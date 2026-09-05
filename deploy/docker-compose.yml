@@ -31,6 +31,12 @@ x-arc-image: &arc-image
     DATA_DIR: /data
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-arc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-arc}
     QBIT_URL: http://qbittorrent:8080
+    # Where users actually reach Arc, which is Caddy's hostname over TLS —
+    # not the host-side dev URL in .env. Invite links are built from this and
+    # its origin is the one the CSRF check accepts, so a stack left pointing
+    # at localhost sends out links nobody can follow. The api logs an error
+    # at startup if this still looks local in prod.
+    PUBLIC_URL: https://${PUBLIC_HOST:-localhost}
   restart: unless-stopped
 
 services:
@@ -49,6 +55,8 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - backend
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -69,18 +77,59 @@ services:
       - "6881:6881"
       - "6881:6881/udp"
     restart: unless-stopped
+    # Backend only. qBittorrent talks to the open internet and is the service
+    # most likely to be compromised; keeping it off the frontend network means
+    # it cannot appear as a peer to the api and therefore cannot forge the
+    # X-Forwarded-For that --forwarded-allow-ips trusts.
+    networks:
+      - backend
 
   api:
     <<: *arc-image
     depends_on:
       db:
         condition: service_healthy
+    # --forwarded-allow-ips: trust X-Forwarded-For so that `request.client.host`
+    # is the real visitor and not Caddy — the M2 login rate limit counts per IP
+    # and would otherwise put every user in one bucket.
+    #
+    # It is the *frontend* subnet, and never `*`. With `*` uvicorn trusts the
+    # whole chain and takes the LEFTMOST X-Forwarded-For entry, which is
+    # whatever the visitor's own browser sent: anyone could pick an address,
+    # spend somebody else's login budget, and lock them out — or rotate the
+    # header and never hit a limit at all. Scoped to 172.28.0.0/16, the only
+    # thing that can appear as a peer is Caddy, and uvicorn takes the entry
+    # Caddy appended.
+    #
+    # --workers 1: the login rate limiter lives in process memory
+    # (arc/services/auth/ratelimit.py), so N workers means N times the budget.
+    # One process is plenty for a handful of users; M11 moves the counters to
+    # a shared store and this can go back up.
+    #
+    # --no-access-log: the app already logs structured request lines, and
+    # uvicorn's access log would write the full path of every request —
+    # including `/api/invites/<token>`, which is a live credential.
     command:
-      ["uvicorn", "arc.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+      [
+        "uvicorn",
+        "arc.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--workers",
+        "1",
+        "--no-access-log",
+        "--forwarded-allow-ips",
+        "172.28.0.0/16",
+      ]
     volumes:
       - arc_data:/data
     expose:
       - "8000"
+    networks:
+      - frontend
+      - backend
 
   worker:
     <<: *arc-image
@@ -90,6 +139,8 @@ services:
     command: ["python", "-m", "arc.worker"]
     volumes:
       - arc_data:/data
+    networks:
+      - backend
 
   caddy:
     image: caddy:2
@@ -107,6 +158,26 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     restart: unless-stopped
+    networks:
+      - frontend
+
+# Two networks with pinned subnets. Pinned because the api has to name the
+# range it will trust X-Forwarded-For from, and Docker's default pool hands
+# out whichever /16 happens to be free — a value that cannot be written down
+# is a value that cannot be trusted.
+#
+# Split because only Caddy needs to reach the api's port, and only the api and
+# worker need to reach the database and qBittorrent. Nothing on `backend` can
+# present itself to the api as the proxy.
+networks:
+  frontend:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+  backend:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
 
 volumes:
   pgdata:

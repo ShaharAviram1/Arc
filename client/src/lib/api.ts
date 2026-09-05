@@ -11,13 +11,39 @@ export type ApiErrorBody = unknown
 export class ApiError extends Error {
   readonly status: number
   readonly body: ApiErrorBody
+  /** Seconds from `Retry-After`, when the server sent one (429 / 503). */
+  readonly retryAfter: number | null
 
-  constructor(status: number, body: ApiErrorBody, message?: string) {
+  constructor(
+    status: number,
+    body: ApiErrorBody,
+    message?: string,
+    retryAfter: number | null = null,
+  ) {
     super(message ?? `Request failed with status ${status}`)
     this.name = 'ApiError'
     this.status = status
     this.body = body
+    this.retryAfter = retryAfter
   }
+}
+
+/**
+ * `Retry-After` is either a delay in seconds or an HTTP date. Both are
+ * normalised to whole seconds from now; anything unparseable becomes null.
+ */
+function parseRetryAfter(response: Response): number | null {
+  const raw = response.headers.get('Retry-After')
+  if (raw === null) return null
+
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+
+  if (/^\d+$/.test(trimmed)) return Number(trimmed)
+
+  const at = Date.parse(trimmed)
+  if (Number.isNaN(at)) return null
+  return Math.max(0, Math.ceil((at - Date.now()) / 1000))
 }
 
 function isJson(response: Response): boolean {
@@ -56,6 +82,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       response.status,
       body,
       `${init?.method ?? 'GET'} ${path} → ${response.status}`,
+      parseRetryAfter(response),
     )
   }
 

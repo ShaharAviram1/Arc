@@ -15,14 +15,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arc.config import Settings
-from arc.db import SessionFactory, create_session_factory
-from arc.main import create_app
+from arc.db import SessionFactory
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus, Setting
 from arc.services.jobs import (
     JobContext,
@@ -86,35 +84,19 @@ async def _writes_then_fails(ctx: JobContext) -> None:
 
 
 @pytest.fixture
-async def jobs_factory(pg_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
+def jobs_factory(api_factory: SessionFactory) -> SessionFactory:
     """Real (committing) sessions against the test database.
 
-    Truncates ``jobs`` on the way out so tests cannot see each other's rows.
+    ``api_factory`` (conftest) empties ``jobs`` — and the account tables — on
+    the way out, so tests cannot see each other's rows.
     """
-    factory = create_session_factory(pg_engine)
-    try:
-        yield factory
-    finally:
-        async with pg_engine.begin() as connection:
-            await connection.execute(text("DELETE FROM jobs"))
+    return api_factory
 
 
 @pytest.fixture
-async def jobs_client(
-    settings: Settings, pg_engine: AsyncEngine, jobs_factory: SessionFactory
-) -> AsyncIterator[AsyncClient]:
-    """An HTTP client for an app wired to the test database.
-
-    ``ASGITransport`` does not run the lifespan, which is what normally puts
-    the engine and session factory on ``app.state``; they are set here
-    instead, pointed at the migrated test database.
-    """
-    app: FastAPI = create_app(settings)
-    app.state.engine = pg_engine
-    app.state.session_factory = jobs_factory
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+def jobs_client(admin_client: AsyncClient) -> AsyncClient:
+    """An HTTP client signed in as an admin: ``/api/jobs`` requires the role."""
+    return admin_client
 
 
 @pytest.fixture

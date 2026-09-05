@@ -24,8 +24,21 @@
 		file_server
 	}
 
+	# An invite token travels in the URL path (`/api/invites/<token>` and
+	# `/api/invites/<token>/accept`), so an ordinary access log is a file full
+	# of live registration credentials — readable by anyone who can read logs,
+	# and kept for as long as logs are kept. The filter rewrites that one
+	# segment and leaves every other path intact, so the log stays useful.
+	#
+	# The api is run with `--no-access-log` for the same reason; this is the
+	# other half of it.
 	log {
 		output stdout
-		format console
+		format filter {
+			wrap console
+			fields {
+				request>uri regexp "^/api/invites/[^/?]+" "/api/invites/REDACTED"
+			}
+		}
 	}
 }

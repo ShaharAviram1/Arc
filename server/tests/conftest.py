@@ -18,16 +18,28 @@ import pytest
 from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
 from arc.config import Settings
+from arc.db import SessionFactory, create_session_factory
 from arc.main import create_app
+from arc.models import User, UserRole
+from arc.services.auth import create_user
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = SERVER_DIR / "alembic.ini"
+
+#: Every state-changing call needs an allowed ``Origin`` (arc/api/csrf.py).
+#: This is one of the dev origins, which are allowed whenever ENV is not prod.
+ORIGIN = "http://localhost:5173"
+
+#: The admin the ``admin_client`` fixture creates and signs in as.
+ADMIN_EMAIL = "admin@arc.test"
+ADMIN_PASSWORD = "adminadmin123"
 
 #: A database of its own, so a developer's `arc` dev data is never dropped by
 #: a test run.
@@ -147,6 +159,96 @@ def pg_engine(test_database_url: str) -> Iterator[AsyncEngine]:
         yield engine
     finally:
         asyncio.run(engine.dispose())
+
+
+# --- API against the real test database -------------------------------------
+#
+# The ``db_session`` fixture below wraps a test in a transaction that is rolled
+# back, which is wrong for anything about *concurrent* transactions (the job
+# queue, single-use invites) or about a client making several requests. These
+# fixtures commit for real and clean up afterwards.
+
+
+@pytest.fixture
+async def api_factory(pg_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
+    """Real (committing) sessions, with the account tables emptied afterwards.
+
+    Order matters on the way out: ``sessions`` and ``invites`` both reference
+    ``users``. ``sessions`` cascades and ``invites.created_by`` nulls out, but
+    deleting explicitly and in order keeps the intent obvious.
+    """
+    factory = create_session_factory(pg_engine)
+    try:
+        yield factory
+    finally:
+        async with pg_engine.begin() as connection:
+            for table in ("jobs", "sessions", "invites", "users"):
+                await connection.execute(text(f"DELETE FROM {table}"))
+
+
+@pytest.fixture
+def api_app(settings: Settings, pg_engine: AsyncEngine, api_factory: SessionFactory) -> FastAPI:
+    """An app wired to the test database.
+
+    ``ASGITransport`` does not run the lifespan, which is what normally puts
+    the engine and session factory on ``app.state`` (and what runs the admin
+    bootstrap); they are set here instead. One app per test, so each gets a
+    fresh login rate limiter.
+    """
+    app = create_app(settings)
+    app.state.engine = pg_engine
+    app.state.session_factory = api_factory
+    return app
+
+
+def api_transport(app: FastAPI, *, origin: str | None = ORIGIN) -> AsyncClient:
+    """A client for ``app``, sending ``origin`` on every request by default.
+
+    ``origin=None`` gives a client that sends no ``Origin`` at all — what a
+    cross-site form post or a careless script looks like.
+    """
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Origin": origin} if origin else None,
+    )
+
+
+@pytest.fixture
+async def api_client(api_app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """An anonymous HTTP client against the test database."""
+    async with api_transport(api_app) as client:
+        yield client
+
+
+async def add_user(
+    factory: SessionFactory,
+    email: str,
+    password: str,
+    *,
+    role: UserRole = UserRole.USER,
+    is_active: bool = True,
+) -> User:
+    """Create an account directly, bypassing the invite flow."""
+    async with factory() as session:
+        user = await create_user(session, email, password, role=role)
+        user.is_active = is_active
+        await session.commit()
+        return user
+
+
+async def login(client: AsyncClient, email: str, password: str) -> AsyncClient:
+    """Sign ``client`` in; the session cookie stays in its jar."""
+    response = await client.post("/api/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    return client
+
+
+@pytest.fixture
+async def admin_client(api_client: AsyncClient, api_factory: SessionFactory) -> AsyncClient:
+    """An HTTP client signed in as an admin."""
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+    return await login(api_client, ADMIN_EMAIL, ADMIN_PASSWORD)
 
 
 @pytest.fixture

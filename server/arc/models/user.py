@@ -66,6 +66,7 @@ class Invite(Base):
     created_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
     )
+    created_at: Mapped[datetime] = created_at()
     expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
@@ -81,5 +82,8 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    #: Indexed for the hourly purge (``arc.worker``), which is the only query
+    #: that does not go through the primary key: without it, deleting expired
+    #: rows is a sequential scan of every live session every hour.
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
     user_agent: Mapped[str | None] = mapped_column(String(512))

@@ -38,11 +38,11 @@ that must be verified before the next milestone starts.
   executed by the worker; unit tests for claim/retry semantics.
 
 ### M2 — Auth, users, invites
-- [ ] Argon2 password hashing, cookie sessions, CSRF/origin check
-- [ ] Endpoints: login, logout, me, create invite (admin), accept invite
-- [ ] First-admin bootstrap via env (`BOOTSTRAP_ADMIN_EMAIL/PASSWORD`)
-- [ ] Client: Login page, Accept-invite page, auth context, route guard
-- **DoD:** admin can invite a user by link; invitee sets a password and logs
+- [x] Argon2 password hashing, cookie sessions, CSRF/origin check
+- [x] Endpoints: login, logout, me, create invite (admin), accept invite
+- [x] First-admin bootstrap via env (`BOOTSTRAP_ADMIN_EMAIL/PASSWORD`)
+- [x] Client: Login page, Accept-invite page, auth context, route guard
+- **DoD (verified 2026-09-05 by orchestrator, in-browser):** admin can invite a user by link; invitee sets a password and logs
   in; all `/api/*` except auth routes return 401 without a session. Tests
   cover token single-use and expiry. (spec §2, §7 security)
 

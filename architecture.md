@@ -134,7 +134,7 @@ arc/
 | Table | Key columns |
 |---|---|
 | `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
-| `invites` | id, token_hash, email (optional), created_by, expires_at, used_at |
+| `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
 | `anime` | id (AniList id, PK), mal_id, title_romaji, title_english, title_native, synonyms (JSONB), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB), next_airing (JSONB), refreshed_at |
 | `episodes` | id, anime_id, number, title, air_at, state (enum, §6 of spec), state_changed_at, unavailable_reason |
@@ -249,9 +249,24 @@ source dirs, remove torrent from qBittorrent (with files), state
 
 ## 7. Security
 
-- Cookie sessions, CSRF protection on state-changing requests (SameSite=Lax +
-  origin check). Argon2id hashes. Login rate-limited per IP.
-- Invite tokens: random 32 bytes, stored hashed, 7-day expiry, single use.
+- Cookie sessions (`arc_session`, HttpOnly, SameSite=Lax, Secure in prod,
+  30-day sliding TTL re-issued to the browser when the server extends it;
+  token stored as sha256 hash, deleted on logout, purged hourly by the
+  worker). CSRF: every mutating `/api/*` request must carry an
+  `Origin` (or `Referer`) matching `PUBLIC_URL` or, in dev, localhost:5173/8000;
+  otherwise 403. Argon2id hashes; unknown emails run a dummy verify so timing
+  does not reveal existence. Login rate-limited per IP (10/15 min) and per
+  email (5/15 min) and on the public invite routes (20/15 min per IP),
+  in-process (M11 may move it to Postgres). Behind Caddy, uvicorn trusts
+  `X-Forwarded-For` only from the compose network CIDR (never `*`, which
+  would let clients spoof their IP), runs a single worker until the limiter
+  is shared, and has its access log off (invite tokens are path segments;
+  Caddy redacts `/api/*` URIs in its log). Argon2 runs in a thread, not on
+  the event loop. `/docs`, `/redoc`, `/openapi.json` are disabled in prod.
+  The last active admin cannot be deactivated or demoted.
+- Invite tokens: random 32 bytes, stored hashed, 7-day default expiry (max 30
+  days), single use enforced by `UPDATE … WHERE used_at IS NULL`; revoke sets
+  `expires_at = now()`. Accept creates a `user`-role account and logs in.
 - All `/api` and `/media` routes require a session; admin routes check role.
 - MAL tokens and any stored secrets encrypted at rest; app secrets via env.
 - Media directories not served statically; paths derived from ids, never
@@ -298,7 +313,11 @@ logged): `ENV` (dev|prod), `LOG_LEVEL`, `PUBLIC_URL`, `DATABASE_URL`,
 (default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
 (seconds to wait for in-flight jobs on shutdown, default 30),
 `WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
-requeued, default 900; must exceed the longest expected job).
+requeued, default 900; must exceed the longest expected job),
+`SESSION_TTL_DAYS` (30), `LOGIN_RATE_LIMIT_PER_IP` (10),
+`LOGIN_RATE_LIMIT_PER_EMAIL` (5), `LOGIN_RATE_WINDOW_SECONDS` (900),
+`CORS_ALLOWED_ORIGINS` (comma list, optional; dev origins are added
+automatically when `ENV` is not prod).
 
 Deploy-only (compose/Caddy, not read by the app): `PUBLIC_HOST`,
 `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PUID`, `PGID`, `TZ`.
@@ -365,3 +384,14 @@ env (it is not in the settings table).
 - 2026-09-05 — Dropped `DEV_DATABASE_URL`/`DEV_QBIT_URL`: `.env` now holds
   localhost URLs and Compose sets container hostnames in `environment:`.
   Running the API or worker directly from `server/` needs no exports.
+- 2026-09-05 — M2 auth: `invites.created_at` added (migration 2); email
+  mismatch on accept is 409; bootstrap admin from env at API startup, never
+  overwrites; session purge is an hourly scheduler task in the worker, not a
+  job row; `/api/jobs` is admin-only.
+- 2026-09-05 — M2 security review fixes: forwarded-IP trust limited to the
+  compose subnet; one uvicorn worker until the rate limiter is shared;
+  bootstrap tolerates the multi-worker race; CORS outermost; sliding session
+  cookie re-issued; rate-limiter memory bounded; Argon2 off the loop;
+  `PUBLIC_URL` derived from `PUBLIC_HOST` in compose; zero-admin guard;
+  invite routes rate-limited; docs hidden in prod; `.env.example` ships no
+  admin password; `ix_sessions_expires_at` (migration 3).

@@ -8,6 +8,7 @@ without a fully populated ``.env``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -41,6 +42,31 @@ class Settings(BaseSettings):
 
     # --- Database --------------------------------------------------------
     database_url: str = "postgresql+asyncpg://arc:arc@localhost:5432/arc"
+
+    # --- Auth (M2) -------------------------------------------------------
+    #: Lifetime of a login session. Expiry slides: any request more than a day
+    #: after the last extension pushes it out again, so the value is "days of
+    #: inactivity before you are logged out", not "days before you are".
+    session_ttl_days: int = Field(default=30, ge=1)
+    #: Login attempts allowed per client IP inside the window below.
+    login_rate_limit_per_ip: int = Field(default=10, ge=1)
+    #: Login attempts allowed per email address. Tighter than the IP budget:
+    #: it is the one that matters when an attempt is spread over many hosts.
+    login_rate_limit_per_email: int = Field(default=5, ge=1)
+    #: Width of the rate-limit window, in seconds (default 15 minutes). Shared
+    #: by the login budgets and the invite one below.
+    login_rate_window_seconds: float = Field(default=900.0, gt=0)
+    #: Requests to the two *public* invite routes allowed per client IP in the
+    #: same window. Looser than login: following a link, reloading the page and
+    #: submitting the form is several requests from one person. Tight enough
+    #: that guessing at a 256-bit token is not worth starting.
+    invite_rate_limit_per_ip: int = Field(default=20, ge=1)
+    #: Extra browser origins allowed to make state-changing calls, as a comma
+    #: separated list. ``PUBLIC_URL``'s own origin is always allowed, and the
+    #: localhost dev origins are added automatically when ``ENV`` is not
+    #: ``prod``; this is for the cases neither covers (a second hostname, a
+    #: staging domain). Read through :attr:`extra_origins`.
+    cors_allowed_origins: str = ""
 
     # --- Secrets (validated only when the feature is used) ---------------
     # Secret-valued settings are ``SecretStr`` so they cannot leak through a
@@ -89,6 +115,22 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def extra_origins(self) -> tuple[str, ...]:
+        """``CORS_ALLOWED_ORIGINS`` split and cleaned.
+
+        A plain comma-separated string rather than a ``list[str]`` field:
+        pydantic-settings parses list-typed values from the environment as
+        JSON, which would make ``CORS_ALLOWED_ORIGINS=https://a,https://b``
+        a startup crash instead of the obvious thing.
+        """
+        return tuple(part.strip() for part in self.cors_allowed_origins.split(",") if part.strip())
+
+    @property
+    def session_ttl(self) -> timedelta:
+        """``SESSION_TTL_DAYS`` as a ``timedelta``."""
+        return timedelta(days=self.session_ttl_days)
 
     @property
     def downloads_dir(self) -> Path:

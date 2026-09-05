@@ -11,17 +11,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from arc.api.deps import SessionDep
+from arc.api.deps import SessionDep, get_admin_user
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus
 from arc.services.jobs import enqueue, find_active
 
-# TODO(M2): require admin. Until sessions exist there is no role to check, and
-# nothing on this router may be exposed publicly before that lands.
-router = APIRouter(tags=["jobs"])
+# Admin only, at the router: the queue is operational surface (FR-D3), and a
+# route added here later must not be able to forget the check. Anonymous
+# callers get 401, signed-in non-admins 403.
+router = APIRouter(tags=["jobs"], dependencies=[Depends(get_admin_user)])
 
 MAX_LIMIT = 200
 
@@ -36,6 +37,10 @@ MAX_PRIORITY = 1000
 
 class JobCreate(BaseModel):
     """What a caller may set when queueing work."""
+
+    #: A field the API does not know is a mistake worth reporting, not one to
+    #: drop silently — a payload belongs under ``payload``.
+    model_config = ConfigDict(extra="forbid")
 
     # ``type`` is not checked against the registry: handlers register
     # themselves from the worker's service packages, which the API process has
