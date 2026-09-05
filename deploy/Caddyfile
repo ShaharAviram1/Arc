@@ -1,0 +1,31 @@
+# Arc — TLS termination, static client, API/media proxy (architecture.md §8).
+#
+# PUBLIC_HOST comes from .env. Use `localhost` for a local production-shaped
+# run (Caddy issues an internal certificate); use the real hostname in
+# production and Caddy obtains a Let's Encrypt certificate automatically.
+
+{$PUBLIC_HOST} {
+	encode gzip
+
+	# The API owns /api and /media. Media is never served statically: paths
+	# are derived from ids and every request needs a session (security §7).
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /media/* {
+		reverse_proxy api:8000
+	}
+
+	# Everything else is the built React SPA.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

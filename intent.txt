@@ -1,0 +1,31 @@
+Arc — project intent
+
+This is my own project for the course. The idea is a personal anime
+server with a browser client. The server owns the library and does all
+the work against the outside services. The client is the face.
+
+The server indexes the episodes on disk, matches the filenames to real
+titles, prepares them for playback, streams them to the browser, tracks
+what I have watched, and keeps my MyAnimeList list in step. It reads the
+catalogue and the airing schedule from AniList, which needs no account,
+and writes progress back to MyAnimeList over OAuth, which is where my
+list lives.
+The server will acquire the relevant videos based on what was already watched, and what the user signifies he want ot see - as opposed to downloading everything.
+The server will do that using Nyaa RSS capabilities.
+
+The client shows continue watching, the seasonal schedule, and a
+recommendations page. It plays an episode in the browser, reports
+progress back to the server, and lets me mark a show dropped or planned
+to watch.
+
+What it needs to do:
+- Match messy release filenames to the right title, season and episode,
+  and say when it is unsure instead of guessing.
+- Stream from the server to a browser player, resuming where I stopped.
+- Prepare an episode for playback as soon as it appears, so it is ready
+  before I ask for it. The server knows when each episode airs.
+- Keep MyAnimeList true to what I actually watched, and never write a
+  change I did not make.
+- Know what aired and what I am behind on, per show.
+- Answer a vague request for something to watch with a short argued case
+  for each suggestion.

@@ -1,0 +1,60 @@
+@import 'tailwindcss';
+
+/* Arc is dark-first: the tokens below are the dark palette, and the
+   prefers-color-scheme: light block below is the (optional) light override. */
+:root {
+  --arc-bg: #0b0d10;
+  --arc-surface: #14171c;
+  --arc-surface-raised: #1c2027;
+  --arc-border: #262b33;
+  --arc-text: #e7eaef;
+  --arc-text-muted: #98a1b0;
+  --arc-accent: #7c8cff;
+  --arc-accent-contrast: #0b0d10;
+  --arc-ok: #4ade80;
+  --arc-warn: #fbbf24;
+  --arc-error: #f87171;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--arc-bg);
+  --color-surface: var(--arc-surface);
+  --color-surface-raised: var(--arc-surface-raised);
+  --color-border-subtle: var(--arc-border);
+  --color-text: var(--arc-text);
+  --color-text-muted: var(--arc-text-muted);
+  --color-accent: var(--arc-accent);
+  --color-accent-contrast: var(--arc-accent-contrast);
+  --color-ok: var(--arc-ok);
+  --color-warn: var(--arc-warn);
+  --color-error: var(--arc-error);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--arc-bg);
+  color: var(--arc-text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

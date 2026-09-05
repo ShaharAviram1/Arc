@@ -1,0 +1,111 @@
+# Arc — production stack (architecture.md §8).
+#
+# Always run these from the repository root and pass `--env-file .env`: the
+# .env lives at the root, but Compose would otherwise look for it next to
+# this file. `make up` / `make dev` do it for you.
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+#
+# Local development uses the override alongside this file, which publishes db
+# and qbittorrent on localhost and leaves api/worker/caddy to `make dev`:
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml \
+#     -f deploy/docker-compose.dev.yml up -d db qbittorrent
+
+name: arc
+
+x-arc-image: &arc-image
+  build:
+    context: ../server
+    dockerfile: Dockerfile
+  image: arc-server:latest
+  env_file:
+    - ../.env
+  environment:
+    # Both api and worker inherit this block. ENV is pinned here rather than
+    # left to .env so the production stack is structurally prod.
+    ENV: prod
+    DATA_DIR: /data
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-arc}
+      POSTGRES_USER: ${POSTGRES_USER:-arc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arc} -d ${POSTGRES_DB:-arc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-UTC}
+      WEBUI_PORT: 8080
+    volumes:
+      - qbit_config:/config
+      - arc_data:/data
+    # Web UI is reachable on the internal network only (security §7); the dev
+    # override publishes it on localhost for debugging.
+    expose:
+      - "8080"
+    ports:
+      # BitTorrent listen port. Change together with qBittorrent's setting.
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  api:
+    <<: *arc-image
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      ["uvicorn", "arc.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    volumes:
+      - arc_data:/data
+    expose:
+      - "8000"
+
+  worker:
+    <<: *arc-image
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "arc.worker"]
+    volumes:
+      - arc_data:/data
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - api
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../client/dist:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  qbit_config:
+  arc_data:
+  caddy_data:
+  caddy_config:

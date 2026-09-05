@@ -1,0 +1,36 @@
+# --- Secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+
+# --- Python ----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Node ------------------------------------------------------------------
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# --- Runtime data ----------------------------------------------------------
+data/
+*.sqlite
+*.sqlite3
+
+# --- Editors / OS ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,29 @@
+# Local development override (architecture.md §8, "Local dev").
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up -d db qbittorrent
+#
+# `make dev` does exactly that, then runs api, worker and vite on the host.
+# Postgres is published on localhost:5432 and the qBittorrent Web UI on
+# localhost:8080 so they can be reached from host processes and a browser.
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arc}
+
+  qbittorrent:
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  # api / worker / caddy are not started in dev; they run on the host with hot
+  # reload. Listing them with `profiles` keeps a bare `up` from starting them.
+  api:
+    profiles: ["full"]
+
+  worker:
+    profiles: ["full"]
+
+  caddy:
+    profiles: ["full"]
