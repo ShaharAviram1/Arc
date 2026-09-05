@@ -59,6 +59,25 @@ Two Python processes share one codebase and one database:
   qBittorrent polling). Can be scaled to more than one instance safely
   because of `SKIP LOCKED`.
 
+### Job queue mechanics (M1)
+- Claim: one statement, `SELECT … WHERE status='pending' AND run_after <= now()
+  ORDER BY priority, run_after, id LIMIT 1 FOR UPDATE SKIP LOCKED`; the same
+  transaction sets `running`, `locked_by`, `locked_at`, `started_at`, and
+  increments `attempts` (so a crash still burns an attempt).
+- Handler runs in its own session; on success the runner commits handler work
+  then marks `done`; on exception it rolls back handler work, stores the error
+  (truncated, with traceback tail) and either reschedules with backoff
+  (10 s, 60 s, 300 s, then ×5, capped at 1 h) or marks `failed` once
+  `attempts >= max_attempts`. Unknown job type → `failed` immediately.
+- Dedupe: optional `dedupe_key` stored in `payload`; an enqueue with a key
+  that matches a `pending`/`running` job of the same type returns that job.
+- Crash recovery: `requeue_stale` (at worker start and every 5 min) returns
+  `running` jobs whose lock is older than `WORKER_STALE_AFTER` to `pending`,
+  or to `failed` if attempts are exhausted. Shutdown drains in-flight jobs up
+  to `WORKER_DRAIN_TIMEOUT`, then cancels and resets them to `pending`.
+- API: `POST /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs` (admin-only
+  from M2). Success status is `done`.
+
 ## 3. Repository layout
 
 ```
@@ -114,20 +133,20 @@ arc/
 
 | Table | Key columns |
 |---|---|
-| `users` | id, email (unique), password_hash, role, is_active, timezone, created_at |
+| `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
 | `anime` | id (AniList id, PK), mal_id, title_romaji, title_english, title_native, synonyms (JSONB), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB), next_airing (JSONB), refreshed_at |
 | `episodes` | id, anime_id, number, title, air_at, state (enum, §6 of spec), state_changed_at, unavailable_reason |
-| `media_files` | id, episode_id (nullable until matched), path, size, parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
+| `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty |
-| `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, updated_at |
+| `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), updated_at |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
-| `mal_write_log` | id, user_id, anime_id, field, old_value, new_value, cause (watch/manual/revert), status, error, created_at |
+| `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value, cause (watch/manual/revert), status, error, created_at |
 | `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason |
-| `torrents` | id, episode_id, info_hash, magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
-| `jobs` | id, type, payload (JSONB), status, priority, attempts, run_after, locked_by, locked_at, last_error, created_at, finished_at |
+| `torrents` | id, episode_id, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
+| `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
 | `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang) |
 
@@ -264,7 +283,9 @@ Local dev: `make dev` (see `scripts/dev.sh`) starts `db` and `qbittorrent`
 via the dev compose override, then runs `api` and `worker` with hot reload
 and `vite dev` for the client with a proxy to the API. Compose is always
 invoked with `--env-file .env` because `.env` lives at the repo root.
-Production: `make up` (builds images, `ENV=prod` is set in the compose file).
+Production: `make up` (builds images; `ENV=prod`, `DATABASE_URL`, and
+`QBIT_URL` are set in the compose file, so `.env` never needs container
+hostnames).
 
 ## 9. Configuration (env)
 
@@ -273,16 +294,23 @@ logged): `ENV` (dev|prod), `LOG_LEVEL`, `PUBLIC_URL`, `DATABASE_URL`,
 `SECRET_KEY`, `FERNET_KEY`, `MAL_CLIENT_ID`, `MAL_CLIENT_SECRET`,
 `MAL_REDIRECT_URI`, `ANTHROPIC_API_KEY`, `LLM_MATCH_SUGGESTIONS` (bool),
 `QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `DATA_DIR`, `MAX_TRANSCODES`,
-`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`.
+`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `WORKER_CONCURRENCY`
+(default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
+(seconds to wait for in-flight jobs on shutdown, default 30),
+`WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
+requeued, default 900; must exceed the longest expected job).
 
 Deploy-only (compose/Caddy, not read by the app): `PUBLIC_HOST`,
 `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PUID`, `PGID`, `TZ`.
-Local-dev overrides used by `make dev`/`make migrate` for host processes:
-`DEV_DATABASE_URL`, `DEV_QBIT_URL` (localhost instead of compose hostnames).
+`.env` holds host-side values (`localhost` URLs) used by `make dev`, tests,
+and processes run directly; inside Compose the `api`/`worker` services
+override `DATABASE_URL` and `QBIT_URL` with the service hostnames
+(`db`, `qbittorrent`) structurally, alongside `ENV=prod`.
 
 Rule values (N, G, D, groups, resolution,
-languages) live in the `settings` table and are editable by admin, with env
-defaults for first boot.
+languages) live in the `settings` table and are editable by admin, seeded by
+the initial migration. `MAX_TRANSCODES` is host capacity and lives only in
+env (it is not in the settings table).
 
 ## 10. Testing strategy
 
@@ -321,3 +349,19 @@ defaults for first boot.
   which left the client unlinted; the user chose full lint coverage
   (incl. type-aware rules like no-floating-promises) over the newer
   compiler. Revisit when typescript-eslint supports 7.
+- 2026-09-05 — M1 schema decisions: BIGINT identity PKs (anime uses the
+  AniList id; composite PKs for list_entries/watch_progress/wants); enums are
+  `StrEnum` stored as VARCHAR(32), not native PG enums; JSONB for JSON;
+  `jobs` gained `max_attempts` and `started_at`; `watch_progress.completed_at`
+  added for retention; unique on lower(email), media_files.path,
+  torrents.info_hash; `mal_write_log.anime_id` is RESTRICT; `max_transcodes`
+  removed from the settings seed. Extra indexes: anime.mal_id,
+  rec_runs(user_id, created_at). Postgres-backed tests run against the dev
+  compose db (`arc_test`), gated by the `pg` marker.
+- 2026-09-05 — M1 job queue: Postgres `SKIP LOCKED` claim, attempts counted
+  at claim time, dedupe via `payload.dedupe_key` (no column), backoff
+  10/60/300 s then ×5 capped at 1 h, `WORKER_*` settings, `/api/jobs`
+  endpoints (auth deferred to M2), success status named `done`.
+- 2026-09-05 — Dropped `DEV_DATABASE_URL`/`DEV_QBIT_URL`: `.env` now holds
+  localhost URLs and Compose sets container hostnames in `environment:`.
+  Running the API or worker directly from `server/` needs no exports.

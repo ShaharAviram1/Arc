@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     max_transcodes: int = Field(default=2, ge=1)
 
+    # --- Worker ----------------------------------------------------------
+    #: Jobs the worker runs at once. Transcodes have their own, smaller cap
+    #: (``max_transcodes``); this is the queue-wide limit.
+    worker_concurrency: int = Field(default=2, ge=1)
+    #: Seconds to wait before asking for work again when the queue was empty.
+    worker_poll_interval: float = Field(default=1.0, gt=0)
+    #: On shutdown, how long to let in-flight jobs finish before cancelling.
+    worker_drain_timeout: float = Field(default=30.0, ge=0)
+    #: Seconds a job may sit ``running`` before the sweep assumes the worker
+    #: holding it died and puts it back. Must comfortably exceed the longest a
+    #: real job takes, or a slow job is requeued underneath itself.
+    worker_stale_after: float = Field(default=900.0, gt=0)
+
     # --- Feature flags ---------------------------------------------------
     llm_match_suggestions: bool = False
 

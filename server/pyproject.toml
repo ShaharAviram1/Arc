@@ -63,5 +63,10 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
+markers = [
+    "pg: needs a running PostgreSQL (make dev-db); set ARC_SKIP_PG_TESTS=1 to skip",
+    "slow: exercises real ffmpeg/qBittorrent instead of a mock",
+]

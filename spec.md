@@ -57,7 +57,8 @@ any time, and the owner uses it daily.
 - **MalLink** — per user: OAuth tokens, MAL username, last import/sync time.
 - **MalWriteLog** — every write Arc made to MAL: what, when, why, previous
   value, result. Append-only.
-- **AcquisitionWant** — (user, anime) derived interest; drives what to fetch.
+- **AcquisitionWant** — (user, episode) derived interest; drives what to
+  fetch. Computed from the user's list status and progress (see FR-A1).
 - **Torrent** — a Nyaa release chosen for an Episode: magnet/info hash,
   group, resolution, seeders at pick time, qBittorrent state.
 - **Job** — background unit of work (scan, match, transcode, mal-sync, fetch,

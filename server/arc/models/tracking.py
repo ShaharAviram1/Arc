@@ -1,0 +1,86 @@
+"""Per-user tracking: ``list_entries`` and ``watch_progress``.
+
+Both are keyed by (user, thing): a user's view of a show and of an episode.
+Everything acquisition and MAL sync do starts from these two tables
+(architecture.md §5.1, §5.5).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, false
+from sqlalchemy.orm import Mapped, mapped_column
+
+from arc.db import Base
+from arc.models._columns import TZDateTime, updated_at
+from arc.models.enums import ListStatus, UpdatedBy, enum_column
+
+
+class ListEntry(Base):
+    """(user, anime) → status, progress, score (spec §3, FR-W2).
+
+    This is the row MAL sync argues with: ``updated_by`` and ``mal_dirty``
+    together say whether Arc or MAL made the last change and whether it still
+    needs pushing (FR-M3, FR-M4).
+    """
+
+    __tablename__ = "list_entries"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[ListStatus] = mapped_column(enum_column(ListStatus), nullable=False)
+    #: Episodes watched, MAL's definition: the highest completed number.
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    #: 1–10, or null for "not scored".
+    score: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = updated_at()
+    #: Which side made the last change (§5.5 step 4 picks a winner with it).
+    updated_by: Mapped[UpdatedBy] = mapped_column(
+        enum_column(UpdatedBy),
+        nullable=False,
+        default=UpdatedBy.ARC,
+        server_default=UpdatedBy.ARC.value,
+    )
+    mal_synced_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: True when Arc holds a change MAL has not been told about yet.
+    mal_dirty: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+
+class WatchProgress(Base):
+    """(user, episode) → where the player got to (FR-S3, FR-S4)."""
+
+    __tablename__ = "watch_progress"
+    __table_args__ = (
+        # "Continue watching", most recent first, for one user (FR-W1).
+        Index("ix_watch_progress_user_id_updated_at", "user_id", "updated_at"),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    position_s: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, server_default="0"
+    )
+    #: The duration the client reported; null before the player knows it.
+    duration_s: Mapped[float | None] = mapped_column(Float)
+    #: Set once at ≥ 90 % and never unset automatically (FR-S4).
+    completed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    #: When ``completed`` first flipped true, written once alongside it and
+    #: never moved afterwards. Retention measures the grace window G from this
+    #: rather than from ``updated_at`` (FR-T1): ``updated_at`` moves whenever
+    #: the player scrubs back through an already-finished episode, which would
+    #: keep pushing the deletion date away for as long as anyone rewatches.
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    updated_at: Mapped[datetime] = updated_at()

@@ -37,16 +37,30 @@ reload. Ctrl-C stops all three; the containers keep running (`make down`).
 - qBittorrent Web UI — <http://localhost:8080> (dev only; in production it is
   bound to the internal Docker network)
 
-Database migrations:
+`.env` holds host-side URLs (`localhost`); Docker Compose overrides
+`DATABASE_URL` and `QBIT_URL` for the `api` and `worker` containers with the
+`db` / `qbittorrent` service hostnames. So the api and worker can also be run
+one at a time from `server/`, with the database up (`make dev-db`) and no
+exports of any kind:
 
 ```bash
+cd server
+uv run uvicorn arc.main:app --reload --port 8000
+uv run python -m arc.worker
+```
+
+Database:
+
+```bash
+make dev-db               # just Postgres, in Docker, waited for until healthy
 make migrate              # alembic upgrade head
+make revision m="…"       # autogenerate a migration, then review it by hand
 ```
 
 ## Tests and linting
 
 ```bash
-make test                 # pytest (server) + vitest (client)
+make test                 # pytest (server) + vitest (client); starts the db first
 make lint                 # ruff check, ruff format --check, mypy, eslint
 make fmt                  # ruff format + prettier
 ```
@@ -58,6 +72,12 @@ uv sync
 uv run pytest
 uv run ruff check . && uv run ruff format --check . && uv run mypy arc
 ```
+
+The server tests marked `pg` run against a throwaway `arc_test` database
+(override with `TEST_DATABASE_URL`), which they create and migrate on first
+use. They fail loudly if Postgres is not running — start it with `make
+dev-db`, or set `ARC_SKIP_PG_TESTS=1` to skip them on a machine without
+Docker.
 
 ## Layout
 

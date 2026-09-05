@@ -28,13 +28,13 @@ that must be verified before the next milestone starts.
   hello page behind auth-less `/api/health`; tests pass green on empty suite.
 
 ### M1 — Data model and migrations
-- [ ] SQLAlchemy models for every table in architecture.md §4
-- [ ] Alembic initial migration; `settings` seeded with defaults (N=2, G=7,
+- [x] SQLAlchemy models for every table in architecture.md §4
+- [x] Alembic initial migration; `settings` seeded with defaults (N=2, G=7,
       D=21, 1080p, en subs, ja audio)
-- [ ] Job table + claim/run/retry loop in `worker.py` (SKIP LOCKED) with a
+- [x] Job table + claim/run/retry loop in `worker.py` (SKIP LOCKED) with a
       handler registry and a no-op job to prove it
-- [ ] APScheduler inside worker with one heartbeat job
-- **DoD:** migration applies on a fresh DB; a job enqueued from the API is
+- [x] APScheduler inside worker with one heartbeat job
+- **DoD (verified 2026-09-05 by orchestrator):** migration applies on a fresh DB; a job enqueued from the API is
   executed by the worker; unit tests for claim/retry semantics.
 
 ### M2 — Auth, users, invites

@@ -22,10 +22,15 @@ x-arc-image: &arc-image
   env_file:
     - ../.env
   environment:
-    # Both api and worker inherit this block. ENV is pinned here rather than
-    # left to .env so the production stack is structurally prod.
+    # Both api and worker inherit this block, and `environment:` wins over
+    # `env_file:`, so these override whatever .env holds. ENV is pinned here
+    # rather than left to .env so the production stack is structurally prod.
+    # The URLs in .env are host-side (localhost); inside the network these
+    # services are reached by their compose service names.
     ENV: prod
     DATA_DIR: /data
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-arc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-arc}
+    QBIT_URL: http://qbittorrent:8080
   restart: unless-stopped
 
 services:

@@ -1,11 +1,14 @@
 """Alembic environment.
 
-The database URL always comes from ``arc.config.Settings`` (i.e. from
+The database URL comes from ``arc.config.Settings`` (i.e. from
 ``DATABASE_URL``), never from ``alembic.ini``, so migrations and the app can
-never disagree about which database they are pointed at.
+never disagree about which database they are pointed at. The one exception is
+a caller that has already set ``sqlalchemy.url`` on the config object — the
+test suite does this to point migrations at its throwaway database — which
+wins over the environment.
 
-``target_metadata`` stays ``None`` until M1 introduces the declarative
-``Base``; autogenerate is not useful before then.
+``target_metadata`` is ``arc.models.Base.metadata``. Importing ``arc.models``
+(not ``arc.db``) is what registers every table.
 """
 
 from __future__ import annotations
@@ -19,18 +22,22 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 from arc.config import get_settings
+from arc.models import Base
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# `%` is ConfigParser's interpolation character, so a URL containing one (a
-# percent-encoded password, say) must be escaped before it goes into the ini.
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+# The placeholder in alembic.ini ("driver://user:pass@localhost/dbname") is
+# never a real target, so anything else means a caller injected a URL.
+_PLACEHOLDER_URL = "driver://user:pass@localhost/dbname"
+if config.get_main_option("sqlalchemy.url", _PLACEHOLDER_URL) == _PLACEHOLDER_URL:
+    # `%` is ConfigParser's interpolation character, so a URL containing one
+    # (a percent-encoded password, say) must be escaped before it goes in.
+    config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 
-# TODO(M1): from arc.db import Base; target_metadata = Base.metadata
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

@@ -16,14 +16,13 @@ if [ ! -f .env ]; then
 	exit 1
 fi
 
-# Export everything in .env, then point host processes at the published ports
-# rather than the compose service names.
+# Export everything in .env. Its URLs are host-side already (Compose
+# overrides them with the service hostnames inside the containers), so the
+# api and worker started below need nothing further.
 set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
-export DATABASE_URL="${DEV_DATABASE_URL:-${DATABASE_URL:-}}"
-export QBIT_URL="${DEV_QBIT_URL:-${QBIT_URL:-}}"
 
 COMPOSE=(docker compose --env-file .env
 	-f deploy/docker-compose.yml

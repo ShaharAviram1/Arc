@@ -1,6 +1,6 @@
 """Shared FastAPI dependencies.
 
-M2+ adds the session/current-user dependencies here; M1 adds the DB session.
+M2+ adds the auth/current-user dependencies here.
 """
 
 from __future__ import annotations
@@ -8,8 +8,10 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
+from arc.db import get_session
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -23,3 +25,7 @@ def get_app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+#: One database session per request, from the factory the lifespan built.
+#: Routers that write must commit; nothing here commits for them.
+SessionDep = Annotated[AsyncSession, Depends(get_session)]

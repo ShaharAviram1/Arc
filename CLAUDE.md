@@ -100,10 +100,11 @@ directly. Anything with logic goes through a Writer.
 
 ```
 make dev          # db + qbittorrent in docker, api + worker + vite locally
-make test         # pytest + vitest
+make dev-db       # postgres only, waits until healthy (make test depends on it)
+make test         # pytest (pg tests need the db; ARC_SKIP_PG_TESTS=1 skips them) + vitest
 make lint         # ruff, ruff format --check, mypy, eslint, tsc, prettier --check
 make fmt          # ruff format + prettier --write
-make migrate      # alembic upgrade head (uses DEV_DATABASE_URL)
+make migrate      # alembic upgrade head against DATABASE_URL in .env
 make revision m="msg"   # alembic autogenerate revision
 make up / down    # production compose (always --env-file .env); logs, ps, clean also exist
 ```
