@@ -35,6 +35,8 @@ any time, and the owner uses it daily.
   - User: everything else (watch, track, add shows, request acquisition via
     their own list, link MAL, get recommendations, resolve match-review items
     for their own requested shows).
+- Each user has a timezone (detected at signup from the browser, editable
+  from the Schedule page); schedule and air dates render in it.
 - Sessions: HTTP-only secure cookie sessions. Passwords hashed with Argon2.
 
 ## 3. Domain model (conceptual)

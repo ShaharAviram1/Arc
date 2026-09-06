@@ -235,6 +235,10 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
             season=raw.get("season"),
             season_year=raw.get("seasonYear"),
             cover_url=_cover(raw.get("coverImage")),
+            # Only the season query asks for this; a search result leaves it
+            # null, and the cache is careful never to write a null summary
+            # ``next_airing`` over a cached one (FR-C3).
+            next_airing=raw.get("nextAiringEpisode"),
         )
 
     studios = ((raw.get("studios") or {}).get("nodes")) or []

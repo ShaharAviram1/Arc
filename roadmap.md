@@ -87,12 +87,12 @@ that must be verified before the next milestone starts.
   reconciliation attaches the AniList id and replaces the dates.
 
 ### M4 — Schedule and "behind on"
-- [ ] AniList seasonal + airing schedule fetch, per-episode `air_at`
-- [ ] Schedule endpoint (season, weekday grouping, user tz) + Schedule page
+- [x] AniList seasonal + airing schedule fetch, per-episode `air_at`
+- [x] Schedule endpoint (season, weekday grouping, user tz) + Schedule page
       with prev/next season and add-to-list actions (FR-C3)
-- [ ] Behind-by computation per followed show (FR-C4)
-- [ ] Home page v1: Behind on + New this week (FR-W1, partial)
-- **DoD:** schedule renders current season by weekday in the user's timezone;
+- [x] Behind-by computation per followed show (FR-C4)
+- [x] Home page v1: Behind on + New this week (FR-W1, partial)
+- **DoD (verified 2026-09-06 by orchestrator in-browser with a live timezone change; frozen-clock behind tests in the suite):** schedule renders current season by weekday in the user's timezone;
   followed shows highlighted; behind count correct in tests with a frozen
   clock.
 

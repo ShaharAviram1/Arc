@@ -1,4 +1,5 @@
 import { Link, useParams } from 'react-router-dom'
+import { CoverThumb } from '@/components/CoverThumb'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   anilistUrl,
@@ -300,20 +301,7 @@ export function Show() {
       )}
 
       <header className="flex flex-col gap-6 sm:flex-row">
-        {anime.cover_url === null ? (
-          <div
-            aria-hidden
-            className="flex aspect-[2/3] w-40 shrink-0 items-center justify-center rounded-lg bg-[var(--arc-surface-raised)] text-xs text-[var(--arc-text-muted)]"
-          >
-            No cover
-          </div>
-        ) : (
-          <img
-            src={anime.cover_url}
-            alt=""
-            className="aspect-[2/3] w-40 shrink-0 rounded-lg bg-[var(--arc-surface-raised)] object-cover"
-          />
-        )}
+        <CoverThumb url={anime.cover_url} className="aspect-[2/3] w-40 rounded-lg" />
 
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">

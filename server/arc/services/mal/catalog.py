@@ -14,7 +14,10 @@ handled here so nothing above has to know:
 * **No airing schedule.** MAL publishes a weekly broadcast slot, not per-episode
   air times, so :func:`synthesise_airing` works them out from ``start_date``
   plus that slot and marks every one of them estimated. The client badges them
-  and AniList's real times replace them the moment AniList is back.
+  and AniList's real times replace them the moment AniList is back. The same
+  slot gives :func:`synthesise_next_airing` the next broadcast of a currently
+  airing show, which is what puts a MAL-sourced row on a weekday of the
+  schedule (FR-C3).
 * **Partial dates.** ``start_date`` can be ``2023``, ``2023-09`` or
   ``2023-09-29``. Only the full form is a date; the others are dropped rather
   than guessed, because a wrong first-episode date propagates to every episode.
@@ -76,6 +79,11 @@ DEFAULT_BROADCAST_TIME = time(23, 0)
 #: Refuse to synthesise a schedule longer than this. A bad ``num_episodes``
 #: would otherwise write tens of thousands of episode rows.
 MAX_SYNTHESISED_EPISODES = 2000
+
+#: The AniList status value that means "still airing". ``STATUS_MAP`` maps
+#: MAL's ``currently_airing`` onto it, and a synthesised broadcast slot is only
+#: written for shows in that state.
+RELEASING = "RELEASING"
 
 #: MAL's airing status → the AniList vocabulary ``anime.status`` holds.
 STATUS_MAP = {
@@ -206,6 +214,45 @@ def synthesise_airing(
     ]
 
 
+def next_broadcast(broadcast: tuple[int, time], *, now: datetime) -> datetime:
+    """The next occurrence of a weekly JST slot, at or after ``now``.
+
+    Wholly a Tokyo-local calculation before it is converted back: "Friday
+    23:00" is a Japanese weekday, and working the next Friday out in UTC puts
+    a late-night slot on Saturday for half the year.
+    """
+    weekday, at = broadcast
+    local = now.astimezone(JST)
+    candidate = datetime.combine(local.date(), at, tzinfo=JST)
+    candidate += timedelta(days=(weekday - candidate.weekday()) % 7)
+    if candidate < local:
+        candidate += timedelta(weeks=1)
+    return candidate.astimezone(UTC)
+
+
+def synthesise_next_airing(
+    *, status: str | None, broadcast: tuple[int, time] | None, now: datetime
+) -> dict[str, Any] | None:
+    """A ``next_airing`` blob for a currently-airing show (FR-C3, FR-C6).
+
+    MAL publishes no ``nextAiringEpisode``, and without one a MAL-sourced
+    season row lands on no weekday at all — which is exactly the state the
+    schedule has to survive, since the pre-cache runs through MAL precisely
+    when AniList is down. The broadcast slot is enough to say *when* the next
+    episode airs, so that is what this says.
+
+    What it deliberately does not say is *which* episode. MAL's ``num_episodes``
+    is the total, not the count aired, and counting weeks from ``start_date``
+    would guess through every break and recap week a show ever takes. The
+    number is null, ``estimated`` marks the blob as Arc's own arithmetic, and
+    the show page renders no "next episode" line for it.
+    """
+    if status != RELEASING or broadcast is None:
+        return None
+    at = next_broadcast(broadcast, now=now)
+    return {"episode": None, "airingAt": int(at.timestamp()), "estimated": True}
+
+
 def _relations(raw: dict[str, Any]) -> list[MediaRelation]:
     out: list[MediaRelation] = []
     for edge in raw.get("related_anime") or []:
@@ -227,25 +274,35 @@ def _relations(raw: dict[str, Any]) -> list[MediaRelation]:
     return out
 
 
-def parse_anime(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
-    """One MAL ``anime`` object as a :class:`CatalogMedia`."""
+def parse_anime(raw: dict[str, Any], *, full: bool, now: datetime | None = None) -> CatalogMedia:
+    """One MAL ``anime`` object as a :class:`CatalogMedia`.
+
+    ``now`` is the instant the synthesised broadcast slot is measured from;
+    it defaults to the present and exists so a test can pin it.
+    """
     start_date = parse_date(raw.get("start_date"))
     broadcast = parse_broadcast(raw.get("broadcast"))
     episodes = raw.get("num_episodes") or None
     start_season = raw.get("start_season") or {}
     season = start_season.get("season")
+    status = STATUS_MAP.get(str(raw.get("status") or "").lower())
     summary = {
         "source": "mal",
         "mal_id": int(raw["id"]),
         "title": _titles(raw),
         "format": FORMAT_MAP.get(str(raw.get("media_type") or "").lower()),
         "episodes": episodes,
-        "status": STATUS_MAP.get(str(raw.get("status") or "").lower()),
+        "status": status,
         "season": str(season).upper() if season else None,
         "season_year": start_season.get("year"),
         "cover_url": (raw.get("main_picture") or {}).get("large"),
         "broadcast": broadcast,
         "start_date": start_date,
+        # Carried by a summary as well as a detail record: a season row with no
+        # next broadcast has no weekday on the schedule (FR-C3).
+        "next_airing": synthesise_next_airing(
+            status=status, broadcast=broadcast, now=now or datetime.now(UTC)
+        ),
     }
     if not full:
         return CatalogMedia(**summary)  # type: ignore[arg-type]
@@ -410,6 +467,7 @@ async def _sleep(seconds: float) -> None:
 
 __all__ = [
     "DEFAULT_BROADCAST_TIME",
+    "RELEASING",
     "DETAIL_FIELDS",
     "FORMAT_MAP",
     "JST",
@@ -422,7 +480,9 @@ __all__ = [
     "WEEKDAYS",
     "MalSource",
     "parse_anime",
+    "next_broadcast",
     "parse_broadcast",
     "parse_date",
     "synthesise_airing",
+    "synthesise_next_airing",
 ]

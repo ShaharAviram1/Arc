@@ -508,6 +508,114 @@ async def test_a_mal_summary_page_attaches_to_the_anilist_rows(
     assert all(row.summary_source == "mal" for row in rows)
 
 
+# --- The next broadcast (FR-C3, FR-C6, FR-C7) -------------------------------
+#
+# ``next_airing`` is the one column a *summary* writes as well as a detail
+# fetch, because the schedule is built out of season rows. So its precedence
+# cannot be read off ``detail_source``, which a season sweep never sets, and
+# these are the cases that go wrong when it is.
+
+SLOT_ANILIST_ID = 999501
+SLOT_MAL_ID = 999502
+
+#: AniList's own blob: a real episode number and no ``estimated`` key.
+PUBLISHED_SLOT = {"episode": 6, "airingAt": 1_800_000_000, "timeUntilAiring": 604_800}
+#: The one Arc synthesises from a MAL broadcast time: no episode, and flagged.
+ESTIMATED_SLOT = {"episode": None, "airingAt": 1_800_600_000, "estimated": True}
+
+
+def slot_payload(
+    source: str, next_airing: dict[str, object] | None, *, full: bool = False
+) -> CatalogMedia:
+    """One season row from ``source``, with or without a next broadcast.
+
+    The AniList payload carries both ids (its summary includes ``idMal``); the
+    MAL one carries only its own, which is what makes the two land on one row
+    during an outage.
+    """
+    return CatalogMedia(
+        source="anilist" if source == "anilist" else "mal",
+        title=MediaTitle(romaji="Next Broadcast"),
+        anilist_id=SLOT_ANILIST_ID if source == "anilist" else None,
+        mal_id=SLOT_MAL_ID,
+        format="TV",
+        status="RELEASING",
+        season="FALL",
+        season_year=2026,
+        next_airing=next_airing,
+        full=full,
+    )
+
+
+async def test_a_mal_slot_does_not_replace_an_anilist_one_on_a_summary_row(
+    db_session: AsyncSession,
+) -> None:
+    """The bug this rule exists for: a season sweep sets no ``detail_source``.
+
+    Without it, the MAL sweep of the same season during an outage would move
+    the show to whatever weekday MAL's broadcast slot implies and leave it
+    there until somebody opened the title.
+    """
+    [row] = await upsert_summaries(db_session, [slot_payload("anilist", PUBLISHED_SLOT)])
+    assert row.detail_source is None and row.summary_source == "anilist"
+
+    [after] = await upsert_summaries(db_session, [slot_payload("mal", ESTIMATED_SLOT)])
+
+    assert after.id == row.id
+    assert after.next_airing == PUBLISHED_SLOT
+    # The rest of the summary is MAL's now; only the slot was protected.
+    assert after.summary_source == "mal"
+
+
+async def test_an_anilist_slot_replaces_a_mal_estimate_on_a_summary_row(
+    db_session: AsyncSession,
+) -> None:
+    """The other direction: AniList's return corrects the outage's guess."""
+    [row] = await upsert_summaries(db_session, [slot_payload("mal", ESTIMATED_SLOT)])
+    assert row.next_airing == ESTIMATED_SLOT
+
+    [after] = await upsert_summaries(db_session, [slot_payload("anilist", PUBLISHED_SLOT)])
+
+    assert after.id == row.id
+    assert after.next_airing == PUBLISHED_SLOT
+
+
+async def test_a_mal_slot_fills_a_summary_row_that_has_none(db_session: AsyncSession) -> None:
+    """ "Never overwrite" is not "never write": a row with no slot has no weekday."""
+    [row] = await upsert_summaries(db_session, [slot_payload("anilist", None)])
+    assert row.next_airing is None
+
+    [after] = await upsert_summaries(db_session, [slot_payload("mal", ESTIMATED_SLOT)])
+
+    assert after.id == row.id
+    assert after.next_airing == ESTIMATED_SLOT
+
+
+async def test_a_mal_detail_fetch_does_not_blank_an_anilist_slot(
+    db_session: AsyncSession,
+) -> None:
+    """A detail fetch writes the column even when null; MAL's null is not news."""
+    [row] = await upsert_summaries(db_session, [slot_payload("anilist", PUBLISHED_SLOT)])
+
+    after = await upsert_detail(db_session, slot_payload("mal", None, full=True))
+
+    assert after.id == row.id
+    assert after.next_airing == PUBLISHED_SLOT
+    assert after.detail_source == "mal"
+
+
+async def test_an_anilist_detail_fetch_clears_a_slot_the_show_no_longer_has(
+    db_session: AsyncSession,
+) -> None:
+    """The control: a finished show has no next episode, and must lose the one it had."""
+    [row] = await upsert_summaries(db_session, [slot_payload("anilist", PUBLISHED_SLOT)])
+
+    after = await upsert_detail(db_session, slot_payload("anilist", None, full=True))
+
+    assert after.id == row.id
+    assert after.next_airing is None
+
+
 # --- sync_episodes ----------------------------------------------------------
 
 

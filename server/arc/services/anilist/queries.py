@@ -140,9 +140,17 @@ query ArcAiredSchedule($id: Int!, $page: Int!) {
 }
 """
 
-#: One page of a season, most popular first, summary fields only (FR-C7). The
-#: daily pre-cache writes these as summaries, so a season nobody has opened
-#: still renders when both sources are down.
+#: One page of a season, most popular first (FR-C7). The daily pre-cache writes
+#: these as summaries, so a season nobody has opened still renders when both
+#: sources are down.
+#:
+#: ``nextAiringEpisode`` is the one field asked for beyond the summary
+#: fragment, and it is what makes those rows a *schedule* rather than a list:
+#: the weekday a show sits on comes from its next broadcast (FR-C3), and
+#: without it the pre-cache would produce two hundred titles that no day of the
+#: week claims. It is not in the fragment itself because a search result has no
+#: use for it and would then have to be stopped from writing a null over a
+#: cached one.
 SEASON = (
     SUMMARY_FRAGMENT
     + """
@@ -151,6 +159,7 @@ query ArcSeason($season: MediaSeason!, $seasonYear: Int!, $page: Int!, $perPage:
     pageInfo { currentPage hasNextPage }
     media(season: $season, seasonYear: $seasonYear, type: ANIME, sort: POPULARITY_DESC) {
       ...ArcSummary
+      nextAiringEpisode { episode airingAt }
     }
   }
 }

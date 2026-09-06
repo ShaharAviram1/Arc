@@ -18,7 +18,9 @@ Five handlers:
   estimated air dates (FR-C6).
 * ``catalog_season_sweep`` — the daily pre-cache (03:30 UTC). Writes this
   season's and next season's summaries so the schedule renders even when both
-  sources are down (FR-C7).
+  sources are down (FR-C7), then queues a spaced-out ``catalog_refresh`` for
+  each current-season row the summaries left with no airing information at
+  all — the only query that carries a schedule is the detail one.
 
 Every handler is idempotent: a refresh is an upsert, and an enqueue with a
 dedupe key is a no-op when the work is already queued.
@@ -38,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Integer, exists, func, or_, select
 
-from arc.models import Anime, Job, ListEntry, ListStatus
+from arc.models import Anime, Episode, Job, ListEntry, ListStatus
 from arc.services.catalog.cache import ensure_anime, upsert_summaries
 from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import (
@@ -49,6 +51,7 @@ from arc.services.catalog.names import (
     SEASON_SWEEP,
     dedupe_key,
 )
+from arc.services.catalog.schedule import SCHEDULED_FORMATS
 from arc.services.catalog.seasons import current_season, next_season
 from arc.services.catalog.source import SourceNotFound, SourceUnavailable
 from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue, find_active
@@ -83,6 +86,12 @@ RELEASING = "RELEASING"
 #: waiting on, fast enough to clear a day's outage in an afternoon.
 RECONCILE_LIMIT = 50
 RECONCILE_SPACING_SECONDS = 5.0
+
+#: How many unplaced rows one season sweep will follow up with a detail fetch
+#: (:func:`_enqueue_season_details`). Sixty at five seconds is five minutes of
+#: queue for a job that runs once a day, so a fresh season fills in over a few
+#: nights rather than in one burst that AniList would throttle.
+SEASON_DETAIL_LIMIT = 60
 
 
 async def _sleep(seconds: float) -> None:
@@ -261,6 +270,43 @@ async def catalog_reconcile(ctx: JobContext) -> None:
         ctx.log.info("catalogue reconcile", extra={"candidates": len(rows), "attached": attached})
 
 
+async def _enqueue_season_details(ctx: JobContext, year: int, season: str) -> int:
+    """Queue a detail fetch for every current-season row the schedule cannot place.
+
+    The season query carries ``nextAiringEpisode`` and nothing else about
+    airing, so a show that is between broadcasts — finished, on a break, or not
+    yet started — comes out of the sweep with no slot and no episodes, and the
+    schedule has nothing to put it on a weekday with (FR-C3). Only the *detail*
+    query asks for ``airingSchedule``, which is where the last episode's air
+    time comes from, so those rows have to be fetched one at a time.
+
+    Deliberately narrow: only the weekly formats (a film has no weekday to
+    recover), only rows with neither a slot nor a single episode row, only the
+    current season, and only :data:`SEASON_DETAIL_LIMIT` of them per run. The
+    enqueue goes through :func:`_enqueue_refreshes`, so these share the sweeps'
+    spacing and dedupe key rather than inventing a second budget.
+    """
+    statement = (
+        select(Anime.id)
+        .where(
+            Anime.season == season,
+            Anime.season_year == year,
+            Anime.format.in_(sorted(SCHEDULED_FORMATS)),
+            Anime.next_airing.is_(None),
+            ~exists().where(Episode.anime_id == Anime.id),
+        )
+        .order_by(Anime.id)
+        .limit(SEASON_DETAIL_LIMIT)
+    )
+    anime_ids = list((await ctx.session.scalars(statement)).all())
+    queued = await _enqueue_refreshes(ctx, anime_ids)
+    ctx.log.info(
+        "catalogue season sweep queued detail fetches for unplaced rows",
+        extra={"year": year, "season": season, "candidates": len(anime_ids), "queued": queued},
+    )
+    return queued
+
+
 @register(SEASON_SWEEP)
 async def catalog_season_sweep(ctx: JobContext) -> None:
     """Cache this season and the next one (FR-C7).
@@ -268,6 +314,12 @@ async def catalog_season_sweep(ctx: JobContext) -> None:
     Summaries only, so a title somebody opens still gets a full fetch. The
     point is that the *schedule* renders from local rows: a day when neither
     source answers should cost the airing times, not the season itself.
+
+    The summaries alone leave a hole, though: a season row between broadcasts
+    has no ``nextAiringEpisode`` and no episodes, and the schedule can place
+    neither. So the sweep finishes by queueing a spaced-out detail fetch for
+    those (:func:`_enqueue_season_details`), which is what brings back the
+    ``airingSchedule`` the weekday is recovered from.
     """
     year, season = current_season()
     upcoming = next_season(year, season)
@@ -288,7 +340,8 @@ async def catalog_season_sweep(ctx: JobContext) -> None:
                 "catalogue season cached",
                 extra={"year": target_year, "season": target_season, "titles": len(rows)},
             )
-    ctx.log.info("catalogue season sweep", extra={"titles": cached})
+    queued = await _enqueue_season_details(ctx, year, season)
+    ctx.log.info("catalogue season sweep", extra={"titles": cached, "queued": queued})
 
 
 __all__ = [
@@ -301,6 +354,7 @@ __all__ = [
     "RECONCILE_SPACING_SECONDS",
     "REFRESH",
     "REFRESH_ALL",
+    "SEASON_DETAIL_LIMIT",
     "SEASON_SWEEP",
     "SPACING_SECONDS",
     "catalog_pre_air",

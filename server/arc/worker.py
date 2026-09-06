@@ -29,9 +29,10 @@ from arc import __version__
 from arc.config import Settings, get_settings
 from arc.core.logging import setup_logging
 from arc.db import SessionFactory, create_engine, create_session_factory
-from arc.models import Job
+from arc.models import Anime, Job
 from arc.services.auth import purge_expired
 from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers handlers)
+from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
 
 log = logging.getLogger("arc.worker")
@@ -115,22 +116,40 @@ async def _enqueue_sweep(factory: SessionFactory, job_type: str) -> None:
 
 
 async def _seed_season_sweep(factory: SessionFactory) -> None:
-    """Enqueue the season pre-cache if this deployment has never run it.
+    """Enqueue the season pre-cache if the schedule would otherwise be empty.
 
-    Checked against the job table rather than against the ``anime`` rows: the
-    question is "has the sweep happened", and a season with no cached titles
-    is also what a season nobody has searched looks like.
+    Two conditions, either of which is enough. The first is that this
+    deployment has never run the sweep — asked of the job table rather than of
+    the ``anime`` rows, because "has the sweep happened" is the question and a
+    season with no titles is also what a season nobody has searched looks like.
+
+    The second is that the sweep *has* run but the cache holds nothing for the
+    season Arc is in now. That is what a worker restarting the morning after a
+    season rolls over looks like, and what a run that failed against both
+    sources leaves behind: the schedule page (FR-C3) would render seven empty
+    days until 03:30 tomorrow, which is precisely the state FR-C7 exists to
+    avoid.
+
+    The enqueue is deduplicated on the job type, so a sweep already pending
+    from the scheduler is returned rather than doubled.
     """
     try:
+        year, season = current_season()
         async with factory() as session:
             seen = await session.scalar(
                 select(Job.id).where(Job.type == catalog_jobs.SEASON_SWEEP).limit(1)
             )
-            if seen is not None:
+            cached = await session.scalar(
+                select(Anime.id).where(Anime.season == season, Anime.season_year == year).limit(1)
+            )
+            if seen is not None and cached is not None:
                 return
             await enqueue(session, catalog_jobs.SEASON_SWEEP, dedupe_key=catalog_jobs.SEASON_SWEEP)
             await session.commit()
-        log.info("season pre-cache queued for the first time")
+        log.info(
+            "season pre-cache queued at startup",
+            extra={"year": year, "season": season, "swept_before": seen is not None},
+        )
     except Exception:  # pragma: no cover - a scheduling failure must not kill the worker
         log.exception("could not seed the season sweep")
 

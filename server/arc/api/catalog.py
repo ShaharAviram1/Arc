@@ -8,6 +8,12 @@ source is answering, when the other one last failed, and what it said.
 
 The numbers come straight off the circuit breaker; nothing here calls a source,
 so hitting this endpoint during an outage costs no timeouts.
+
+The season sweep can also be triggered from here (FR-C7). It is the same job
+the worker schedules at 03:30 UTC, queued under the same dedupe key, so an
+admin pressing the button while the nightly run is pending gets that run back
+rather than a second one. Enqueued, never run inline: the sweep is two seasons
+of upstream requests and must not happen inside a request handler.
 """
 
 from __future__ import annotations
@@ -15,9 +21,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
+from fastapi import status as http_status
 from pydantic import BaseModel
 
-from arc.api.deps import CatalogDep, get_admin_user
+from arc.api.deps import CatalogDep, SessionDep, get_admin_user
+from arc.api.jobs import JobOut
+from arc.models import Job
+from arc.services.catalog.names import SEASON_SWEEP
+from arc.services.jobs import enqueue
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"], dependencies=[Depends(get_admin_user)])
 
@@ -58,4 +69,22 @@ async def status(catalog: CatalogDep) -> CatalogStatusOut:
     return CatalogStatusOut.model_validate(catalog.status())
 
 
-__all__ = ["CatalogStatusOut", "SourceStatusOut", "router"]
+@router.post(
+    "/season-sweep",
+    response_model=JobOut,
+    status_code=http_status.HTTP_202_ACCEPTED,
+    summary="Queue the season pre-cache now (admin, FR-C7)",
+)
+async def season_sweep(session: SessionDep) -> Job:
+    """Cache this season and the next from whichever source is up.
+
+    The schedule renders from those rows, so this is the button to press after
+    a season rolls over, after an outage, or on a fresh deployment that has not
+    reached 03:30 yet.
+    """
+    job = await enqueue(session, SEASON_SWEEP, dedupe_key=SEASON_SWEEP)
+    await session.commit()
+    return job
+
+
+__all__ = ["SEASON_SWEEP", "CatalogStatusOut", "SourceStatusOut", "router"]

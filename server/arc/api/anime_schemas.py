@@ -15,57 +15,21 @@ constructor makes each of those decisions visible in one place.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus
 from arc.services.catalog import preferred_title
-
-#: A show that has finished airing but has no schedule rows (AniList only
-#: keeps ``airingSchedule`` for reasonably recent seasons) still has aired
-#: episodes; this is the status that says so.
-FINISHED = "FINISHED"
-
-#: A show that is still airing. Its ``nextAiringEpisode`` is the sharpest
-#: statement AniList makes about where the boundary is.
-RELEASING = "RELEASING"
-
-
-def aired_through(
-    episodes: list[Episode],
-    *,
-    now: datetime,
-    anime_status: str | None,
-    next_airing: dict[str, Any] | None,
-) -> int:
-    """The highest episode number known to have aired, from any evidence.
-
-    A null ``air_at`` is missing data, not a statement about the future.
-    AniList's schedule can simply not cover an episode — an old season it no
-    longer keeps, a gap in the back catalogue, a page Arc failed to fetch —
-    and reading each null as "not yet" would mark episode 300 of a running
-    show unaired while 301 airs on Sunday.
-
-    So the boundary is drawn once for the whole list, from the two things that
-    *are* statements: the highest episode with a past air time, and (while the
-    show is releasing) the episode before the one AniList says is next.
-    Everything at or below it counts as aired even with no date of its own.
-    """
-    highest = max(
-        (
-            episode.number
-            for episode in episodes
-            if episode.air_at is not None and episode.air_at <= now
-        ),
-        default=0,
-    )
-    if anime_status == RELEASING:
-        upcoming = (next_airing or {}).get("episode")
-        if isinstance(upcoming, int):
-            highest = max(highest, upcoming - 1)
-    return highest
+from arc.services.catalog.airing import (
+    FINISHED,
+    RELEASING,
+    aired_through,
+    is_aired,
+    next_airing_at,
+    next_airing_episode,
+)
 
 
 class TitleOut(BaseModel):
@@ -178,14 +142,19 @@ class NextAiringOut(BaseModel):
 
     @classmethod
     def from_blob(cls, raw: dict[str, Any] | None) -> NextAiringOut | None:
-        """AniList's ``nextAiringEpisode`` as stored, or ``None``."""
-        if not raw:
+        """AniList's ``nextAiringEpisode`` as stored, or ``None``.
+
+        Null for the slot Arc synthesises from a MAL broadcast time as well: it
+        knows when the next episode airs but not which one, and a show page
+        that named an episode number it had guessed would be worse than one
+        that says nothing. The schedule renders that case from the raw blob
+        instead (:mod:`arc.services.catalog.schedule`).
+        """
+        episode = next_airing_episode(raw)
+        at = next_airing_at(raw)
+        if episode is None or at is None:
             return None
-        episode = raw.get("episode")
-        airing_at = raw.get("airingAt")
-        if episode is None or airing_at is None:
-            return None
-        return cls(episode=int(episode), at=datetime.fromtimestamp(int(airing_at), UTC))
+        return cls(episode=episode, at=at)
 
 
 class RelationOut(BaseModel):
@@ -273,24 +242,17 @@ class EpisodeOut(BaseModel):
         *,
         now: datetime,
         anime_status: str | None,
-        aired_through: int = 0,
+        boundary: int = 0,
         watched: bool = False,
     ) -> EpisodeOut:
-        if episode.air_at is not None:
-            aired = episode.air_at <= now
-        else:
-            # No schedule row. For a finished show that means AniList simply
-            # does not keep the dates that far back, not that the episode is
-            # in the future; otherwise it is aired if the rest of the list
-            # places it behind the boundary (see :func:`aired_through`).
-            aired = anime_status == FINISHED or episode.number <= aired_through
+        """``boundary`` is the list's :func:`aired_through`; see that module."""
         return cls(
             id=episode.id,
             number=episode.number,
             title=episode.title,
             air_at=episode.air_at,
             air_at_estimated=episode.air_at_estimated,
-            aired=aired,
+            aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
             state=episode.state,
             watched=watched,
         )
@@ -406,7 +368,7 @@ class AnimeDetail(AnimeCore):
                     episode,
                     now=now,
                     anime_status=anime.status,
-                    aired_through=boundary,
+                    boundary=boundary,
                     watched=episode.id in watched,
                 )
                 for episode in episodes
@@ -414,7 +376,14 @@ class AnimeDetail(AnimeCore):
         )
 
 
+#: ``FINISHED``, ``RELEASING``, ``aired_through`` and ``is_aired`` are
+#: re-exported rather than defined here: the aired rule moved into
+#: :mod:`arc.services.catalog.airing` when the home page started needing it
+#: too (FR-C4), and one rule with two definitions is how a show page and a
+#: "behind by N" come to disagree about episode 6.
 __all__ = [
+    "FINISHED",
+    "RELEASING",
     "AnimeCore",
     "AnimeDetail",
     "AnimeSummary",
@@ -427,4 +396,5 @@ __all__ = [
     "SearchPage",
     "TitleOut",
     "aired_through",
+    "is_aired",
 ]

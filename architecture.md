@@ -273,8 +273,25 @@ source dirs, remove torrent from qBittorrent (with files), state
   weekday/time (JST) for 1..num_episodes, `air_at_estimated = true`; AniList
   schedule data replaces them and clears the flag.
 - Jobs: `catalog_reconcile` (hourly when AniList is healthy: fill missing
-  `anilist_id` via `Media(idMal:)`), `catalog_season_sweep` (daily: upsert
-  the current season's summaries from whichever source is up).
+  `anilist_id` via `Media(idMal:)`), `catalog_season_sweep` (daily at 03:30
+  UTC, and at worker start when the current season has no cached rows:
+  upsert the current and next season's summaries from whichever source is
+  up, including `nextAiringEpisode`; MAL-sourced airing shows get a
+  synthesised `next_airing` from their broadcast slot, marked
+  `estimated`, episode number unknown).
+  After the summary upsert the sweep enqueues a detail refresh (which
+  brings the airing schedule) for every current-season TV/TV_SHORT/ONA row
+  with no `next_airing` and no episode rows, spaced 5 s, max 60 per sweep,
+  so most of the season gets a weekday within the hour.
+- An estimated (MAL) `next_airing` never replaces an existing blob on a row
+  whose summary or detail came from AniList, and never replaces a published
+  one; AniList blobs always replace MAL ones. The schedule exposes
+  `next_at_estimated` so the UI can mark synthesised times.
+- Schedule placement: a `next_airing` older than 7 days is ignored (hiatus)
+  and the row falls back to its last real episode air time. The aired rule
+  (`air_at <= now`, estimated dates count, RELEASING boundary, FINISHED
+  fallback) lives in one place, `catalog/airing.py`, used by the show page
+  and by behind-by.
 
 ## 5b. API surface (kept current)
 
@@ -288,12 +305,16 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/{id}` | admin | invite management |
 | `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
 | `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard) |
+| `PATCH /api/users/me` | any | change own timezone (IANA, validated) |
 | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue |
 | `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
 | `GET /api/catalog/status` | admin | source health and breaker state |
 | `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
+| `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
+| `GET /api/home` | any | `continue_watching` (empty until M8), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
+| `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 
 ## 6. External integrations
 
@@ -470,3 +491,11 @@ env (it is not in the settings table).
   official API as read-only fallback behind a `CatalogSource` interface and
   a circuit breaker; estimated air dates from broadcast slots; migrations
   squashed into a single initial revision since nothing has shipped.
+- 2026-09-06 — M4: schedule and home endpoints read the cache only; behind
+  counts only `watching` shows; new-this-week covers watching+planned; the
+  season sweep carries `nextAiringEpisode`; stale next-airing ignored after
+  7 days.
+- 2026-09-06 — M4 review fixes: estimated next-airing never overwrites
+  AniList data; `next_at_estimated` on schedule entries; sweep schedules
+  detail refreshes for unplaced season rows; `PATCH /api/users/me` lets a
+  user change their timezone (spec §2 users now have an editable timezone).

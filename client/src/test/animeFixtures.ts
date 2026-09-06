@@ -3,8 +3,16 @@ import type {
   AnimeRelation,
   AnimeSearchResponse,
   AnimeSummary,
+  EpisodeOut,
   ListEntry,
 } from '@/lib/anime'
+import type {
+  BehindEntry,
+  HomePage,
+  ScheduleDay,
+  ScheduleEntry,
+  SchedulePage,
+} from '@/lib/schedule'
 
 export const FRIEREN: AnimeSummary = {
   id: 154587,
@@ -170,3 +178,143 @@ export function listEntry(overrides: Partial<ListEntry> = {}): ListEntry {
     ...overrides,
   }
 }
+
+/* --- Schedule and home (roadmap M4) ---------------------------------- */
+
+/** A second currently-airing show, so a day column is not the same title twice. */
+export const APOTHECARY: AnimeSummary = {
+  id: 161645,
+  title: {
+    romaji: 'Kusuriya no Hitorigoto',
+    english: 'The Apothecary Diaries',
+    native: '薬屋のひとりごと',
+    preferred: 'The Apothecary Diaries',
+  },
+  format: 'TV',
+  episodes: 24,
+  status: 'RELEASING',
+  season: 'FALL',
+  season_year: 2026,
+  // No cover: the compact row has to fall back to the placeholder.
+  cover_url: null,
+  anilist_id: 161645,
+  mal_id: 54492,
+  source: 'anilist',
+  list_status: null,
+}
+
+export function scheduleEntry(
+  anime: AnimeSummary,
+  overrides: Partial<Omit<ScheduleEntry, 'anime'>> = {},
+): ScheduleEntry {
+  return {
+    anime,
+    air_time_local: '18:30',
+    next_episode: null,
+    next_at: null,
+    next_at_estimated: false,
+    following: false,
+    list_status: anime.list_status,
+    ...overrides,
+  }
+}
+
+/** Seven empty Monday-first columns, the shape the server always sends. */
+function emptyDays(): ScheduleDay[] {
+  return [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, entries: [] }))
+}
+
+/**
+ * Frieren airs Tuesday and is followed, with a real AniList airing time; the
+ * Apothecary airs Thursday off a MAL broadcast slot, so its time is a guess
+ * and carries the "est." marker (FR-C6).
+ */
+export const SCHEDULE_PAGE: SchedulePage = {
+  year: 2026,
+  season: 'FALL',
+  prev: { year: 2026, season: 'SUMMER' },
+  next: { year: 2027, season: 'WINTER' },
+  timezone: 'Europe/Berlin',
+  days: emptyDays().map((day) => {
+    if (day.weekday === 1) {
+      return {
+        ...day,
+        entries: [
+          scheduleEntry(FRIEREN, {
+            air_time_local: '18:30',
+            next_episode: 5,
+            next_at: '2026-09-08T16:30:00Z',
+            following: true,
+            list_status: 'watching',
+          }),
+        ],
+      }
+    }
+    if (day.weekday === 3) {
+      return {
+        ...day,
+        entries: [
+          scheduleEntry(APOTHECARY, {
+            air_time_local: '22:00',
+            next_episode: 2,
+            next_at: '2026-09-10T20:00:00Z',
+            next_at_estimated: true,
+          }),
+        ],
+      }
+    }
+    return day
+  }),
+  unscheduled: [scheduleEntry(FRIEREN_SPECIAL, { air_time_local: null, list_status: 'planned' })],
+}
+
+/** A season the daily sweep has not filled yet. */
+export const EMPTY_SCHEDULE: SchedulePage = {
+  ...SCHEDULE_PAGE,
+  days: emptyDays(),
+  unscheduled: [],
+}
+
+function airedEpisode(overrides: Partial<EpisodeOut> = {}): EpisodeOut {
+  return {
+    id: 9101,
+    number: 7,
+    title: null,
+    air_at: '2026-09-04T14:00:00Z',
+    air_at_estimated: false,
+    aired: true,
+    state: 'ready',
+    watched: false,
+    ...overrides,
+  }
+}
+
+/** Seven of twelve aired, three watched: behind by four. */
+export const BEHIND_FRIEREN: BehindEntry = {
+  anime: { ...FRIEREN, episodes: 12, status: 'RELEASING', list_status: 'watching' },
+  entry: listEntry({ status: 'watching', progress: 3 }),
+  aired: 7,
+  behind: 4,
+  latest_aired_at: '2026-09-04T14:00:00Z',
+}
+
+export const HOME_PAGE: HomePage = {
+  continue_watching: [],
+  behind: [BEHIND_FRIEREN],
+  new_this_week: [
+    { anime: FRIEREN, episode: airedEpisode() },
+    {
+      anime: APOTHECARY,
+      // Filled from MAL while AniList was down, so the date is a guess (FR-C6).
+      episode: airedEpisode({
+        id: 9102,
+        number: 2,
+        air_at: '2026-09-05T15:00:00Z',
+        air_at_estimated: true,
+        state: 'preparing',
+      }),
+    },
+  ],
+}
+
+export const EMPTY_HOME: HomePage = { continue_watching: [], behind: [], new_this_week: [] }

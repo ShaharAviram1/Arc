@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api import anime as anime_api
 from arc.config import Settings
-from arc.models import Anime, Job, JobStatus, ListEntry, ListStatus, User
+from arc.models import Anime, Episode, Job, JobStatus, ListEntry, ListStatus, User
+from arc.services.anilist.client import parse_media
 from arc.services.auth import create_user
 from arc.services.catalog import Breaker, CatalogService, episodes_for, names
 from arc.services.catalog import jobs as catalog_jobs
+from arc.services.catalog.cache import upsert_summaries
 from arc.services.catalog.jobs import (
     PRE_AIR,
     RECONCILE,
@@ -33,7 +35,16 @@ from arc.services.catalog.jobs import (
 )
 from arc.services.catalog.seasons import current_season, next_season, season_of
 from arc.services.jobs import JobContext, enqueue, registered_types
-from tests.anilist_mock import FRIEREN_ID, FakeAniList, frieren_fake, summary_of
+from arc.services.mal.catalog import JST
+from tests.anilist_mock import (
+    FRIEREN_ID,
+    RELEASING_ID,
+    FakeAniList,
+    frieren_fake,
+    load,
+    season_node,
+    summary_of,
+)
 from tests.mal_mock import FRIEREN_MAL_ID, SEASON_NAME, SEASON_YEAR, FakeMal
 from tests.mal_mock import frieren_fake as mal_frieren_fake
 
@@ -57,12 +68,18 @@ async def add_anime(
     mal_id: int | None = None,
     status: str = "FINISHED",
     next_airing_at: datetime | None = None,
+    format: str | None = None,
+    season: str | None = None,
+    season_year: int | None = None,
 ) -> Anime:
     anime = Anime(
         anilist_id=anilist_id,
         mal_id=mal_id,
         title_romaji=f"Show {anilist_id or mal_id}",
         status=status,
+        format=format,
+        season=season,
+        season_year=season_year,
     )
     if next_airing_at is not None:
         anime.next_airing = {"episode": 7, "airingAt": epoch(next_airing_at), "timeUntilAiring": 0}
@@ -95,7 +112,7 @@ def anilist() -> FakeAniList:
     """Frieren by id, by MAL id, by search, and in Fall 2023."""
     fake = frieren_fake()
     fake.seasons[(SEASON_YEAR, SEASON_NAME)] = [
-        summary_of(fake.media[FRIEREN_ID]["data"]["Media"])  # type: ignore[index]
+        season_node(fake.media[FRIEREN_ID]["data"]["Media"])  # type: ignore[index]
     ]
     return fake
 
@@ -594,6 +611,137 @@ async def test_the_season_sweep_falls_back_to_mal(
     assert all(row.anilist_id is None for row in rows)
 
 
+async def test_the_season_sweep_records_the_next_broadcast(
+    db_session: AsyncSession,
+    settings: Settings,
+    catalog: CatalogService,
+    anilist: FakeAniList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A season row with no next broadcast has no weekday (FR-C3, FR-C7).
+
+    The sweep writes summaries, and ``next_airing`` is the one field the season
+    query asks for beyond them — precisely so the schedule can be rendered from
+    the pre-cache alone when both sources are down.
+    """
+    releasing = load("media_999001_releasing")["data"]["Media"]
+    anilist.seasons[(SEASON_YEAR, SEASON_NAME)] = [season_node(releasing)]
+    monkeypatch.setattr(
+        "arc.services.catalog.jobs.current_season", lambda: (SEASON_YEAR, SEASON_NAME)
+    )
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    row = await db_session.scalar(select(Anime).where(Anime.anilist_id == RELEASING_ID))
+    assert row is not None
+    assert row.next_airing == releasing["nextAiringEpisode"]
+    assert row.format == "TV"
+    assert (row.season, row.season_year) == ("WINTER", 2026)
+    # Still a summary: opening the show must still trigger a full fetch.
+    assert row.refreshed_at is None
+
+
+async def test_a_search_result_never_blanks_a_cached_broadcast(
+    db_session: AsyncSession,
+    settings: Settings,
+    catalog: CatalogService,
+    anilist: FakeAniList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The search query does not ask for ``nextAiringEpisode``; its null is not news."""
+    releasing = load("media_999001_releasing")["data"]["Media"]
+    anilist.seasons[(SEASON_YEAR, SEASON_NAME)] = [season_node(releasing)]
+    monkeypatch.setattr(
+        "arc.services.catalog.jobs.current_season", lambda: (SEASON_YEAR, SEASON_NAME)
+    )
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    # …and now the same show arrives from a search, which carries no slot.
+    await upsert_summaries(db_session, [parse_media(summary_of(releasing), full=False)])
+
+    row = await db_session.scalar(select(Anime).where(Anime.anilist_id == RELEASING_ID))
+    assert row is not None
+    assert row.next_airing == releasing["nextAiringEpisode"]
+
+
+#: A MAL season entry for a show that is on the air, with a Friday slot. Built
+#: here rather than captured: the fixtures are all from Fall 2023 and have
+#: therefore finished airing, and this is the one case the synthesised slot
+#: exists for.
+MAL_AIRING_NODE = {
+    "node": {
+        "id": 999003,
+        "title": "Kin'youbi no Ban",
+        "media_type": "tv",
+        "status": "currently_airing",
+        "num_episodes": 12,
+        "start_date": "2023-10-06",
+        "start_season": {"year": SEASON_YEAR, "season": SEASON_NAME.lower()},
+        "broadcast": {"day_of_the_week": "friday", "start_time": "23:00"},
+        "main_picture": {"large": "https://img.test/friday.jpg"},
+    }
+}
+
+
+async def test_a_mal_season_row_lands_on_its_broadcast_weekday(
+    db_session: AsyncSession,
+    settings: Settings,
+    catalog: CatalogService,
+    anilist: FakeAniList,
+    mal: FakeMal,
+    monkeypatch: pytest.MonkeyPatch,
+    slept: list[float],
+) -> None:
+    """The sweep runs through MAL exactly when AniList is down (FR-C6, FR-C7).
+
+    MAL publishes no ``nextAiringEpisode``, so without a synthesised slot every
+    row it writes would be a show the schedule cannot place — an empty week for
+    the whole of an outage, which is the state FR-C7 exists to prevent.
+    """
+    anilist.disabled = True
+    mal.seasons[(SEASON_YEAR, SEASON_NAME)] = {"data": [MAL_AIRING_NODE], "paging": {}}
+    monkeypatch.setattr(
+        "arc.services.catalog.jobs.current_season", lambda: (SEASON_YEAR, SEASON_NAME)
+    )
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    row = await db_session.scalar(select(Anime).where(Anime.mal_id == 999003))
+    assert row is not None
+    assert row.summary_source == "mal"
+    assert row.next_airing is not None
+    # The weekday is Japanese, and it is in the future: this is the *next*
+    # broadcast, not the premiere.
+    at = datetime.fromtimestamp(row.next_airing["airingAt"], JST)
+    assert at.weekday() == 4
+    assert at.time() == time(23, 0)
+    assert at > datetime.now(UTC)
+    # …and it names no episode, because MAL does not know which one is next.
+    assert row.next_airing["episode"] is None
+    assert row.next_airing["estimated"] is True
+
+
+async def test_a_finished_mal_season_row_gets_no_slot(
+    db_session: AsyncSession,
+    settings: Settings,
+    catalog: CatalogService,
+    anilist: FakeAniList,
+    monkeypatch: pytest.MonkeyPatch,
+    slept: list[float],
+) -> None:
+    """Frieren finished airing in 2024; it has no next broadcast."""
+    anilist.disabled = True
+    monkeypatch.setattr(
+        "arc.services.catalog.jobs.current_season", lambda: (SEASON_YEAR, SEASON_NAME)
+    )
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    row = await db_session.scalar(select(Anime).where(Anime.mal_id == FRIEREN_MAL_ID))
+    assert row is not None
+    assert row.next_airing is None
+
+
 async def test_the_season_sweep_survives_a_season_nobody_can_answer(
     db_session: AsyncSession,
     settings: Settings,
@@ -620,3 +768,106 @@ async def test_the_season_sweep_survives_a_season_nobody_can_answer(
 
     rows = list((await db_session.scalars(select(Anime))).all())
     assert FRIEREN_ID in {row.anilist_id for row in rows}
+
+
+# --- The season sweep's follow-up detail fetches ------------------------------
+#
+# The season query carries ``nextAiringEpisode`` and nothing else about airing,
+# so a show between broadcasts comes out of the sweep with no slot and no
+# episodes — and the schedule has nothing to place it with (FR-C3). Only the
+# detail query asks for ``airingSchedule``, so those rows are followed up one
+# at a time.
+
+
+@pytest.fixture
+def empty_seasons(anilist: FakeAniList, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sweep that caches nothing, so only the seeded rows are candidates."""
+    anilist.seasons.clear()
+    monkeypatch.setattr(
+        "arc.services.catalog.jobs.current_season", lambda: (SEASON_YEAR, SEASON_NAME)
+    )
+
+
+async def add_season_row(
+    session: AsyncSession, anilist_id: int, *, format: str | None = "TV", **kwargs: object
+) -> Anime:
+    """A current-season row, as the sweep's summaries would leave it."""
+    return await add_anime(
+        session,
+        anilist_id,
+        status="RELEASING",
+        format=format,
+        season=SEASON_NAME,
+        season_year=SEASON_YEAR,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def test_the_sweep_queues_a_detail_fetch_for_every_unplaceable_row(
+    db_session: AsyncSession, settings: Settings, catalog: CatalogService, empty_seasons: None
+) -> None:
+    """Three weekly-format rows with neither a slot nor an episode: three refreshes."""
+    rows = [
+        await add_season_row(db_session, 803000 + offset, format=format)
+        for offset, format in enumerate(("TV", "TV_SHORT", "ONA"))
+    ]
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    jobs = await queued(db_session, REFRESH)
+    assert [job.payload["anime_id"] for job in jobs] == [row.id for row in rows]
+    gaps = [
+        (later.run_after - earlier.run_after).total_seconds()
+        for earlier, later in zip(jobs, jobs[1:], strict=False)
+    ]
+    assert gaps == [SPACING_SECONDS] * 2
+
+
+async def test_the_sweep_leaves_the_rows_the_schedule_can_already_place(
+    db_session: AsyncSession, settings: Settings, catalog: CatalogService, empty_seasons: None
+) -> None:
+    """A slot or a single dated episode is enough; a film has no weekday to find."""
+    await add_season_row(db_session, 803100, next_airing_at=datetime.now(UTC) + timedelta(days=2))
+    with_episodes = await add_season_row(db_session, 803101)
+    db_session.add(Episode(anime_id=with_episodes.id, number=1))
+    await add_season_row(db_session, 803102, format="MOVIE")
+    await add_season_row(db_session, 803103, format=None)
+    # Next season is not current: its rows wait for the sweep that follows it.
+    await add_anime(
+        db_session,
+        803104,
+        status="RELEASING",
+        format="TV",
+        season=next_season(SEASON_YEAR, SEASON_NAME)[1],
+        season_year=next_season(SEASON_YEAR, SEASON_NAME)[0],
+    )
+    await db_session.flush()
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    assert await queued(db_session, REFRESH) == []
+
+
+async def test_the_sweeps_follow_up_is_capped(
+    db_session: AsyncSession, settings: Settings, catalog: CatalogService, empty_seasons: None
+) -> None:
+    """A brand-new season is two hundred rows; five minutes of queue is enough."""
+    for offset in range(catalog_jobs.SEASON_DETAIL_LIMIT + 5):
+        await add_season_row(db_session, 803200 + offset)
+
+    await catalog_jobs.catalog_season_sweep(context(db_session, settings, SEASON_SWEEP))
+
+    assert len(await queued(db_session, REFRESH)) == catalog_jobs.SEASON_DETAIL_LIMIT
+
+
+async def test_the_follow_up_does_not_duplicate_a_queued_refresh(
+    db_session: AsyncSession, settings: Settings, catalog: CatalogService, empty_seasons: None
+) -> None:
+    """Same job type, same dedupe key: two sweeps are one refresh."""
+    await add_season_row(db_session, 803300)
+    ctx = context(db_session, settings, SEASON_SWEEP)
+
+    await catalog_jobs.catalog_season_sweep(ctx)
+    await catalog_jobs.catalog_season_sweep(ctx)
+
+    assert len(await queued(db_session, REFRESH)) == 1

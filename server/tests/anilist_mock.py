@@ -328,6 +328,19 @@ def summary_of(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def season_node(payload: dict[str, Any]) -> dict[str, Any]:
+    """The fields the *season* query asks for: the summary plus the next slot.
+
+    A season list carries one field beyond the search fragment —
+    ``nextAiringEpisode`` — because that is what puts a show on a weekday of
+    the schedule (FR-C3). Kept next to :func:`summary_of` so the two fakes
+    differ exactly where the two queries do.
+    """
+    node = summary_of(payload)
+    node["nextAiringEpisode"] = payload.get("nextAiringEpisode")
+    return node
+
+
 __all__ = [
     "DISABLED_BODY",
     "DISABLED_STATUS",
@@ -343,5 +356,6 @@ __all__ = [
     "load",
     "long_running_fake",
     "media_payload",
+    "season_node",
     "summary_of",
 ]

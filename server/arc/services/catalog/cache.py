@@ -43,6 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode
+from arc.services.catalog.airing import next_airing_estimated
 from arc.services.catalog.service import CatalogService
 from arc.services.catalog.source import (
     AiringEntry,
@@ -232,12 +233,42 @@ def _attach_ids(
         index[incoming] = row
 
 
+def _may_write_next_airing(row: Anime, media: CatalogMedia, *, summary_source: str | None) -> bool:
+    """Whether ``media`` outranks the slot ``row`` already holds (rule 3).
+
+    ``next_airing`` needs its own precedence check because it is the one column
+    a *summary* writes as well as a detail fetch, so ``detail_source`` does not
+    describe who put it there. A season sweep leaves a row with
+    ``summary_source = "anilist"``, ``detail_source = NULL`` and AniList's
+    published ``nextAiringEpisode``; the MAL sweep of the same season during an
+    outage would then find no ``detail_source`` to be stopped by and overwrite
+    a published time with an estimate — the show would move to whatever weekday
+    MAL's broadcast slot implies, and stay there until somebody opened it.
+
+    So the rule is read off both source columns and off the blob itself:
+    AniList always wins, and MAL may write only where AniList has left nothing
+    — no slot at all, or a slot MAL itself estimated. ``summary_source`` is
+    passed in rather than read here because :func:`_apply` has already
+    overwritten it by the time this matters.
+    """
+    if media.source != "mal":
+        return True
+    if row.next_airing is None:
+        return True
+    if "anilist" in (row.detail_source, summary_source):
+        return False
+    return next_airing_estimated(row.next_airing)
+
+
 def _apply(row: Anime, media: CatalogMedia, *, now: datetime) -> None:
     """Write ``media`` onto ``row`` under the precedence rules (rules 2 and 3)."""
     # MAL is allowed to complete an AniList-sourced row, never to rewrite it:
     # its synopsis is a different translation, it has no tags or banner, and
     # overwriting would make a five-minute outage cost a day of worse data.
     fill_only = media.source == "mal" and row.detail_source == "anilist"
+    # Decided before the summary loop below, which overwrites the very column
+    # the decision is read from.
+    may_write_next_airing = _may_write_next_airing(row, media, summary_source=row.summary_source)
 
     for name, value in _summary_values(media).items():
         # The summary columns are overwritten rather than filled, because a
@@ -248,11 +279,27 @@ def _apply(row: Anime, media: CatalogMedia, *, now: datetime) -> None:
         if fill_only and value is None:
             continue
         setattr(row, name, value)
+
+    # ``next_airing`` is a detail column that a *season* payload also carries,
+    # because the schedule is built from season rows and a show with no next
+    # broadcast has no weekday (FR-C3, FR-C7). It is therefore written from a
+    # summary too — but only when the payload actually has one, since a search
+    # result does not ask AniList for the field and writing its null would
+    # blank the schedule every time somebody searched.
+    if media.next_airing is not None and may_write_next_airing:
+        row.next_airing = media.next_airing
+
     if not media.full:
         return
 
     for name, value in _detail_values(media).items():
         if fill_only and getattr(row, name) is not None:
+            continue
+        # A *full* fetch is also allowed to clear the slot — a show that has
+        # finished airing has no next episode, and leaving the last one there
+        # would keep it on the schedule for ever — but only from the source
+        # that outranks whatever wrote it.
+        if name == "next_airing" and not may_write_next_airing:
             continue
         setattr(row, name, value)
     row.refreshed_at = now

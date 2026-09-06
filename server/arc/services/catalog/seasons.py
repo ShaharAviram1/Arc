@@ -32,9 +32,34 @@ def next_season(year: int, season: str) -> tuple[int, str]:
     return (year, SEASONS[index + 1])
 
 
+def prev_season(year: int, season: str) -> tuple[int, str]:
+    """The season before ``(year, season)``, rolling WINTER back to last FALL."""
+    index = SEASONS.index(season.upper())
+    if index == 0:
+        return (year - 1, SEASONS[-1])
+    return (year, SEASONS[index - 1])
+
+
+def adjacent_seasons(year: int, season: str) -> tuple[tuple[int, str], tuple[int, str]]:
+    """``(previous, next)`` — the two seasons the schedule page links to (FR-C3).
+
+    Returned as a pair rather than fetched one at a time because the page needs
+    both on every render and a caller that asked for only one would still have
+    to know the wrap rules to label the other.
+    """
+    return (prev_season(year, season), next_season(year, season))
+
+
 def current_season(now: datetime | None = None) -> tuple[int, str]:
     """The season Arc is in, measured in UTC."""
     return season_of((now or datetime.now(UTC)).date())
 
 
-__all__ = ["SEASONS", "current_season", "next_season", "season_of"]
+__all__ = [
+    "SEASONS",
+    "adjacent_seasons",
+    "current_season",
+    "next_season",
+    "prev_season",
+    "season_of",
+]

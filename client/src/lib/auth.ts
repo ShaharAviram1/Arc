@@ -18,6 +18,7 @@ import {
 } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { ApiError, apiFetch } from '@/lib/api'
+import { HOME_QUERY_KEY, SCHEDULE_QUERY_KEY } from '@/lib/schedule'
 
 export type Role = 'admin' | 'user'
 
@@ -119,6 +120,53 @@ export function browserTimezone(): string | undefined {
   }
 }
 
+/**
+ * A short, spread-out zone list for a browser without
+ * `Intl.supportedValuesOf` — one common city per broad offset, enough that
+ * nobody is stuck with a zone hours away from their own.
+ */
+const FALLBACK_TIMEZONES: readonly string[] = [
+  'UTC',
+  'Pacific/Honolulu',
+  'America/Anchorage',
+  'America/Los_Angeles',
+  'America/Denver',
+  'America/Chicago',
+  'America/New_York',
+  'America/Sao_Paulo',
+  'Europe/London',
+  'Europe/Berlin',
+  'Europe/Athens',
+  'Europe/Moscow',
+  'Africa/Lagos',
+  'Africa/Nairobi',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Bangkok',
+  'Asia/Shanghai',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+  'Pacific/Auckland',
+]
+
+/**
+ * IANA zones to offer, with `current` guaranteed to be among them: a zone the
+ * browser has never heard of is still the one the account is set to, and a
+ * select that cannot show its own value would silently change it on save.
+ */
+export function timezoneOptions(current: string): string[] {
+  let zones: string[]
+  try {
+    zones =
+      typeof Intl.supportedValuesOf === 'function'
+        ? Intl.supportedValuesOf('timeZone')
+        : [...FALLBACK_TIMEZONES]
+  } catch {
+    zones = [...FALLBACK_TIMEZONES]
+  }
+  return current !== '' && !zones.includes(current) ? [current, ...zones] : zones
+}
+
 /** `undefined` while loading, `null` when logged out, the user when logged in. */
 export function useMe(): UseQueryResult<User | null, Error> {
   return useQuery<User | null, Error>({
@@ -143,6 +191,32 @@ export function useLogin(): UseMutationResult<User, Error, LoginInput> {
       apiFetch<User>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
     onSuccess: (user) => {
       queryClient.setQueryData(authMeQueryKey, user)
+    },
+  })
+}
+
+/**
+ * Change the viewer's own timezone (spec §4.1 FR-C3).
+ *
+ * The zone is not a formatting preference the client applies: the server
+ * groups the schedule into weekday columns and works out air times in it, so
+ * changing it changes those *responses*. Hence both aggregates are invalidated
+ * rather than patched — there is nothing sensible to patch them to, and only
+ * the server can re-derive them.
+ */
+export function useUpdateTimezone(): UseMutationResult<User, Error, string> {
+  const queryClient = useQueryClient()
+
+  return useMutation<User, Error, string>({
+    mutationFn: (timezone) =>
+      apiFetch<User>('/api/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify({ timezone }),
+      }),
+    onSuccess: (user) => {
+      queryClient.setQueryData(authMeQueryKey, user)
+      void queryClient.invalidateQueries({ queryKey: [SCHEDULE_QUERY_KEY] })
+      void queryClient.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
     },
   })
 }

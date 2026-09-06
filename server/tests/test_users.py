@@ -284,3 +284,72 @@ async def test_an_unknown_field_is_422(
     response = await admin_client.patch(f"/api/users/{user.id}", json={"is_actve": False})
 
     assert response.status_code == 422
+
+
+# --- The caller's own profile -------------------------------------------------
+
+
+async def test_a_user_can_set_their_own_timezone(
+    api_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Write-once from the client's point of view: the schedule reads it back."""
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+    await login(api_client, USER_EMAIL, USER_PASSWORD)
+
+    response = await api_client.patch("/api/users/me", json={"timezone": "Asia/Jerusalem"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["timezone"] == "Asia/Jerusalem"
+    assert set(body) == {"id", "email", "role", "timezone", "created_at"}
+    assert (await me(api_client))["timezone"] == "Asia/Jerusalem"
+    schedule = await api_client.get("/api/schedule")
+    assert schedule.status_code == 200
+    assert schedule.json()["timezone"] == "Asia/Jerusalem"
+
+
+async def test_an_admin_may_change_their_own_timezone_too(admin_client: AsyncClient) -> None:
+    """Not an admin route: it is the one thing on this router anybody may do."""
+    response = await admin_client.patch("/api/users/me", json={"timezone": "Asia/Tokyo"})
+
+    assert response.status_code == 200, response.text
+    assert (await me(admin_client))["timezone"] == "Asia/Tokyo"
+
+
+@pytest.mark.parametrize("name", ["Foo/Bar", "GMT+2", "Europe", "", "../etc/passwd", "x" * 100])
+async def test_a_timezone_zoneinfo_cannot_resolve_is_422(
+    api_client: AsyncClient, api_factory: SessionFactory, name: str
+) -> None:
+    """The write is where a mistake can still be reported; the read falls back."""
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+    await login(api_client, USER_EMAIL, USER_PASSWORD)
+
+    response = await api_client.patch("/api/users/me", json={"timezone": name})
+
+    assert response.status_code == 422
+    assert (await me(api_client))["timezone"] == "UTC"
+
+
+async def test_the_profile_patch_takes_nothing_else(
+    api_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """`extra="forbid"`: nobody promotes themselves through the profile route."""
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+    await login(api_client, USER_EMAIL, USER_PASSWORD)
+
+    promoted = await api_client.patch(
+        "/api/users/me", json={"timezone": "Asia/Tokyo", "role": "admin"}
+    )
+    assert promoted.status_code == 422
+    empty = await api_client.patch("/api/users/me", json={})
+    assert empty.status_code == 422, "the timezone is required, not optional"
+
+    assert (await me(api_client))["role"] == "user"
+    assert (await me(api_client))["timezone"] == "UTC"
+
+
+async def test_the_profile_patch_needs_a_session(api_client: AsyncClient) -> None:
+    response = await api_client.patch("/api/users/me", json={"timezone": "Asia/Tokyo"})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": NOT_AUTHENTICATED}

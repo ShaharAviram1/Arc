@@ -2,11 +2,13 @@
  * Catalogue and list-state data layer (spec §4.1 FR-C1/FR-C2, §4.6 FR-W2,
  * roadmap M3).
  *
- * Search results, the show page and "my list" all describe the same anime, and
- * all three carry the viewer's list status. Setting a status therefore has to
- * land in every cache that shows it: the mutation patches the show and search
- * caches directly (so a select never snaps back to its old value) and
- * invalidates the list queries, which are cheap to refetch.
+ * Search results, the show page, the schedule, the home dashboard and "my
+ * list" all describe the same anime, and all of them carry the viewer's list
+ * status. Setting a status therefore has to land in every cache that shows it:
+ * the mutation patches each one directly, so a select never snaps back to its
+ * old value while the correcting refetch is in flight, and then invalidates
+ * them so the server's own arithmetic — `following`, "behind by N" — replaces
+ * the patch a moment later.
  */
 
 import {
@@ -20,6 +22,14 @@ import {
 } from '@tanstack/react-query'
 import { ApiError, apiFetch } from '@/lib/api'
 import { errorDetail } from '@/lib/auth'
+import {
+  HOME_QUERY_KEY,
+  isFollowing,
+  SCHEDULE_QUERY_KEY,
+  type HomePage,
+  type ScheduleEntry,
+  type SchedulePage,
+} from '@/lib/schedule'
 
 export type ListStatus = 'watching' | 'planned' | 'on_hold' | 'dropped' | 'completed'
 
@@ -343,6 +353,84 @@ export function useMyList(status?: ListStatus): UseQueryResult<MyListItem[], Err
   })
 }
 
+/** The same summary carrying a new list status; identity is kept when it can be. */
+function withStatus(anime: AnimeSummary, status: ListStatus | null): AnimeSummary {
+  return anime.list_status === status ? anime : { ...anime, list_status: status }
+}
+
+/**
+ * The schedule grid. A row's own `list_status` drives its select and
+ * `following` drives its accent edge, so the two have to move together — a row
+ * showing "Watching" without the edge would read as a bug for the second the
+ * refetch takes.
+ */
+function applyToSchedule(client: QueryClient, animeId: number, status: ListStatus | null): void {
+  const following = isFollowing(status)
+
+  function patch(entry: ScheduleEntry): ScheduleEntry {
+    if (entry.anime.id !== animeId) return entry
+    return { ...entry, anime: withStatus(entry.anime, status), list_status: status, following }
+  }
+
+  function holds(entries: ScheduleEntry[]): boolean {
+    return entries.some((entry) => entry.anime.id === animeId)
+  }
+
+  client.setQueriesData<SchedulePage>({ queryKey: [SCHEDULE_QUERY_KEY] }, (current) => {
+    if (current === undefined) return current
+    // A season this show does not air in is left alone, object identity and all.
+    if (!current.days.some((day) => holds(day.entries)) && !holds(current.unscheduled)) {
+      return current
+    }
+    return {
+      ...current,
+      days: current.days.map((day) =>
+        holds(day.entries) ? { ...day, entries: day.entries.map(patch) } : day,
+      ),
+      unscheduled: holds(current.unscheduled)
+        ? current.unscheduled.map(patch)
+        : current.unscheduled,
+    }
+  })
+}
+
+/**
+ * The home dashboard. "Behind on" is a list of *followed* shows, so a show
+ * taken off the list, dropped or completed leaves it immediately rather than
+ * sitting there with a status that contradicts the section it is in.
+ */
+function applyToHome(client: QueryClient, animeId: number, status: ListStatus | null): void {
+  const followed = isFollowing(status) ? status : null
+
+  client.setQueriesData<HomePage>({ queryKey: [HOME_QUERY_KEY] }, (current) => {
+    if (current === undefined) return current
+    const inBehind = current.behind.some((item) => item.anime.id === animeId)
+    const inWeek = current.new_this_week.some((item) => item.anime.id === animeId)
+    if (!inBehind && !inWeek) return current
+
+    return {
+      ...current,
+      behind:
+        followed === null
+          ? current.behind.filter((item) => item.anime.id !== animeId)
+          : current.behind.map((item) =>
+              item.anime.id === animeId
+                ? {
+                    ...item,
+                    anime: withStatus(item.anime, followed),
+                    entry: { ...item.entry, status: followed },
+                  }
+                : item,
+            ),
+      new_this_week: inWeek
+        ? current.new_this_week.map((item) =>
+            item.anime.id === animeId ? { ...item, anime: withStatus(item.anime, status) } : item,
+          )
+        : current.new_this_week,
+    }
+  })
+}
+
 /** Patch every cached view of this anime so the UI never shows a stale status. */
 function applyListStatus(client: QueryClient, animeId: number, entry: ListEntry | null): void {
   client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
@@ -365,8 +453,16 @@ function applyListStatus(client: QueryClient, animeId: number, entry: ListEntry 
     },
   )
 
+  // Following a show changes its highlight on the schedule and can add or
+  // remove a "behind on" card (roadmap M4). Both are server-computed, so the
+  // patch below is only good enough to bridge the refetch that follows it.
+  applyToSchedule(client, animeId, entry?.status ?? null)
+  applyToHome(client, animeId, entry?.status ?? null)
+
   void client.invalidateQueries({ queryKey: [LIST_QUERY_KEY] })
   void client.invalidateQueries({ queryKey: [ANIME_QUERY_KEY, 'search'] })
+  void client.invalidateQueries({ queryKey: [SCHEDULE_QUERY_KEY] })
+  void client.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
 }
 
 export function useSetListEntry(): UseMutationResult<ListEntry, Error, SetListEntryInput> {

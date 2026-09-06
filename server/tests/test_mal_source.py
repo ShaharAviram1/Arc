@@ -14,13 +14,14 @@ values: Frieren premiered on Friday 2023-09-29 at 23:00 JST, which is
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
 from arc.services.catalog.source import SourceNotFound, SourceUnavailable
 from arc.services.mal import parse_anime, parse_broadcast, parse_date, synthesise_airing
-from arc.services.mal.catalog import MalSource
+from arc.services.mal.catalog import JST, MalSource, next_broadcast, synthesise_next_airing
 from arc.services.mal.catalog import parse_anime as parse
 from tests.mal_mock import (
     CLIENT_ID_HEADER,
@@ -129,6 +130,88 @@ def test_a_nonsense_episode_count_is_capped() -> None:
     airing = synthesise_airing(start_date=date(2000, 1, 1), broadcast=None, episodes=100_000)
 
     assert len(airing) == 2000
+
+
+# --- The synthesised next broadcast -----------------------------------------
+
+
+#: A Wednesday, so "the next Friday" is later the same week.
+WEDNESDAY_JST = datetime(2026, 11, 4, 12, 0, tzinfo=JST)
+FRIDAY_SLOT = (4, time(23, 0))
+
+
+def test_the_next_broadcast_is_the_coming_weekday_in_tokyo() -> None:
+    at = next_broadcast(FRIDAY_SLOT, now=WEDNESDAY_JST)
+
+    assert at == datetime(2026, 11, 6, 23, 0, tzinfo=JST)
+    assert at.tzinfo is UTC  # returned in UTC, like AniList's own airingAt
+    assert at.astimezone(JST).weekday() == 4
+
+
+def test_a_slot_that_has_just_passed_moves_to_next_week() -> None:
+    """Half an hour after Friday's broadcast, the next one is a week away."""
+    just_after = datetime(2026, 11, 6, 23, 30, tzinfo=JST)
+
+    at = next_broadcast(FRIDAY_SLOT, now=just_after)
+
+    assert at.astimezone(JST) == datetime(2026, 11, 13, 23, 0, tzinfo=JST)
+
+
+def test_a_slot_still_to_come_today_is_today() -> None:
+    before = datetime(2026, 11, 6, 9, 0, tzinfo=JST)
+
+    at = next_broadcast(FRIDAY_SLOT, now=before)
+
+    assert at.astimezone(JST) == datetime(2026, 11, 6, 23, 0, tzinfo=JST)
+
+
+def test_the_weekday_is_japanese_not_the_callers() -> None:
+    """A late-night Tokyo slot is the previous day almost everywhere else."""
+    at = next_broadcast(FRIDAY_SLOT, now=WEDNESDAY_JST)
+
+    assert at.astimezone(UTC).weekday() == 4  # 14:00 UTC on the Friday
+    assert at.astimezone(ZoneInfo("America/Los_Angeles")).weekday() == 4
+
+
+def test_only_a_currently_airing_show_gets_a_synthesised_slot() -> None:
+    assert (
+        synthesise_next_airing(status="FINISHED", broadcast=FRIDAY_SLOT, now=WEDNESDAY_JST) is None
+    )
+    assert synthesise_next_airing(status="RELEASING", broadcast=None, now=WEDNESDAY_JST) is None
+
+
+def test_the_synthesised_slot_names_no_episode() -> None:
+    """MAL's ``num_episodes`` is the total, not the count aired (FR-C6)."""
+    blob = synthesise_next_airing(status="RELEASING", broadcast=FRIDAY_SLOT, now=WEDNESDAY_JST)
+
+    assert blob is not None
+    assert blob["episode"] is None
+    assert blob["estimated"] is True
+    assert datetime.fromtimestamp(blob["airingAt"], JST) == datetime(2026, 11, 6, 23, 0, tzinfo=JST)
+
+
+def test_a_currently_airing_summary_carries_the_slot() -> None:
+    """This is what puts a MAL-sourced season row on a weekday (FR-C3)."""
+    raw = {
+        "id": 4242,
+        "title": "Airing Now",
+        "media_type": "tv",
+        "status": "currently_airing",
+        "num_episodes": 12,
+        "broadcast": {"day_of_the_week": "friday", "start_time": "23:00"},
+    }
+
+    media = parse_anime(raw, full=False, now=WEDNESDAY_JST)
+
+    assert media.next_airing is not None
+    assert media.next_airing["episode"] is None
+    assert datetime.fromtimestamp(media.next_airing["airingAt"], JST).weekday() == 4
+
+
+def test_a_finished_summary_carries_no_slot() -> None:
+    raw = load("search_frieren")["data"][0]["node"]
+
+    assert parse(raw, full=False, now=WEDNESDAY_JST).next_airing is None
 
 
 # --- Parsing a whole record -------------------------------------------------

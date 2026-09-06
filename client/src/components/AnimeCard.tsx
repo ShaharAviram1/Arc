@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { CoverThumb } from '@/components/CoverThumb'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import type { AnimeSummary } from '@/lib/anime'
 
@@ -11,34 +12,13 @@ function secondaryLine(anime: AnimeSummary): string {
   return parts.join(' · ')
 }
 
-/** Neutral block for a show AniList has no cover for. */
-function CoverPlaceholder() {
-  return (
-    <div
-      aria-hidden
-      className="flex aspect-[2/3] w-full items-center justify-center bg-[var(--arc-surface-raised)] text-xs text-[var(--arc-text-muted)]"
-    >
-      No cover
-    </div>
-  )
-}
-
 export function AnimeCard({ anime }: { anime: AnimeSummary }) {
   const secondary = secondaryLine(anime)
 
   return (
     <article className="flex flex-col overflow-hidden rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)]">
       <Link to={`/anime/${anime.id}`} className="block">
-        {anime.cover_url === null ? (
-          <CoverPlaceholder />
-        ) : (
-          <img
-            src={anime.cover_url}
-            alt=""
-            loading="lazy"
-            className="aspect-[2/3] w-full bg-[var(--arc-surface-raised)] object-cover"
-          />
-        )}
+        <CoverThumb url={anime.cover_url} className="aspect-[2/3] w-full" />
       </Link>
 
       <div className="flex flex-1 flex-col gap-2 p-3">

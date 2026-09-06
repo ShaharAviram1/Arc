@@ -111,7 +111,10 @@ class Anime(Base):
     #: entry carries whichever external ids the source knew.
     relations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     #: AniList's nextAiringEpisode blob {episode, airingAt, timeUntilAiring}.
-    #: MAL publishes no equivalent, so a MAL-filled row leaves it null.
+    #: MAL publishes no equivalent, so a MAL-filled row carries a slot Arc
+    #: synthesised from the broadcast time instead — same ``airingAt``, a null
+    #: ``episode``, and ``estimated: true`` to say so (FR-C6). The schedule
+    #: needs it either way: no next broadcast means no weekday (FR-C3).
     next_airing: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     #: When the detail columns were last filled, from either source (FR-C5).
     refreshed_at: Mapped[datetime | None] = mapped_column(TZDateTime)

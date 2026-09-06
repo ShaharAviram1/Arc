@@ -1,16 +1,37 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
+import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Home } from '@/pages/Home'
 import { createQueryClient } from '@/lib/queryClient'
+import { Home } from '@/pages/Home'
+import { APOTHECARY, EMPTY_HOME, FRIEREN, HOME_PAGE } from '@/test/animeFixtures'
+import { mockApi, TEST_USER, type MockRoutes } from '@/test/apiMock'
 
-function renderHome() {
-  const client = createQueryClient()
-  return render(
-    <QueryClientProvider client={client}>
-      <Home />
+const HEALTH = { status: 'ok', version: '0.1.0', env: 'dev' }
+
+function renderHome(routes: MockRoutes) {
+  const fetchMock = mockApi({
+    'GET /api/auth/me': { body: TEST_USER },
+    'GET /api/health': { body: HEALTH },
+    ...routes,
+  })
+  const router = createMemoryRouter(
+    [
+      { path: '/', element: <Home /> },
+      { path: '/anime/:id', element: <p>show page</p> },
+    ],
+    { initialEntries: ['/'] },
+  )
+  render(
+    <QueryClientProvider client={createQueryClient()}>
+      <RouterProvider router={router} />
     </QueryClientProvider>,
   )
+  return fetchMock
+}
+
+function section(name: string): HTMLElement {
+  return screen.getByRole('heading', { level: 2, name }).parentElement as HTMLElement
 }
 
 afterEach(() => {
@@ -18,26 +39,80 @@ afterEach(() => {
 })
 
 describe('Home', () => {
-  it('shows the API status when /api/health responds', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ status: 'ok', version: '0.1.0', env: 'dev' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      ),
-    )
+  it('shows how far behind the viewer is on each followed show', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE } })
 
-    renderHome()
+    expect(await screen.findByText('Behind by 4 · 7 of 12 aired')).toBeInTheDocument()
+
+    const behind = within(section('Behind on'))
+    expect(behind.getByRole('link', { name: FRIEREN.title.preferred })).toHaveAttribute(
+      'href',
+      `/anime/${FRIEREN.id}`,
+    )
+    // The card carries the same status control as everywhere else (FR-W2).
+    expect(behind.getByRole('combobox')).toHaveValue('watching')
+    expect(behind.getByText(/^Latest episode /)).toBeInTheDocument()
+  })
+
+  it('lists this week’s episodes with their state, marking estimated dates', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE } })
+    await screen.findByText('Behind by 4 · 7 of 12 aired')
+
+    const week = within(section('New this week'))
+    expect(week.getAllByRole('listitem')).toHaveLength(2)
+    expect(week.getByText('Episode 7')).toBeInTheDocument()
+    expect(week.getByText('Episode 2')).toBeInTheDocument()
+    expect(week.getByText('Ready')).toBeInTheDocument()
+    expect(week.getByText('Preparing')).toBeInTheDocument()
+    expect(week.getByRole('link', { name: APOTHECARY.title.preferred })).toBeInTheDocument()
+
+    // Exactly one of the two came back with a synthesised air date (FR-C6).
+    expect(week.getAllByText('est.')).toHaveLength(1)
+  })
+
+  it('keeps continue watching as a placeholder until playback lands', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE } })
+
+    expect(
+      await screen.findByText('Nothing yet — playback arrives in a later milestone.'),
+    ).toBeInTheDocument()
+  })
+
+  it('has an empty line for each section when there is nothing to show', async () => {
+    renderHome({ 'GET /api/home': { body: EMPTY_HOME } })
+
+    expect(
+      await screen.findByText('Nothing to catch up on — every followed show is up to date.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('No episodes aired in the last seven days for the shows you follow.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+  })
+
+  it('reports a failure to build the page', async () => {
+    renderHome({ 'GET /api/home': { status: 500, body: { detail: 'boom' } } })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load your home page.')
+  })
+
+  it('still shows the API status when /api/health responds', async () => {
+    renderHome({ 'GET /api/home': { body: EMPTY_HOME } })
 
     expect(await screen.findByText('API: ok')).toBeInTheDocument()
+    expect(screen.getByText('0.1.0 · dev')).toBeInTheDocument()
   })
 
   it('shows "API: unreachable" when the API cannot be reached', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-
-    renderHome()
+    const router = createMemoryRouter([{ path: '/', element: <Home /> }], {
+      initialEntries: ['/'],
+    })
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
 
     // The shared query defaults retry once with a ~1s backoff, so allow for that.
     expect(await screen.findByText('API: unreachable', {}, { timeout: 5000 })).toBeInTheDocument()

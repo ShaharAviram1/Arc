@@ -2,9 +2,19 @@ import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { authErrorMessage, authMeQueryKey, useLogin, useMe, type User } from '@/lib/auth'
+import {
+  authErrorMessage,
+  authMeQueryKey,
+  timezoneOptions,
+  useLogin,
+  useMe,
+  useUpdateTimezone,
+  type User,
+} from '@/lib/auth'
 import { createQueryClient } from '@/lib/queryClient'
-import { mockApi, TEST_USER } from '@/test/apiMock'
+import { homeQueryKey, scheduleQueryKey } from '@/lib/schedule'
+import { EMPTY_HOME, SCHEDULE_PAGE } from '@/test/animeFixtures'
+import { callTo, jsonBodyOf, mockApi, TEST_USER } from '@/test/apiMock'
 
 function wrapperFor(client: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -88,6 +98,43 @@ describe('useLogin', () => {
       expect(result.current.isError).toBe(true)
     })
     expect(authErrorMessage(result.current.error)).toBe('Wrong email or password.')
+  })
+})
+
+describe('useUpdateTimezone', () => {
+  const TOKYO_USER: User = { ...TEST_USER, timezone: 'Asia/Tokyo' }
+
+  it('PATCHes the zone, then re-seeds `me` and drops both aggregates', async () => {
+    const fetchMock = mockApi({ 'PATCH /api/users/me': { body: TOKYO_USER } })
+    const client = createQueryClient()
+    // Two caches the server computes in the viewer's zone; both must go.
+    client.setQueryData(scheduleQueryKey(), SCHEDULE_PAGE)
+    client.setQueryData(homeQueryKey, EMPTY_HOME)
+
+    const { result } = renderHook(() => useUpdateTimezone(), { wrapper: wrapperFor(client) })
+    result.current.mutate('Asia/Tokyo')
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+
+    expect(jsonBodyOf(callTo(fetchMock, '/api/users/me'))).toEqual({ timezone: 'Asia/Tokyo' })
+    expect(client.getQueryData<User>(authMeQueryKey)).toEqual(TOKYO_USER)
+    expect(client.getQueryState(scheduleQueryKey())?.isInvalidated).toBe(true)
+    expect(client.getQueryState(homeQueryKey)?.isInvalidated).toBe(true)
+  })
+})
+
+describe('timezoneOptions', () => {
+  it('offers the browser’s own zone list', () => {
+    const zones = timezoneOptions('Europe/Berlin')
+
+    expect(zones).toContain('Europe/Berlin')
+    expect(zones).toContain('Asia/Tokyo')
+  })
+
+  it('keeps a zone the browser has never heard of selectable', () => {
+    expect(timezoneOptions('Mars/Olympus_Mons')[0]).toBe('Mars/Olympus_Mons')
   })
 })
 
