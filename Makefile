@@ -49,17 +49,26 @@ test: dev-db
 	cd server && uv run pytest
 	pnpm --dir client test --run
 
+# ruff covers `scripts/` as well as `server/`: the capture script imports the
+# application's own query documents, so it is Arc's code and is held to Arc's
+# rules. `--config` is explicit because ruff would otherwise look for a config
+# next to `../scripts`, find none, and quietly lint it with its defaults —
+# a different line length and a narrower rule set than the rest of the repo.
+RUFF := uv run ruff
+RUFF_PATHS := . ../scripts
+RUFF_CONFIG := --config pyproject.toml
+
 lint:
-	cd server && uv run ruff check .
-	cd server && uv run ruff format --check .
+	cd server && $(RUFF) check $(RUFF_CONFIG) $(RUFF_PATHS)
+	cd server && $(RUFF) format --check $(RUFF_CONFIG) $(RUFF_PATHS)
 	cd server && uv run mypy arc
 	pnpm --dir client lint
 	pnpm --dir client exec tsc -b --noEmit
 	pnpm --dir client format:check
 
 fmt:
-	cd server && uv run ruff format .
-	cd server && uv run ruff check --fix .
+	cd server && $(RUFF) format $(RUFF_CONFIG) $(RUFF_PATHS)
+	cd server && $(RUFF) check --fix $(RUFF_CONFIG) $(RUFF_PATHS)
 	pnpm --dir client format
 
 # --- Database ---------------------------------------------------------------

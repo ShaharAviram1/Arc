@@ -56,6 +56,30 @@ Original error: {error}
 
 
 @pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Make every catalogue wait free, and record what it asked for.
+
+    Each pause in the catalogue code — the AniList client's pacing gap and both
+    its backoffs, MAL's retry pause, the reconciliation job's spacing — goes
+    through a module-level ``_sleep`` precisely so a test can assert on the
+    *durations* without paying them. Tests that want the real thing (the pacing
+    test) simply do not ask for this fixture.
+    """
+    recorded: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        recorded.append(seconds)
+
+    for module in (
+        "arc.services.anilist.client",
+        "arc.services.mal.catalog",
+        "arc.services.catalog.jobs",
+    ):
+        monkeypatch.setattr(f"{module}._sleep", fake_sleep)
+    return recorded
+
+
+@pytest.fixture
 def settings(test_database_url: str) -> Settings:
     """Settings for tests, isolated from any developer ``.env``.
 
@@ -169,6 +193,21 @@ def pg_engine(test_database_url: str) -> Iterator[AsyncEngine]:
 # fixtures commit for real and clean up afterwards.
 
 
+#: Emptied after every test that uses ``api_factory``, in this order. Most of
+#: the foreign keys cascade, but deleting explicitly — children first — keeps
+#: the intent obvious and survives someone changing an ``ondelete`` later.
+CLEANUP_TABLES = (
+    "jobs",
+    "watch_progress",
+    "list_entries",
+    "episodes",
+    "anime",
+    "sessions",
+    "invites",
+    "users",
+)
+
+
 @pytest.fixture
 async def api_factory(pg_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
     """Real (committing) sessions, with the account tables emptied afterwards.
@@ -182,7 +221,7 @@ async def api_factory(pg_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
         yield factory
     finally:
         async with pg_engine.begin() as connection:
-            for table in ("jobs", "sessions", "invites", "users"):
+            for table in CLEANUP_TABLES:
                 await connection.execute(text(f"DELETE FROM {table}"))
 
 

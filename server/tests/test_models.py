@@ -35,6 +35,7 @@ from arc.models import (
 pytestmark = pytest.mark.pg
 
 ANILIST_ID = 154587  # Frieren, as good a fixture as any.
+MAL_ID = 52991
 
 
 async def _fixture_user(session: AsyncSession, email: str = "viewer@example.com") -> User:
@@ -44,10 +45,12 @@ async def _fixture_user(session: AsyncSession, email: str = "viewer@example.com"
     return user
 
 
-async def _fixture_anime(session: AsyncSession, anilist_id: int = ANILIST_ID) -> Anime:
+async def _fixture_anime(
+    session: AsyncSession, anilist_id: int = ANILIST_ID, mal_id: int = MAL_ID
+) -> Anime:
     anime = Anime(
-        id=anilist_id,
-        mal_id=52991,
+        anilist_id=anilist_id,
+        mal_id=mal_id,
         title_romaji="Sousou no Frieren",
         title_english="Frieren: Beyond Journey's End",
         synonyms=["Frieren at the Funeral"],
@@ -113,7 +116,7 @@ async def test_core_aggregates_round_trip(db_session: AsyncSession) -> None:
     await db_session.commit()
 
     # Defaults applied by the database, and JSONB/array columns intact.
-    stored_anime = await db_session.get(Anime, ANILIST_ID)
+    stored_anime = await db_session.get(Anime, anime.id)
     assert stored_anime is not None
     assert stored_anime.genres == ["Adventure", "Drama", "Fantasy"]
     assert stored_anime.synonyms == ["Frieren at the Funeral"]
@@ -143,7 +146,7 @@ async def test_core_aggregates_round_trip(db_session: AsyncSession) -> None:
 async def test_enums_round_trip_as_their_values(db_session: AsyncSession) -> None:
     """Enums come back as members, and are stored as the lowercase value."""
     user = await _fixture_user(db_session, "enums@example.com")
-    anime = await _fixture_anime(db_session, anilist_id=1)
+    anime = await _fixture_anime(db_session, anilist_id=1, mal_id=1)
     episode = await _fixture_episode(db_session, anime)
     db_session.add(
         ListEntry(
@@ -198,7 +201,7 @@ async def test_job_defaults_and_payload(db_session: AsyncSession) -> None:
 async def test_deleting_a_user_cascades_to_their_rows(db_session: AsyncSession) -> None:
     """User-owned rows go with the user; shared library rows do not."""
     user = await _fixture_user(db_session, "cascade@example.com")
-    anime = await _fixture_anime(db_session, anilist_id=2)
+    anime = await _fixture_anime(db_session, anilist_id=2, mal_id=2)
     episode = await _fixture_episode(db_session, anime)
     db_session.add_all(
         [
@@ -222,7 +225,7 @@ async def test_deleting_a_user_cascades_to_their_rows(db_session: AsyncSession) 
 
 
 async def test_episode_number_is_unique_per_anime(db_session: AsyncSession) -> None:
-    anime = await _fixture_anime(db_session, anilist_id=3)
+    anime = await _fixture_anime(db_session, anilist_id=3, mal_id=3)
     await _fixture_episode(db_session, anime, number=5)
     await db_session.commit()
 
@@ -271,7 +274,7 @@ async def test_media_file_path_is_unique(db_session: AsyncSession) -> None:
 
 async def test_torrent_info_hash_is_unique(db_session: AsyncSession) -> None:
     """The info hash is the torrent's identity; two rows would be two views."""
-    anime = await _fixture_anime(db_session, anilist_id=5)
+    anime = await _fixture_anime(db_session, anilist_id=5, mal_id=5)
     first = await _fixture_episode(db_session, anime, number=1)
     second = await _fixture_episode(db_session, anime, number=2)
     info_hash = "a" * 40
@@ -293,7 +296,7 @@ async def test_deleting_an_anime_with_a_mal_write_log_is_refused(
     that every MAL write can be explained and reverted.
     """
     user = await _fixture_user(db_session, "restrict@example.com")
-    anime = await _fixture_anime(db_session, anilist_id=6)
+    anime = await _fixture_anime(db_session, anilist_id=6, mal_id=6)
     db_session.add(
         MalWriteLog(
             user_id=user.id,
@@ -315,7 +318,7 @@ async def test_deleting_an_anime_with_a_mal_write_log_is_refused(
 async def test_watch_progress_completed_at_round_trips(db_session: AsyncSession) -> None:
     """``completed_at`` is null until completion, then holds the moment."""
     user = await _fixture_user(db_session, "completed@example.com")
-    anime = await _fixture_anime(db_session, anilist_id=7)
+    anime = await _fixture_anime(db_session, anilist_id=7, mal_id=7)
     episode = await _fixture_episode(db_session, anime)
 
     progress = WatchProgress(user_id=user.id, episode_id=episode.id, position_s=10.0)
@@ -344,3 +347,63 @@ async def test_watch_progress_completed_at_round_trips(db_session: AsyncSession)
         )
     )
     assert raw.scalar_one() == finished_at
+
+
+async def test_an_anime_needs_at_least_one_external_id(db_session: AsyncSession) -> None:
+    """``ck_anime_has_external_id`` (FR-C6).
+
+    A row with neither id could never be refreshed or matched against anything
+    again: it would be a cache entry nothing can reach.
+    """
+    db_session.add(Anime(title_romaji="Nowhere from"))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+@pytest.mark.parametrize("column", ["anilist_id", "mal_id"])
+async def test_each_external_id_is_unique(db_session: AsyncSession, column: str) -> None:
+    """Uniqueness is what stops two sources producing two rows for one show."""
+    db_session.add(Anime(**{column: 4242}, title_romaji="First"))
+    await db_session.commit()
+
+    db_session.add(Anime(**{column: 4242}, title_romaji="Second"))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+@pytest.mark.parametrize(("anilist_id", "mal_id"), [(9001, None), (None, 9002)])
+async def test_one_external_id_is_enough(
+    db_session: AsyncSession, anilist_id: int | None, mal_id: int | None
+) -> None:
+    """A MAL-only row is what an AniList outage produces, and it must be legal."""
+    anime = Anime(anilist_id=anilist_id, mal_id=mal_id, title_romaji="Half known")
+    db_session.add(anime)
+    await db_session.commit()
+
+    stored = await db_session.get(Anime, anime.id)
+    assert stored is not None
+    assert (stored.anilist_id, stored.mal_id) == (anilist_id, mal_id)
+    # Nullable unique columns: a second row with the *other* id null is fine.
+    other = Anime(anilist_id=9003 if anilist_id else None, mal_id=9004 if mal_id else None)
+    db_session.add(other)
+    await db_session.commit()
+
+
+async def test_an_episodes_air_date_is_not_estimated_by_default(
+    db_session: AsyncSession,
+) -> None:
+    """The flag is only ever set by a MAL fill (FR-C6); the default is "known"."""
+    anime = await _fixture_anime(db_session, anilist_id=11, mal_id=11)
+    episode = await _fixture_episode(db_session, anime)
+    await db_session.commit()
+
+    stored = await db_session.get(Episode, episode.id)
+    assert stored is not None
+    assert stored.air_at_estimated is False
+
+    stored.air_at_estimated = True
+    await db_session.commit()
+    await db_session.refresh(stored)
+    assert stored.air_at_estimated is True

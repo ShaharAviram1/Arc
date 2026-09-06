@@ -27,7 +27,13 @@ from arc.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``disable_existing_loggers=False``: this file is imported in-process by
+    # the test suite (which runs ``alembic upgrade head`` to build the test
+    # database), and the default would switch off every logger created before
+    # that point — i.e. every ``arc.*`` module already imported, for the rest
+    # of the run. Migrations should configure logging, not silence the
+    # application.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The placeholder in alembic.ini ("driver://user:pass@localhost/dbname") is
 # never a real target, so anything else means a caller injected a URL.

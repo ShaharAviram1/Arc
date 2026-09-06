@@ -1,0 +1,109 @@
+{
+  "data": {
+    "Media": {
+      "id": 999001,
+      "idMal": 999001,
+      "title": {
+        "romaji": "Arc no Tesuto",
+        "english": "Arc Test Show",
+        "native": "アークのテスト"
+      },
+      "format": "TV",
+      "episodes": 12,
+      "status": "RELEASING",
+      "season": "WINTER",
+      "seasonYear": 2026,
+      "coverImage": {
+        "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/xl/bx999001.jpg",
+        "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx999001.jpg"
+      },
+      "bannerImage": null,
+      "description": "A show that is still airing.<br>\n<br>\nUsed to pin the aired/not-yet boundary.",
+      "genres": [
+        "Comedy"
+      ],
+      "synonyms": [],
+      "tags": [
+        {
+          "name": "Testing",
+          "rank": 100
+        }
+      ],
+      "studios": {
+        "nodes": [
+          {
+            "name": "Studio Fixture"
+          }
+        ]
+      },
+      "nextAiringEpisode": {
+        "episode": 6,
+        "airingAt": 1771156800,
+        "timeUntilAiring": 432000
+      },
+      "relations": {
+        "edges": []
+      },
+      "aired": {
+        "pageInfo": {
+          "currentPage": 1,
+          "hasNextPage": false
+        },
+        "nodes": [
+          {
+            "episode": 1,
+            "airingAt": 1768132800
+          },
+          {
+            "episode": 2,
+            "airingAt": 1768737600
+          },
+          {
+            "episode": 3,
+            "airingAt": 1769342400
+          },
+          {
+            "episode": 4,
+            "airingAt": 1769947200
+          },
+          {
+            "episode": 5,
+            "airingAt": 1770552000
+          }
+        ]
+      },
+      "upcoming": {
+        "nodes": [
+          {
+            "episode": 6,
+            "airingAt": 1771156800
+          },
+          {
+            "episode": 7,
+            "airingAt": 1771761600
+          },
+          {
+            "episode": 8,
+            "airingAt": 1772366400
+          },
+          {
+            "episode": 9,
+            "airingAt": 1772971200
+          },
+          {
+            "episode": 10,
+            "airingAt": 1773576000
+          },
+          {
+            "episode": 11,
+            "airingAt": 1774180800
+          },
+          {
+            "episode": 12,
+            "airingAt": 1774785600
+          }
+        ]
+      }
+    }
+  }
+}

@@ -13,7 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from arc import __version__
-from arc.api import auth, health, invites, jobs, users
+from arc.api import anime, auth, catalog, health, invites, jobs, users
+from arc.api import list as list_api
 from arc.api.auth import SessionRefreshMiddleware
 from arc.api.csrf import OriginCheckMiddleware
 from arc.config import Settings, get_settings
@@ -21,6 +22,7 @@ from arc.core.logging import setup_logging
 from arc.core.security import allowed_origins, origin_of
 from arc.db import create_engine, create_session_factory
 from arc.services.auth import LoginRateLimiter, RateLimitWindow, bootstrap_admin
+from arc.services.catalog.factory import create_catalog
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await app.state.catalog.aclose()
         await engine.dispose()
         log.info("database engine disposed")
         log.info("api stopped")
@@ -130,6 +133,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.settings = settings
+    #: One catalogue for the whole app: its AniList client's pacing then
+    #: reflects the real request rate rather than one caller's guess at it
+    #: (architecture.md §6), and its circuit breaker is shared, so an outage
+    #: found by a search is not rediscovered — at the cost of a timeout — by
+    #: the show page a second later (FR-C6). Built here rather than in the
+    #: lifespan because ``ASGITransport`` does not run the lifespan and the
+    #: routers must still find it; the lifespan closes it. Tests swap the
+    #: attribute for a service over mock transports.
+    app.state.catalog = create_catalog(settings)
     #: One limiter per app, so two apps in one process (a test suite) cannot
     #: exhaust each other's login budget.
     app.state.login_rate_limiter = LoginRateLimiter(
@@ -173,6 +185,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(invites.router)
     app.include_router(users.router)
     app.include_router(jobs.router)
+    app.include_router(anime.router)
+    app.include_router(catalog.router)
+    app.include_router(list_api.router)
     return app
 
 

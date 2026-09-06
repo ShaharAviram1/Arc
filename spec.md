@@ -39,8 +39,8 @@ any time, and the owner uses it daily.
 
 ## 3. Domain model (conceptual)
 
-- **Anime** — a title as known to AniList (AniList id, MAL id, titles in
-  romaji/english/native, format, episode count, season, airing status, cover,
+- **Anime** — a title with an internal id and external ids as known
+  (AniList id, MAL id; at least one present), titles in romaji/english/native, format, episode count, season, airing status, cover,
   genres, tags, studio, relations, next-airing episode). Cached locally and
   refreshed periodically.
 - **Episode** — belongs to an Anime; number, title, air date (from AniList
@@ -80,6 +80,15 @@ any time, and the owner uses it daily.
   user has not watched ("behind by N").
 - FR-C5 Refresh airing data at least daily and within one hour of a followed
   show's scheduled air time.
+- FR-C6 Catalogue fallback: when AniList is unreachable, disabled, or
+  failing, search, show pages, list changes, and the season view keep working
+  from the MyAnimeList official API (read-only, client-id auth). Air dates
+  obtained that way are synthesised from the broadcast slot and marked as
+  estimated in the UI until AniList data replaces them. Shows are identified
+  internally, with AniList and MAL ids attached as they become known, so a
+  show first seen through MAL is the same show once AniList returns.
+- FR-C7 The current season's catalogue is pre-cached daily so the schedule
+  survives an outage of both sources.
 
 ### 4.2 Acquisition (Nyaa via qBittorrent)
 - FR-A1 For each user and each show in status `watching` or `planned`, the
@@ -282,6 +291,7 @@ preparing → failed → (retry) → preparing
 
 | Topic | Status | Notes |
 |---|---|---|
+| MAL API client id | **Done 2026-09-06** | Reused from the owner's AnimeTrack app. Still needed for M9: the client secret and Arc's redirect URL on the MAL app config. |
 | Hosting provider / budget | **Deferred** | Owner may consolidate with other projects. Constraints: must allow BitTorrent traffic, needs persistent disk (≥ 200 GB suggested), CPU for x264 transcodes (hardware encode optional). See architecture.md §8. |
 | Legal/ToS | Owner's call | Torrenting licensed content on a cloud host may violate the host's ToS; choose a provider accordingly. |
 | Retention defaults G=7, D=21 | Provisional | Admin-configurable; revisit after use. |
@@ -305,3 +315,8 @@ preparing → failed → (retry) → preparing
 - 2026-09-05 — Phase 1 pages: Home, Schedule, Show, Player, Search/add, MAL
   link. Phase 2: Recommendations, Match review, Admin.
 - 2026-09-05 — Hosting deferred.
+- 2026-09-06 — Catalogue fallback (FR-C6/C7): internal anime ids with
+  AniList and MAL external ids; MAL official API as read-only secondary
+  source when AniList is down; daily season pre-cache. Chosen after an
+  all-day AniList outage; MAL official preferred over Jikan because it is
+  first-party and its client id is needed for M9 anyway.

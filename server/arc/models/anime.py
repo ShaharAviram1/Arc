@@ -1,8 +1,14 @@
 """Catalogue: ``anime`` and ``episodes`` (architecture.md §4, spec §3).
 
-``anime`` is a local cache of AniList, keyed by the AniList id so that a
-refresh is a plain upsert and nothing has to translate ids. ``episodes`` is
-Arc's own per-episode state machine (spec §6).
+``anime`` is a local cache of whichever catalogue source answered, keyed by an
+**internal** id. It used to be keyed by the AniList id, which was simpler right
+up to the day AniList went down: a show first seen through MyAnimeList has no
+AniList id yet, and one that gains it later must stay the same row, with the
+same list entries and the same episodes (FR-C6). So the primary key is Arc's
+own, the two external ids are nullable and unique, and a check constraint keeps
+a row from having neither.
+
+``episodes`` is Arc's own per-episode state machine (spec §6).
 """
 
 from __future__ import annotations
@@ -10,7 +16,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,20 +35,45 @@ from arc.db import Base
 from arc.models._columns import TZDateTime, bigint_pk
 from arc.models.enums import EpisodeState, enum_column
 
+#: Length of ``summary_source`` / ``detail_source``. Both hold one of the two
+#: source names ("anilist", "mal"); 16 leaves room for a third without a
+#: migration and is still short enough to read as "a name, not a sentence".
+SOURCE_LENGTH = 16
+
 
 class Anime(Base):
-    """A title as AniList knows it, cached locally and refreshed (FR-C5)."""
+    """A title, from whichever source Arc could reach (FR-C5, FR-C6)."""
 
     __tablename__ = "anime"
     __table_args__ = (
+        # A row with neither external id could never be refreshed or matched
+        # against anything; it would be a dead cache entry that nothing can
+        # ever reach again.
+        CheckConstraint(
+            "anilist_id IS NOT NULL OR mal_id IS NOT NULL",
+            name="has_external_id",
+        ),
         # The schedule and "behind on" queries filter by airing status.
         Index("ix_anime_status", "status"),
     )
 
-    #: The AniList id. Not generated: it comes from upstream.
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    #: MAL id, when AniList knows one. The join key for all MAL sync.
-    mal_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    #: Arc's own id. Stable across everything that happens to the external ids.
+    id: Mapped[int] = bigint_pk()
+
+    #: The AniList id, when AniList has been reached for this title. Unique, so
+    #: two sources cannot produce two rows for one show.
+    anilist_id: Mapped[int | None] = mapped_column(Integer, unique=True, index=True)
+    #: The MAL id. The join key for all MAL sync, and the id the catalogue
+    #: fallback finds a show by.
+    mal_id: Mapped[int | None] = mapped_column(Integer, unique=True, index=True)
+
+    #: Which source last wrote the summary columns, and which last filled the
+    #: detail ones ("anilist" | "mal"). ``detail_source`` is what tells
+    #: ``ensure_anime`` that a row filled from MAL should be upgraded as soon
+    #: as AniList is healthy again, and what the API reports as ``source`` so
+    #: the client can say "catalogue via MAL".
+    summary_source: Mapped[str | None] = mapped_column(String(SOURCE_LENGTH))
+    detail_source: Mapped[str | None] = mapped_column(String(SOURCE_LENGTH))
 
     title_romaji: Mapped[str | None] = mapped_column(Text)
     title_english: Mapped[str | None] = mapped_column(Text)
@@ -39,7 +81,8 @@ class Anime(Base):
     #: Alternative titles, used by the matcher's token-set ratio (§5.2).
     synonyms: Mapped[list[str] | None] = mapped_column(JSONB)
 
-    #: AniList MediaFormat (TV, MOVIE, OVA, …).
+    #: AniList MediaFormat (TV, MOVIE, OVA, …). MAL's ``media_type`` is mapped
+    #: into the same vocabulary on the way in.
     format: Mapped[str | None] = mapped_column(String(32))
     #: Total episode count; null while a show is airing without a known count.
     episodes: Mapped[int | None] = mapped_column(Integer)
@@ -49,19 +92,28 @@ class Anime(Base):
     season: Mapped[str | None] = mapped_column(String(16))
     season_year: Mapped[int | None] = mapped_column(Integer)
 
+    #: The synopsis, stored as plain text (AniList's HTML is stripped on the
+    #: way in; MAL's is already plain). Cached rather than fetched per request:
+    #: the show page needs it on every view and the recommendation candidate
+    #: pool needs it for forty titles at once (§5.6), and AniList's rate limit
+    #: does not allow either.
+    description: Mapped[str | None] = mapped_column(Text)
+
     cover_url: Mapped[str | None] = mapped_column(Text)
     banner_url: Mapped[str | None] = mapped_column(Text)
     #: A real array rather than JSONB: genres are queried ("top-3 genres" in
     #: the recommendation candidate pool, §5.6) and Postgres can index them.
     genres: Mapped[list[str] | None] = mapped_column(ARRAY(String))
-    #: [{name, rank}] — shape belongs to AniList, so JSONB.
+    #: [{name, rank}] — shape belongs to AniList, so JSONB. MAL has no tags.
     tags: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     studio: Mapped[str | None] = mapped_column(Text)
-    #: Sequels/prequels/side stories, used by the recommender (§5.6).
+    #: Sequels/prequels/side stories, used by the recommender (§5.6). Each
+    #: entry carries whichever external ids the source knew.
     relations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     #: AniList's nextAiringEpisode blob {episode, airingAt, timeUntilAiring}.
+    #: MAL publishes no equivalent, so a MAL-filled row leaves it null.
     next_airing: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    #: When this row was last pulled from AniList (FR-C5).
+    #: When the detail columns were last filled, from either source (FR-C5).
     refreshed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
@@ -83,8 +135,17 @@ class Episode(Base):
     )
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
-    #: From the AniList airing schedule; null for shows that have finished.
+    #: From the AniList airing schedule, or synthesised from a MAL broadcast
+    #: slot; null for shows that have finished and for which neither source
+    #: keeps dates.
     air_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: True when ``air_at`` was worked out from a weekly broadcast slot rather
+    #: than published per episode (FR-C6). The client badges these; a real
+    #: AniList time overwrites one and clears the flag, and an estimate never
+    #: overwrites a real time.
+    air_at_estimated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     state: Mapped[EpisodeState] = mapped_column(
         enum_column(EpisodeState),
         nullable=False,

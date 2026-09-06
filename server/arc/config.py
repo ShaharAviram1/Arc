@@ -75,9 +75,31 @@ class Settings(BaseSettings):
     fernet_key: SecretStr | None = None
 
     # --- MyAnimeList -----------------------------------------------------
+    #: Read-only catalogue calls (FR-C6) need nothing but this; the OAuth
+    #: fields below are M9's. Unset means "no fallback": everything keeps
+    #: working while AniList is up, and ``GET /api/catalog/status`` reports
+    #: ``mal`` as unconfigured.
     mal_client_id: str | None = None
     mal_client_secret: SecretStr | None = None
     mal_redirect_uri: str = "http://localhost:8000/api/mal/callback"
+    #: MAL API v2's base URL. Configurable for the same reason ``ANILIST_URL``
+    #: is: the test suite and the local fixture servers point it at a mock.
+    mal_api_url: str = "https://api.myanimelist.net/v2"
+
+    # --- AniList (M3) ----------------------------------------------------
+    #: The GraphQL endpoint. Configurable so the test suite can point it at a
+    #: mock and an operator can put a caching proxy in front of it.
+    anilist_url: str = "https://graphql.anilist.co"
+    #: Minimum gap between two AniList requests. AniList documents 90/min but
+    #: currently enforces 30; 700 ms keeps Arc under the real limit even when
+    #: both worker slots are querying (architecture.md §6).
+    anilist_min_interval_ms: int = Field(default=700, ge=0)
+
+    # --- Catalogue fallback (M3b) ----------------------------------------
+    #: How long a catalogue source is skipped after it fails (FR-C6). Long
+    #: enough that an outage costs one timeout rather than one per request,
+    #: short enough that a blip is over in five minutes.
+    catalog_breaker_seconds: float = Field(default=300.0, ge=0)
 
     # --- Anthropic -------------------------------------------------------
     anthropic_api_key: SecretStr | None = None

@@ -47,15 +47,44 @@ that must be verified before the next milestone starts.
   cover token single-use and expiry. (spec §2, §7 security)
 
 ### M3 — AniList catalogue and list states
-- [ ] AniList GraphQL client with retry + rate limiting
-- [ ] Anime cache upsert (titles, synonyms, relations, airing, cover)
-- [ ] Search endpoint + Search page (FR-C1)
-- [ ] List endpoints: set status/score, get my list (FR-C2, FR-W2)
-- [ ] Show page: cover, synopsis, status/score controls, episode list
+- [x] AniList GraphQL client with retry + rate limiting
+- [x] Anime cache upsert (titles, synonyms, relations, airing, cover)
+- [x] Search endpoint + Search page (FR-C1)
+- [x] List endpoints: set status/score, get my list (FR-C2, FR-W2)
+- [x] Show page: cover, synopsis, status/score controls, episode list
       (states rendered but mostly `not_wanted` for now)
-- [ ] Scheduled catalogue refresh (daily + pre-air) (FR-C5)
-- **DoD:** user searches "Frieren", adds it as watching, sees the show page
+- [x] Scheduled catalogue refresh (daily + pre-air) (FR-C5)
+- **DoD (verified 2026-09-06 by orchestrator: fixture run in-browser, then live AniList after it returned):** user searches "Frieren", adds it as watching, sees the show page
   with correct episode count and air dates.
+- [x] Re-capture AniList fixtures with `scripts/capture_anilist.py` and re-run
+      the live DoD once the AniList API is back (done 2026-09-06 evening when
+      it returned; live capture revealed the episode 1–4 premiere-block gap).
+
+### M3b — Catalogue fallback and internal ids
+- [x] Schema: `anime.id` internal identity; `anilist_id` and `mal_id` nullable
+      unique; `detail_source`/`summary_source` markers; `episodes.air_at_estimated`
+      flag. Migrations squashed into one fresh initial revision (nothing has
+      shipped).
+- [x] `CatalogSource` interface with `AniListSource` and `MalSource` (MAL API
+      v2, `X-MAL-CLIENT-ID` reads): search, by-anilist-id, by-mal-id, season.
+- [x] `CatalogService`: primary AniList, fallback MAL on connection error,
+      timeout, 5xx or AniList's "disabled" 403; circuit breaker so an outage
+      does not cost a timeout per request; results record their source.
+- [x] MAL-sourced episodes with air dates synthesised from `start_date` +
+      broadcast weekday/time (JST), flagged estimated; AniList overwrites.
+- [x] Reconciliation job: rows with `mal_id` but no `anilist_id` looked up on
+      AniList by MAL id when it is healthy; uniqueness on `mal_id` prevents
+      duplicates across sources.
+- [x] Season pre-cache job (daily) so the schedule works offline (FR-C7).
+- [x] Admin `GET /api/catalog/status` (source health, breaker state).
+- [x] Client: ids opaque; "catalogue via MAL" notice and "estimated" air-date
+      badge; clearer error when both sources are down.
+- [x] Owner: MAL API client id (reused from the AnimeTrack app) set in `.env`
+      (2026-09-06); verified live against `api.myanimelist.net`.
+- **DoD (verified 2026-09-06 by orchestrator in-browser against the real MAL and AniList APIs):** with AniList blocked (pointed at a dead URL), search "frieren" via
+  MAL still returns results, adding it creates episodes with estimated dates,
+  the show page renders with the MAL notice; re-enabling AniList and running
+  reconciliation attaches the AniList id and replaces the dates.
 
 ### M4 — Schedule and "behind on"
 - [ ] AniList seasonal + airing schedule fetch, per-episode `air_at`
@@ -122,6 +151,10 @@ that must be verified before the next milestone starts.
   advanced.
 
 ### M9 — MyAnimeList sync
+- [ ] Owner prerequisites: `MAL_CLIENT_SECRET` (from the Cloudflare worker
+      secrets of the old AnimeTrack app or the MAL app config page) and Arc's
+      callback URL registered on the MAL app (currently points at the old
+      GitHub Pages `oauth.html`).
 - [ ] MAL OAuth PKCE flow, encrypted token storage, refresh (FR-M1)
 - [ ] Import on link + scheduled re-import with conflict rule (FR-M2, FR-M3)
 - [ ] `mal_push` with write log, dirty flags, idempotent retries, never
@@ -207,8 +240,8 @@ CLAUDE.md).
 ## Dependencies at a glance
 
 ```
-M0 → M1 → M2 → M3 → M4
-              M3 → M5 → M6 → M7 → M8 → M9 → M10 → M11
+M0 → M1 → M2 → M3 → M3b → M4
+              M3b → M5 → M6 → M7 → M8 → M9 → M10 → M11
                                      M8 → M12
                                      M5 → M13
                                      M11 → M14 → M15

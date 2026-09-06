@@ -24,6 +24,7 @@ from arc.config import Settings
 from arc.db import get_session
 from arc.models import User, UserRole
 from arc.services.auth import COOKIE_NAME, resolve_session
+from arc.services.catalog import CatalogService
 
 NOT_AUTHENTICATED = "not authenticated"
 ADMIN_REQUIRED = "admin required"
@@ -52,6 +53,24 @@ SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 #: One database session per request, from the factory the lifespan built.
 #: Routers that write must commit; nothing here commits for them.
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+def get_catalog(request: Request) -> CatalogService:
+    """The process-wide catalogue, built by :func:`arc.main.create_app`.
+
+    One instance per app, on ``app.state``, for two reasons. The AniList client
+    inside it is what paces requests to stay under AniList's limit, and a fresh
+    one per request would pace against nothing (architecture.md §6). And the
+    circuit breaker in front of both sources is only worth having if it is
+    shared: an outage discovered by a search must not be rediscovered, at the
+    cost of a timeout, by the show page a second later. Tests replace
+    ``app.state.catalog`` with a service over mock transports.
+    """
+    catalog: CatalogService = request.app.state.catalog
+    return catalog
+
+
+CatalogDep = Annotated[CatalogService, Depends(get_catalog)]
 
 
 async def get_optional_user(
@@ -117,12 +136,14 @@ __all__ = [
     "NOT_AUTHENTICATED",
     "SESSION_REFRESHED_UNTIL",
     "AdminUser",
+    "CatalogDep",
     "CurrentUser",
     "OptionalUser",
     "SessionDep",
     "SettingsDep",
     "get_admin_user",
     "get_app_settings",
+    "get_catalog",
     "get_current_user",
     "get_optional_user",
 ]

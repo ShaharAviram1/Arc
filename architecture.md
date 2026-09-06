@@ -136,8 +136,8 @@ arc/
 | `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
-| `anime` | id (AniList id, PK), mal_id, title_romaji, title_english, title_native, synonyms (JSONB), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB), next_airing (JSONB), refreshed_at |
-| `episodes` | id, anime_id, number, title, air_at, state (enum, §6 of spec), state_changed_at, unavailable_reason |
+| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB, anime-only), next_airing (JSONB), refreshed_at |
+| `episodes` | id, anime_id, number, title, air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty |
@@ -237,12 +237,70 @@ now` (or no wanter ever existed and file age > G) → delete rendition and
 source dirs, remove torrent from qBittorrent (with files), state
 `not_wanted`. Stale wants dropped per FR-T2 in `compute_wants`.
 
+### 5.0 Catalogue sources and fallback (M3b)
+- `CatalogSource` protocol: `search(q, page)`, `by_anilist_id(id)`,
+  `by_mal_id(id)`, `season(year, season)`; implementations `AniListSource`
+  and `MalSource`. Both return the same `CatalogMedia` dataclass with
+  `source` set.
+- `CatalogService` tries AniList first and falls back to MAL on connection
+  error, timeout, 5xx, or AniList's "temporarily disabled" 403. A circuit
+  breaker opens after a failure and skips AniList for 5 minutes (probing on
+  the next call after that), so an outage never costs a timeout per request.
+  If both fail: 502 `catalogue is unavailable`.
+- Breakers are per API process (on `app.state`) and per job run (a fresh
+  breaker per scheduled job, so each sweep re-probes a source that was down).
+- A cached row is served when a source reports the id as not found, so a
+  show already on someone's list never 404s because one source dropped it.
+- MAL premiere rule: episode 1 airs on `start_date` at the broadcast time
+  (the weekday is ignored for the premiere; later episodes are weekly from
+  there). A missing broadcast slot defaults to 23:00 JST so the calendar
+  day survives west of Japan. Partial `start_date` values (year or
+  year-month) yield no synthesised dates. `num_episodes: 0` (uncounted
+  airing show) yields no episode rows from MAL.
+- When AniList's schedule starts above episode 1 (premiere blocks), the
+  estimated or undated rows below its first published episode are back-filled weekly
+  backwards from that episode and stay flagged estimated; published dates
+  always win and no two episodes share an instant.
+- Upserts insert inside a savepoint and retry via lookup on a unique-key
+  collision, so two concurrent first-time upserts of one show (e.g. a search
+  racing the reconcile job) converge on one row.
+- Identity: `anime.id` is internal. Upserts look up by `anilist_id`, then by
+  `mal_id`; AniList payloads carry `idMal`, so an AniList upsert attaches to
+  a MAL-first row instead of creating a second one. `detail_source` records
+  which source last filled the detail columns; MAL data never overwrites
+  AniList-sourced detail, AniList always overwrites MAL-sourced detail.
+- MAL-sourced episodes: `air_at` synthesised from `start_date` + broadcast
+  weekday/time (JST) for 1..num_episodes, `air_at_estimated = true`; AniList
+  schedule data replaces them and clears the flag.
+- Jobs: `catalog_reconcile` (hourly when AniList is healthy: fill missing
+  `anilist_id` via `Media(idMal:)`), `catalog_season_sweep` (daily: upsert
+  the current season's summaries from whichever source is up).
+
+## 5b. API surface (kept current)
+
+All routes require a session unless marked public. Errors are JSON `{"detail"}`.
+Mutating requests must carry an allowed `Origin`.
+
+| Route | Who | Purpose |
+|---|---|---|
+| `GET /api/health` | public | liveness |
+| `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | public / any | session |
+| `POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/{id}` | admin | invite management |
+| `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
+| `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard) |
+| `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue |
+| `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
+| `GET /api/catalog/status` | admin | source health and breaker state |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
+| `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
+| `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
+
 ## 6. External integrations
 
 | Service | Auth | Rate/limits | Notes |
 |---|---|---|---|
-| AniList GraphQL `https://graphql.anilist.co` | none | 90 req/min | Queries: `Media` search, `Page(media)` seasonal, `AiringSchedule`. Cache aggressively in `anime`. |
-| MAL API v2 `https://api.myanimelist.net/v2` | OAuth 2.0 PKCE (plain), client id + secret in env | modest | Endpoints: `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
+| AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
+| MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
 | Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` | none | be polite: ≤1 req/2 s, cache 10 min | `c=1_2` = Anime English-translated. `f=2` for trusted only (used as a tie-break, not a filter). |
 | qBittorrent Web API | local user/pass in env | n/a | `auth/login`, `torrents/add`, `torrents/info?category=arc`, `torrents/delete`. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Python SDK `anthropic`; model `claude-opus-5`; structured outputs; streaming. |
@@ -395,3 +453,20 @@ env (it is not in the settings table).
   `PUBLIC_URL` derived from `PUBLIC_HOST` in compose; zero-admin guard;
   invite routes rate-limited; docs hidden in prod; `.env.example` ships no
   admin password; `ix_sessions_expires_at` (migration 3).
+- 2026-09-06 — M3 catalogue: `anime.description` column (migration 4);
+  `AnimeDetail.episodes` is the episode list and `episode_count` the AniList
+  count; preferred title = english else romaji; relations filtered to anime;
+  episode rows created from the airing schedule (never deleted, state never
+  downgraded); refresh jobs: daily 04:00 UTC sweep of followed/releasing
+  shows plus hourly pre-air sweep (−6 h … +90 min). AniList was disabled
+  upstream (403) during M3, so fixtures are hand-built from public data and
+  `scripts/capture_anilist.py` must be re-run when it returns.
+- 2026-09-06 — M3 review fixes: aired schedule paged past 100 episodes;
+  `aired` also inferred from the highest aired number for NULL air dates;
+  search upsert is one multi-row statement; refresh sweeps space children
+  5 s apart starting after the last queued refresh; job names live in a
+  handler-free `anilist/names.py`; `scripts/` is linted.
+- 2026-09-06 — M3b: internal anime ids with AniList/MAL external ids; MAL
+  official API as read-only fallback behind a `CatalogSource` interface and
+  a circuit breaker; estimated air dates from broadcast slots; migrations
+  squashed into a single initial revision since nothing has shipped.
