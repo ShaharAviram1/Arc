@@ -33,13 +33,16 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import httpx
+from rapidfuzz import fuzz
 
 from arc.services.anilist import AniListClient, AniListSource
-from arc.services.anilist.client import SCHEDULE_PER_PAGE
+from arc.services.anilist.client import SCHEDULE_PER_PAGE, parse_media
+from arc.services.catalog import CatalogMedia
 
 FIXTURES = Path(__file__).parent / "fixtures" / "anilist"
 
@@ -108,6 +111,7 @@ class FakeAniList:
         search: dict[str, dict[str, Any]] | None = None,
         schedule: dict[int, list[list[dict[str, Any]]]] | None = None,
         seasons: dict[tuple[int, str], list[dict[str, Any]]] | None = None,
+        search_fn: Callable[[str, int], dict[str, Any]] | None = None,
         disabled: bool = False,
     ) -> None:
         self.media = media or {}
@@ -119,6 +123,13 @@ class FakeAniList:
         #: exactly what the live API did all day on 2026-09-06. Flip it back to
         #: false mid-test to play AniList coming back.
         self.disabled = disabled
+        #: An optional generic search, consulted before :attr:`search`. Takes
+        #: the (already lower-cased) term and the page number and returns a
+        #: whole response body. :func:`match_catalogue_fake` uses it to answer
+        #: any term at all out of a bundled catalogue, which is what the
+        #: matcher acceptance run needs — pinning one canned page per case
+        #: would make the test a test of the fixture.
+        self.search_fn: Callable[[str, int], dict[str, Any]] | None = search_fn
         #: One entry per request the client actually sent, as
         #: ``(operation, variables)``. Retries show up as repeats.
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -153,6 +164,8 @@ class FakeAniList:
             self.calls.append(("search", variables))
             term = str(variables["search"]).lower()
             payload = self.search.get(term)
+            if payload is None and self.search_fn is not None:
+                payload = self.search_fn(term, int(variables.get("page", 1)))
             if payload is None:
                 payload = {
                     "data": {
@@ -302,6 +315,85 @@ def long_running_fake(*, aired: int = LONG_RUNNING_AIRED) -> FakeAniList:
     return FakeAniList(media={LONG_RUNNING_ID: payload}, schedule={LONG_RUNNING_ID: pages})
 
 
+# --- The matcher's catalogue -------------------------------------------------
+
+#: Every title ``scripts/capture_match_catalogue.py`` collected: the seeds of
+#: ``tests/fixtures/match_cases.json`` *and* the near-misses a real AniList
+#: search returns alongside them — the sequels, the side stories, the movie of
+#: the same name. Those are the point: a matcher fixture with only the right
+#: answers in it proves nothing.
+MATCH_CATALOGUE_FILE = FIXTURES / "match_catalogue.json"
+
+#: How many hits :func:`match_catalogue_fake`'s search returns, matching the
+#: page size ``AniListClient.search`` asks for closely enough that the matcher
+#: sees a realistic result set.
+SEARCH_RESULTS = 8
+
+
+@lru_cache(maxsize=1)
+def match_catalogue() -> tuple[dict[str, Any], ...]:
+    """The captured catalogue, as AniList's own ``Media`` objects."""
+    payload = json.loads(MATCH_CATALOGUE_FILE.read_text(encoding="utf-8"))
+    return tuple(payload["media"])
+
+
+@lru_cache(maxsize=1)
+def match_catalogue_media() -> tuple[CatalogMedia, ...]:
+    """The same catalogue as :class:`CatalogMedia`, ready for the cache.
+
+    ``full=True``: these carry synonyms and relations, which is what a *detail*
+    fetch returns and what the local ``anime`` rows hold in production. The
+    search results the fake hands back are summaries, so a test that seeds the
+    cache and one that does not exercise genuinely different paths.
+    """
+    return tuple(parse_media(dict(node), full=True) for node in match_catalogue())
+
+
+def _catalogue_keys() -> list[tuple[int, str, dict[str, Any]]]:
+    """``(index, searchable text, node)`` for every title of every entry."""
+    rows: list[tuple[int, str, dict[str, Any]]] = []
+    for index, node in enumerate(match_catalogue()):
+        names = [value for value in (node.get("title") or {}).values() if value]
+        names.extend(node.get("synonyms") or [])
+        for name in names:
+            rows.append((index, str(name).casefold(), node))
+    return rows
+
+
+def catalogue_search(term: str, page: int = 1) -> dict[str, Any]:
+    """AniList's search, approximated over the bundled catalogue.
+
+    ``token_set_ratio`` against every title and synonym, best score per entry,
+    top :data:`SEARCH_RESULTS`. It is not AniList's ``SEARCH_MATCH`` ordering
+    and does not need to be: what the matcher must survive is *a plausible
+    result set containing the answer and its relatives*, which this produces.
+    """
+    term = term.casefold().strip()
+    best: dict[int, float] = {}
+    nodes: dict[int, dict[str, Any]] = {}
+    if term:
+        for index, name, node in _catalogue_keys():
+            score = max(fuzz.token_set_ratio(term, name), fuzz.partial_ratio(term, name))
+            if score > best.get(index, 0.0):
+                best[index] = score
+                nodes[index] = node
+    ranked = sorted(best.items(), key=lambda item: (-item[1], item[0]))
+    hits = [nodes[index] for index, score in ranked if score >= 60][:SEARCH_RESULTS]
+    return {
+        "data": {
+            "Page": {
+                "pageInfo": {"currentPage": page, "hasNextPage": False},
+                "media": [summary_of(node) for node in (hits if page == 1 else [])],
+            }
+        }
+    }
+
+
+def match_catalogue_fake() -> FakeAniList:
+    """A fake that answers *any* search term out of the bundled catalogue."""
+    return FakeAniList(search_fn=catalogue_search)
+
+
 def summary_of(payload: dict[str, Any]) -> dict[str, Any]:
     """The summary half of a captured detail response.
 
@@ -349,12 +441,18 @@ __all__ = [
     "FROZEN_NOW",
     "LONG_RUNNING_AIRED",
     "LONG_RUNNING_ID",
+    "MATCH_CATALOGUE_FILE",
     "NULL_MEDIA",
     "RELEASING_ID",
+    "SEARCH_RESULTS",
     "FakeAniList",
+    "catalogue_search",
     "frieren_fake",
     "load",
     "long_running_fake",
+    "match_catalogue",
+    "match_catalogue_fake",
+    "match_catalogue_media",
     "media_payload",
     "season_node",
     "summary_of",

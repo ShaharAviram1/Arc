@@ -33,8 +33,9 @@ any time, and the owner uses it daily.
     groups, resolution, look-ahead N), edit retention settings, view storage
     and job queues, resolve match-review items, delete files.
   - User: everything else (watch, track, add shows, request acquisition via
-    their own list, link MAL, get recommendations, resolve match-review items
-    for their own requested shows).
+    their own list, link MAL, get recommendations, resolve match-review
+    items — any signed-in user may resolve any item in phase 1; scoping to
+    the requesting user is an M14 admin-panel refinement).
 - Each user has a timezone (detected at signup from the browser, editable
   from the Schedule page); schedule and air dates render in it.
 - Sessions: HTTP-only secure cookie sessions. Passwords hashed with Argon2.
@@ -131,6 +132,10 @@ any time, and the owner uses it daily.
 - FR-L4 Confidence ≥ high threshold → auto-link. Below it → the file goes to
   the **match-review queue** with the top candidates and is not played until
   a user confirms. The server must say when it is unsure instead of guessing.
+  Auto-link additionally requires the title itself to match closely (exact
+  normalised title, or similarity above a configurable floor) — a strong
+  overall score built on a loose title is still a guess. Movie files match
+  as episode 1 of a movie entry.
 - FR-L5 For unsure cases an LLM may be asked to propose the most likely
   candidate with a one-line reason; the proposal is shown in the review
   queue, never auto-applied.

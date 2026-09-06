@@ -1,0 +1,688 @@
+[
+  {
+    "name": "[SubsPlease] Sousou no Frieren - 05 (1080p) [A1B2C3D4].mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 5,
+    "note": "the plain case"
+  },
+  {
+    "name": "[SubsPlease] Sousou no Frieren - 28 (1080p) [9F8E7D6C].mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 28,
+    "note": "the last episode of a known count"
+  },
+  {
+    "name": "[Erai-raws] Sousou no Frieren - 15 [1080p][Multiple Subtitle][12AB34CD].mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 15,
+    "note": "another group, same show"
+  },
+  {
+    "name": "[EMBER] Sousou no Frieren S01E20 [1080p] [HEVC WEBRip].mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 20,
+    "note": "SxxExx numbering"
+  },
+  {
+    "name": "Frieren - 28 END.mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 28,
+    "note": "a bare manual drop under half the title"
+  },
+  {
+    "name": "[Yameii] Frieren - Beyond Journey's End - S01E14 [English Dub] [1080p][WEB-DL].mkv",
+    "expected_title": "Sousou no Frieren",
+    "expected_anilist_id": 154587,
+    "expected_episode": 14,
+    "note": "the English title, with an apostrophe"
+  },
+  {
+    "name": "Mushishi - 03.mkv",
+    "expected_title": "Mushishi",
+    "expected_anilist_id": 457,
+    "expected_episode": 3,
+    "note": "a bare manual drop"
+  },
+  {
+    "name": "[Group] Mushishi Zoku Shou - 05 [720p].mkv",
+    "expected_title": "Mushishi Zoku Shou",
+    "expected_anilist_id": 20595,
+    "expected_episode": 5,
+    "note": "a sequel whose name is a subtitle, not a number"
+  },
+  {
+    "name": "[Judas] Mob Psycho 100 II - 03 [1080p][HEVC x265 10bit][Multi-Subs].mkv",
+    "expected_title": "Mob Psycho 100 II",
+    "expected_anilist_id": 101338,
+    "expected_episode": 3,
+    "note": "a roman numeral season on a title that ends in a number"
+  },
+  {
+    "name": "[EMBER] Mob Psycho 100 S03E12 [1080p] [HEVC WEBRip].mkv",
+    "expected_title": "Mob Psycho 100 III",
+    "expected_anilist_id": 140439,
+    "expected_episode": 12,
+    "note": "S3 written as a number, catalogue writes it as III"
+  },
+  {
+    "name": "[Group] Mob Psycho 100 - 07 [1080p].mkv",
+    "expected_title": "Mob Psycho 100",
+    "expected_anilist_id": 21507,
+    "expected_episode": 7,
+    "note": "no season: must not land on II or III"
+  },
+  {
+    "name": "[Commie] Steins;Gate 0 - 11 [BD 1080p AAC].mkv",
+    "expected_title": "Steins;Gate 0",
+    "expected_anilist_id": 21127,
+    "expected_episode": 11,
+    "note": "a title whose last token is a zero"
+  },
+  {
+    "name": "Steins;Gate - 22.mkv",
+    "expected_title": "Steins;Gate",
+    "expected_anilist_id": 9253,
+    "expected_episode": 22,
+    "note": "and the show it is not"
+  },
+  {
+    "name": "[EMBER] 86 - Eighty Six S01E10 [1080p] [HEVC WEBRip].mkv",
+    "expected_title": "86: Eighty Six",
+    "expected_anilist_id": 116589,
+    "expected_episode": 10,
+    "note": "a title that begins with a number"
+  },
+  {
+    "name": "[EMBER] 86 - Eighty Six S02E11 [1080p] [HEVC WEBRip].mkv",
+    "expected_title": "86: Eighty Six Part 2",
+    "expected_anilist_id": 131586,
+    "expected_episode": 11,
+    "note": "the same, second cour"
+  },
+  {
+    "name": "[ASW] Re Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2 - 05 [1080p HEVC][12345678].mkv",
+    "expected_title": "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2",
+    "expected_anilist_id": 119661,
+    "expected_episode": 5,
+    "note": "season and part, and a colon the release drops"
+  },
+  {
+    "name": "[Erai-raws] Re:Zero kara Hajimeru Isekai Seikatsu 3rd Season - 02 [1080p][Multiple Subtitle][12345678].mkv",
+    "expected_title": "Re:Zero kara Hajimeru Isekai Seikatsu 3rd Season",
+    "expected_anilist_id": 163134,
+    "expected_episode": 2,
+    "note": "ordinal season"
+  },
+  {
+    "name": "[Erai-raws] Kaguya-sama wa Kokurasetai - Ultra Romantic - 05 [1080p][Multiple Subtitle][ABCD1234].mkv",
+    "expected_title": "Kaguya-sama wa Kokurasetai: Ultra Romantic",
+    "expected_anilist_id": 125367,
+    "expected_episode": 5,
+    "note": "a season named by subtitle"
+  },
+  {
+    "name": "[HorribleSubs] Kaguya-sama wa Kokurasetai - 06 [720p].mkv",
+    "expected_title": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+    "expected_anilist_id": 101921,
+    "expected_episode": 6,
+    "note": "the first season, which the catalogue subtitles"
+  },
+  {
+    "name": "[SubsPlease] Boku no Hero Academia S7 - 12 (1080p) [77665544].mkv",
+    "expected_title": "Boku no Hero Academia 7",
+    "expected_anilist_id": 163139,
+    "expected_episode": 12,
+    "note": "a seventh season"
+  },
+  {
+    "name": "[HorribleSubs] Boku no Hero Academia S4 - 01 [720p].mkv",
+    "expected_title": "Boku no Hero Academia 4",
+    "expected_anilist_id": 104276,
+    "expected_episode": 1,
+    "note": "a fourth"
+  },
+  {
+    "name": "[SubsPlease] One Piece - 1122 (1080p) [0F1E2D3C].mkv",
+    "expected_title": "ONE PIECE",
+    "expected_anilist_id": 21,
+    "expected_episode": 1122,
+    "note": "four-digit absolute numbering on a show with no episode count"
+  },
+  {
+    "name": "One.Piece.S01E1089.1080p.WEB.h264-SUPER.mkv",
+    "expected_title": "ONE PIECE",
+    "expected_anilist_id": 21,
+    "expected_episode": 1089,
+    "note": "the scene's version of the same"
+  },
+  {
+    "name": "[Judas] Vinland Saga S2 - 12 [1080p][HEVC x265 10bit][Multi-Subs].mkv",
+    "expected_title": "VINLAND SAGA SEASON 2",
+    "expected_anilist_id": 136430,
+    "expected_episode": 12,
+    "note": "season 2 by number, catalogue by word"
+  },
+  {
+    "name": "[Group] Vinland Saga - 12 [1080p].mkv",
+    "expected_title": "VINLAND SAGA",
+    "expected_anilist_id": 101348,
+    "expected_episode": 12,
+    "note": "and season 1"
+  },
+  {
+    "name": "[SubsPlease] Jujutsu Kaisen - 47 (1080p) [FEEDFACE].mkv",
+    "expected_title": "Jujutsu Kaisen 2nd Season",
+    "expected_anilist_id": 145064,
+    "expected_episode": 23,
+    "note": "absolute numbering across a sequel: 47 - 24 = 23"
+  },
+  {
+    "name": "[EMBER] Jujutsu Kaisen S02E23 [1080p] [HEVC WEBRip].mkv",
+    "expected_title": "Jujutsu Kaisen 2nd Season",
+    "expected_anilist_id": 145064,
+    "expected_episode": 23,
+    "note": "the same episode, numbered per season"
+  },
+  {
+    "name": "[SubsPlease] Spy x Family Season 2 - 01 (1080p) [C0FFEE01].mkv",
+    "expected_title": "SPY×FAMILY Season 2",
+    "expected_anilist_id": 158927,
+    "expected_episode": 1,
+    "note": "an interpunct the release writes as an x"
+  },
+  {
+    "name": "Spy.x.Family.S02E06.1080p.NF.WEB-DL.DDP2.0.H.264-VARYG.mkv",
+    "expected_title": "SPY×FAMILY Season 2",
+    "expected_anilist_id": 158927,
+    "expected_episode": 6,
+    "note": "the same, scene style"
+  },
+  {
+    "name": "[Beatrice-Raws] Shingeki no Kyojin S3 - 05 [BDRip 1920x1080 x264 FLAC].mkv",
+    "expected_title": "Shingeki no Kyojin Season 3",
+    "expected_anilist_id": 99147,
+    "expected_episode": 5,
+    "note": "season 3 part 1"
+  },
+  {
+    "name": "[ASW] Kimetsu no Yaiba - Katanakaji no Sato-hen - 07 [1080p HEVC][ABCDEF12].mkv",
+    "expected_title": "Kimetsu no Yaiba: Katanakaji no Sato-hen",
+    "expected_anilist_id": 145139,
+    "expected_episode": 7,
+    "note": "an arc-named season"
+  },
+  {
+    "name": "[Judas] Kimetsu no Yaiba - Yuukaku-hen - 11 [1080p][HEVC x265 10bit].mkv",
+    "expected_title": "Kimetsu no Yaiba: Yuukaku-hen",
+    "expected_anilist_id": 142329,
+    "expected_episode": 11,
+    "note": "another arc of the same show"
+  },
+  {
+    "name": "[Beatrice-Raws] Kimetsu no Yaiba - 19 [BDRip 1920x1080 x264 FLAC].mkv",
+    "expected_title": "Kimetsu no Yaiba",
+    "expected_anilist_id": 101922,
+    "expected_episode": 19,
+    "note": "and the unadorned first season"
+  },
+  {
+    "name": "[SubsPlease] Bocchi the Rock! - 12 (1080p) [ABCD0001].mkv",
+    "expected_title": "Bocchi the Rock!",
+    "expected_anilist_id": 130003,
+    "expected_episode": 12,
+    "note": "an exclamation mark in the title"
+  },
+  {
+    "name": "[Kametsu] Cowboy Bebop - 12 (BD 1080p Hi10P FLAC) [DEADBEEF].mkv",
+    "expected_title": "Cowboy Bebop",
+    "expected_anilist_id": 1,
+    "expected_episode": 12,
+    "note": "a 1998 show with a movie of the same name"
+  },
+  {
+    "name": "[SubsPlease] Dandadan - 07 (1080p) [DEADBEEF].mkv",
+    "expected_title": "Dandadan",
+    "expected_anilist_id": 171018,
+    "expected_episode": 7,
+    "note": "catalogue writes the English as DAN DA DAN"
+  },
+  {
+    "name": "[SubsPlease] Kusuriya no Hitorigoto - 24 (1080p) [5A6B7C8D].mkv",
+    "expected_title": "Kusuriya no Hitorigoto",
+    "expected_anilist_id": 161645,
+    "expected_episode": 24,
+    "note": "romaji only"
+  },
+  {
+    "name": "[Judas] Overlord IV - 05 [1080p][HEVC x265 10bit].mkv",
+    "expected_title": "Overlord IV",
+    "expected_anilist_id": 133844,
+    "expected_episode": 5,
+    "note": "roman numeral seasons all the way to IV"
+  },
+  {
+    "name": "[Group] Overlord - 05 [1080p].mkv",
+    "expected_title": "Overlord",
+    "expected_anilist_id": 20832,
+    "expected_episode": 5,
+    "note": "and the one that must not be beaten by containment"
+  },
+  {
+    "name": "Hunter x Hunter - 148.mkv",
+    "expected_title": "HUNTER×HUNTER (2011)",
+    "expected_anilist_id": 11061,
+    "expected_episode": 148,
+    "note": "an episode number only the remake has"
+  },
+  {
+    "name": "[Commie] Chihayafuru 3 - 24 [BD 720p AAC].mkv",
+    "expected_title": "Chihayafuru 3",
+    "expected_anilist_id": 101215,
+    "expected_episode": 24,
+    "note": "a bare trailing number that is part of the name"
+  },
+  {
+    "name": "[Coalgirls] Nichijou 09 (1920x1080 Blu-ray FLAC) [11223344].mkv",
+    "expected_title": "Nichijou",
+    "expected_anilist_id": 10165,
+    "expected_episode": 9,
+    "note": "no dash before the number"
+  },
+  {
+    "name": "[Coalgirls] Toradora! 14 (1920x1080 Blu-ray FLAC) [DEADBEEF].mkv",
+    "expected_title": "Toradora!",
+    "expected_anilist_id": 4224,
+    "expected_episode": 14,
+    "note": "same, with punctuation"
+  },
+  {
+    "name": "[Kametsu] Fullmetal Alchemist Brotherhood - 44 (BD 1080p Hi10P FLAC) [A1B2C3D4].mkv",
+    "expected_title": "Hagane no Renkinjutsushi: FULLMETAL ALCHEMIST",
+    "expected_anilist_id": 5114,
+    "expected_episode": 44,
+    "note": "the release uses the English name, the catalogue the romaji"
+  },
+  {
+    "name": "[Kametsu] Death Note - 25 (BD 1080p Hi10P AAC) [90ABCDEF].mkv",
+    "expected_title": "DEATH NOTE",
+    "expected_anilist_id": 1535,
+    "expected_episode": 25,
+    "note": "catalogue shouts the title"
+  },
+  {
+    "name": "[Yameii] Solo Leveling - S02E03 [English Dub] [1080p][WEB-DL][AAC].mkv",
+    "expected_title": "Ore dake Level Up na Ken: Season 2 - Arise from the Shadow",
+    "expected_anilist_id": 176496,
+    "expected_episode": 3,
+    "note": "English title, romaji catalogue, season with a subtitle"
+  },
+  {
+    "name": "[Yameii] Kaiju No. 8 - S01E11 [English Dub] [720p][WEB-DL].mkv",
+    "expected_title": "Kaijuu 8-gou",
+    "expected_anilist_id": 153288,
+    "expected_episode": 11,
+    "note": "English title with a number in it"
+  },
+  {
+    "name": "[MTBB] Bakemonogatari - 01 [BD 1080p].mkv",
+    "expected_title": "Bakemonogatari",
+    "expected_anilist_id": 5081,
+    "expected_episode": 1,
+    "note": "one of a dozen -monogatari titles"
+  },
+  {
+    "name": "[Anime Time] Monogatari Series - Second Season - 05 [BD][1080p][HEVC 10bit][AAC].mkv",
+    "expected_title": "Monogatari Series: Second Season",
+    "expected_anilist_id": 17074,
+    "expected_episode": 5,
+    "note": "a franchise whose season is its name"
+  },
+  {
+    "name": "[MTBB] Sound! Euphonium 3 - 08 [BD 1080p].mkv",
+    "expected_title": "Hibike! Euphonium 3",
+    "expected_anilist_id": 109731,
+    "expected_episode": 8,
+    "note": "English title with a season number"
+  },
+  {
+    "name": "[MTBB] Ping Pong the Animation - 05 [BD 1080p].mkv",
+    "expected_title": "Ping Pong THE ANIMATION",
+    "expected_anilist_id": 20607,
+    "expected_episode": 5,
+    "note": "casing differs"
+  },
+  {
+    "name": "[Beatrice-Raws] Violet Evergarden - 11 [BDRip 1920x1080 HEVC FLAC].mkv",
+    "expected_title": "Violet Evergarden",
+    "expected_anilist_id": 21827,
+    "expected_episode": 11,
+    "note": "a show with a movie and a side story"
+  },
+  {
+    "name": "[Group] Made in Abyss - Retsujitsu no Ougonkyou - 03 [1080p].mkv",
+    "expected_title": "Made in Abyss: Retsujitsu no Ougonkyou",
+    "expected_anilist_id": 114745,
+    "expected_episode": 3,
+    "note": "sequel named by subtitle"
+  },
+  {
+    "name": "[Nyanpasu] Yuru Camp - 04 (BD 1080p FLAC).mkv",
+    "expected_title": "Yuru Camp△",
+    "expected_anilist_id": 98444,
+    "expected_episode": 4,
+    "note": "a triangle in the catalogue title the release drops"
+  },
+  {
+    "name": "Chainsaw.Man.S01E08.2160p.WEB-DL.DDP5.1.HEVC-NTb.mkv",
+    "expected_title": "Chainsaw Man",
+    "expected_anilist_id": 127230,
+    "expected_episode": 8,
+    "note": "scene name, 4K"
+  },
+  {
+    "name": "Cyberpunk.Edgerunners.S01E10.1080p.NF.WEB-DL.DDP5.1.x264-NTb.mkv",
+    "expected_title": "Cyberpunk: Edgerunners",
+    "expected_anilist_id": 120377,
+    "expected_episode": 10,
+    "note": "an ONA, not a TV show"
+  },
+  {
+    "name": "Serial Experiments Lain - 09.mkv",
+    "expected_title": "serial experiments lain",
+    "expected_anilist_id": 339,
+    "expected_episode": 9,
+    "note": "the catalogue title is lowercase"
+  },
+  {
+    "name": "Neon Genesis Evangelion - 24.mkv",
+    "expected_title": "Shin Seiki Evangelion",
+    "expected_anilist_id": 30,
+    "expected_episode": 24,
+    "note": "English release, romaji catalogue, nothing in common"
+  },
+  {
+    "name": "Monster - 74.mkv",
+    "expected_title": "MONSTER",
+    "expected_anilist_id": 19,
+    "expected_episode": 74,
+    "note": "a one-word title and 74 episodes"
+  },
+  {
+    "name": "Ergo Proxy 11.mkv",
+    "expected_title": "Ergo Proxy",
+    "expected_anilist_id": 790,
+    "expected_episode": 11,
+    "note": "no separator at all"
+  },
+  {
+    "name": "Texhnolyze Ep 15.mkv",
+    "expected_title": "TEXHNOLYZE",
+    "expected_anilist_id": 26,
+    "expected_episode": 15,
+    "note": "Ep prefix"
+  },
+  {
+    "name": "Haibane Renmei E07.mkv",
+    "expected_title": "Haibane Renmei",
+    "expected_anilist_id": 387,
+    "expected_episode": 7,
+    "note": "E prefix"
+  },
+  {
+    "name": "Planetes - Episode 12.mkv",
+    "expected_title": "Planetes",
+    "expected_anilist_id": 329,
+    "expected_episode": 12,
+    "note": "the word Episode"
+  },
+  {
+    "name": "[Anime Time] Hyouka - 11 [BD][720p][x265 10bit][AAC].mkv",
+    "expected_title": "Hyouka",
+    "expected_anilist_id": 12189,
+    "expected_episode": 11,
+    "note": "short title, many tags"
+  },
+  {
+    "name": "[Erai-raws] Dungeon Meshi - 24 [1080p][Multiple Subtitle][FEEDBEEF].mkv",
+    "expected_title": "Dungeon Meshi",
+    "expected_anilist_id": 153518,
+    "expected_episode": 24,
+    "note": "romaji release, English catalogue name is different"
+  },
+  {
+    "name": "[SubsPlease] Shangri-La Frontier S2 - 03 (1080p) [BEEF1234].mkv",
+    "expected_title": "Shangri-La Frontier 2nd Season",
+    "expected_anilist_id": 176508,
+    "expected_episode": 3,
+    "note": "S2 against a catalogue that writes 2nd Season"
+  },
+  {
+    "name": "[SubsPlease] Oshi no Ko S2 - 06 (480p) [11AA22BB].mkv",
+    "expected_title": "[Oshi no Ko] 2nd Season",
+    "expected_anilist_id": 166531,
+    "expected_episode": 6,
+    "note": "square brackets in the catalogue title"
+  },
+  {
+    "name": "[HorribleSubs] Dr. Stone - 24 [1080p].mkv",
+    "expected_title": "Dr. STONE",
+    "expected_anilist_id": 105333,
+    "expected_episode": 24,
+    "note": "a full stop in the title"
+  },
+  {
+    "name": "[HorribleSubs] One Punch Man S2 - 09 [480p].mkv",
+    "expected_title": "One Punch Man 2",
+    "expected_anilist_id": 97668,
+    "expected_episode": 9,
+    "note": "S2 against a bare trailing 2"
+  },
+  {
+    "name": "[Commie] Psycho-Pass 2 - 05 [BD 720p AAC].mkv",
+    "expected_title": "PSYCHO-PASS 2",
+    "expected_anilist_id": 20513,
+    "expected_episode": 5,
+    "note": "hyphen and a trailing number"
+  },
+  {
+    "name": "[Judas] Fate Zero - 12 [1080p][HEVC x265 10bit][Dual-Audio].mkv",
+    "expected_title": "Fate/Zero",
+    "expected_anilist_id": 10087,
+    "expected_episode": 12,
+    "note": "a slash the release drops"
+  },
+  {
+    "name": "[Kametsu] Code Geass - 22 (BD 1080p Hi10P FLAC) [Dual Audio] [ABCD1234].mkv",
+    "expected_title": "Code Geass: Hangyaku no Lelouch",
+    "expected_anilist_id": 1575,
+    "expected_episode": 22,
+    "note": "the release uses half the name"
+  },
+  {
+    "name": "[Judas] Naruto Shippuuden - 500 [1080p][HEVC x265 10bit].mkv",
+    "expected_title": "NARUTO: Shippuuden",
+    "expected_anilist_id": 1735,
+    "expected_episode": 500,
+    "note": "500 episodes"
+  },
+  {
+    "name": "[Judas] Bleach - 366 [720p][HEVC x265 10bit].mkv",
+    "expected_title": "BLEACH",
+    "expected_anilist_id": 269,
+    "expected_episode": 366,
+    "note": "and 366"
+  },
+  {
+    "name": "[SubsPlease] Detective Conan - 1120 (1080p) [11112222].mkv",
+    "expected_title": "Meitantei Conan",
+    "expected_anilist_id": 235,
+    "expected_episode": 1120,
+    "note": "English release, romaji catalogue, no episode count"
+  },
+  {
+    "name": "[Group] Gintama - 201 [1080p].mkv",
+    "expected_title": "Gintama",
+    "expected_anilist_id": 918,
+    "expected_episode": 201,
+    "note": "a franchise with an apostrophe in a sequel's title"
+  },
+  {
+    "name": "[HorribleSubs] Fairy Tail - 175 [720p].mkv",
+    "expected_title": "FAIRY TAIL",
+    "expected_anilist_id": 6702,
+    "expected_episode": 175,
+    "note": "shouted catalogue title"
+  },
+  {
+    "name": "[Erai-raws] Mushoku Tensei II - Isekai Ittara Honki Dasu - 03 [1080p][Multiple Subtitle][A1B2C3D4].mkv",
+    "expected_title": "Mushoku Tensei II: Isekai Ittara Honki Dasu",
+    "expected_anilist_id": 146065,
+    "expected_episode": 3,
+    "note": "a roman numeral in the middle of the name"
+  },
+  {
+    "name": "[SubsPlease] Sono Bisque Doll wa Koi wo Suru - 08 (1080p) [1A2B3C4D].mkv",
+    "expected_title": "Sono Bisque Doll wa Koi wo Suru",
+    "expected_anilist_id": 132405,
+    "expected_episode": 8,
+    "note": "long romaji title"
+  },
+  {
+    "name": "[Group] Shokugeki no Souma - Shin no Sara - 09 [720p].mkv",
+    "expected_title": "Shokugeki no Souma: Shin no Sara",
+    "expected_anilist_id": 109963,
+    "expected_episode": 9,
+    "note": "one of five seasons with subtitles"
+  },
+  {
+    "name": "[SubsPlease] Kanojo, Okarishimasu S3 - 07 (1080p) [ABCD1234].mkv",
+    "expected_title": "Kanojo, Okarishimasu 3rd Season",
+    "expected_anilist_id": 154745,
+    "expected_episode": 7,
+    "note": "a comma in the title"
+  },
+  {
+    "name": "[Erai-raws] Tate no Yuusha no Nariagari Season 3 - 06 [1080p][Multiple Subtitle].mkv",
+    "expected_title": "Tate no Yuusha no Nariagari Season 3",
+    "expected_anilist_id": 111322,
+    "expected_episode": 6,
+    "note": "three seasons written identically"
+  },
+  {
+    "name": "[Group] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 3rd Season - 11 [1080p].mkv",
+    "expected_title": "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 3rd Season",
+    "expected_anilist_id": 146066,
+    "expected_episode": 11,
+    "note": "a very long title with an ordinal season"
+  },
+  {
+    "name": "[Group] Seishun Buta Yarou wa Bunny Girl Senpai no Yume wo Minai - 07 [1080p].mkv",
+    "expected_title": "Seishun Buta Yarou wa Bunny Girl Senpai no Yume wo Minai",
+    "expected_anilist_id": 101291,
+    "expected_episode": 7,
+    "note": "the longest title in the corpus"
+  },
+  {
+    "name": "[Group] Nanatsu no Taizai - Fundo no Shinpan - 20 [1080p].mkv",
+    "expected_title": "Nanatsu no Taizai: Funnu no Shinpan",
+    "expected_anilist_id": 116752,
+    "expected_episode": 20,
+    "note": "the release romanises one word differently"
+  },
+  {
+    "name": "[Group] Mahoutsukai no Yome Season 2 - 12 [1080p].mkv",
+    "expected_title": "Mahoutsukai no Yome SEASON 2",
+    "expected_anilist_id": 154364,
+    "expected_episode": 12,
+    "note": "season 2 with a shouted catalogue title"
+  },
+  {
+    "name": "[Group] Kono Subarashii Sekai ni Shukufuku wo! 2 - 05 [720p].mkv",
+    "expected_title": "Kono Subarashii Sekai ni Shukufuku wo! 2",
+    "expected_anilist_id": 21699,
+    "expected_episode": 5,
+    "note": "a bare 2 that is the season and the name"
+  },
+  {
+    "name": "[Group] Ijiranaide, Nagatoro-san 2nd Attack - 04 [1080p].mkv",
+    "expected_title": "Ijiranaide, Nagatoro-san 2nd Attack",
+    "expected_anilist_id": 140596,
+    "expected_episode": 4,
+    "note": "2nd Attack is a subtitle, not a season marker"
+  },
+  {
+    "name": "[Group] 3-gatsu no Lion 2nd Season - 05 [1080p].mkv",
+    "expected_title": "3-gatsu no Lion 2nd Season",
+    "expected_anilist_id": 98478,
+    "expected_episode": 5,
+    "note": "a title that starts with a digit and has an ordinal season"
+  },
+  {
+    "name": "[Group] Ghost in the Shell SAC_2045 - 06 [1080p].mkv",
+    "expected_title": "Koukaku Kidoutai: SAC_2045",
+    "expected_anilist_id": 106154,
+    "expected_episode": 6,
+    "note": "a four-digit number that is not a year"
+  },
+  {
+    "name": "[Group] K-On!! - 13 [BD 1080p].mkv",
+    "expected_title": "K-ON!!",
+    "expected_anilist_id": 7791,
+    "expected_episode": 13,
+    "note": "the season marker is a second exclamation mark"
+  },
+  {
+    "name": "[Group] xxxHOLiC - 12 [720p].mkv",
+    "expected_title": "xxxHOLiC",
+    "expected_anilist_id": 861,
+    "expected_episode": 12,
+    "note": "mixed case, no spaces"
+  },
+  {
+    "name": "[Anime Time] Fate Stay Night - Unlimited Blade Works - 12 [BD][1080p][HEVC 10bit][AAC].mkv",
+    "expected_title": "Fate/stay night: Unlimited Blade Works",
+    "expected_anilist_id": 19603,
+    "expected_episode": 12,
+    "note": "a TV series with a movie of the same name"
+  },
+  {
+    "name": "[Group] Yofukashi no Uta Season 2 - 08 [1080p][HEVC].mkv",
+    "expected_title": "Yofukashi no Uta Season 2",
+    "expected_anilist_id": 175914,
+    "expected_episode": 8,
+    "note": "a season 2 and a Mini shorts series"
+  },
+  {
+    "name": "[Erai-raws] Blue Lock vs. U-20 Japan - 09 [1080p][Multiple Subtitle][0A0B0C0D].mkv",
+    "expected_title": "Blue Lock VS. U-20 JAPAN",
+    "expected_anilist_id": 163146,
+    "expected_episode": 9,
+    "note": "the sequel's name is not a number"
+  },
+  {
+    "name": "[MTBB] Shouwa Genroku Rakugo Shinjuu - 09 [BD 1080p].mkv",
+    "expected_title": "Shouwa Genroku Rakugo Shinjuu",
+    "expected_anilist_id": 20972,
+    "expected_episode": 9,
+    "note": "long romaji, two seasons"
+  },
+  {
+    "name": "[Erai-raws] Sengoku Youko - Senma Konton-hen - 03 [1080p][Multiple Subtitle].mkv",
+    "expected_title": "Sengoku Youko: Senma Konton-hen",
+    "expected_anilist_id": 176660,
+    "expected_episode": 3,
+    "note": "a second cour named as an arc"
+  },
+  {
+    "name": "[Nyanpasu] Non Non Biyori Repeat - 07 (BD 1080p).mkv",
+    "expected_title": "Non Non Biyori: Repeat",
+    "expected_anilist_id": 20694,
+    "expected_episode": 7,
+    "note": "the catalogue has a colon the release does not"
+  }
+]

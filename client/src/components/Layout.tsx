@@ -1,11 +1,14 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useLogout, useMe } from '@/lib/auth'
+import { useReviewSummary } from '@/lib/review'
 
 interface NavItem {
   to: string
   label: string
   adminOnly?: boolean
 }
+
+const REVIEW_PATH = '/review'
 
 const PHASE_1_NAV: NavItem[] = [
   { to: '/', label: 'Home' },
@@ -16,15 +19,35 @@ const PHASE_1_NAV: NavItem[] = [
 
 const PHASE_2_NAV: NavItem[] = [
   { to: '/recs', label: 'Recs' },
-  { to: '/review', label: 'Review' },
+  { to: REVIEW_PATH, label: 'Review' },
   { to: '/admin', label: 'Admin', adminOnly: true },
 ]
 
 function navClass({ isActive }: { isActive: boolean }): string {
-  const base = 'block rounded-md px-3 py-2 text-sm transition-colors'
+  const base =
+    'flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm transition-colors'
   return isActive
     ? `${base} bg-[var(--arc-surface-raised)] text-[var(--arc-text)]`
     : `${base} text-[var(--arc-text-muted)] hover:bg-[var(--arc-surface-raised)] hover:text-[var(--arc-text)]`
+}
+
+/**
+ * The pending-review count beside the Review entry. Only ever rendered for a
+ * positive count, so the sidebar is silent when there is nothing to do; the
+ * label spells out what the number means, since a bare "3" tells a screen
+ * reader nothing.
+ */
+function ReviewCountPill({ count }: { count: number }) {
+  const label = count === 1 ? '1 file needs review' : `${count} files need review`
+
+  return (
+    <span
+      aria-label={label}
+      className="inline-flex min-w-5 items-center justify-center rounded-full bg-[var(--arc-accent)] px-1.5 text-xs font-medium text-[var(--arc-accent-contrast)]"
+    >
+      {count}
+    </span>
+  )
 }
 
 function AccountPanel() {
@@ -57,6 +80,12 @@ export function Layout() {
   const isAdmin = me?.role === 'admin'
   const phase2Nav = PHASE_2_NAV.filter((item) => !item.adminOnly || isAdmin)
 
+  // No count while it is loading, and none if the poll failed: an absent pill
+  // reads as "nothing waiting", which is the safer thing to say when we do not
+  // know (M13's review page is where a real answer lives).
+  const { data: review } = useReviewSummary()
+  const pendingReview = review?.pending ?? 0
+
   return (
     <div className="flex min-h-full">
       <aside className="hidden w-56 shrink-0 flex-col border-r border-[var(--arc-border)] bg-[var(--arc-surface)] p-4 sm:flex">
@@ -78,6 +107,9 @@ export function Layout() {
           {phase2Nav.map((item) => (
             <NavLink key={item.to} to={item.to} className={navClass}>
               {item.label}
+              {item.to === REVIEW_PATH && pendingReview > 0 ? (
+                <ReviewCountPill count={pendingReview} />
+              ) : null}
             </NavLink>
           ))}
         </nav>

@@ -113,6 +113,50 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     max_transcodes: int = Field(default=2, ge=1)
 
+    # --- Library: ingest and matching (M5) --------------------------------
+    #: How often the worker walks the download and manual-drop directories
+    #: (FR-L1). Two minutes: a torrent that finishes is handed over by
+    #: qBittorrent in M6, so this scan exists for files that appear without
+    #: Arc being told — a manual drop, a restart mid-download — and two
+    #: minutes is well inside "before anyone notices".
+    library_scan_interval_seconds: float = Field(default=120.0, gt=0)
+    #: A file younger than this is skipped and picked up on the next scan. A
+    #: cheap stand-in for "the size stopped changing": a copy in progress is
+    #: still being written to, and indexing it would store a size and a probe
+    #: that are both wrong (FR-L1).
+    library_settle_seconds: float = Field(default=60.0, ge=0)
+    #: Video extensions the scanner picks up, comma separated. Read through
+    #: :attr:`video_extensions`.
+    video_extensions: str = "mkv,mp4,avi,ts,webm"
+    #: Confidence at or above which a match is linked without asking anybody
+    #: (FR-L4, architecture.md §5.2). Nothing below this is ever auto-linked;
+    #: that is a non-negotiable, not a tuning knob.
+    match_auto_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    #: Below this a candidate is not worth showing a human either, and the
+    #: file becomes a "no good candidates" review item.
+    match_min_candidate: float = Field(default=0.40, ge=0.0, le=1.0)
+    #: The *title* similarity an automatic link needs on top of the confidence
+    #: (FR-L4). Confidence is a weighted sum, so a title that is merely close
+    #: can be carried over the threshold by a season, a format and an episode
+    #: number that all agree — which is how ``Kaijuu 9-gou`` would be linked to
+    #: *Kaijuu 8-gou*. Above this value, or an exact ``title_key`` match, and
+    #: nothing else: below it the file goes to review whatever the sum says.
+    #: Higher than :data:`~arc.services.library.matcher.NON_EXACT_CEILING` by
+    #: default, which makes the default rule "the file must literally name the
+    #: show"; lower it to let close spellings link themselves.
+    match_min_title_for_auto: float = Field(default=0.92, ge=0.0, le=1.0)
+    #: How many *new* files one scan pass indexes before it stops and leaves
+    #: the rest for the next one (FR-L1). A first scan of an existing library
+    #: is thousands of files and one ffprobe each; without a cap the job would
+    #: run for longer than ``WORKER_STALE_AFTER`` and be requeued underneath
+    #: itself. The next pass is two minutes away, so a big library is indexed
+    #: over a few passes rather than in one that never finishes.
+    library_scan_batch: int = Field(default=200, ge=1)
+    #: How many files are indexed between commits inside one pass. Small
+    #: enough that a slow probe cannot leave a long-running transaction open,
+    #: large enough that the commit is not the expensive part.
+    library_scan_commit_every: int = Field(default=25, ge=1)
+
     # --- Worker ----------------------------------------------------------
     #: Jobs the worker runs at once. Transcodes have their own, smaller cap
     #: (``max_transcodes``); this is the queue-wide limit.
@@ -157,6 +201,31 @@ class Settings(BaseSettings):
     @property
     def downloads_dir(self) -> Path:
         return self.data_dir / "downloads"
+
+    @property
+    def manual_dir(self) -> Path:
+        """The "drop a file in here" directory (FR-L1)."""
+        return self.data_dir / "manual"
+
+    @property
+    def library_dirs(self) -> tuple[Path, ...]:
+        """Everything the ingest scan walks, in order."""
+        return (self.downloads_dir, self.manual_dir)
+
+    @property
+    def video_extensions_set(self) -> frozenset[str]:
+        """``VIDEO_EXTENSIONS`` split, lowercased, dots stripped.
+
+        A comma-separated string rather than a ``list[str]`` field for the
+        same reason ``CORS_ALLOWED_ORIGINS`` is: pydantic-settings parses a
+        list-typed value from the environment as JSON, and
+        ``VIDEO_EXTENSIONS=mkv,mp4`` would be a startup crash.
+        """
+        return frozenset(
+            part.strip().lstrip(".").lower()
+            for part in self.video_extensions.split(",")
+            if part.strip()
+        )
 
     @property
     def renditions_dir(self) -> Path:

@@ -22,6 +22,9 @@ fi
 set -a
 # shellcheck disable=SC1091
 . ./.env
+# A relative DATA_DIR is meant relative to the repo root, but the api and
+# worker start from server/ — make it absolute before they inherit it.
+case "${DATA_DIR:-}" in ""|/*) ;; *) export DATA_DIR="$PWD/${DATA_DIR#./}";; esac
 set +a
 
 COMPOSE=(docker compose --env-file .env

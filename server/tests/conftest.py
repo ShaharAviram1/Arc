@@ -200,6 +200,11 @@ CLEANUP_TABLES = (
     "jobs",
     "watch_progress",
     "list_entries",
+    # Both reference ``episodes``: ``media_files.episode_id`` nulls out and
+    # ``renditions`` cascades, but deleting them first keeps the order the
+    # same shape as the foreign keys and survives an ``ondelete`` changing.
+    "media_files",
+    "renditions",
     "episodes",
     "anime",
     "sessions",

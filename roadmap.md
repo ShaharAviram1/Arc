@@ -97,15 +97,17 @@ that must be verified before the next milestone starts.
   clock.
 
 ### M5 — Filename parser and matcher
-- [ ] Corpus `tests/fixtures/release_names.txt` (≥ 200 real names)
-- [ ] Parser wrapper over anitopy with normalisation (FR-L2)
-- [ ] Matcher: candidate generation (prior, local cache, AniList search),
+- [x] Corpus `tests/fixtures/release_names.txt` (≥ 200 real names)
+- [x] Parser wrapper over anitopy with normalisation (FR-L2)
+- [x] Matcher: candidate generation (prior, local cache, AniList search),
       scoring, confidence thresholds (FR-L3, FR-L4)
-- [ ] Ingest job: watch `/data/downloads` and a manual-drop dir, ffprobe,
+- [x] Ingest job: watch `/data/downloads` and a manual-drop dir, ffprobe,
       create `media_files`, run match (FR-L1)
-- [ ] Review queue endpoints (list, confirm, set manually, ignore) — API only
-      in phase 1 (FR-L6); Show page shows "needs review" badge
-- **DoD:** parser + matcher pass the corpus at agreed precision; files
+- [x] Review queue endpoints (list, confirm, set manually, ignore) — API only
+      in phase 1 (FR-L6); sidebar shows a pending-review count (the per-show
+      badge is deferred to the M13 review UI since unmatched files have no
+      show yet)
+- **DoD (verified 2026-09-06 by orchestrator: corpus 235 names at 100 %, matcher precision 100 % / recall 90.8 %; live drop of a real MKV + two edge files):** parser + matcher pass the corpus at agreed precision; files
   dropped into the manual dir get matched or land in review; nothing is
   auto-linked below threshold.
 

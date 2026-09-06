@@ -18,6 +18,7 @@ from sqlalchemy import select
 from arc.api.deps import SessionDep, get_admin_user
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus
 from arc.services.jobs import enqueue, find_active
+from arc.services.library.names import LIBRARY_SCAN
 
 # Admin only, at the router: the queue is operational surface (FR-D3), and a
 # route added here later must not be able to forget the check. Anonymous
@@ -33,6 +34,15 @@ MAX_LIMIT = 200
 #: 500 rather than a 422.
 MAX_ATTEMPTS_LIMIT = 20
 MAX_PRIORITY = 1000
+
+#: Job types whose *work* is the whole queue's, not one row's: a second one
+#: queued beside the first would walk the same directories and find nothing,
+#: and two of them running at once is two ffprobe storms. The scheduler
+#: already dedupes them on the type (``arc/worker.py``); a caller that omits
+#: ``dedupe_key`` gets the same key here, so "press the button twice" and "the
+#: timer fired while a scan was pending" behave identically. An explicit
+#: ``dedupe_key`` is left alone — a caller that names one means it.
+TYPE_DEDUPED: frozenset[str] = frozenset({LIBRARY_SCAN})
 
 
 class JobCreate(BaseModel):
@@ -85,6 +95,9 @@ class JobOut(BaseModel):
     summary="Enqueue a job (201, or 200 for a dedupe hit)",
 )
 async def create_job(body: JobCreate, session: SessionDep, response: Response) -> Job:
+    body = body.model_copy(
+        update={"dedupe_key": body.dedupe_key or (body.type if body.type in TYPE_DEDUPED else None)}
+    )
     if body.dedupe_key is not None:
         # Look first, so a dedupe hit can answer 200: nothing was created, and
         # 201 would tell the caller a row exists that it did not cause. The

@@ -181,6 +181,38 @@ arc/
    line reason using structured output; stored for the review UI only.
 3. The parser and scorer are pure functions with a corpus-driven test suite.
 
+### 5.2a Matching rules as built (M5)
+- Parser: `anitopy` plus normalisation into `ParsedName` (title, `title_key`,
+  episode/range, season, part, version, group, resolution, kind:
+  episode|batch|movie|special|nc|unknown). Pinned by
+  `tests/fixtures/release_names.txt` (235 names, 100 % on episode+kind and
+  title_key).
+- Candidates: expected-episode prior (Arc-downloaded files; applied as a
+  bounded bonus so it can never beat a title that says otherwise), fuzzy
+  search over the local cache, and a catalogue search (AniList → MAL).
+- Score weights: title 0.55, episode plausibility 0.20, season/sequel
+  agreement 0.15, format 0.05, year 0.05. Non-exact title matches are
+  capped at 0.88; an exact `title_key` match scores 1.0. Confidence is the
+  best score, reduced to ≤ 0.80 when the runner-up is within 0.05.
+  Absolute numbering above the episode count is re-based onto cached
+  sequels with a penalty. Auto-link at ≥ `MATCH_AUTO_THRESHOLD` and only when the title is exact or
+  its similarity ≥ `MATCH_MIN_TITLE_FOR_AUTO`; the expected-episode bonus
+  applies only when the prior's own title similarity ≥ 0.60; an existing
+  link is never cleared by a re-run; otherwise
+  review with the top candidates and reasons; NC files are ignored; batches
+  go to review. Acceptance fixture: 98 labelled cases, precision 100 %,
+  recall ≥ 85 % (90.8 % achieved after the title floor), review cases carry the answer in the top 3.
+- `library.link.link()` is the single place a file is attached to an
+  episode (auto-link and review confirm); it sets `matched` without
+  downgrading `preparing`/`ready`. M7 enqueues the transcode right after it.
+- Ingest: `library_scan` every `LIBRARY_SCAN_INTERVAL_SECONDS` and at worker
+  start walks `DATA_DIR/downloads` and `DATA_DIR/manual`, skips partials
+  (`.part`, `.!qB`), hidden files, and files modified within
+  `LIBRARY_SETTLE_SECONDS`; new files get a `media_files` row with the parse
+  and (when `ffprobe` exists) probe summary, then a `match_file` job.
+  Relative `DATA_DIR` is made absolute by `make`/`scripts/dev.sh` before the
+  processes start from `server/`.
+
 ### 5.3 Transcode
 1. `transcode` (priority = how soon a user will reach it): choose subtitle
    track (configured language, prefer ASS over SRT), choose audio track
@@ -315,6 +347,8 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
 | `GET /api/home` | any | `continue_watching` (empty until M8), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
+| `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute |
+| `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title |
 
 ## 6. External integrations
 
@@ -388,7 +422,12 @@ logged): `ENV` (dev|prod), `LOG_LEVEL`, `PUBLIC_URL`, `DATABASE_URL`,
 `SECRET_KEY`, `FERNET_KEY`, `MAL_CLIENT_ID`, `MAL_CLIENT_SECRET`,
 `MAL_REDIRECT_URI`, `ANTHROPIC_API_KEY`, `LLM_MATCH_SUGGESTIONS` (bool),
 `QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `DATA_DIR`, `MAX_TRANSCODES`,
-`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `WORKER_CONCURRENCY`
+`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `MATCH_AUTO_THRESHOLD` (0.85),
+`MATCH_MIN_CANDIDATE` (0.40), `MATCH_MIN_TITLE_FOR_AUTO` (0.92; above the
+0.88 non-exact cap, so in practice auto-link needs an exact normalised title
+or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
+`LIBRARY_SETTLE_SECONDS` (60), `LIBRARY_SCAN_BATCH` (200),
+`LIBRARY_SCAN_COMMIT_EVERY` (25), `VIDEO_EXTENSIONS`, `WORKER_CONCURRENCY`
 (default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
 (seconds to wait for in-flight jobs on shutdown, default 30),
 `WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
@@ -413,7 +452,7 @@ env (it is not in the settings table).
 ## 10. Testing strategy
 
 - Parser/matcher: corpus of ≥ 200 real release names with expected
-  (title, episode, season, group, resolution); assert confidence tiers.
+  (title_key, episode, season, kind, group, version); assert confidence tiers.
 - Acquisition window: property tests over progress/N/aired combos.
 - MAL rules: table-driven tests proving no write occurs without a
   user-originated event, progress never lowered automatically, revert
@@ -499,3 +538,11 @@ env (it is not in the settings table).
   AniList data; `next_at_estimated` on schedule entries; sweep schedules
   detail refreshes for unplaced season rows; `PATCH /api/users/me` lets a
   user change their timezone (spec §2 users now have an editable timezone).
+- 2026-09-06 — M5: parser corpus + matcher acceptance fixtures are the
+  specification; prior is a bounded bonus; non-exact cap 0.88; review API
+  open to any signed-in user (admin-only scoping deferred to M14);
+  `ffprobe` optional locally (now installed via brew).
+- 2026-09-06 — M5 review fixes: two-bar auto-link rule (confidence AND
+  close title / trusted prior); prior needs title ≥ 0.60; movies match as
+  episode 1 of a MOVIE entry; recap `.5` files always review; an existing
+  link is never cleared automatically; scans batch and commit incrementally.

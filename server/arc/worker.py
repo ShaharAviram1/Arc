@@ -7,8 +7,9 @@ One process, two things running side by side (architecture.md §2):
   at a time;
 * the **scheduler** (APScheduler) — periodic work: the heartbeat, the sweep
   that recovers jobs a crashed worker left locked, the hourly purge of expired
-  sessions (M2), and the catalogue's five periodic jobs (M3, M3b). M5+ hangs
-  the rest (Nyaa polling, MAL re-import, retention) off the same scheduler.
+  sessions (M2), the catalogue's five periodic jobs (M3, M3b), and the library
+  scan that finds new files on disk (M5). M6+ hangs the rest (Nyaa polling,
+  MAL re-import, retention) off the same scheduler.
 
 More than one worker may run at once; ``SKIP LOCKED`` is what makes that safe.
 """
@@ -34,6 +35,8 @@ from arc.services.auth import purge_expired
 from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers handlers)
 from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
+from arc.services.library import jobs as library_jobs  # noqa: F401  (registers handlers)
+from arc.services.library.names import LIBRARY_SCAN
 
 log = logging.getLogger("arc.worker")
 
@@ -232,6 +235,19 @@ async def run(settings: Settings) -> None:
         id=catalog_jobs.SEASON_SWEEP,
         args=[factory, catalog_jobs.SEASON_SWEEP],
     )
+    # Library ingest (FR-L1): walk the download and manual-drop directories.
+    # ``next_run_time`` is now, not one interval from now — a worker that has
+    # just started is exactly when a file dropped in while it was down needs
+    # picking up, and waiting two minutes to notice would be the first thing
+    # anyone complained about.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=settings.library_scan_interval_seconds,
+        id=LIBRARY_SCAN,
+        args=[factory, LIBRARY_SCAN],
+        next_run_time=datetime.now(UTC),
+    )
     scheduler.start()
 
     # …and once now if it has never run. A fresh deployment would otherwise
@@ -250,6 +266,7 @@ async def run(settings: Settings) -> None:
             "stale_after_s": settings.worker_stale_after,
             "stale_sweep_s": STALE_SWEEP_SECONDS,
             "session_purge_s": SESSION_PURGE_SECONDS,
+            "library_scan_s": settings.library_scan_interval_seconds,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
         },
     )

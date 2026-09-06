@@ -600,6 +600,44 @@ async def test_api_dedupe_hit_is_200_not_201(jobs_client: AsyncClient) -> None:
     assert len(listed.json()) == 1
 
 
+async def test_a_library_scan_dedupes_on_its_type_without_being_asked(
+    jobs_client: AsyncClient,
+) -> None:
+    """A scan is the whole queue's work, not one row's (``TYPE_DEDUPED``).
+
+    The scheduler already queues it with the type as the key; a caller that
+    presses the button while that one is pending would otherwise queue a
+    second walk of the same directories — and two ffprobe storms at once.
+    """
+    first = await jobs_client.post("/api/jobs", json={"type": "library_scan"})
+    assert first.status_code == 201, first.text
+    assert first.json()["payload"]["dedupe_key"] == "library_scan"
+
+    second = await jobs_client.post("/api/jobs", json={"type": "library_scan"})
+
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"]
+    listed = await jobs_client.get("/api/jobs", params={"type": "library_scan"})
+    assert len(listed.json()) == 1
+
+
+async def test_an_explicit_dedupe_key_is_left_alone(jobs_client: AsyncClient) -> None:
+    """A caller that names a key means it; only the *default* is filled in."""
+    created = await jobs_client.post(
+        "/api/jobs", json={"type": "library_scan", "dedupe_key": "library_scan:manual"}
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["payload"]["dedupe_key"] == "library_scan:manual"
+
+
+async def test_other_types_still_queue_twice(jobs_client: AsyncClient) -> None:
+    """The default is per type, not a blanket rule: two matches are two files."""
+    first = await jobs_client.post("/api/jobs", json={"type": "match_file"})
+    second = await jobs_client.post("/api/jobs", json={"type": "match_file"})
+    assert (first.status_code, second.status_code) == (201, 201)
+    assert first.json()["id"] != second.json()["id"]
+
+
 # --- End to end (M1 definition of done) -------------------------------------
 
 

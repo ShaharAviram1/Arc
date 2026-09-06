@@ -10,7 +10,7 @@ COMPOSE_DEV := $(COMPOSE) -f deploy/docker-compose.dev.yml
 # Load the root .env into the environment of a recipe. Its URLs are already
 # host-side (Compose overrides them for containers), so nothing is rewritten
 # here. Trailing ';' so it can prefix a command.
-LOAD_ENV := set -a; if [ -f .env ]; then . ./.env; fi; set +a;
+LOAD_ENV := set -a; if [ -f .env ]; then . ./.env; fi; set +a; case "$${DATA_DIR:-}" in ""|/*) ;; *) export DATA_DIR="$$PWD/$${DATA_DIR#./}";; esac;
 
 .PHONY: help dev dev-db test lint fmt migrate revision up down logs ps clean
 
