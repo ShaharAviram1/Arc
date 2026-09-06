@@ -34,3 +34,6 @@ data/
 .idea/
 .vscode/
 *.swp
+
+# personal notes and drafts (never committed)
+notes/

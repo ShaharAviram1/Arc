@@ -28,6 +28,7 @@ from arc.config import Settings
 from arc.db import SessionFactory, create_session_factory
 from arc.main import create_app
 from arc.models import User, UserRole
+from arc.services.acquisition import nyaa
 from arc.services.auth import create_user
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
@@ -53,6 +54,24 @@ Start it with:   make dev-db
 
 Original error: {error}
 """
+
+
+@pytest.fixture(autouse=True)
+def _fresh_nyaa_client() -> Iterator[None]:
+    """Give every test its own Nyaa client (arc/services/acquisition/nyaa.py).
+
+    The client is deliberately process-wide in production — one pacing gap and
+    one cache for every concurrent search — and that is precisely what a test
+    suite must not inherit: the ten-minute cache would answer the next test
+    from the previous test's fixture, and the ``httpx.AsyncClient`` inside it
+    is bound to an event loop that ends with the test that built it.
+
+    Dropped rather than closed: closing needs an ``await`` and this has to run
+    for synchronous tests too. The transport underneath is a mock in every
+    test that has one at all.
+    """
+    yield
+    nyaa.reset_shared_client()
 
 
 @pytest.fixture
@@ -200,6 +219,10 @@ CLEANUP_TABLES = (
     "jobs",
     "watch_progress",
     "list_entries",
+    # Both cascade from ``episodes``; listed for the same reason as the two
+    # below, and because a want is keyed by a user as well as an episode.
+    "wants",
+    "torrents",
     # Both reference ``episodes``: ``media_files.episode_id`` nulls out and
     # ``renditions`` cascades, but deleting them first keeps the order the
     # same shape as the foreign keys and survives an ``ondelete`` changing.

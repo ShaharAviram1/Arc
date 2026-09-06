@@ -169,6 +169,33 @@ arc/
 4. `poll_qbit` (every 60 s): sync progress; on completion → state
    `downloaded`, enqueue `ingest_file` with the largest video file.
 
+### 5.1a Acquisition as built (M6)
+- `compute_wants` (every 15 min, after any list change, and after a watch
+  completion): for each `watching`/`planned` entry, `p` = max(furthest
+  completed episode, list progress); wants `p+1 … p+N` (`look_ahead_n`,
+  capped at 10) that have aired. `on_hold`/`dropped`/`completed`/off-list
+  → wants deleted. Episodes with a live want in `not_wanted` (or
+  `unavailable` after a 1-day retry delay) → `wanted` + `search_release`.
+  A `wanted`/`unavailable` episode with no live want returns to
+  `not_wanted`; `searching` onwards is never touched by the reconciler.
+- `search_release`: `wanted→searching`; Nyaa search + filter + rank; top
+  pick → `torrents` row (reuse on duplicate hash) → qBittorrent add →
+  `downloading`. No candidate → requeue itself (same dedupe key): every 30
+  min while the episode aired < 24 h ago, else every 6 h; after 14 days →
+  `unavailable` "no acceptable release found". qBittorrent unreachable →
+  backoff, stays `searching`.
+- `poll_qbit` (every 60 s): syncs progress/state for Arc-category torrents;
+  on completion → `downloaded`, largest video file under the mapped host
+  directory is ingested with `expected=[anime_id, number]` so the matcher's
+  prior applies → `matching` → `matched` via `link()`. A torrent that
+  vanished from the client → `unavailable` "removed from client".
+- `episodes.state` is written only by `acquisition/states.transition()`,
+  which enforces the spec §6 table and logs every edge. Extra edges beyond
+  the diagram: `searching → not_wanted` (want vanished mid-search),
+  `matching → unavailable` (delivered file rejected in review),
+  `wanted|unavailable → not_wanted`. One process-wide Nyaa client keeps the
+  pacing and cache shared across concurrent searches.
+
 ### 5.2 Ingest and match
 1. `ingest_file`: create `media_files`, ffprobe it, parse filename.
 2. `match_file`: candidates = expected episode (if Arc downloaded it, prior
@@ -349,6 +376,7 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title |
+| `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 
 ## 6. External integrations
 
@@ -356,8 +384,8 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|---|
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
-| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` | none | be polite: ≤1 req/2 s, cache 10 min | `c=1_2` = Anime English-translated. `f=2` for trusted only (used as a tie-break, not a filter). |
-| qBittorrent Web API | local user/pass in env | n/a | `auth/login`, `torrents/add`, `torrents/info?category=arc`, `torrents/delete`. |
+| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 4 query forms per episode (romaji/english, `- NN`, `SNNENN`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
+| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Python SDK `anthropic`; model `claude-opus-5`; structured outputs; streaming. |
 
 ## 7. Security
@@ -427,7 +455,8 @@ logged): `ENV` (dev|prod), `LOG_LEVEL`, `PUBLIC_URL`, `DATABASE_URL`,
 0.88 non-exact cap, so in practice auto-link needs an exact normalised title
 or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `LIBRARY_SETTLE_SECONDS` (60), `LIBRARY_SCAN_BATCH` (200),
-`LIBRARY_SCAN_COMMIT_EVERY` (25), `VIDEO_EXTENSIONS`, `WORKER_CONCURRENCY`
+`LIBRARY_SCAN_COMMIT_EVERY` (25), `VIDEO_EXTENSIONS`, `NYAA_URL`,
+`QBIT_CATEGORY` (arc), `QBIT_DOWNLOADS_PATH` (/data/downloads), `WORKER_CONCURRENCY`
 (default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
 (seconds to wait for in-flight jobs on shutdown, default 30),
 `WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
@@ -546,3 +575,8 @@ env (it is not in the settings table).
   close title / trusted prior); prior needs title ≥ 0.60; movies match as
   episode 1 of a MOVIE entry; recap `.5` files always review; an existing
   link is never cleared automatically; scans batch and commit incrementally.
+- 2026-09-06 — M6 acquisition: on_hold generates no wants; `p` is the max of
+  completed and list progress; season assumed 1 when unmarked on either
+  side; unavailable episodes retry after 1 day; per-show overrides in the
+  settings table (no schema change); qBittorrent 5 add dialect handled;
+  live DoD run downloaded one episode end to end.

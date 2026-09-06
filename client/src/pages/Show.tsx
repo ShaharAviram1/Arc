@@ -4,11 +4,14 @@ import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   anilistUrl,
   catalogErrorMessage,
+  episodeProgressPercent,
   episodeStateClass,
   episodeStateLabel,
   formatAirDate,
   listErrorMessage,
   malUrl,
+  releaseLine,
+  unavailableReason,
   useAnime,
   useSetListEntry,
   type AnimeDetail,
@@ -127,13 +130,69 @@ function ScoreControl({ animeId, score }: { animeId: number; score: number | nul
   )
 }
 
+/**
+ * How far acquisition has got (FR-A7). The bar carries the number for assistive
+ * tech and the text beside it carries the same number for everyone else, so
+ * neither has to read the other's markup.
+ */
+function AcquisitionProgress({ percent }: { percent: number }) {
+  const text = `${String(percent)}%`
+
+  return (
+    <span className="mt-1 flex items-center gap-1.5">
+      <span
+        role="progressbar"
+        aria-label="Acquisition progress"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuetext={text}
+        className="block h-1 w-16 overflow-hidden rounded-full bg-[var(--arc-border)]"
+      >
+        <span
+          className="block h-full rounded-full bg-[var(--arc-accent)]"
+          style={{ width: text }}
+        />
+      </span>
+      <span className="text-xs text-[var(--arc-text-muted)] tabular-nums">{text}</span>
+    </span>
+  )
+}
+
+/**
+ * Why an episode is not coming (FR-A6). "Unavailable" on its own invites the
+ * question, so the marker answers it on hover and says the whole thing to a
+ * screen reader, which cannot hover.
+ */
+function UnavailableHint({ reason }: { reason: string }) {
+  return (
+    <span
+      role="img"
+      title={reason}
+      aria-label={`Unavailable: ${reason}`}
+      className="ml-1.5 cursor-help text-xs text-[var(--arc-text-muted)]"
+    >
+      ⓘ
+    </span>
+  )
+}
+
 function EpisodeRow({ episode, timezone }: { episode: EpisodeOut; timezone?: string }) {
   const title = episode.title ?? `Episode ${episode.number}`
+  const percent = episodeProgressPercent(episode)
+  const reason = unavailableReason(episode)
 
   return (
     <tr className="border-t border-[var(--arc-border)]">
       <td className="px-3 py-2 text-[var(--arc-text-muted)] tabular-nums">{episode.number}</td>
-      <td className="px-3 py-2 text-[var(--arc-text)]">{title}</td>
+      <td className="px-3 py-2 text-[var(--arc-text)]">
+        {title}
+        {episode.release === null ? null : (
+          <span className="mt-0.5 block text-xs text-[var(--arc-text-muted)]">
+            {releaseLine(episode.release)}
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 whitespace-nowrap text-[var(--arc-text-muted)]">
         {formatAirDate(episode.air_at, timezone)}
         {episode.air_at_estimated ? (
@@ -149,10 +208,16 @@ function EpisodeRow({ episode, timezone }: { episode: EpisodeOut; timezone?: str
         {episode.aired ? 'Aired' : 'Unaired'}
       </td>
       <td className="px-3 py-2">
-        <span
-          className={`inline-block rounded-full border px-2 py-0.5 text-xs ${episodeStateClass(episode.state)}`}
-        >
-          {episodeStateLabel(episode.state)}
+        <span className="flex flex-col items-start">
+          <span className="whitespace-nowrap">
+            <span
+              className={`inline-block rounded-full border px-2 py-0.5 text-xs ${episodeStateClass(episode.state)}`}
+            >
+              {episodeStateLabel(episode.state)}
+            </span>
+            {reason === null ? null : <UnavailableHint reason={reason} />}
+          </span>
+          {percent === null ? null : <AcquisitionProgress percent={percent} />}
         </span>
       </td>
       <td className="px-3 py-2 text-center">

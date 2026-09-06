@@ -13,7 +13,19 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from arc import __version__
-from arc.api import anime, auth, catalog, health, home, invites, jobs, review, schedule, users
+from arc.api import (
+    acquisition,
+    anime,
+    auth,
+    catalog,
+    health,
+    home,
+    invites,
+    jobs,
+    review,
+    schedule,
+    users,
+)
 from arc.api import list as list_api
 from arc.api.auth import SessionRefreshMiddleware
 from arc.api.csrf import OriginCheckMiddleware
@@ -191,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(schedule.router)
     app.include_router(home.router)
     app.include_router(review.router)
+    app.include_router(acquisition.router)
     return app
 
 

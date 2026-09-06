@@ -115,8 +115,11 @@ any time, and the owner uses it daily.
   and save path; the server polls completion and hands the file to the
   library pipeline.
 - FR-A6 If no acceptable release exists yet, retry on a backoff schedule
-  (e.g. every 30 min on air day, then every 6 h, give up after 14 days and
-  flag the episode "unavailable").
+  (every 30 min on air day, then every 6 h). After 14 days flag the episode
+  "unavailable"; while someone still wants it, retry once a day (cheap: a
+  few RSS requests) and stop only when the want goes away. If a downloaded
+  file turns out not to be the episode (ignored in review), the episode is
+  flagged unavailable the same way.
 - FR-A7 Users can see the acquisition status of each episode on the show page
   (wanted, searching, downloading with %, preparing, ready, unavailable).
 
@@ -178,7 +181,7 @@ any time, and the owner uses it daily.
   completed, and set a score (1–10) from the show page.
 - FR-W3 Marking an episode as watched manually is allowed (e.g. watched
   elsewhere) and is treated the same as FR-S4.
-- FR-W4 Dropped and completed shows generate no acquisition wants.
+- FR-W4 Dropped, completed and on-hold shows generate no acquisition wants.
 
 ### 4.7 MyAnimeList sync
 - FR-M1 Each user links their own MAL account via OAuth 2.0 (PKCE). Tokens
@@ -327,3 +330,6 @@ preparing → failed → (retry) → preparing
   source when AniList is down; daily season pre-cache. Chosen after an
   all-day AniList outage; MAL official preferred over Jikan because it is
   first-party and its client id is needed for M9 anyway.
+- 2026-09-06 — FR-A6 clarified: after the 14-day give-up, unavailable
+  episodes are retried daily for as long as a want exists; a downloaded
+  file rejected in review flags the episode unavailable.

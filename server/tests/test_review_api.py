@@ -20,7 +20,8 @@ from arc.api.deps import NOT_AUTHENTICATED
 from arc.api.review import ALREADY_LINKED, ITEM_NOT_FOUND, NOT_IGNORED
 from arc.config import Settings
 from arc.db import SessionFactory
-from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState
+from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState, Torrent
+from arc.services.acquisition.reject import QBIT_REJECTED, WRONG_FILE
 from arc.services.catalog import Breaker, CatalogService
 from tests.anilist_mock import FRIEREN_ID, FakeAniList, frieren_fake
 from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD, add_user, api_transport, login
@@ -496,7 +497,97 @@ class TestConfirm:
         assert response.status_code == 422
 
 
+async def seed_download(
+    factory: SessionFactory,
+    *,
+    anilist_id: int,
+    number: int = 5,
+    state: EpisodeState = EpisodeState.MATCHING,
+    with_torrent: bool = True,
+) -> Episode:
+    """An episode Arc downloaded a release for, mid-match."""
+    async with factory() as session:
+        anime = Anime(anilist_id=anilist_id, title_romaji="Sousou no Frieren")
+        session.add(anime)
+        await session.flush()
+        episode = Episode(anime_id=anime.id, number=number, state=state)
+        session.add(episode)
+        await session.flush()
+        if with_torrent:
+            session.add(
+                Torrent(
+                    episode_id=episode.id,
+                    info_hash=f"{anilist_id:040d}",
+                    qbit_state="stalledUP",
+                )
+            )
+        await session.commit()
+        return episode
+
+
 class TestIgnoreAndReopen:
+    async def test_ignoring_a_downloaded_file_frees_the_episode(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """Otherwise the episode sits in ``matching`` for ever (spec §6)."""
+        episode = await seed_download(api_factory, anilist_id=971001)
+        media_file = await seed_file(
+            api_factory, data_dir, name=FRIEREN_FILE, directory=f"downloads/{episode.id}"
+        )
+
+        response = await user_client.post(f"/api/review/{media_file.id}/ignore")
+
+        assert response.status_code == 200
+        async with api_factory() as session:
+            after = await session.get(Episode, episode.id)
+            assert after is not None
+            assert after.state is EpisodeState.UNAVAILABLE
+            assert after.unavailable_reason == WRONG_FILE
+            torrent = await session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+            assert torrent is not None and torrent.qbit_state == QBIT_REJECTED
+
+    async def test_ignoring_a_manually_dropped_file_touches_no_episode(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """A mislabelled file somebody dropped in says nothing about anything."""
+        episode = await seed_download(api_factory, anilist_id=971002)
+        media_file = await seed_file(api_factory, data_dir, name=FRIEREN_FILE)
+
+        await user_client.post(f"/api/review/{media_file.id}/ignore")
+
+        async with api_factory() as session:
+            after = await session.get(Episode, episode.id)
+            assert after is not None and after.state is EpisodeState.MATCHING
+
+    async def test_a_file_in_a_download_directory_arc_never_chose_is_left_alone(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        episode = await seed_download(api_factory, anilist_id=971003, with_torrent=False)
+        media_file = await seed_file(
+            api_factory, data_dir, name=FRIEREN_FILE, directory=f"downloads/{episode.id}"
+        )
+
+        await user_client.post(f"/api/review/{media_file.id}/ignore")
+
+        async with api_factory() as session:
+            after = await session.get(Episode, episode.id)
+            assert after is not None and after.state is EpisodeState.MATCHING
+
+    async def test_an_episode_already_matched_elsewhere_is_not_disturbed(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """Another file linked to it first; this one being wrong changes nothing."""
+        episode = await seed_download(api_factory, anilist_id=971004, state=EpisodeState.MATCHED)
+        media_file = await seed_file(
+            api_factory, data_dir, name=FRIEREN_FILE, directory=f"downloads/{episode.id}"
+        )
+
+        await user_client.post(f"/api/review/{media_file.id}/ignore")
+
+        async with api_factory() as session:
+            after = await session.get(Episode, episode.id)
+            assert after is not None and after.state is EpisodeState.MATCHED
+
     async def test_ignore_takes_it_out_of_the_queue(
         self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
     ) -> None:

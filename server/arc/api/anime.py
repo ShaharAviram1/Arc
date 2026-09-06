@@ -34,7 +34,7 @@ from sqlalchemy import or_, select
 from arc.api.anime_schemas import AnimeDetail, AnimeSummary, RelationOut, SearchPage
 from arc.api.deps import AdminUser, CatalogDep, CurrentUser, SessionDep
 from arc.api.jobs import JobOut
-from arc.models import Anime, Job, ListEntry
+from arc.models import Anime, Episode, Job, ListEntry, Torrent
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceNotFound,
@@ -135,6 +135,23 @@ async def search(
     )
 
 
+async def _torrents_for(session: SessionDep, anime_id: int) -> dict[int, Torrent]:
+    """``episode_id → torrent`` for one show, newest row per episode.
+
+    One query for the whole episode list rather than one per row. Ordered by
+    id so that the last write wins when an episode has been re-fetched: the
+    release a user is being shown is the one currently downloading, not the
+    one that was abandoned last week.
+    """
+    rows = await session.scalars(
+        select(Torrent)
+        .join(Episode, Episode.id == Torrent.episode_id)
+        .where(Episode.anime_id == anime_id)
+        .order_by(Torrent.id)
+    )
+    return {torrent.episode_id: torrent for torrent in rows.all()}
+
+
 @router.get(
     "/{anime_id}",
     response_model=AnimeDetail,
@@ -171,6 +188,7 @@ async def detail(
         now=now(),
         list_entry=entry,
         relation_ids=await _relation_ids(session, anime),
+        torrents=await _torrents_for(session, anime.id),
     )
 
 

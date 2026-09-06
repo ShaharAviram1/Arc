@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus
+from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus, Torrent
 from arc.services.catalog import preferred_title
 from arc.services.catalog.airing import (
     FINISHED,
@@ -216,6 +216,44 @@ class RelationOut(BaseModel):
         return anilist_ids, mal_ids
 
 
+class ReleaseOut(BaseModel):
+    """The Nyaa release Arc picked for an episode (FR-A3, FR-A7).
+
+    Shown so a user can see *what* is being downloaded, and so an admin can
+    tell at a glance that the ranking rules did what they were meant to. It
+    survives the download: the row stays after the file is matched, and
+    "which group's encode is this?" is a question people ask of an episode
+    they are about to watch.
+    """
+
+    #: Release group as the filename parser read it; null when the name had
+    #: none, which happens with scene-style releases.
+    group: str | None = None
+    resolution: str | None = None
+    #: The raw release title. The client renders it in a tooltip.
+    title: str | None = None
+    #: Seeders **at pick time**, not now — it is what the ranker saw.
+    seeders: int | None = None
+
+    @classmethod
+    def from_torrent(cls, torrent: Torrent) -> ReleaseOut:
+        return cls(
+            group=torrent.group,
+            resolution=torrent.resolution,
+            title=torrent.title,
+            seeders=torrent.seeders,
+        )
+
+
+#: Episode states whose download percentage means something to a user (FR-A7).
+#: Before ``downloading`` there is nothing to report and after ``downloaded``
+#: the number would be a permanent 100 % on an episode that is already
+#: playable, which reads as "still working" rather than as "done".
+PROGRESS_STATES: frozenset[EpisodeState] = frozenset(
+    {EpisodeState.DOWNLOADING, EpisodeState.DOWNLOADED}
+)
+
+
 class EpisodeOut(BaseModel):
     """One row of the show page's episode list."""
 
@@ -234,6 +272,16 @@ class EpisodeOut(BaseModel):
     #: Whether this user finished it (FR-S4). Always false until M8 writes
     #: ``watch_progress``.
     watched: bool = False
+    #: 0..1 while the episode is downloading, null otherwise (FR-A7). A
+    #: fraction rather than a percentage: the client formats it, and a server
+    #: that already rounded has thrown away the difference between 99.4 % and
+    #: 99.6 %.
+    download_progress: float | None = None
+    #: Why the search gave up, in a sentence (FR-A6, FR-A7). Only ever set
+    #: while the state is ``unavailable``.
+    unavailable_reason: str | None = None
+    #: The release Arc picked, once it has picked one.
+    release: ReleaseOut | None = None
 
     @classmethod
     def from_episode(
@@ -244,6 +292,7 @@ class EpisodeOut(BaseModel):
         anime_status: str | None,
         boundary: int = 0,
         watched: bool = False,
+        torrent: Torrent | None = None,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module."""
         return cls(
@@ -255,6 +304,13 @@ class EpisodeOut(BaseModel):
             aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
             state=episode.state,
             watched=watched,
+            download_progress=(
+                torrent.progress
+                if torrent is not None and episode.state in PROGRESS_STATES
+                else None
+            ),
+            unavailable_reason=episode.unavailable_reason,
+            release=ReleaseOut.from_torrent(torrent) if torrent is not None else None,
         )
 
 
@@ -330,6 +386,7 @@ class AnimeDetail(AnimeCore):
         list_entry: ListEntry | None = None,
         watched: frozenset[int] = frozenset(),
         relation_ids: dict[tuple[str, int], int] | None = None,
+        torrents: dict[int, Torrent] | None = None,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -370,6 +427,7 @@ class AnimeDetail(AnimeCore):
                     anime_status=anime.status,
                     boundary=boundary,
                     watched=episode.id in watched,
+                    torrent=(torrents or {}).get(episode.id),
                 )
                 for episode in episodes
             ],
@@ -391,8 +449,10 @@ __all__ = [
     "ListEntryOut",
     "ListEntryPatch",
     "ListRow",
+    "PROGRESS_STATES",
     "NextAiringOut",
     "RelationOut",
+    "ReleaseOut",
     "SearchPage",
     "TitleOut",
     "aired_through",

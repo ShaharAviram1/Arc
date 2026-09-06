@@ -21,6 +21,12 @@ null: the number described how sure the *matcher* was, and once a person has
 chosen the show there is nothing left for it to describe. The candidate list
 is kept — it is what was on screen when the choice was made.
 
+**What ignoring does.** Takes the file out of the queue — and, if Arc
+downloaded it, tells the *episode* so: the release Arc chose was not this
+episode after all, so the episode leaves ``matching`` for ``unavailable`` and
+the daily retry looks again (:mod:`arc.services.acquisition.reject`). A file
+somebody dropped in by hand carries no such claim and changes nothing.
+
 A file that is already linked is a 409, not a silent relink: the client should
 reopen it first, so that "I changed my mind" is a deliberate two-step rather
 than a double-click. Since every linked state (``auto``, ``confirmed``) carries
@@ -52,6 +58,7 @@ from arc.api.review_schemas import (
 )
 from arc.config import Settings
 from arc.models import Anime, MediaFile, ReviewState
+from arc.services.acquisition.reject import reject_download
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceUnavailable,
@@ -263,11 +270,26 @@ async def ignore(
 
     The row stays — the file is still on disk, and re-creating it on the next
     scan only to ignore it again would be a queue that never empties.
+
+    If the file is one **Arc downloaded**, ignoring it also says something
+    about the *episode*: the release Arc picked was not it, and the episode has
+    been sitting in ``matching`` waiting for this answer. It goes to
+    ``unavailable``, which is both the sentence the show page shows and the
+    state the daily retry looks for — see
+    :mod:`arc.services.acquisition.reject`.
     """
     media_file = await _load(session, media_file_id)
     media_file.review_state = ReviewState.IGNORED
+    episode = await reject_download(session, media_file, downloads_dir=settings.downloads_dir)
     await session.commit()
-    log.info("review item ignored", extra={"media_file_id": media_file.id, "user_id": user.id})
+    log.info(
+        "review item ignored",
+        extra={
+            "media_file_id": media_file.id,
+            "user_id": user.id,
+            "episode_unavailable": episode.id if episode is not None else None,
+        },
+    )
     return await _item(session, media_file, settings)
 
 

@@ -31,6 +31,9 @@ from arc.config import Settings, get_settings
 from arc.core.logging import setup_logging
 from arc.db import SessionFactory, create_engine, create_session_factory
 from arc.models import Anime, Job
+from arc.services.acquisition import jobs as acquisition_jobs  # noqa: F401  (registers handlers)
+from arc.services.acquisition.names import COMPUTE_WANTS, POLL_QBIT
+from arc.services.acquisition.nyaa import close_shared_client
 from arc.services.auth import purge_expired
 from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers handlers)
 from arc.services.catalog.seasons import current_season
@@ -65,6 +68,17 @@ SEASON_SWEEP_MINUTE = 30
 #: followed show's scheduled air time"). The job itself looks 90 minutes
 #: ahead, so an hourly period covers every air time with margin.
 PRE_AIR_SWEEP_SECONDS = 3600
+
+#: How often to recompute every user's acquisition window (§5.1 step 1). The
+#: window also moves on every list change and every watch completion, both of
+#: which enqueue the job themselves; this is the tick that catches what
+#: neither can see — an episode airing.
+COMPUTE_WANTS_SECONDS = 900
+
+#: How often to ask qBittorrent what it is doing (§5.1 step 4). A minute is
+#: the resolution of the download percentage on the show page (FR-A7) and the
+#: worst-case delay between a torrent finishing and the transcode starting.
+POLL_QBIT_SECONDS = 60
 
 #: How often to look for MAL-only rows that AniList could now identify
 #: (FR-C6). Hourly: the ids only change when an outage has just ended, and the
@@ -235,6 +249,27 @@ async def run(settings: Settings) -> None:
         id=catalog_jobs.SEASON_SWEEP,
         args=[factory, catalog_jobs.SEASON_SWEEP],
     )
+    # Acquisition (FR-A1, FR-A5): recompute the wants, and watch the client.
+    # Both start immediately rather than one interval in: a worker that has
+    # just come up is exactly when a download that finished while it was down
+    # needs noticing, and when a list change made during the outage needs
+    # acting on.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=COMPUTE_WANTS_SECONDS,
+        id=COMPUTE_WANTS,
+        args=[factory, COMPUTE_WANTS],
+        next_run_time=datetime.now(UTC),
+    )
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=POLL_QBIT_SECONDS,
+        id=POLL_QBIT,
+        args=[factory, POLL_QBIT],
+        next_run_time=datetime.now(UTC),
+    )
     # Library ingest (FR-L1): walk the download and manual-drop directories.
     # ``next_run_time`` is now, not one interval from now — a worker that has
     # just started is exactly when a file dropped in while it was down needs
@@ -267,6 +302,8 @@ async def run(settings: Settings) -> None:
             "stale_sweep_s": STALE_SWEEP_SECONDS,
             "session_purge_s": SESSION_PURGE_SECONDS,
             "library_scan_s": settings.library_scan_interval_seconds,
+            "compute_wants_s": COMPUTE_WANTS_SECONDS,
+            "poll_qbit_s": POLL_QBIT_SECONDS,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
         },
     )
@@ -283,6 +320,9 @@ async def run(settings: Settings) -> None:
     finally:
         log.info("worker stopping")
         scheduler.shutdown(wait=False)
+        # The Nyaa client is process-wide and outlives every search job, so
+        # this is the only place that closes it (acquisition/nyaa.py).
+        await close_shared_client()
         await engine.dispose()
         log.info("worker stopped")
 

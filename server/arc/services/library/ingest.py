@@ -43,6 +43,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,12 +142,20 @@ async def ingest_file(
     path: Path,
     *,
     probe: bool = True,
+    expected: list[int] | None = None,
 ) -> MediaFile | None:
     """Create the ``media_files`` row for ``path`` and queue its match.
 
     Returns ``None`` when a row already exists, which is what makes the whole
     scan idempotent. The row is flushed, not committed: the caller owns the
     transaction, so the row and its job appear together or not at all.
+
+    ``expected`` is ``[anime_id, episode_number]`` and is passed straight into
+    the ``match_file`` payload as the matcher's prior (FR-L3). The *scan* never
+    has one — a file that appeared on disk on its own says nothing about what
+    Arc meant to download — but the qBittorrent hand-off always does, because
+    Arc chose that release for that episode
+    (:mod:`arc.services.acquisition.jobs`).
     """
     absolute = str(path.resolve())
     existing = await session.scalar(select(MediaFile).where(MediaFile.path == absolute))
@@ -174,10 +183,13 @@ async def ingest_file(
     session.add(media_file)
     await session.flush()
 
+    job_payload: dict[str, Any] = {"media_file_id": media_file.id}
+    if expected is not None:
+        job_payload["expected"] = list(expected)
     await enqueue(
         session,
         MATCH_FILE,
-        {"media_file_id": media_file.id},
+        job_payload,
         dedupe_key=match_dedupe_key(media_file.id),
     )
     log.info(

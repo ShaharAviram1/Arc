@@ -19,7 +19,9 @@ Three rules live here.
   ``matched``, which is right from every earlier state, and would be a
   downgrade from ``preparing`` or ``ready`` — a re-linked file must not send a
   playable episode back to the start of the pipeline (FR-P5: the source is
-  kept precisely so a rendition can outlive it).
+  kept precisely so a rendition can outlive it). The rule itself lives in
+  :mod:`arc.services.acquisition.states`, which owns every write to
+  ``episodes.state``; this module only calls it.
 * **Linking is idempotent.** Running the same match twice writes the same row
   twice with the same values, which is what lets the job be retried.
 """
@@ -34,13 +36,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState
+from arc.services.acquisition.states import TERMINAL_STATES, advance_to_matched
 
 log = logging.getLogger(__name__)
-
-#: States a link must not pull an episode out of. ``ready`` is the obvious
-#: one; ``preparing`` is the same argument one step earlier — a transcode in
-#: flight is not restarted because the file it is reading got re-matched.
-TERMINAL_STATES: frozenset[EpisodeState] = frozenset({EpisodeState.PREPARING, EpisodeState.READY})
 
 
 class LinkError(RuntimeError):
@@ -85,15 +83,6 @@ async def ensure_episode(session: AsyncSession, anime_id: int, number: int) -> E
     return episode
 
 
-def advance_to_matched(episode: Episode) -> bool:
-    """Move ``episode`` to ``matched`` unless that would be a downgrade."""
-    if episode.state in TERMINAL_STATES or episode.state is EpisodeState.MATCHED:
-        return False
-    episode.state = EpisodeState.MATCHED
-    episode.state_changed_at = datetime.now(UTC)
-    return True
-
-
 async def link(
     session: AsyncSession,
     media_file: MediaFile,
@@ -118,7 +107,7 @@ async def link(
         media_file.match_confidence = confidence
     if candidates is not None:
         media_file.match_candidates = candidates
-    moved = advance_to_matched(episode)
+    moved = advance_to_matched(episode, reason=f"media file {media_file.id} linked")
     await session.flush()
     log.info(
         "media file linked",

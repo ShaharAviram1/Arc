@@ -19,9 +19,22 @@ from arc.models._columns import TZDateTime, bigint_pk, created_at
 class Want(Base):
     """(user, episode) → "this user wants this episode" (FR-A1).
 
-    Rows are not deleted when a want lapses: ``dropped_at`` plus
-    ``drop_reason`` records why, which retention needs (FR-T2) and which
-    makes "why was this never fetched?" answerable.
+    The table is a **reconciled** view of everybody's list, rebuilt by
+    :func:`arc.services.acquisition.wants.compute_wants`, and the two ways a
+    want ends are deliberately different.
+
+    A want that lapses because the *window* moved — the user watched ahead,
+    dropped the show, removed it from their list — is **deleted**. There is
+    nothing to remember: the window is recomputed from the list every fifteen
+    minutes, so the row would come back the moment it applied again, and a
+    tombstone for it would have to be distinguished from the other kind on
+    every read.
+
+    A want dropped by FR-T2 — "you have had this ready for D days and have not
+    watched it" (M10) — is **kept**, with ``dropped_at`` and ``drop_reason``.
+    That one is a statement about a user and an episode rather than about the
+    window, it must survive the next recompute, and it is what makes "why was
+    this never fetched?" answerable.
     """
 
     __tablename__ = "wants"

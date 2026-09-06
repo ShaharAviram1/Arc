@@ -16,6 +16,16 @@ services:
   qbittorrent:
     ports:
       - "127.0.0.1:8080:8080"
+    # In dev the worker runs on the *host* and has to open the files
+    # qBittorrent wrote, so the download directory is a bind mount of the
+    # repository's own `data/downloads` rather than a slice of the `arc_data`
+    # named volume. `../data/downloads` is relative to this file, i.e. the
+    # repository root — the same directory `DATA_DIR=./data` resolves to when
+    # the worker is started from the root, and the one to point `DATA_DIR` at
+    # (absolutely) when starting it from `server/`. The named volume still
+    # backs the rest of `/data`, and production keeps it for all of it.
+    volumes:
+      - ../data/downloads:/data/downloads
 
   # api / worker / caddy are not started in dev; they run on the host with hot
   # reload. Listing them with `profiles` keeps a bare `up` from starting them.

@@ -104,10 +104,27 @@ class Settings(BaseSettings):
     # --- Anthropic -------------------------------------------------------
     anthropic_api_key: SecretStr | None = None
 
+    # --- Nyaa (M6) -------------------------------------------------------
+    #: The Nyaa origin. Configurable for the same reason ``ANILIST_URL`` is:
+    #: the test suite points it at a mock transport, and an operator may want
+    #: a mirror. The RSS path is built by
+    #: :mod:`arc.services.acquisition.nyaa`, not spelled out here.
+    nyaa_url: str = "https://nyaa.si"
+
     # --- qBittorrent -----------------------------------------------------
     qbit_url: str = "http://localhost:8080"
     qbit_user: str | None = None
     qbit_pass: SecretStr | None = None
+    #: The category every torrent Arc adds is filed under. It is also the
+    #: filter ``torrents/info`` is polled with, so nothing a person added by
+    #: hand in the same client is ever touched by Arc (FR-A5).
+    qbit_category: str = "arc"
+    #: Where qBittorrent writes downloads **as qBittorrent sees it**. It is a
+    #: container path, and ``DATA_DIR/downloads`` is the same directory as the
+    #: worker sees it; :func:`arc.services.acquisition.qbit.host_path` maps
+    #: one onto the other. They differ whenever the client runs in its own
+    #: container, which is every deployment (architecture.md §8).
+    qbit_downloads_path: str = "/data/downloads"
 
     # --- Media -----------------------------------------------------------
     data_dir: Path = Path("./data")

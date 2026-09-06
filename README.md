@@ -37,6 +37,33 @@ reload. Ctrl-C stops all three; the containers keep running (`make down`).
 - qBittorrent Web UI — <http://localhost:8080> (dev only; in production it is
   bound to the internal Docker network)
 
+### qBittorrent's first-run password
+
+`linuxserver/qbittorrent` (4.6+) will not take a password from the
+environment. On the container's **first** start it generates a temporary one
+and prints it to the log; set a permanent one to match `QBIT_PASS` in `.env`
+(default `admin` / `adminadmin`) once, and it is kept in the `qbit_config`
+volume from then on:
+
+```bash
+docker logs arc-qbittorrent-1 | grep -i "temporary password"
+TMP=<the password it printed>
+curl -c /tmp/qb -H 'Referer: http://localhost:8080' \
+     -d "username=admin&password=$TMP" \
+     http://localhost:8080/api/v2/auth/login
+curl -b /tmp/qb -H 'Referer: http://localhost:8080' \
+     --data-urlencode 'json={"web_ui_password":"adminadmin"}' \
+     http://localhost:8080/api/v2/app/setPreferences
+```
+
+In dev the container's `/data/downloads` is bind-mounted to the repository's
+`data/downloads` (`deploy/docker-compose.dev.yml`) so the worker, which runs
+on the host, can open the files qBittorrent finished. Point `DATA_DIR` at that
+same `data/` directory — from `server/` that means an absolute path, e.g.
+`export DATA_DIR="$PWD/../data"` — or the worker will look for the downloads
+under `server/data`. Production keeps the `arc_data` named volume, shared
+between `api`, `worker` and `qbittorrent`, and needs none of this.
+
 `.env` holds host-side URLs (`localhost`); Docker Compose overrides
 `DATABASE_URL` and `QBIT_URL` for the `api` and `worker` containers with the
 `db` / `qbittorrent` service hostnames. So the api and worker can also be run

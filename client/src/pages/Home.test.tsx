@@ -4,7 +4,13 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
 import { Home } from '@/pages/Home'
-import { APOTHECARY, EMPTY_HOME, FRIEREN, HOME_PAGE } from '@/test/animeFixtures'
+import {
+  APOTHECARY,
+  EMPTY_HOME,
+  FRIEREN,
+  HOME_PAGE,
+  HOME_PAGE_DOWNLOADING,
+} from '@/test/animeFixtures'
 import { mockApi, TEST_USER, type MockRoutes } from '@/test/apiMock'
 
 const HEALTH = { status: 'ok', version: '0.1.0', env: 'dev' }
@@ -68,6 +74,21 @@ describe('Home', () => {
 
     // Exactly one of the two came back with a synthesised air date (FR-C6).
     expect(week.getAllByText('est.')).toHaveLength(1)
+  })
+
+  it('puts the download percentage after the state badge (FR-A7)', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE_DOWNLOADING } })
+
+    expect(await screen.findByText('Downloading')).toBeInTheDocument()
+    const week = within(section('New this week'))
+    expect(week.getByText('42%')).toBeInTheDocument()
+  })
+
+  it('shows no percentage for an episode that is not being fetched', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE } })
+    await screen.findByText('Behind by 4 · 7 of 12 aired')
+
+    expect(within(section('New this week')).queryByText(/%$/)).not.toBeInTheDocument()
   })
 
   it('keeps continue watching as a placeholder until playback lands', async () => {

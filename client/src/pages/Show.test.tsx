@@ -14,6 +14,7 @@ import {
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
+  UNAVAILABLE_REASON,
   UNLINKED_RELATION,
 } from '@/test/animeFixtures'
 import { callTo, jsonBodyOf, mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
@@ -111,6 +112,93 @@ describe('Show', () => {
     const play = await screen.findAllByRole('link', { name: 'Play' })
     expect(play).toHaveLength(1)
     expect(play[0]).toHaveAttribute('href', '/watch/9001')
+  })
+
+  it('shows how far a downloading episode has got, as a bar and as text (FR-A7)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const bar = await screen.findByRole('progressbar')
+    expect(bar).toHaveAttribute('aria-valuenow', '42')
+    expect(bar).toHaveAttribute('aria-valuemin', '0')
+    expect(bar).toHaveAttribute('aria-valuemax', '100')
+    expect(bar).toHaveAttribute('aria-valuetext', '42%')
+    expect(screen.getByText('42%')).toBeInTheDocument()
+    // Only the transfer gets a bar: searching and wanted are just badges.
+    expect(screen.getAllByRole('progressbar')).toHaveLength(1)
+    expect(screen.getAllByText('Searching')).toHaveLength(2)
+  })
+
+  it('reads downloaded and matching as complete', async () => {
+    const [first, ...rest] = FRIEREN_DETAIL.episodes
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          episodes: [{ ...first, state: 'matching', download_progress: null }, ...rest],
+        },
+      },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const bars = screen.getAllByRole('progressbar')
+    expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['100', '42'])
+    expect(screen.getByText('100%')).toBeInTheDocument()
+  })
+
+  it('says why an unavailable episode is not coming (FR-A6)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    // Hoverable for a mouse, and spelled out for a screen reader, which cannot.
+    const hint = await screen.findByLabelText(`Unavailable: ${UNAVAILABLE_REASON}`)
+    expect(hint).toHaveAttribute('title', UNAVAILABLE_REASON)
+    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+  })
+
+  it('names the chosen release under the episode title (FR-A3)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    expect(await screen.findByText('[SubsPlease] · 1080p · 123 seeders')).toBeInTheDocument()
+  })
+
+  it('drops the group from the release line when the parser did not find one', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          episodes: FRIEREN_DETAIL.episodes.map((episode) =>
+            episode.release === null
+              ? episode
+              : { ...episode, release: { ...episode.release, group: null } },
+          ),
+        },
+      },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText('1080p · 123 seeders')).toBeInTheDocument()
+  })
+
+  it('shows no release line for an episode nothing has been picked for', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    // Episode 1 is ready and carries no release, so its cell is the title alone
+    // — the exact-text match lands on the cell itself, not on an inner span.
+    const title = await screen.findByText('The Journey’s End')
+    expect(title.tagName).toBe('TD')
+    expect(screen.getAllByText('[SubsPlease] · 1080p · 123 seeders')).toHaveLength(1)
   })
 
   it('shows score and progress only once the show is on the list', async () => {

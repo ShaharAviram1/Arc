@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, ListEntry, ListStatus, UpdatedBy
+from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.catalog.cache import ensure_anime
 from arc.services.catalog.service import CatalogService
 
@@ -108,6 +109,13 @@ async def set_list_entry(
     entry.updated_at = datetime.now(UTC)
 
     await session.flush()
+    # The acquisition window is a function of this row (FR-A1, FR-W4), so
+    # every change to it queues a recompute — deduplicated, so a burst of list
+    # edits costs one job. Enqueued rather than computed inline: reconciling
+    # every user's window is not something a request should wait on, and the
+    # fifteen-minute sweep would get there anyway. In the same transaction, so
+    # a list change that is rolled back does not leave work behind.
+    await enqueue_compute_wants(session)
     return entry, anime
 
 
@@ -123,6 +131,9 @@ async def remove_list_entry(session: AsyncSession, *, user_id: int, anime_id: in
         return False
     await session.delete(entry)
     await session.flush()
+    # A show that left the list wants nothing (FR-W4). Same reasoning as
+    # :func:`set_list_entry`: queue it, do not compute it here.
+    await enqueue_compute_wants(session)
     return True
 
 

@@ -4,22 +4,30 @@ import { createElement, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/lib/api'
 import {
+  ACQUISITION_POLL_MS,
   anilistUrl,
   animeQueryKey,
   catalogErrorMessage,
+  episodeProgressPercent,
+  hasActiveEpisode,
   listErrorMessage,
   listQueryKey,
   malUrl,
+  releaseLine,
+  useAnime,
   useAnimeSearch,
   useRemoveListEntry,
   useSetListEntry,
   type AnimeDetail,
+  type EpisodeOut,
 } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
 import {
+  CHOSEN_RELEASE,
   FRIEREN,
   FRIEREN_DETAIL,
   FRIEREN_DETAIL_ON_LIST,
+  FRIEREN_DETAIL_SETTLED,
   listEntry,
   SEARCH_PAGE_1,
 } from '@/test/animeFixtures'
@@ -76,6 +84,143 @@ describe('catalogue links', () => {
   it('builds the public page for each source', () => {
     expect(anilistUrl(154587)).toBe('https://anilist.co/anime/154587')
     expect(malUrl(52991)).toBe('https://myanimelist.net/anime/52991')
+  })
+})
+
+describe('releaseLine', () => {
+  it('joins group, resolution and seeders in that order', () => {
+    expect(releaseLine(CHOSEN_RELEASE)).toBe('[SubsPlease] · 1080p · 123 seeders')
+  })
+
+  it('omits a part the parser did not find', () => {
+    expect(releaseLine({ ...CHOSEN_RELEASE, group: null })).toBe('1080p · 123 seeders')
+    expect(releaseLine({ ...CHOSEN_RELEASE, resolution: null })).toBe('[SubsPlease] · 123 seeders')
+    expect(releaseLine({ ...CHOSEN_RELEASE, seeders: null })).toBe('[SubsPlease] · 1080p')
+  })
+
+  it('counts a lone seeder in the singular', () => {
+    expect(releaseLine({ ...CHOSEN_RELEASE, seeders: 1 })).toBe('[SubsPlease] · 1080p · 1 seeder')
+  })
+
+  it('falls back to the raw release name when it knows nothing else', () => {
+    expect(releaseLine({ ...CHOSEN_RELEASE, group: null, resolution: null, seeders: null })).toBe(
+      CHOSEN_RELEASE.title,
+    )
+  })
+})
+
+/** An episode whose only interesting fields are the ones FR-A7 reports on. */
+function episode(overrides: Partial<EpisodeOut>): EpisodeOut {
+  return {
+    id: 1,
+    number: 1,
+    title: null,
+    air_at: null,
+    air_at_estimated: false,
+    aired: true,
+    state: 'wanted',
+    watched: false,
+    download_progress: null,
+    unavailable_reason: null,
+    release: null,
+    ...overrides,
+  }
+}
+
+describe('episodeProgressPercent', () => {
+  it('rounds a download fraction to whole percent', () => {
+    expect(episodeProgressPercent(episode({ state: 'downloading', download_progress: 0.42 }))).toBe(
+      42,
+    )
+    expect(
+      episodeProgressPercent(episode({ state: 'downloading', download_progress: 0.667 })),
+    ).toBe(67)
+  })
+
+  it('reads the states past the transfer as complete', () => {
+    expect(episodeProgressPercent(episode({ state: 'downloaded', download_progress: null }))).toBe(
+      100,
+    )
+    expect(episodeProgressPercent(episode({ state: 'matching', download_progress: null }))).toBe(
+      100,
+    )
+  })
+
+  it('has no bar for a state that is not a transfer, nor for one not reported on yet', () => {
+    expect(episodeProgressPercent(episode({ state: 'searching' }))).toBeNull()
+    expect(episodeProgressPercent(episode({ state: 'ready' }))).toBeNull()
+    expect(
+      episodeProgressPercent(episode({ state: 'downloading', download_progress: null })),
+    ).toBeNull()
+  })
+})
+
+describe('hasActiveEpisode', () => {
+  it('is true while anything is still on its way to being playable', () => {
+    expect(hasActiveEpisode(FRIEREN_DETAIL)).toBe(true)
+  })
+
+  it('is false once every episode has arrived or was never wanted', () => {
+    expect(hasActiveEpisode(FRIEREN_DETAIL_SETTLED)).toBe(false)
+  })
+
+  it('is false before there is an answer at all', () => {
+    expect(hasActiveEpisode(undefined)).toBe(false)
+  })
+})
+
+describe('useAnime', () => {
+  const detailPath = `GET /api/anime/${String(FRIEREN.id)}`
+
+  function detailCalls(fetchMock: ReturnType<typeof mockApi>): number {
+    return requestsMade(fetchMock).filter((request) => request === detailPath).length
+  }
+
+  async function settle(ms = 0): Promise<void> {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  it('re-asks on an interval while acquisition is in flight (FR-A7)', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = mockApi({ [detailPath]: { body: FRIEREN_DETAIL } })
+      const client = createQueryClient()
+
+      const { result } = renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+
+      expect(result.current.data).toEqual(FRIEREN_DETAIL)
+      expect(detailCalls(fetchMock)).toBe(1)
+
+      await settle(ACQUISITION_POLL_MS)
+      expect(detailCalls(fetchMock)).toBe(2)
+
+      await settle(ACQUISITION_POLL_MS)
+      expect(detailCalls(fetchMock)).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops polling once every episode has settled', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = mockApi({ [detailPath]: { body: FRIEREN_DETAIL_SETTLED } })
+      const client = createQueryClient()
+
+      const { result } = renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+
+      expect(result.current.data).toEqual(FRIEREN_DETAIL_SETTLED)
+      expect(detailCalls(fetchMock)).toBe(1)
+
+      await settle(ACQUISITION_POLL_MS * 4)
+      expect(detailCalls(fetchMock)).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

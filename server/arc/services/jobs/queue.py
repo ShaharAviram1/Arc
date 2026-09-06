@@ -27,8 +27,20 @@ ACTIVE_STATUSES = (JobStatus.PENDING, JobStatus.RUNNING)
 DEDUPE_FIELD = "dedupe_key"
 
 
-async def find_active(session: AsyncSession, type: str, dedupe_key: str) -> Job | None:
-    """The pending/running job for ``type`` carrying ``dedupe_key``, if any."""
+async def find_active(
+    session: AsyncSession,
+    type: str,
+    dedupe_key: str,
+    *,
+    exclude_job_id: int | None = None,
+) -> Job | None:
+    """The pending/running job for ``type`` carrying ``dedupe_key``, if any.
+
+    ``exclude_job_id`` is for a handler that requeues **itself** — the retry
+    schedule in :mod:`arc.services.acquisition.jobs` is the case. Such a job is
+    ``running`` under the very key it is about to queue under, so without this
+    the dedupe finds the caller and the retry is silently dropped.
+    """
     key_expr = cast(ColumnElement[str], Job.payload[DEDUPE_FIELD].astext)
     statement = (
         select(Job)
@@ -40,6 +52,8 @@ async def find_active(session: AsyncSession, type: str, dedupe_key: str) -> Job 
         .order_by(Job.id)
         .limit(1)
     )
+    if exclude_job_id is not None:
+        statement = statement.where(Job.id != exclude_job_id)
     existing: Job | None = await session.scalar(statement)
     return existing
 
@@ -53,6 +67,7 @@ async def enqueue(
     run_after: datetime | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     dedupe_key: str | None = None,
+    exclude_job_id: int | None = None,
 ) -> Job:
     """Insert a job row and return it (flushed, not committed).
 
@@ -74,7 +89,7 @@ async def enqueue(
     """
     body: dict[str, Any] = dict(payload or {})
     if dedupe_key is not None:
-        existing = await find_active(session, type, dedupe_key)
+        existing = await find_active(session, type, dedupe_key, exclude_job_id=exclude_job_id)
         if existing is not None:
             return existing
         body[DEDUPE_FIELD] = dedupe_key

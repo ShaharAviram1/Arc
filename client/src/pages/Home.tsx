@@ -4,6 +4,7 @@ import { CoverThumb } from '@/components/CoverThumb'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   catalogErrorMessage,
+  episodeProgressPercent,
   episodeStateClass,
   episodeStateLabel,
   formatAirDate,
@@ -93,6 +94,8 @@ function BehindCard({ item, timezone }: { item: BehindEntry; timezone?: string }
 
 function NewEpisodeRow({ item, timezone }: { item: NewEpisodeEntry; timezone?: string }) {
   const { anime, episode } = item
+  // No bar here — the row is one line, so the number alone carries it (FR-A7).
+  const percent = episodeProgressPercent(episode)
 
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--arc-border)] px-3 py-2 first:border-t-0">
@@ -118,6 +121,11 @@ function NewEpisodeRow({ item, timezone }: { item: NewEpisodeEntry; timezone?: s
       >
         {episodeStateLabel(episode.state)}
       </span>
+      {percent === null ? null : (
+        <span className="text-xs text-[var(--arc-text-muted)] tabular-nums">
+          {`${String(percent)}%`}
+        </span>
+      )}
     </li>
   )
 }

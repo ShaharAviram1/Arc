@@ -112,16 +112,16 @@ that must be verified before the next milestone starts.
   auto-linked below threshold.
 
 ### M6 — Acquisition (wants → Nyaa → qBittorrent)
-- [ ] `compute_wants` (window N, aired-only, merge across users, drop on
+- [x] `compute_wants` (window N, aired-only, merge across users, drop on
       dropped/completed) (FR-A1, FR-A2, FR-W4)
-- [ ] Nyaa RSS client: query builder, parse, filter by parser, rank by rules
+- [x] Nyaa RSS client: query builder, parse, filter by parser, rank by rules
       from `settings` with per-show overrides (FR-A3, FR-A4)
-- [ ] qBittorrent Web API client: add, info, delete (FR-A5)
-- [ ] `search_release`, `poll_qbit` jobs; retry/backoff and `unavailable`
+- [x] qBittorrent Web API client: add, info, delete (FR-A5)
+- [x] `search_release`, `poll_qbit` jobs; retry/backoff and `unavailable`
       (FR-A6)
-- [ ] Episode state machine + transitions logged (spec §6)
-- [ ] Show page: per-episode acquisition status with download % (FR-A7)
-- **DoD:** adding an airing show as watching results in the next aired
+- [x] Episode state machine + transitions logged (spec §6)
+- [x] Show page: per-episode acquisition status with download % (FR-A7)
+- **DoD (verified 2026-09-06 by orchestrator: one real episode found on Nyaa, downloaded via qBittorrent, ingested and auto-linked with the prior; show page shows the release):** adding an airing show as watching results in the next aired
   episode being found on Nyaa, downloaded by qBittorrent, and ingested, with
   no manual step. Tests cover window logic and ranking with fixtures;
   Nyaa/qBit mocked.

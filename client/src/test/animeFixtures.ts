@@ -4,6 +4,7 @@ import type {
   AnimeSearchResponse,
   AnimeSummary,
   EpisodeOut,
+  EpisodeRelease,
   ListEntry,
 } from '@/lib/anime'
 import type {
@@ -94,9 +95,22 @@ export const SEARCH_PAGE_1: AnimeSearchResponse = {
 
 export const EMPTY_SEARCH: AnimeSearchResponse = { results: [], page: 1, has_next: false }
 
+/** The release the ranked rules picked for the episode being downloaded (FR-A3). */
+export const CHOSEN_RELEASE: EpisodeRelease = {
+  group: 'SubsPlease',
+  resolution: '1080p',
+  title: '[SubsPlease] Sousou no Frieren - 04 (1080p) [A1B2C3D4].mkv',
+  seeders: 123,
+}
+
+/** Why episode 5 gave up, after the FR-A6 retry window closed. */
+export const UNAVAILABLE_REASON = 'No acceptable release found after 14 days.'
+
 /**
- * One episode in each of the three shapes the show page has to render: ready
- * (playable), mid-pipeline, and unaired / not wanted.
+ * One episode in each shape the show page has to render: ready (playable),
+ * mid-pipeline, unaired / not wanted, and the three acquisition states of
+ * FR-A7 — downloading with a percentage and a chosen release, unavailable with
+ * a reason, and searching with neither.
  */
 export const FRIEREN_DETAIL: AnimeDetail = {
   ...FRIEREN,
@@ -110,6 +124,9 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       aired: true,
       state: 'ready',
       watched: true,
+      download_progress: null,
+      unavailable_reason: null,
+      release: null,
     },
     {
       id: 9002,
@@ -120,6 +137,9 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       aired: true,
       state: 'preparing',
       watched: false,
+      download_progress: null,
+      unavailable_reason: null,
+      release: null,
     },
     {
       id: 9003,
@@ -130,6 +150,48 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       aired: false,
       state: 'not_wanted',
       watched: false,
+      download_progress: null,
+      unavailable_reason: null,
+      release: null,
+    },
+    {
+      id: 9004,
+      number: 4,
+      title: 'The Land Where Souls Rest',
+      air_at: '2023-10-20T14:00:00Z',
+      air_at_estimated: false,
+      aired: true,
+      state: 'downloading',
+      watched: false,
+      download_progress: 0.42,
+      unavailable_reason: null,
+      release: CHOSEN_RELEASE,
+    },
+    {
+      id: 9005,
+      number: 5,
+      title: null,
+      air_at: '2023-10-27T14:00:00Z',
+      air_at_estimated: false,
+      aired: true,
+      state: 'unavailable',
+      watched: false,
+      download_progress: null,
+      unavailable_reason: UNAVAILABLE_REASON,
+      release: null,
+    },
+    {
+      id: 9006,
+      number: 6,
+      title: null,
+      air_at: '2023-11-03T14:00:00Z',
+      air_at_estimated: false,
+      aired: true,
+      state: 'searching',
+      watched: false,
+      download_progress: null,
+      unavailable_reason: null,
+      release: null,
     },
   ],
   episode_count: 28,
@@ -166,6 +228,21 @@ export const FRIEREN_DETAIL_VIA_MAL: AnimeDetail = {
   anilist_id: null,
   source: 'mal',
   episodes: FRIEREN_DETAIL.episodes.map((episode) => ({ ...episode, air_at_estimated: true })),
+}
+
+/**
+ * The same show with nothing left in flight: every episode has either arrived
+ * or was never wanted, so the show page has no reason to poll (FR-A7).
+ */
+export const FRIEREN_DETAIL_SETTLED: AnimeDetail = {
+  ...FRIEREN_DETAIL,
+  episodes: FRIEREN_DETAIL.episodes.map((episode, index) => ({
+    ...episode,
+    state: index === 0 ? 'ready' : 'not_wanted',
+    download_progress: null,
+    unavailable_reason: null,
+    release: null,
+  })),
 }
 
 export function listEntry(overrides: Partial<ListEntry> = {}): ListEntry {
@@ -285,6 +362,9 @@ function airedEpisode(overrides: Partial<EpisodeOut> = {}): EpisodeOut {
     aired: true,
     state: 'ready',
     watched: false,
+    download_progress: null,
+    unavailable_reason: null,
+    release: null,
     ...overrides,
   }
 }
@@ -312,6 +392,21 @@ export const HOME_PAGE: HomePage = {
         air_at: '2026-09-05T15:00:00Z',
         air_at_estimated: true,
         state: 'preparing',
+      }),
+    },
+  ],
+}
+
+/** One episode still coming down, so the row carries a percentage (FR-A7). */
+export const HOME_PAGE_DOWNLOADING: HomePage = {
+  ...HOME_PAGE,
+  new_this_week: [
+    {
+      anime: FRIEREN,
+      episode: airedEpisode({
+        state: 'downloading',
+        download_progress: 0.42,
+        release: CHOSEN_RELEASE,
       }),
     },
   ],

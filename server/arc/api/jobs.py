@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from arc.api.deps import SessionDep, get_admin_user
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus
+from arc.services.acquisition.names import COMPUTE_WANTS, POLL_QBIT
 from arc.services.jobs import enqueue, find_active
 from arc.services.library.names import LIBRARY_SCAN
 
@@ -42,7 +43,7 @@ MAX_PRIORITY = 1000
 #: ``dedupe_key`` gets the same key here, so "press the button twice" and "the
 #: timer fired while a scan was pending" behave identically. An explicit
 #: ``dedupe_key`` is left alone — a caller that names one means it.
-TYPE_DEDUPED: frozenset[str] = frozenset({LIBRARY_SCAN})
+TYPE_DEDUPED: frozenset[str] = frozenset({LIBRARY_SCAN, COMPUTE_WANTS, POLL_QBIT})
 
 
 class JobCreate(BaseModel):

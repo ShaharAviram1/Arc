@@ -96,6 +96,18 @@ export interface AnimeSearchResponse {
   has_next: boolean
 }
 
+/**
+ * The Nyaa release Arc picked for an episode, once the ranked rules have
+ * chosen one (spec §4.2 FR-A3). `title` is the raw release name and is always
+ * set; everything the filename parser could not pull out of it is null.
+ */
+export interface EpisodeRelease {
+  group: string | null
+  resolution: string | null
+  title: string
+  seeders: number | null
+}
+
 /** Arc's own per-episode state machine (spec §6). */
 export interface EpisodeOut {
   id: number
@@ -110,6 +122,15 @@ export interface EpisodeOut {
   aired: boolean
   state: string
   watched: boolean
+  /**
+   * How far the transfer has got, 0–1, while the episode is `downloading` or
+   * `downloaded`; null in every other state (FR-A7).
+   */
+  download_progress: number | null
+  /** Why the retry window closed without a release; set only for `unavailable` (FR-A6). */
+  unavailable_reason: string | null
+  /** The chosen release, once there is one (FR-A3). */
+  release: EpisodeRelease | null
 }
 
 /**
@@ -285,6 +306,87 @@ export function episodeStateClass(state: string): string {
 }
 
 /**
+ * The states in which the server is still working towards a playable file
+ * (spec §6). While an episode sits in one of them the answer will change
+ * without the viewer touching anything, which is what makes polling worth it.
+ */
+export const ACTIVE_EPISODE_STATES: readonly string[] = [
+  'wanted',
+  'searching',
+  'downloading',
+  'downloaded',
+  'matching',
+  'preparing',
+]
+
+/**
+ * How often the show page re-asks while acquisition is in flight (FR-A7).
+ * Slow enough to be cheap, fast enough that a progress bar looks alive.
+ */
+export const ACQUISITION_POLL_MS = 15_000
+
+export function isEpisodeActive(state: string): boolean {
+  return ACTIVE_EPISODE_STATES.includes(state)
+}
+
+/** True while at least one episode of a show is still on its way to `ready`. */
+export function hasActiveEpisode(anime: AnimeDetail | undefined): boolean {
+  return anime !== undefined && anime.episodes.some((episode) => isEpisodeActive(episode.state))
+}
+
+function clampFraction(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(1, Math.max(0, value))
+}
+
+/**
+ * How complete the acquisition of an episode is, 0–1, or null when there is no
+ * bar to draw. `downloaded` and `matching` are past the transfer, so they read
+ * full whether or not the server still sends a number for them; a `downloading`
+ * episode qBittorrent has not reported on yet gets the badge alone rather than
+ * a bar stuck at zero.
+ */
+export function episodeProgress(episode: EpisodeOut): number | null {
+  switch (episode.state) {
+    case 'downloading':
+      return episode.download_progress === null ? null : clampFraction(episode.download_progress)
+    case 'downloaded':
+    case 'matching':
+      return 1
+    default:
+      return null
+  }
+}
+
+/** `episodeProgress` as whole percent, for the bar and the text beside it. */
+export function episodeProgressPercent(episode: EpisodeOut): number | null {
+  const progress = episodeProgress(episode)
+  return progress === null ? null : Math.round(progress * 100)
+}
+
+/** The reason an episode will not arrive, shown only where it applies (FR-A6). */
+export function unavailableReason(episode: EpisodeOut): string | null {
+  if (episode.state !== 'unavailable') return null
+  const reason = episode.unavailable_reason
+  return reason === null || reason === '' ? null : reason
+}
+
+/**
+ * `[SubsPlease] · 1080p · 123 seeders` — whichever of the three the server
+ * knows, in that order. A release the parser got nothing out of falls back to
+ * its raw name, which beats an empty line.
+ */
+export function releaseLine(release: EpisodeRelease): string {
+  const parts: string[] = []
+  if (release.group !== null && release.group !== '') parts.push(`[${release.group}]`)
+  if (release.resolution !== null && release.resolution !== '') parts.push(release.resolution)
+  if (release.seeders !== null) {
+    parts.push(`${String(release.seeders)} seeder${release.seeders === 1 ? '' : 's'}`)
+  }
+  return parts.length === 0 ? release.title : parts.join(' · ')
+}
+
+/**
  * Weekday + date in the browser's locale, plus the time for anything still to
  * come (a past air date only needs the day; an upcoming one is a countdown a
  * person plans around). `tz` overrides the browser's zone — the user's own
@@ -340,6 +442,12 @@ export function useAnime(id: number): UseQueryResult<AnimeDetail, Error> {
     queryFn: () => apiFetch<AnimeDetail>(`/api/anime/${id}`),
     enabled: Number.isInteger(id) && id > 0,
     retry: false,
+    // Acquisition advances on the server's clock, not on anything the viewer
+    // does, so the page re-asks itself while an episode is still being fetched
+    // or prepared and goes quiet the moment they have all settled (FR-A7).
+    // Reading `query.state.data` rather than closing over a render's copy keeps
+    // the decision on the freshest answer, including the one that ends polling.
+    refetchInterval: (query) => (hasActiveEpisode(query.state.data) ? ACQUISITION_POLL_MS : false),
   })
 }
 
