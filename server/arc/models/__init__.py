@@ -30,13 +30,14 @@ from arc.models.mal import MalLink, MalWriteLog
 from arc.models.media import MediaFile, Rendition
 from arc.models.recs import RecRun
 from arc.models.settings import DEFAULT_SETTINGS, Setting
-from arc.models.tracking import ListEntry, WatchProgress
+from arc.models.tracking import IN_PROGRESS_INDEX, ListEntry, WatchProgress
 from arc.models.user import Invite, Session, User
 
 __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_PRIORITY",
     "DEFAULT_SETTINGS",
+    "IN_PROGRESS_INDEX",
     "TRANSCODE_EPISODE_INDEX",
     "Anime",
     "Base",

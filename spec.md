@@ -169,6 +169,10 @@ any time, and the owner uses it daily.
 - FR-S4 An episode counts as **watched** when position ≥ 90 % of duration.
   This sets WatchProgress.completed, advances ListEntry.progress if this
   episode number is greater than current progress, and enqueues a MAL sync.
+  If the show is not on the user's list, watching it adds it as Watching
+  (the act of watching is the user's choice); status is never changed
+  automatically beyond that, and un-marking a watched episode never lowers
+  list progress or triggers a MAL write.
 - FR-S5 Next-episode: at the end of an episode, offer the next one if ready.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
 
@@ -333,3 +337,5 @@ preparing → failed → (retry) → preparing
 - 2026-09-06 — FR-A6 clarified: after the 14-day give-up, unavailable
   episodes are retried daily for as long as a want exists; a downloaded
   file rejected in review flags the episode unavailable.
+- 2026-09-07 — FR-S4 clarified: completing an episode of an unlisted show
+  adds it as Watching; un-marking never rolls back progress or MAL.

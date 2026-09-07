@@ -9,12 +9,31 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, false
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
 from arc.models._columns import TZDateTime, updated_at
 from arc.models.enums import ListStatus, UpdatedBy, enum_column
+
+#: "Continue watching" (FR-W1) and the home page's resume rail read one user's
+#: *unfinished* rows, newest first — never the finished ones, which is most of
+#: the table for anybody who has used Arc for a season. Named as a constant for
+#: the same reason :data:`arc.models.job.TRANSCODE_EPISODE_INDEX` is: the
+#: migration that creates it and the test that proves it survived both spell
+#: it, and three spellings of one index is how an index quietly disappears.
+IN_PROGRESS_INDEX = "ix_watch_progress_in_progress"
+
+#: ``DESC`` because the query orders that way, and a descending scan of an
+#: ascending index costs a sort on a partial index Postgres would otherwise
+#: walk straight. Written as SQL rather than as a column list because an
+#: ordering is not something ``Index("…", "updated_at")`` can express.
+IN_PROGRESS_EXPRESSION = "updated_at DESC"
+
+#: The partial predicate. Completion is sticky (FR-S4), so the rows this index
+#: excludes are excluded for good — the index stays the size of what a user is
+#: part-way through rather than of everything they have ever watched.
+IN_PROGRESS_PREDICATE = "completed = false"
 
 
 class ListEntry(Base):
@@ -60,6 +79,15 @@ class WatchProgress(Base):
     __table_args__ = (
         # "Continue watching", most recent first, for one user (FR-W1).
         Index("ix_watch_progress_user_id_updated_at", "user_id", "updated_at"),
+        # The same question, asked the way the query actually asks it: one
+        # user's *unfinished* rows, newest first (:func:`arc.services.playback.
+        # progress.continue_watching`).
+        Index(
+            IN_PROGRESS_INDEX,
+            "user_id",
+            text(IN_PROGRESS_EXPRESSION),
+            postgresql_where=text(IN_PROGRESS_PREDICATE),
+        ),
     )
 
     user_id: Mapped[int] = mapped_column(

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from arc.api.deps import SessionDep, get_admin_user
+from arc.api.deps import JobId, SessionDep, get_admin_user
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus
 from arc.services.acquisition.names import COMPUTE_WANTS, POLL_QBIT
 from arc.services.jobs import enqueue, find_active
@@ -137,7 +137,7 @@ async def list_jobs(
 
 
 @router.get("/api/jobs/{job_id}", response_model=JobOut, summary="One job")
-async def get_job(job_id: int, session: SessionDep) -> Job:
+async def get_job(job_id: JobId, session: SessionDep) -> Job:
     job = await session.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")

@@ -23,7 +23,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from arc.api.anime_schemas import AnimeSummary, ListEntryOut, ListEntryPatch, ListRow
-from arc.api.deps import CatalogDep, CurrentUser, SessionDep
+from arc.api.deps import AnimeId, CatalogDep, CurrentUser, SessionDep
 from arc.models import ListStatus
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
@@ -70,7 +70,7 @@ async def index(
     },
 )
 async def put(
-    anime_id: int,
+    anime_id: AnimeId,
     body: ListEntryPatch,
     user: CurrentUser,
     session: SessionDep,
@@ -113,7 +113,7 @@ async def put(
     summary="Remove a show from the caller's list",
     responses={404: {"description": ENTRY_NOT_FOUND}},
 )
-async def remove(anime_id: int, user: CurrentUser, session: SessionDep) -> Response:
+async def remove(anime_id: AnimeId, user: CurrentUser, session: SessionDep) -> Response:
     removed = await remove_list_entry(session, user_id=user.id, anime_id=anime_id)
     if not removed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ENTRY_NOT_FOUND)

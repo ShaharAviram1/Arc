@@ -103,6 +103,7 @@ from arc.services.media.names import (
     TRANSCODE,
     enqueue_transcode,
     latest_transcode_jobs,
+    output_dir_for,
     transcode_dedupe_key,
 )
 from arc.services.media.plan import (
@@ -207,11 +208,6 @@ def encode_options(settings: Settings) -> EncodeOptions:
         crf=settings.ffmpeg_crf,
         segment_seconds=settings.hls_segment_seconds,
     )
-
-
-def output_dir_for(settings: Settings, episode_id: int) -> Path:
-    """``DATA_DIR/renditions/<episode id>`` — derived from the id, never input."""
-    return settings.renditions_dir / str(episode_id)
 
 
 class _Reporter:

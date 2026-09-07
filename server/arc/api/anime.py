@@ -32,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 
 from arc.api.anime_schemas import AnimeDetail, AnimeSummary, RelationOut, SearchPage
-from arc.api.deps import AdminUser, CatalogDep, CurrentUser, SessionDep
+from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep
 from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.models import Anime, Job, ListEntry
@@ -48,6 +48,7 @@ from arc.services.catalog import (
 from arc.services.catalog.names import REFRESH as REFRESH_JOB
 from arc.services.catalog.names import dedupe_key as refresh_dedupe_key
 from arc.services.jobs import enqueue
+from arc.services.playback.progress import completed_episode_ids
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ async def search(
     responses={404: {"description": ANIME_NOT_FOUND}, 502: {"description": CATALOGUE_UNAVAILABLE}},
 )
 async def detail(
-    anime_id: int,
+    anime_id: AnimeId,
     user: CurrentUser,
     session: SessionDep,
     catalog: CatalogDep,
@@ -167,14 +168,17 @@ async def detail(
     # The download percentage, the preparing percentage, the failure sentence
     # and the rendition all live outside ``episodes`` (FR-A7, FR-P1, FR-P4);
     # three queries for the whole list rather than three per episode.
-    extras = await episode_extras(session, [episode.id for episode in episodes])
-    # ``watched`` stays empty until M8 writes ``watch_progress``; the shape is
-    # here so the client can render the mark from day one.
+    episode_ids = [episode.id for episode in episodes]
+    extras = await episode_extras(session, episode_ids)
     return AnimeDetail.build(
         anime,
         episodes=episodes,
         now=now(),
         list_entry=entry,
+        # One query for the whole list: which of these the caller has finished
+        # (FR-S4). The tick on a show page is per user, so it cannot come from
+        # the episode row.
+        watched=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
         relation_ids=await _relation_ids(session, anime),
         torrents=extras.torrents,
         renditions=extras.renditions,
@@ -189,7 +193,7 @@ async def detail(
     summary="Queue a catalogue refresh for one show (admin)",
 )
 async def refresh(
-    anime_id: int,
+    anime_id: AnimeId,
     admin: AdminUser,
     session: SessionDep,
     response: Response,

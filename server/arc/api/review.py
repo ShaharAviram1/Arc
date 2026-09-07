@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.anime_schemas import AnimeSummary
 from arc.api.anime_schemas import SearchPage as AnimeSearchPage
-from arc.api.deps import CatalogDep, CurrentUser, SessionDep, SettingsDep
+from arc.api.deps import CatalogDep, CurrentUser, MediaFileId, SessionDep, SettingsDep
 from arc.api.review_schemas import (
     CandidateOut,
     ConfirmRequest,
@@ -173,7 +173,7 @@ async def summary(user: CurrentUser, session: SessionDep) -> ReviewSummary:
     },
 )
 async def search_for_item(
-    media_file_id: int,
+    media_file_id: MediaFileId,
     user: CurrentUser,
     session: SessionDep,
     catalog: CatalogDep,
@@ -213,7 +213,7 @@ async def search_for_item(
     responses={404: {"description": ITEM_NOT_FOUND}, 409: {"description": ALREADY_LINKED}},
 )
 async def confirm(
-    media_file_id: int,
+    media_file_id: MediaFileId,
     body: ConfirmRequest,
     user: CurrentUser,
     session: SessionDep,
@@ -261,7 +261,7 @@ async def confirm(
     responses={404: {"description": ITEM_NOT_FOUND}},
 )
 async def ignore(
-    media_file_id: int,
+    media_file_id: MediaFileId,
     user: CurrentUser,
     session: SessionDep,
     settings: SettingsDep,
@@ -300,7 +300,7 @@ async def ignore(
     responses={404: {"description": ITEM_NOT_FOUND}, 409: {"description": NOT_IGNORED}},
 )
 async def reopen(
-    media_file_id: int,
+    media_file_id: MediaFileId,
     user: CurrentUser,
     session: SessionDep,
     settings: SettingsDep,

@@ -23,6 +23,8 @@ from arc.api import (
     invites,
     jobs,
     media,
+    media_stream,
+    playback,
     review,
     schedule,
     users,
@@ -206,6 +208,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(review.router)
     app.include_router(acquisition.router)
     app.include_router(media.router)
+    app.include_router(playback.router)
+    # Not under ``/api``: the streaming routes are proxied as their own prefix
+    # and are asked for by a media element rather than by the client's query
+    # layer (arc/api/media_stream.py). They take the same session dependency.
+    app.include_router(media_stream.router)
     return app
 
 

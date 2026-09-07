@@ -10,14 +10,22 @@ Three levels of access, used as annotations on a route or as a router-wide
 Every ``/api`` route except ``/api/health``, the login/logout pair, and the
 two public invite routes takes one of the latter two (spec §7: "all API and
 media routes require a session").
+
+It is also where the **row-id path parameters** live (:data:`AnimeId` and
+friends). Every id in Arc is a ``BIGSERIAL``, and a bare ``int`` in a path
+lets a caller send a number Postgres cannot hold — the driver raises on the
+way out and FastAPI turns that into a 500, which is an error page for what is
+plainly a malformed request. The annotated aliases below bound the parameter
+at the edge, so an out-of-range id is a 422 before any query is built.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi import Path as PathParam
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -36,6 +44,26 @@ SESSION_REFRESHED_UNTIL = "session_refreshed_until"
 
 #: Marker for "the cookie has not been looked up yet on this request".
 _UNSET = object()
+
+#: The largest value a Postgres ``bigint`` holds, and therefore the largest id
+#: any Arc row can have (:func:`arc.models._columns.bigint_pk` is a
+#: ``BIGSERIAL``). A path parameter above it can never name a row, and asking
+#: for it is not a lookup that misses — it is a number the driver refuses to
+#: bind, so it has to be refused a step earlier than the query.
+MAX_ID: Final[int] = 2**63 - 1
+
+#: The smallest. Sequences start at 1 and nothing hands out 0 or a negative id.
+MIN_ID: Final[int] = 1
+
+#: Row-id path parameters, one alias per kind of id. They are the same
+#: constraint every time; separate names because they read as types at the
+#: call site and because each carries its own line in the generated schema.
+AnimeId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="An anime row id.")]
+EpisodeId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="An episode row id.")]
+InviteId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="An invite row id.")]
+JobId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="A job row id.")]
+MediaFileId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="A media file row id.")]
+UserId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="A user row id.")]
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -133,14 +161,22 @@ AdminUser = Annotated[User, Depends(get_admin_user)]
 
 __all__ = [
     "ADMIN_REQUIRED",
+    "MAX_ID",
+    "MIN_ID",
     "NOT_AUTHENTICATED",
     "SESSION_REFRESHED_UNTIL",
     "AdminUser",
+    "AnimeId",
     "CatalogDep",
     "CurrentUser",
+    "EpisodeId",
+    "InviteId",
+    "JobId",
+    "MediaFileId",
     "OptionalUser",
     "SessionDep",
     "SettingsDep",
+    "UserId",
     "get_admin_user",
     "get_app_settings",
     "get_catalog",

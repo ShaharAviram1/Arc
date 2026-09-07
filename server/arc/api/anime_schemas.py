@@ -376,8 +376,8 @@ class EpisodeOut(BaseModel):
     #: compare against a clock the server may disagree with.
     aired: bool
     state: EpisodeState
-    #: Whether this user finished it (FR-S4). Always false until M8 writes
-    #: ``watch_progress``.
+    #: Whether the caller finished it: ``watch_progress.completed`` for this
+    #: (user, episode), set at 90 % or by the manual mark (FR-S4, FR-W3).
     watched: bool = False
     #: 0..1 while the episode is downloading, null otherwise (FR-A7). A
     #: fraction rather than a percentage: the client formats it, and a server

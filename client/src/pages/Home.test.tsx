@@ -6,9 +6,12 @@ import { createQueryClient } from '@/lib/queryClient'
 import { Home } from '@/pages/Home'
 import {
   APOTHECARY,
+  CONTINUE_FRIEREN,
   EMPTY_HOME,
   FRIEREN,
   HOME_PAGE,
+  HOME_PAGE_CONTINUE,
+  HOME_PAGE_CONTINUE_NO_DURATION,
   HOME_PAGE_DOWNLOADING,
   HOME_PAGE_PREPARING,
 } from '@/test/animeFixtures'
@@ -26,6 +29,7 @@ function renderHome(routes: MockRoutes) {
     [
       { path: '/', element: <Home /> },
       { path: '/anime/:id', element: <p>show page</p> },
+      { path: '/watch/:episodeId', element: <p>player</p> },
     ],
     { initialEntries: ['/'] },
   )
@@ -100,11 +104,50 @@ describe('Home', () => {
     expect(within(section('New this week')).queryByText(/%$/)).not.toBeInTheDocument()
   })
 
-  it('keeps continue watching as a placeholder until playback lands', async () => {
+  it('offers each part-watched episode with how far in it is (FR-W1)', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE_CONTINUE } })
+
+    expect(await screen.findByText('12:34 / 23:56')).toBeInTheDocument()
+
+    const strip = within(section('Continue watching'))
+    // Both the cover and the episode line go straight to the player.
+    expect(strip.getByRole('link', { name: 'Episode 5' })).toHaveAttribute(
+      'href',
+      `/watch/${CONTINUE_FRIEREN.episode.id}`,
+    )
+    expect(
+      strip.getByRole('link', { name: `Resume ${FRIEREN.title.preferred} Episode 5` }),
+    ).toHaveAttribute('href', `/watch/${CONTINUE_FRIEREN.episode.id}`)
+    // The title still goes to the show page, as it does in every other section.
+    expect(strip.getByRole('link', { name: FRIEREN.title.preferred })).toHaveAttribute(
+      'href',
+      `/anime/${FRIEREN.id}`,
+    )
+
+    const bar = strip.getByRole('progressbar', { name: 'Progress through Episode 5' })
+    expect(bar).toHaveAttribute('aria-valuenow', '53')
+    expect(bar).toHaveAttribute('aria-valuetext', '12:34 / 23:56')
+  })
+
+  it('shows the position alone when the episode has no known duration', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE_CONTINUE_NO_DURATION } })
+
+    expect(await screen.findByText('12:34')).toBeInTheDocument()
+
+    const strip = within(section('Continue watching'))
+    // No "/ 0:00" tail, and no percentage invented from a length nobody knows.
+    expect(strip.queryByText(/\//)).not.toBeInTheDocument()
+
+    const bar = strip.getByRole('progressbar', { name: 'Progress through Episode 5' })
+    expect(bar).not.toHaveAttribute('aria-valuenow')
+    expect(bar).toHaveAttribute('aria-valuetext', '12:34')
+  })
+
+  it('says so plainly when nothing is in progress', async () => {
     renderHome({ 'GET /api/home': { body: HOME_PAGE } })
 
     expect(
-      await screen.findByText('Nothing yet — playback arrives in a later milestone.'),
+      await screen.findByText('Nothing in progress — start an episode and it will show up here.'),
     ).toBeInTheDocument()
   })
 
@@ -113,6 +156,9 @@ describe('Home', () => {
 
     expect(
       await screen.findByText('Nothing to catch up on — every followed show is up to date.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Nothing in progress — start an episode and it will show up here.'),
     ).toBeInTheDocument()
     expect(
       screen.getByText('No episodes aired in the last seven days for the shows you follow.'),

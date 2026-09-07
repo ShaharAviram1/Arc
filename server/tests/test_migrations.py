@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
-from arc.models import TRANSCODE_EPISODE_INDEX, Base
+from arc.models import IN_PROGRESS_INDEX, TRANSCODE_EPISODE_INDEX, Base
 from arc.models.settings import DEFAULT_SETTINGS
 from tests.conftest import alembic_config
 
@@ -48,8 +48,8 @@ def _diff(url: str) -> list[Any]:
     return asyncio.run(run())
 
 
-def _index_definition(url: str, name: str) -> str | None:
-    """``pg_indexes.indexdef`` for one index on ``jobs``, or ``None``."""
+def _index_definition(url: str, table: str, name: str) -> str | None:
+    """``pg_indexes.indexdef`` for one index, or ``None`` if it is not there."""
 
     async def run() -> str | None:
         engine = create_async_engine(url, poolclass=NullPool)
@@ -58,9 +58,9 @@ def _index_definition(url: str, name: str) -> str | None:
                 found = await connection.execute(
                     text(
                         "SELECT indexdef FROM pg_indexes "
-                        "WHERE tablename = 'jobs' AND indexname = :name"
+                        "WHERE tablename = :table AND indexname = :name"
                     ),
-                    {"name": name},
+                    {"table": table, "name": name},
                 )
                 row = found.first()
                 return None if row is None else str(row[0])
@@ -152,8 +152,26 @@ def test_the_transcode_episode_index_is_created_by_a_migration(
     out in the migration — and an index that exists only in a migration is an
     index a future squash can silently drop. This is the assertion that notices.
     """
-    definition = _index_definition(test_database_url, TRANSCODE_EPISODE_INDEX)
+    definition = _index_definition(test_database_url, "jobs", TRANSCODE_EPISODE_INDEX)
 
     assert definition is not None, f"{TRANSCODE_EPISODE_INDEX} is not on the jobs table"
     assert "payload ->> 'episode_id'" in definition
     assert "WHERE" in definition and "'transcode'" in definition
+
+
+def test_the_in_progress_index_is_created_by_a_migration(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The second index autogenerate cannot write for itself.
+
+    ``continue_watching`` reads one user's *unfinished* rows newest first, so
+    the index is ordered ``DESC`` and partial on ``completed = false`` —
+    neither of which a column-level model declaration can express, so both are
+    written out in the migration. An index that lives only in a migration is
+    one a future squash can silently drop; this is what notices.
+    """
+    definition = _index_definition(test_database_url, "watch_progress", IN_PROGRESS_INDEX)
+
+    assert definition is not None, f"{IN_PROGRESS_INDEX} is not on the watch_progress table"
+    assert "user_id" in definition and "updated_at DESC" in definition
+    assert "WHERE" in definition and "completed = false" in definition

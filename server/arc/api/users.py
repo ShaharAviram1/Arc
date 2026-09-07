@@ -29,7 +29,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
-from arc.api.deps import AdminUser, CurrentUser, SessionDep
+from arc.api.deps import AdminUser, CurrentUser, SessionDep, UserId
 from arc.api.schemas import UserAdminOut, UserOut
 from arc.models import User, UserRole
 from arc.services.auth import count_active_admins, lock_admin_changes
@@ -115,7 +115,7 @@ async def update_me(body: ProfilePatch, user: CurrentUser, session: SessionDep) 
         409: {"description": f"{NO_SELF_DEACTIVATE} / {NO_SELF_DEMOTE} / {LAST_ADMIN}"},
     },
 )
-async def update(user_id: int, body: UserPatch, admin: AdminUser, session: SessionDep) -> User:
+async def update(user_id: UserId, body: UserPatch, admin: AdminUser, session: SessionDep) -> User:
     removes_an_admin = body.is_active is False or (
         body.role is not None and body.role is not UserRole.ADMIN
     )

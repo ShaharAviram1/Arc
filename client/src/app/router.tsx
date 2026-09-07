@@ -27,6 +27,11 @@ export const routes = [
     // auth, so an unauthenticated app shell would only render errors).
     element: <RequireAuth />,
     children: [
+      // The player is full-bleed: a sidebar beside a video is a distraction,
+      // and the page's own keyboard shortcuts (FR-S6) should own the window.
+      // It stays inside the auth gate — media is behind a session — but is a
+      // sibling of the layout rather than a child of it.
+      { path: '/watch/:episodeId', element: <Player />, errorElement: <RouteError /> },
       {
         element: <Layout />,
         errorElement: <RouteError />,
@@ -35,7 +40,6 @@ export const routes = [
           { path: '/schedule', element: <Schedule /> },
           { path: '/search', element: <Search /> },
           { path: '/anime/:id', element: <Show /> },
-          { path: '/watch/:episodeId', element: <Player /> },
           { path: '/mal', element: <Mal /> },
           { path: '/recs', element: <Recs /> },
           // Review is per-user in phase 1 (spec §2: users resolve review items

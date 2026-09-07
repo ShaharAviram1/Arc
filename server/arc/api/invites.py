@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from arc.api.auth import MAX_EMAIL_LENGTH, client_ip, set_session_cookie
-from arc.api.deps import AdminUser, SessionDep, SettingsDep
+from arc.api.deps import AdminUser, InviteId, SessionDep, SettingsDep
 from arc.api.schemas import UserOut
 from arc.core.security import PasswordPolicyError
 from arc.models import Invite, User
@@ -201,7 +201,7 @@ async def index(admin: AdminUser, session: SessionDep) -> list[InviteOut]:
     response_class=Response,
     summary="Revoke an invite (admin)",
 )
-async def delete(invite_id: int, admin: AdminUser, session: SessionDep) -> Response:
+async def delete(invite_id: InviteId, admin: AdminUser, session: SessionDep) -> Response:
     """Expire the invite immediately.
 
     The row survives — it is the record of who was invited by whom — and reads

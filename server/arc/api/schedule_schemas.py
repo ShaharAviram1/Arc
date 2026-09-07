@@ -29,6 +29,7 @@ from arc.api.anime_schemas import AnimeSummary, EpisodeOut, ListEntryOut
 from arc.models import Job, ListStatus, Rendition, Torrent
 from arc.services.catalog.progress import BehindRow, NewEpisodeRow
 from arc.services.catalog.schedule import DAYS_IN_WEEK, PlacedEntry, WeekPlacement
+from arc.services.playback.progress import ContinueRow
 
 
 class SeasonName(StrEnum):
@@ -195,6 +196,7 @@ class NewEpisodeEntry(BaseModel):
         *,
         now: datetime,
         list_status: ListStatus | None = None,
+        watched: bool = False,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
@@ -205,6 +207,7 @@ class NewEpisodeEntry(BaseModel):
                 row.episode,
                 now=now,
                 anime_status=row.anime.status,
+                watched=watched,
                 torrent=torrent,
                 rendition=rendition,
                 transcode_job=transcode_job,
@@ -213,30 +216,30 @@ class NewEpisodeEntry(BaseModel):
 
 
 class ContinueWatchingEntry(BaseModel):
-    """An episode started but not finished (FR-W1).
+    """An episode started but not finished, most recent first (FR-W1).
 
-    Declared now and always empty: ``watch_progress`` is not written until M8,
-    and a field that appears later is a client change, while a field that is
-    there from the start and fills up is not. :meth:`from_row` is written and
-    typed for the same reason — the row it will be built from is the shape it
-    is built from now, so M8 supplies the list and changes nothing else.
+    ``position_s`` is what the player seeks to, and it is the *stored*
+    position rather than the resume rule's answer: the row is only here at all
+    because it is past :data:`~arc.services.playback.progress.
+    CONTINUE_MIN_POSITION_S` and not completed, so the two agree except at the
+    95 % ceiling — and a card that says "6 minutes left" while the player would
+    start from zero is the sort of disagreement worth not having.
     """
 
     anime: AnimeSummary
     episode: EpisodeOut
-    #: Where the player got to, in seconds, and how long the episode is.
+    #: Where the player got to, in seconds, and how long the episode is. The
+    #: duration is null for a row written before the player knew it.
     position_s: float = 0.0
     duration_s: float | None = None
 
     @classmethod
     def from_row(
         cls,
-        row: NewEpisodeRow,
+        row: ContinueRow,
         *,
         now: datetime,
         list_status: ListStatus | None = None,
-        position_s: float = 0.0,
-        duration_s: float | None = None,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
@@ -247,19 +250,24 @@ class ContinueWatchingEntry(BaseModel):
                 row.episode,
                 now=now,
                 anime_status=row.anime.status,
+                # Never true here by construction: the query that produced this
+                # row filters completed rows out. Passed explicitly all the same,
+                # so the flag has one source rather than a default.
+                watched=False,
                 torrent=torrent,
                 rendition=rendition,
                 transcode_job=transcode_job,
             ),
-            position_s=position_s,
-            duration_s=duration_s,
+            position_s=row.position_s,
+            duration_s=row.duration_s,
         )
 
 
 class HomePage(BaseModel):
     """``GET /api/home`` — the three rows of the home page (FR-W1)."""
 
-    #: Empty until M8 writes ``watch_progress``.
+    #: Started and unfinished, most recently watched first, at most
+    #: :data:`~arc.services.playback.progress.CONTINUE_LIMIT`.
     continue_watching: list[ContinueWatchingEntry] = Field(default_factory=list)
     #: Newest aired episode first.
     behind: list[BehindEntry] = Field(default_factory=list)

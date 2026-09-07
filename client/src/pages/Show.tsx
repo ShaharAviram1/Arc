@@ -20,6 +20,7 @@ import {
   type EpisodeOut,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
+import { useMarkWatched, useUnmarkWatched } from '@/lib/playback'
 
 const SCORES = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
 
@@ -138,6 +139,9 @@ const ACQUISITION_LABEL = 'Acquisition progress'
 /** Why a transcode retry did not get as far as being queued. */
 const RETRY_FAILED = 'Could not queue a retry.'
 
+/** Why a manual watched write did not stick (FR-W3). */
+const WATCHED_FAILED = 'Could not save that.'
+
 /**
  * How far the work on an episode has got (FR-A7, FR-P4). The bar carries the
  * number for assistive tech and the text beside it carries the same number for
@@ -217,6 +221,64 @@ function RetryTranscode({ animeId, episodeId }: { animeId: number; episodeId: nu
   )
 }
 
+/**
+ * Marking an episode watched by hand (FR-W3), and taking the mark off again.
+ *
+ * Offered for anything that has aired, whatever state Arc has the file in: the
+ * whole point of the manual mark is the episode watched somewhere else, which
+ * is exactly the case where Arc has no file. Unaired episodes get nothing,
+ * since there is nothing yet to have watched.
+ */
+function WatchedControl({ animeId, episode }: { animeId: number; episode: EpisodeOut }) {
+  const mark = useMarkWatched()
+  const unmark = useUnmarkWatched()
+  const pending = mark.isPending || unmark.isPending
+  const failed = mark.isError || unmark.isError
+
+  if (!episode.watched && !episode.aired) return null
+
+  const buttonClass =
+    'text-xs text-[var(--arc-text-muted)] underline-offset-2 hover:text-[var(--arc-text)] hover:underline disabled:opacity-60'
+
+  return (
+    <span className="flex flex-col items-center gap-0.5">
+      {episode.watched ? (
+        <>
+          <span className="text-[var(--arc-ok)]" role="img" aria-label="Watched">
+            ✓
+          </span>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              unmark.mutate({ episodeId: episode.id, animeId })
+            }}
+            className={buttonClass}
+          >
+            Unmark
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() => {
+            mark.mutate({ episodeId: episode.id, animeId })
+          }}
+          className={buttonClass}
+        >
+          Mark watched
+        </button>
+      )}
+      {failed ? (
+        <span role="alert" className="text-xs text-[var(--arc-error)]">
+          {WATCHED_FAILED}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
 function EpisodeRow({
   animeId,
   episode,
@@ -280,11 +342,7 @@ function EpisodeRow({
         </span>
       </td>
       <td className="px-3 py-2 text-center">
-        {episode.watched ? (
-          <span className="text-[var(--arc-ok)]" role="img" aria-label="Watched">
-            ✓
-          </span>
-        ) : null}
+        <WatchedControl animeId={animeId} episode={episode} />
       </td>
       <td className="px-3 py-2 text-right">
         {episode.state === 'ready' ? (

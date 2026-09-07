@@ -11,12 +11,25 @@ import {
 } from '@/lib/anime'
 import { useMe } from '@/lib/auth'
 import { useHealth } from '@/lib/health'
-import { useHome, type BehindEntry, type NewEpisodeEntry } from '@/lib/schedule'
+import { formatClock } from '@/lib/playback'
+import {
+  useHome,
+  type BehindEntry,
+  type ContinueWatchingEntry,
+  type NewEpisodeEntry,
+} from '@/lib/schedule'
 
 /** Why a date carries "est." — matches the show page's wording (FR-C6). */
 const ESTIMATED_HINT = 'Estimated from the broadcast slot'
 
-const CONTINUE_PLACEHOLDER = 'Nothing yet — playback arrives in a later milestone.'
+const CONTINUE_EMPTY = 'Nothing in progress — start an episode and it will show up here.'
+
+/**
+ * How many part-watched episodes the strip shows. The server already orders
+ * them most-recent-first, so the tail is the least interesting part of a list
+ * nobody scrolls; twenty is more than a dashboard should ever need.
+ */
+const CONTINUE_LIMIT = 20
 const BEHIND_EMPTY = 'Nothing to catch up on — every followed show is up to date.'
 const NEW_EMPTY = 'No episodes aired in the last seven days for the shows you follow.'
 
@@ -60,6 +73,62 @@ function Note({ children }: { children: string }) {
 function behindLine(item: BehindEntry): string {
   const total = item.anime.episodes === null ? '?' : String(item.anime.episodes)
   return `Behind by ${String(item.behind)} · ${String(item.aired)} of ${total} aired`
+}
+
+/**
+ * One part-watched episode (FR-W1). The bar and the clock say the same thing
+ * twice on purpose: the bar is glanceable, the times are exact, and the bar
+ * carries the number for assistive tech, which cannot see a filled rectangle.
+ *
+ * With no duration there is no fraction to state: the clock shows the position
+ * alone and the bar drops `aria-valuenow`, which is how ARIA spells an
+ * indeterminate progress bar. Inventing 0 % would read as "not started".
+ */
+function ContinueCard({ item }: { item: ContinueWatchingEntry }) {
+  const { anime, episode, position_s, duration_s } = item
+  const known = duration_s !== null && duration_s > 0
+  const percent = known
+    ? Math.min(100, Math.max(0, Math.round((position_s / duration_s) * 100)))
+    : 0
+  const clock = known
+    ? `${formatClock(position_s)} / ${formatClock(duration_s)}`
+    : formatClock(position_s)
+  const watchPath = `/watch/${String(episode.id)}`
+  const episodeLabel = `Episode ${String(episode.number)}`
+
+  return (
+    <article className="flex gap-3 rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] p-3">
+      <Link to={watchPath} aria-label={`Resume ${anime.title.preferred} ${episodeLabel}`}>
+        <CoverThumb url={anime.cover_url} className="h-24 w-16 rounded" />
+      </Link>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <Link
+          to={`/anime/${String(anime.id)}`}
+          className="text-sm leading-snug font-medium text-[var(--arc-text)] hover:text-[var(--arc-accent)]"
+        >
+          {anime.title.preferred}
+        </Link>
+        <Link to={watchPath} className="text-xs text-[var(--arc-accent)] hover:underline">
+          {episodeLabel}
+        </Link>
+        <span
+          role="progressbar"
+          aria-label={`Progress through ${episodeLabel}`}
+          aria-valuenow={known ? percent : undefined}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuetext={clock}
+          className="mt-auto block h-1 w-full overflow-hidden rounded-full bg-[var(--arc-border)]"
+        >
+          <span
+            className="block h-full rounded-full bg-[var(--arc-accent)]"
+            style={{ width: `${String(percent)}%` }}
+          />
+        </span>
+        <p className="text-xs text-[var(--arc-text-muted)] tabular-nums">{clock}</p>
+      </div>
+    </article>
+  )
 }
 
 function BehindCard({ item, timezone }: { item: BehindEntry; timezone?: string }) {
@@ -133,8 +202,8 @@ function NewEpisodeRow({ item, timezone }: { item: NewEpisodeEntry; timezone?: s
 
 /**
  * Home (spec §4.6 FR-W1, §5, roadmap M4): what the viewer was watching, what
- * they have fallen behind on, and what turned up this week. Continue watching
- * stays a placeholder until playback lands (roadmap M8).
+ * they have fallen behind on, and what turned up this week. Every card in the
+ * first section links straight into the player (roadmap M8).
  */
 export function Home() {
   const { data: me } = useMe()
@@ -156,11 +225,15 @@ export function Home() {
       ) : (
         <>
           <Section title="Continue watching">
-            <Note>
-              {data.continue_watching.length === 0
-                ? CONTINUE_PLACEHOLDER
-                : `${String(data.continue_watching.length)} episodes in progress.`}
-            </Note>
+            {data.continue_watching.length === 0 ? (
+              <Note>{CONTINUE_EMPTY}</Note>
+            ) : (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {data.continue_watching.slice(0, CONTINUE_LIMIT).map((item) => (
+                  <ContinueCard key={item.episode.id} item={item} />
+                ))}
+              </div>
+            )}
           </Section>
 
           <Section title="Behind on">

@@ -303,6 +303,28 @@ arc/
   static exposure). Range requests supported on segments.
 - Client uses hls.js with `xhrSetup` sending credentials.
 
+### 5.4a Streaming and playback as built (M8)
+- No playlist rewriting: ffmpeg writes bare relative URIs, so
+  `/media/{id}/…` resolves by construction. Every media request carries the
+  session cookie (same origin behind Caddy; Vite proxies `/media` in dev);
+  hls.js is configured with `withCredentials`. `SameSite=Lax` means a
+  cross-site `<video src>` embed would not carry the cookie, which is fine.
+- Client: hls.js is a lazily loaded chunk, used whenever MediaSource exists
+  (Chrome answers "maybe" to the HLS mime check yet cannot play a playlist
+  natively, so `canPlayType` alone is not a signal); only a browser with no
+  MediaSource (iOS Safari) gets the native `src` path; the player page renders outside the sidebar layout; resume is
+  automatic with a dismissible "Resumed from m:ss" notice; a framework-free
+  `ProgressReporter` posts every 10 s while playing, on pause, on seek
+  (debounced), and on `pagehide` via `sendBeacon`, with a 2 s floor between
+  ordinary reports; the end-of-episode overlay offers the next episode when
+  it is ready.
+- `newly_completed` is derived from the upsert's `RETURNING old.completed`
+  (PostgreSQL 18), so it fires exactly once per (user, episode) even when
+  concurrent reports share a timestamp; this pins the database floor at 18. Media routes resolve the target path and refuse anything not
+  inside the rendition directory or that is a symlink. All path ids are
+  bounded to int64 (422 beyond). A partial index on in-progress watch rows
+  backs continue-watching (migration 3).
+
 ### 5.5 Progress and MAL writes
 1. `POST /progress` {episode_id, position, duration} every 10 s and on
    pause/seek/unload. Server upserts `watch_progress`.
@@ -415,10 +437,14 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
-| `GET /api/home` | any | `continue_watching` (empty until M8), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
+| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title |
+| `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode, anime, playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
+| `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
+| `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 
@@ -641,3 +667,8 @@ env (it is not in the settings table).
   first live pick (Erai-raws) was correct over a partial pool that missed
   the more-seeded SubsPlease release because the search stopped at the
   first form that returned anything.
+- 2026-09-07 — M8 streaming/player: session-gated HLS with native Range,
+  ETag/304 and immutable segment caching; 90 % completion raises list
+  progress only (status untouched) and creates a Watching entry when
+  missing; un-mark never rolls back; player outside the sidebar; hls.js
+  lazy chunk; beacon reporting.

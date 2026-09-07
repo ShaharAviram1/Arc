@@ -122,10 +122,27 @@ export interface NewEpisodeEntry {
   episode: EpisodeOut
 }
 
+/**
+ * An episode the viewer started and has not finished (FR-W1). Both times are
+ * seconds: `position_s` is where they stopped, `duration_s` the length the
+ * transcode reported, so the card can draw the bar without asking the player.
+ *
+ * `duration_s` is null when nothing has recorded a length yet — the column is
+ * nullable server-side, and a report can land before the rendition's duration
+ * is known. A card with no duration can still say where the viewer got to; it
+ * just cannot say how far through that is.
+ */
+export interface ContinueWatchingEntry {
+  anime: AnimeSummary
+  episode: EpisodeOut
+  position_s: number
+  duration_s: number | null
+}
+
 /** `GET /api/home` — the three FR-W1 sections. */
 export interface HomePage {
-  /** Empty until playback lands (roadmap M8); shape is not fixed yet. */
-  continue_watching: unknown[]
+  /** Most recent first; the server caps the list, the client caps it again. */
+  continue_watching: ContinueWatchingEntry[]
   behind: BehindEntry[]
   new_this_week: NewEpisodeEntry[]
 }

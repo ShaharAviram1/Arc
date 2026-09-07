@@ -26,7 +26,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from arc.api.deps import SessionDep, get_admin_user
+from arc.api.deps import EpisodeId, SessionDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Episode, EpisodeState, Job
 from arc.services.media.names import enqueue_transcode
@@ -65,7 +65,7 @@ ALREADY_READY = (
     },
 )
 async def transcode_episode(
-    episode_id: int,
+    episode_id: EpisodeId,
     session: SessionDep,
     force: Annotated[bool, Query(description="Re-encode an episode that is already ready")] = False,
 ) -> Job:

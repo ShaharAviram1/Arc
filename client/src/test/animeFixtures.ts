@@ -8,8 +8,10 @@ import type {
   EpisodeRendition,
   ListEntry,
 } from '@/lib/anime'
+import type { PlayInfo } from '@/lib/playback'
 import type {
   BehindEntry,
+  ContinueWatchingEntry,
   HomePage,
   ScheduleDay,
   ScheduleEntry,
@@ -481,4 +483,68 @@ export const HOME_PAGE_PREPARING: HomePage = {
   ],
 }
 
+/** Twelve and a half minutes into a twenty-four minute episode. */
+export const CONTINUE_FRIEREN: ContinueWatchingEntry = {
+  anime: FRIEREN,
+  episode: airedEpisode({ id: 9201, number: 5 }),
+  position_s: 754,
+  duration_s: 1436,
+}
+
+export const HOME_PAGE_CONTINUE: HomePage = {
+  ...HOME_PAGE,
+  continue_watching: [CONTINUE_FRIEREN],
+}
+
+/** A report landed before anything recorded the episode's length. */
+export const CONTINUE_NO_DURATION: ContinueWatchingEntry = {
+  ...CONTINUE_FRIEREN,
+  duration_s: null,
+}
+
+export const HOME_PAGE_CONTINUE_NO_DURATION: HomePage = {
+  ...HOME_PAGE,
+  continue_watching: [CONTINUE_NO_DURATION],
+}
+
 export const EMPTY_HOME: HomePage = { continue_watching: [], behind: [], new_this_week: [] }
+
+/* --- Playback (roadmap M8) -------------------------------------------- */
+
+/**
+ * `GET /api/episodes/9001/play`: episode 1 is ready and part-watched, episode
+ * 2 is still being prepared, so "next" is offered but not playable. Tests that
+ * need the other shapes override `next` / `previous` / `resume_position`.
+ */
+export const PLAY_INFO: PlayInfo = {
+  episode: FRIEREN_DETAIL.episodes[0] as EpisodeOut,
+  anime: FRIEREN,
+  playlist_url: '/media/9001/index.m3u8',
+  duration: 1436.8,
+  resume_position: 754,
+  previous: null,
+  next: { id: 9002, number: 2, state: 'preparing', ready: false },
+}
+
+/** The next episode has arrived, so the end overlay can offer it (FR-S5). */
+export const PLAY_INFO_NEXT_READY: PlayInfo = {
+  ...PLAY_INFO,
+  resume_position: null,
+  next: { id: 9002, number: 2, state: 'ready', ready: true },
+}
+
+/** The last episode of the show: nothing to offer at the end. */
+export const PLAY_INFO_LAST: PlayInfo = { ...PLAY_INFO, resume_position: null, next: null }
+
+/**
+ * `GET /api/episodes/9002/play`: the episode after `PLAY_INFO_NEXT_READY`,
+ * pointing back at 9001. The pair is what a "next, then previous" walk needs.
+ */
+export const PLAY_INFO_EPISODE_2: PlayInfo = {
+  ...PLAY_INFO,
+  episode: { ...(FRIEREN_DETAIL.episodes[0] as EpisodeOut), id: 9002, number: 2 },
+  playlist_url: '/media/9002/index.m3u8',
+  resume_position: null,
+  previous: { id: 9001, number: 1, state: 'ready', ready: true },
+  next: null,
+}

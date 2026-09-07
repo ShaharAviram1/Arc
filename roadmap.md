@@ -139,16 +139,16 @@ that must be verified before the next milestone starts.
   at most (configurable).
 
 ### M8 — Streaming and player
-- [ ] Authenticated `/media/{episode}/index.m3u8` + segments, playlist URL
+- [x] Authenticated `/media/{episode}/index.m3u8` + segments, playlist URL
       rewriting, range support (FR-S1)
-- [ ] Client Player page with hls.js (native on Safari), resume, keyboard
+- [x] Client Player page with hls.js (native on Safari), resume, keyboard
       shortcuts, next-episode prompt (FR-S2, FR-S5, FR-S6)
-- [ ] Progress reporter (10 s, pause/seek/unload) + `/progress` endpoint
+- [x] Progress reporter (10 s, pause/seek/unload) + `/progress` endpoint
       (FR-S3)
-- [ ] Completion at 90 % → watch_progress.completed, list progress advance
+- [x] Completion at 90 % → watch_progress.completed, list progress advance
       (FR-S4); manual "mark watched" (FR-W3)
-- [ ] Home page complete: Continue watching (FR-W1)
-- **DoD:** end-to-end: add show → auto download → ready → play in browser →
+- [x] Home page complete: Continue watching (FR-W1)
+- **DoD (verified 2026-09-07 by orchestrator in Chrome on the real M6/M7 episode: played with burned-in subs, seek reported, left and resumed at 5:14, 91 % completion raised list progress to 11, overlay offered/declined the next episode, continue-watching and behind cleared):** end-to-end: add show → auto download → ready → play in browser →
   close → reopen resumes → finish → next episode is offered and progress
   advanced.
 

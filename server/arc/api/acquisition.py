@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from arc.api.deps import SessionDep, get_admin_user
+from arc.api.deps import EpisodeId, SessionDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Anime, Episode, EpisodeState, Job, User, Want
 from arc.services.acquisition.names import POLL_QBIT, SEARCH_RELEASE, search_dedupe_key
@@ -64,7 +64,7 @@ class WantOut(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a Nyaa search for one episode (admin)",
 )
-async def search_episode(episode_id: int, session: SessionDep) -> Job:
+async def search_episode(episode_id: EpisodeId, session: SessionDep) -> Job:
     """Enqueue, do not search.
 
     The id is not validated here, deliberately: the handler checks it, and a

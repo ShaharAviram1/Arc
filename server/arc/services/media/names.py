@@ -26,11 +26,13 @@ anything anybody is actually waiting for.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from arc.config import Settings
 from arc.models import DEFAULT_PRIORITY, Episode, Job, ListEntry, Want
 from arc.services.jobs.queue import enqueue
 
@@ -56,6 +58,20 @@ MAX_DISTANCE_PRIORITY = 500
 def transcode_dedupe_key(episode_id: int) -> str:
     """One queued transcode per episode, however many things ask for it."""
     return f"{TRANSCODE}:{episode_id}"
+
+
+def output_dir_for(settings: Settings, episode_id: int) -> Path:
+    """``DATA_DIR/renditions/<episode id>`` — derived from the id, never input.
+
+    Here rather than beside the handler that fills the directory because M8's
+    streaming routes have to find it again, and they are a *request* path: the
+    encoder module imports ffmpeg's planner, its probe and the job registry,
+    and none of that belongs behind ``GET /media/…``. The rule itself — one
+    directory per episode id, and the id is the only thing that decides it — is
+    spec §7's "paths are derived from ids, never from user input", so it is
+    worth having in the module both halves already import.
+    """
+    return settings.renditions_dir / str(episode_id)
 
 
 async def latest_transcode_jobs(
@@ -164,6 +180,7 @@ __all__ = [
     "TRANSCODE",
     "enqueue_transcode",
     "latest_transcode_jobs",
+    "output_dir_for",
     "transcode_dedupe_key",
     "transcode_priority",
 ]

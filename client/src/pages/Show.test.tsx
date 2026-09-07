@@ -28,6 +28,10 @@ const DETAIL_PATH = `GET /api/anime/${FRIEREN.id}`
 const LIST_PATH = `/api/list/${FRIEREN.id}`
 /** The one failed episode in the fixture, the only one with a Retry button. */
 const TRANSCODE_PATH = '/api/episodes/9007/transcode'
+/** Episode 1 is the fixture's only watched episode; episode 2 has aired and is not. */
+const WATCHED_PATH = '/api/episodes/9001/watched'
+const UNWATCHED_PATH = '/api/episodes/9002/watched'
+const PROGRESS_RESULT = { completed: true, newly_completed: true, list_progress: 2 }
 
 function renderShow(id: number | string = FRIEREN.id) {
   const router = createMemoryRouter(
@@ -372,6 +376,71 @@ describe('Show', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The catalogue is unavailable right now. Try again in a few minutes.',
     )
+  })
+
+  describe('marking an episode watched (FR-W3)', () => {
+    it('offers a mark for every aired episode that is not watched yet', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+      renderShow()
+
+      // Six of the seven episodes have aired; the watched one shows Unmark.
+      const marks = await screen.findAllByRole('button', { name: 'Mark watched' })
+      expect(marks).toHaveLength(5)
+      // The unaired episode gets neither control: there is nothing to have watched.
+      expect(screen.getAllByRole('button', { name: 'Unmark' })).toHaveLength(1)
+    })
+
+    it('posts the mark and refreshes the show', async () => {
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+        [`POST ${UNWATCHED_PATH}`]: { body: PROGRESS_RESULT },
+      })
+
+      renderShow()
+
+      const marks = await screen.findAllByRole('button', { name: 'Mark watched' })
+      await userEvent.click(marks[0] as HTMLElement)
+
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain(`POST ${UNWATCHED_PATH}`)
+      })
+    })
+
+    it('shows the marker for a watched episode and takes it off again', async () => {
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+        [`DELETE ${WATCHED_PATH}`]: {
+          body: { completed: false, newly_completed: false, list_progress: null },
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByLabelText('Watched')).toBeInTheDocument()
+      await userEvent.click(screen.getByRole('button', { name: 'Unmark' }))
+
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain(`DELETE ${WATCHED_PATH}`)
+      })
+    })
+
+    it('says so when the write fails', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+        [`POST ${UNWATCHED_PATH}`]: { status: 500, body: { detail: 'boom' } },
+      })
+
+      renderShow()
+
+      const marks = await screen.findAllByRole('button', { name: 'Mark watched' })
+      await userEvent.click(marks[0] as HTMLElement)
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not save that.')
+    })
   })
 
   it('shows the not-found state for an unknown id', async () => {

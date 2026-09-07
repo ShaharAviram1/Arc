@@ -29,9 +29,11 @@ from arc.models import (
     Rendition,
     Torrent,
     User,
+    WatchProgress,
 )
 from arc.services.catalog.progress import NEW_LIMIT
 from arc.services.media.names import TRANSCODE
+from arc.services.playback.progress import CONTINUE_LIMIT
 from tests.conftest import add_user, api_transport, login
 from tests.test_schedule_api import add_anime, add_episodes, follow
 
@@ -502,10 +504,163 @@ async def test_another_users_list_is_not_on_this_home_page(
     assert body["new_this_week"] == []
 
 
-async def test_continue_watching_is_present_and_empty_until_m8(
+# --- Continue watching --------------------------------------------------------
+
+
+async def start_watching(
+    factory: SessionFactory,
+    user: User,
+    episode: Episode,
+    *,
+    position_s: float = 300.0,
+    duration_s: float | None = 1420.0,
+    completed: bool = False,
+    at: datetime = NOW,
+    ready: bool = True,
+) -> None:
+    """Put an episode part-way through for ``user``, as the player would.
+
+    ``ready`` is a parameter because the state is one of the three filters: a
+    row whose rendition retention has swept is a row nobody can resume.
+    """
+    async with factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None
+        if ready:
+            row.state = EpisodeState.READY
+            session.add(
+                Rendition(
+                    episode_id=episode.id,
+                    dir=f"/data/renditions/{episode.id}",
+                    playlist_path=f"/data/renditions/{episode.id}/index.m3u8",
+                    duration=duration_s,
+                )
+            )
+        session.add(
+            WatchProgress(
+                user_id=user.id,
+                episode_id=episode.id,
+                position_s=position_s,
+                duration_s=duration_s,
+                completed=completed,
+                completed_at=at if completed else None,
+                updated_at=at,
+            )
+        )
+        await session.commit()
+
+
+async def test_a_started_episode_is_on_the_continue_watching_row(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
+    """FR-W1: started, not completed, most recent first."""
     anime_id = await airing_show(api_factory, title="Show A", anilist_id=910019)
     await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode)
+
+    rows = (await home(client))["continue_watching"]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["episode"]["id"] == episode.id
+    assert row["episode"]["number"] == 2
+    assert row["episode"]["watched"] is False
+    assert row["position_s"] == pytest.approx(300.0)
+    assert row["duration_s"] == pytest.approx(1420.0)
+    assert row["anime"]["title"]["preferred"] == "Show A"
+    assert row["anime"]["list_status"] == "watching"
+    assert row["episode"]["rendition"]["duration"] == pytest.approx(1420.0)
+
+
+async def test_continue_watching_is_most_recently_watched_first(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910030)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    for number, minutes in ((1, 90), (2, 5), (3, 30)):
+        episode = await episode_number(api_factory, anime_id, number)
+        await start_watching(api_factory, user, episode, at=NOW - timedelta(minutes=minutes))
+
+    numbers = [row["episode"]["number"] for row in (await home(client))["continue_watching"]]
+
+    assert numbers == [2, 3, 1]
+
+
+async def test_continue_watching_is_capped(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await add_anime(
+        api_factory, title="Long", anilist_id=910031, status="RELEASING", episodes=30
+    )
+    await add_episodes(api_factory, anime_id, count=30, first_at=NOW - timedelta(weeks=30))
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    for number in range(1, 31):
+        episode = await episode_number(api_factory, anime_id, number)
+        await start_watching(api_factory, user, episode, at=NOW - timedelta(minutes=number))
+
+    rows = (await home(client))["continue_watching"]
+
+    assert len(rows) == CONTINUE_LIMIT
+    # The cap keeps the *newest*, which is the first episode seeded here.
+    assert rows[0]["episode"]["number"] == 1
+
+
+async def test_a_finished_episode_leaves_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910032)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode, position_s=1400.0, completed=True)
 
     assert (await home(client))["continue_watching"] == []
+
+
+async def test_an_episode_barely_started_is_not_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A player that was open for four seconds started nothing."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910033)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode, position_s=4.0)
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_an_episode_whose_rendition_is_gone_is_not_offered(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Retention deletes renditions (FR-T1); the row must not offer a resume."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910034)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode, ready=False)
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_another_users_progress_is_not_on_my_continue_watching(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    other = await add_user(api_factory, "other.viewer@arc.test", "other-password")
+    anime_id = await airing_show(api_factory, title="Theirs", anilist_id=910035)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, other, episode)
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_a_watched_episode_is_marked_on_the_new_this_week_card(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """``EpisodeOut.watched`` is per user and true everywhere it is rendered."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910036)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=6)
+    episode = await episode_number(api_factory, anime_id, 7)
+    await start_watching(api_factory, user, episode, position_s=1400.0, completed=True)
+
+    cards = (await home(client))["new_this_week"]
+
+    assert [row["episode"]["watched"] for row in cards] == [True]
