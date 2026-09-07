@@ -17,10 +17,21 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
+from sqlalchemy import event, select
 
 from arc.db import SessionFactory
-from arc.models import ListStatus, User
+from arc.models import (
+    Episode,
+    EpisodeState,
+    Job,
+    JobStatus,
+    ListStatus,
+    Rendition,
+    Torrent,
+    User,
+)
 from arc.services.catalog.progress import NEW_LIMIT
+from arc.services.media.names import TRANSCODE
 from tests.conftest import add_user, api_transport, login
 from tests.test_schedule_api import add_anime, add_episodes, follow
 
@@ -320,6 +331,162 @@ async def test_new_this_week_is_newest_first_and_capped(
     numbers = [row["episode"]["number"] for row in rows]
     assert numbers == sorted(numbers, reverse=True)
     assert numbers[0] == 60
+
+
+async def episode_number(factory: SessionFactory, anime_id: int, number: int) -> Episode:
+    async with factory() as session:
+        found = await session.scalar(
+            select(Episode).where(Episode.anime_id == anime_id, Episode.number == number)
+        )
+        assert found is not None
+        return found
+
+
+async def test_a_preparing_episode_carries_its_progress_onto_the_home_page(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-P4 on the card, not only on the show page.
+
+    An episode that aired last night is exactly the one most likely to still be
+    preparing, so "new this week" is where the percentage is worth the most —
+    and it lives in the transcode job's payload, not on the episode row.
+    """
+    anime_id = await airing_show(api_factory, title="Preparing", anilist_id=910020)
+    episode = await episode_number(api_factory, anime_id, 7)
+    async with api_factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None
+        row.state = EpisodeState.PREPARING
+        session.add(
+            Job(
+                type=TRANSCODE,
+                payload={"episode_id": episode.id, "progress": 0.42, "stage": "encode"},
+                status=JobStatus.RUNNING,
+            )
+        )
+        await session.commit()
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    card = (await home(client))["new_this_week"][0]["episode"]
+
+    assert card["state"] == "preparing"
+    assert card["prepare_progress"] == pytest.approx(0.42)
+    assert card["failure_reason"] is None
+    assert card["rendition"] is None
+
+
+async def test_a_downloading_episode_carries_its_release_and_percentage(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The other half of the same rule (FR-A7)."""
+    anime_id = await airing_show(api_factory, title="Downloading", anilist_id=910021)
+    episode = await episode_number(api_factory, anime_id, 7)
+    async with api_factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None
+        row.state = EpisodeState.DOWNLOADING
+        session.add(
+            Torrent(
+                episode_id=episode.id,
+                info_hash="d" * 40,
+                title="[SubsPlease] Show - 07 (1080p) [ABCD1234].mkv",
+                group="SubsPlease",
+                resolution="1080p",
+                seeders=42,
+                progress=0.62,
+            )
+        )
+        await session.commit()
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    card = (await home(client))["new_this_week"][0]["episode"]
+
+    assert card["download_progress"] == pytest.approx(0.62)
+    assert card["release"]["group"] == "SubsPlease"
+    assert card["release"]["seeders"] == 42
+
+
+async def test_a_failed_episode_carries_its_reason_and_a_ready_one_its_rendition(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    # One episode per show: only the seventh is inside the seven-day window.
+    playable = await airing_show(api_factory, title="Playable", anilist_id=910022)
+    broken = await airing_show(api_factory, title="Broken", anilist_id=910024)
+    ready = await episode_number(api_factory, playable, 7)
+    failed = await episode_number(api_factory, broken, 7)
+    async with api_factory() as session:
+        ready_row = await session.get(Episode, ready.id)
+        failed_row = await session.get(Episode, failed.id)
+        assert ready_row is not None and failed_row is not None
+        ready_row.state = EpisodeState.READY
+        failed_row.state = EpisodeState.FAILED
+        session.add(
+            Rendition(
+                episode_id=ready.id,
+                dir=f"/data/renditions/{ready.id}",
+                playlist_path=f"/data/renditions/{ready.id}/index.m3u8",
+                duration=1418.5,
+                subtitle_lang="en",
+            )
+        )
+        session.add(
+            Job(
+                type=TRANSCODE,
+                payload={
+                    "episode_id": failed.id,
+                    "error_tail": "ffmpeg exited 1\n[libx264] no such file or directory",
+                },
+                status=JobStatus.FAILED,
+            )
+        )
+        await session.commit()
+    for anime_id in (playable, broken):
+        await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    cards = {
+        row["anime"]["title"]["preferred"]: row["episode"]
+        for row in (await home(client))["new_this_week"]
+    }
+
+    assert cards["Playable"]["rendition"]["duration"] == pytest.approx(1418.5)
+    assert cards["Playable"]["rendition"]["subtitle_lang"] == "en"
+    assert cards["Playable"]["rendition"]["notes"] == []
+    assert cards["Broken"]["failure_reason"].startswith("ffmpeg exited 1")
+    assert cards["Broken"]["rendition"] is None
+
+
+async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """No N+1: three lookups for the page, however many episodes are on it."""
+    anime_id = await add_anime(
+        api_factory, title="Daily", anilist_id=910023, status="RELEASING", episodes=30
+    )
+    await add_episodes(
+        api_factory,
+        anime_id,
+        count=30,
+        first_at=NOW - timedelta(hours=30),
+        step=timedelta(hours=1),
+    )
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+
+    counted: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *rest: object) -> None:
+        counted.append(statement)
+
+    engine = api_factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        rows = (await home(client))["new_this_week"]
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert len(rows) == 30
+    for table in ("torrents", "renditions", "jobs"):
+        matched = [statement for statement in counted if f" {table}" in statement.lower()]
+        assert len(matched) == 1, f"{table} was queried {len(matched)} times"
 
 
 async def test_another_users_list_is_not_on_this_home_page(

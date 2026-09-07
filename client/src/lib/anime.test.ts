@@ -8,15 +8,19 @@ import {
   anilistUrl,
   animeQueryKey,
   catalogErrorMessage,
+  episodeDetailLine,
+  episodeProblem,
   episodeProgressPercent,
   hasActiveEpisode,
   listErrorMessage,
   listQueryKey,
   malUrl,
   releaseLine,
+  renditionLine,
   useAnime,
   useAnimeSearch,
   useRemoveListEntry,
+  useRetryTranscode,
   useSetListEntry,
   type AnimeDetail,
   type EpisodeOut,
@@ -109,7 +113,7 @@ describe('releaseLine', () => {
   })
 })
 
-/** An episode whose only interesting fields are the ones FR-A7 reports on. */
+/** An episode whose only interesting fields are the ones FR-A7 / FR-P4 report on. */
 function episode(overrides: Partial<EpisodeOut>): EpisodeOut {
   return {
     id: 1,
@@ -121,8 +125,11 @@ function episode(overrides: Partial<EpisodeOut>): EpisodeOut {
     state: 'wanted',
     watched: false,
     download_progress: null,
+    prepare_progress: null,
+    failure_reason: null,
     unavailable_reason: null,
     release: null,
+    rendition: null,
     ...overrides,
   }
 }
@@ -146,18 +153,107 @@ describe('episodeProgressPercent', () => {
     )
   })
 
+  it('reads the transcode’s own percentage while preparing (FR-P4)', () => {
+    expect(episodeProgressPercent(episode({ state: 'preparing', prepare_progress: 0.3 }))).toBe(30)
+    // The transfer's number does not leak into the transcode's bar.
+    expect(
+      episodeProgressPercent(
+        episode({ state: 'preparing', prepare_progress: 0.3, download_progress: 1 }),
+      ),
+    ).toBe(30)
+  })
+
   it('has no bar for a state that is not a transfer, nor for one not reported on yet', () => {
     expect(episodeProgressPercent(episode({ state: 'searching' }))).toBeNull()
     expect(episodeProgressPercent(episode({ state: 'ready' }))).toBeNull()
     expect(
       episodeProgressPercent(episode({ state: 'downloading', download_progress: null })),
     ).toBeNull()
+    expect(
+      episodeProgressPercent(episode({ state: 'preparing', prepare_progress: null })),
+    ).toBeNull()
+  })
+})
+
+describe('episodeProblem', () => {
+  it('names the reason an episode will not arrive (FR-A6)', () => {
+    expect(
+      episodeProblem(episode({ state: 'unavailable', unavailable_reason: 'nothing seeded' })),
+    ).toEqual({ label: 'Unavailable', reason: 'nothing seeded' })
+  })
+
+  it('names the reason a transcode broke (FR-P4)', () => {
+    expect(episodeProblem(episode({ state: 'failed', failure_reason: 'ffmpeg exited 1' }))).toEqual(
+      {
+        label: 'Failed',
+        reason: 'ffmpeg exited 1',
+      },
+    )
+  })
+
+  it('is null when the state is fine, or when the server sent no reason with it', () => {
+    expect(episodeProblem(episode({ state: 'ready' }))).toBeNull()
+    expect(episodeProblem(episode({ state: 'failed', failure_reason: null }))).toBeNull()
+    expect(episodeProblem(episode({ state: 'failed', failure_reason: '' }))).toBeNull()
+    // A reason left over from an earlier attempt is not shown once it is moot.
+    expect(episodeProblem(episode({ state: 'preparing', failure_reason: 'old' }))).toBeNull()
+  })
+})
+
+describe('episodeDetailLine', () => {
+  const rendition = {
+    duration: 1436.8,
+    width: 1920,
+    height: 1080,
+    subtitle_lang: 'en',
+    audio_lang: 'ja',
+  }
+
+  it('describes what the viewer is about to play (FR-P4)', () => {
+    expect(renditionLine(rendition)).toBe('1080p · subs en · audio ja')
+  })
+
+  it('leaves out a track the source did not have', () => {
+    expect(renditionLine({ ...rendition, subtitle_lang: null })).toBe('1080p · audio ja')
+    expect(renditionLine({ ...rendition, audio_lang: null, subtitle_lang: null })).toBe('1080p')
+  })
+
+  it('is the rendition alone when nothing named a release', () => {
+    expect(episodeDetailLine(episode({ state: 'ready', rendition }))).toBe(
+      '1080p · subs en · audio ja',
+    )
+  })
+
+  it('appends the rendition to the release line when there is one', () => {
+    expect(episodeDetailLine(episode({ state: 'ready', release: CHOSEN_RELEASE, rendition }))).toBe(
+      '[SubsPlease] · 1080p · 123 seeders · 1080p · subs en · audio ja',
+    )
+  })
+
+  it('has no line for an episode with neither', () => {
+    expect(episodeDetailLine(episode({ state: 'wanted' }))).toBeNull()
   })
 })
 
 describe('hasActiveEpisode', () => {
   it('is true while anything is still on its way to being playable', () => {
     expect(hasActiveEpisode(FRIEREN_DETAIL)).toBe(true)
+  })
+
+  it('counts a transcode in progress, so the page keeps polling through it (FR-P4)', () => {
+    expect(
+      hasActiveEpisode({
+        ...FRIEREN_DETAIL_SETTLED,
+        episodes: [episode({ state: 'preparing', prepare_progress: 0.3 })],
+      }),
+    ).toBe(true)
+    // A failed one is settled: nothing moves until an admin retries it.
+    expect(
+      hasActiveEpisode({
+        ...FRIEREN_DETAIL_SETTLED,
+        episodes: [episode({ state: 'failed', failure_reason: 'ffmpeg exited 1' })],
+      }),
+    ).toBe(false)
   })
 
   it('is false once every episode has arrived or was never wanted', () => {
@@ -313,5 +409,44 @@ describe('useRemoveListEntry', () => {
     expect(cached?.list_status).toBeNull()
     expect(cached?.list_entry).toBeNull()
     expect(client.getQueryState(listQueryKey())?.isInvalidated).toBe(true)
+  })
+})
+
+describe('useRetryTranscode', () => {
+  it('queues a retry and makes the show page ask again (FR-P4)', async () => {
+    const fetchMock = mockApi({ 'POST /api/episodes/9007/transcode': { status: 202 } })
+    const client = createQueryClient()
+    seedShowCache(client)
+
+    const { result } = renderHook(() => useRetryTranscode(), { wrapper: wrapperFor(client) })
+    act(() => {
+      result.current.mutate({ animeId: FRIEREN.id, episodeId: 9007 })
+    })
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+
+    expect(requestsMade(fetchMock)).toEqual(['POST /api/episodes/9007/transcode'])
+    // The episode is back in flight, so the detail query has to be re-asked.
+    expect(client.getQueryState(animeQueryKey(FRIEREN.id))?.isInvalidated).toBe(true)
+  })
+
+  it('asks for a re-encode explicitly when forcing a ready episode', async () => {
+    const fetchMock = mockApi({
+      'POST /api/episodes/9001/transcode?force=true': { status: 202 },
+    })
+    const client = createQueryClient()
+    seedShowCache(client)
+
+    const { result } = renderHook(() => useRetryTranscode(), { wrapper: wrapperFor(client) })
+    act(() => {
+      result.current.mutate({ animeId: FRIEREN.id, episodeId: 9001, force: true })
+    })
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+    expect(requestsMade(fetchMock)).toEqual(['POST /api/episodes/9001/transcode?force=true'])
   })
 })

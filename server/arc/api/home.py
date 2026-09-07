@@ -10,6 +10,14 @@ only written by the player, and the field is in the contract from the start so
 that its arrival is a change to the client's rendering rather than to its
 types.
 
+The episodes on this page are the *same shape* as the ones on a show page, and
+are filled in the same way: one batched lookup each for the torrents, the
+transcode jobs and the renditions of every episode on the page
+(:mod:`arc.api.episode_extras`), so a card can say "downloading, 62 %" or
+"preparing, 40 %" or why the last attempt failed. Three queries for the whole
+page, not three per row — the home page of a user following thirty shows is
+the one place an N+1 would actually hurt.
+
 Like the schedule, this endpoint reads the local cache and the caller's own
 rows. Nothing here calls a catalogue source.
 """
@@ -21,9 +29,15 @@ from datetime import UTC, datetime
 from fastapi import APIRouter
 
 from arc.api.deps import CurrentUser, SessionDep
-from arc.api.schedule_schemas import BehindEntry, HomePage, NewEpisodeEntry
+from arc.api.episode_extras import episode_extras
+from arc.api.schedule_schemas import (
+    BehindEntry,
+    ContinueWatchingEntry,
+    HomePage,
+    NewEpisodeEntry,
+)
 from arc.services.catalog import list_status_for
-from arc.services.catalog.progress import behind_for_user, new_this_week
+from arc.services.catalog.progress import NewEpisodeRow, behind_for_user, new_this_week
 
 router = APIRouter(prefix="/api/home", tags=["home"])
 
@@ -42,18 +56,43 @@ async def home(user: CurrentUser, session: SessionDep) -> HomePage:
     at = now()
     behind = await behind_for_user(session, user, now=at)
     fresh = await new_this_week(session, user, now=at)
+    # Empty until M8 writes ``watch_progress``. A list rather than a literal
+    # ``[]`` in the response so that the rows below — the statuses, the three
+    # lookups, the entry that is built from them — already cover it, and M8
+    # supplies the query and nothing else.
+    started: list[NewEpisodeRow] = []
 
-    # One lookup for the list badges on the "new this week" cards: those rows
-    # are all on the caller's list by construction, but which state they are in
-    # is what the badge says.
+    rows = [*fresh, *started]
+    # One lookup for the list badges on the cards: those rows are all on the
+    # caller's list by construction, but which state they are in is what the
+    # badge says.
     statuses = await list_status_for(
-        session, user_id=user.id, anime_ids=[row.anime.id for row in fresh]
+        session, user_id=user.id, anime_ids=[row.anime.id for row in rows]
     )
+    extras = await episode_extras(session, [row.episode.id for row in rows])
+
     return HomePage(
-        continue_watching=[],
+        continue_watching=[
+            ContinueWatchingEntry.from_row(
+                row,
+                now=at,
+                list_status=statuses.get(row.anime.id),
+                torrent=extras.torrents.get(row.episode.id),
+                rendition=extras.renditions.get(row.episode.id),
+                transcode_job=extras.transcode_jobs.get(row.episode.id),
+            )
+            for row in started
+        ],
         behind=[BehindEntry.from_row(row) for row in behind],
         new_this_week=[
-            NewEpisodeEntry.from_row(row, now=at, list_status=statuses.get(row.anime.id))
+            NewEpisodeEntry.from_row(
+                row,
+                now=at,
+                list_status=statuses.get(row.anime.id),
+                torrent=extras.torrents.get(row.episode.id),
+                rendition=extras.renditions.get(row.episode.id),
+                transcode_job=extras.transcode_jobs.get(row.episode.id),
+            )
             for row in fresh
         ],
     )

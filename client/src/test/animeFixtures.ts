@@ -5,6 +5,7 @@ import type {
   AnimeSummary,
   EpisodeOut,
   EpisodeRelease,
+  EpisodeRendition,
   ListEntry,
 } from '@/lib/anime'
 import type {
@@ -106,11 +107,29 @@ export const CHOSEN_RELEASE: EpisodeRelease = {
 /** Why episode 5 gave up, after the FR-A6 retry window closed. */
 export const UNAVAILABLE_REASON = 'No acceptable release found after 14 days.'
 
+/** What episode 1's transcode produced: 1080p, English subs over a Japanese track. */
+export const READY_RENDITION: EpisodeRendition = {
+  duration: 1436.8,
+  width: 1920,
+  height: 1080,
+  subtitle_lang: 'en',
+  audio_lang: 'ja',
+}
+
+/** The tail of ffmpeg's own complaint about episode 7 (FR-P4). */
+export const FAILURE_REASON =
+  'ffmpeg exited 1: [matroska @ 0x5] Invalid data found when processing input'
+
+/** How far episode 2's transcode has got (FR-P4). */
+export const PREPARE_PROGRESS = 0.3
+
 /**
- * One episode in each shape the show page has to render: ready (playable),
- * mid-pipeline, unaired / not wanted, and the three acquisition states of
- * FR-A7 — downloading with a percentage and a chosen release, unavailable with
- * a reason, and searching with neither.
+ * One episode in each shape the show page has to render: ready (playable, with
+ * the rendition it produced), mid-pipeline, unaired / not wanted, the three
+ * acquisition states of FR-A7 — downloading with a percentage and a chosen
+ * release, unavailable with a reason, and searching with neither — and the two
+ * transcode states of FR-P4: preparing with a percentage, failed with ffmpeg's
+ * reason.
  */
 export const FRIEREN_DETAIL: AnimeDetail = {
   ...FRIEREN,
@@ -125,8 +144,11 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'ready',
       watched: true,
       download_progress: null,
+      prepare_progress: null,
+      failure_reason: null,
       unavailable_reason: null,
       release: null,
+      rendition: READY_RENDITION,
     },
     {
       id: 9002,
@@ -138,8 +160,11 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'preparing',
       watched: false,
       download_progress: null,
+      prepare_progress: PREPARE_PROGRESS,
+      failure_reason: null,
       unavailable_reason: null,
       release: null,
+      rendition: null,
     },
     {
       id: 9003,
@@ -151,8 +176,11 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'not_wanted',
       watched: false,
       download_progress: null,
+      prepare_progress: null,
+      failure_reason: null,
       unavailable_reason: null,
       release: null,
+      rendition: null,
     },
     {
       id: 9004,
@@ -164,8 +192,11 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'downloading',
       watched: false,
       download_progress: 0.42,
+      prepare_progress: null,
+      failure_reason: null,
       unavailable_reason: null,
       release: CHOSEN_RELEASE,
+      rendition: null,
     },
     {
       id: 9005,
@@ -177,8 +208,11 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'unavailable',
       watched: false,
       download_progress: null,
+      prepare_progress: null,
+      failure_reason: null,
       unavailable_reason: UNAVAILABLE_REASON,
       release: null,
+      rendition: null,
     },
     {
       id: 9006,
@@ -190,8 +224,27 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       state: 'searching',
       watched: false,
       download_progress: null,
+      prepare_progress: null,
+      failure_reason: null,
       unavailable_reason: null,
       release: null,
+      rendition: null,
+    },
+    {
+      id: 9007,
+      number: 7,
+      title: null,
+      air_at: '2023-11-10T14:00:00Z',
+      air_at_estimated: false,
+      aired: true,
+      state: 'failed',
+      watched: false,
+      download_progress: null,
+      prepare_progress: null,
+      failure_reason: FAILURE_REASON,
+      unavailable_reason: null,
+      release: null,
+      rendition: null,
     },
   ],
   episode_count: 28,
@@ -240,6 +293,8 @@ export const FRIEREN_DETAIL_SETTLED: AnimeDetail = {
     ...episode,
     state: index === 0 ? 'ready' : 'not_wanted',
     download_progress: null,
+    prepare_progress: null,
+    failure_reason: null,
     unavailable_reason: null,
     release: null,
   })),
@@ -363,8 +418,11 @@ function airedEpisode(overrides: Partial<EpisodeOut> = {}): EpisodeOut {
     state: 'ready',
     watched: false,
     download_progress: null,
+    prepare_progress: null,
+    failure_reason: null,
     unavailable_reason: null,
     release: null,
+    rendition: null,
     ...overrides,
   }
 }
@@ -408,6 +466,17 @@ export const HOME_PAGE_DOWNLOADING: HomePage = {
         download_progress: 0.42,
         release: CHOSEN_RELEASE,
       }),
+    },
+  ],
+}
+
+/** One episode still being transcoded, so the row carries a percentage (FR-P4). */
+export const HOME_PAGE_PREPARING: HomePage = {
+  ...HOME_PAGE,
+  new_this_week: [
+    {
+      anime: FRIEREN,
+      episode: airedEpisode({ state: 'preparing', prepare_progress: PREPARE_PROGRESS }),
     },
   ],
 }

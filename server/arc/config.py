@@ -128,7 +128,40 @@ class Settings(BaseSettings):
 
     # --- Media -----------------------------------------------------------
     data_dir: Path = Path("./data")
+    #: Concurrent ffmpeg encodes in one worker process (FR-P1, §8). A property
+    #: of the host's cores, not an editable rule, which is why it is here and
+    #: not in the ``settings`` table.
     max_transcodes: int = Field(default=2, ge=1)
+
+    # --- Transcode (M7) ---------------------------------------------------
+    #: The binaries. Names, resolved on ``PATH``, or absolute paths — a host
+    #: with a hardware-enabled build in ``/opt`` sets these rather than
+    #: shadowing the system ffmpeg.
+    ffmpeg_bin: str = "ffmpeg"
+    ffprobe_bin: str = "ffprobe"
+    #: The video encoder. ``libx264`` is software H.264 and is what the
+    #: deployment guide sizes the host for; swapping in ``h264_vaapi`` or
+    #: ``h264_nvenc`` is how hardware encoding is enabled later (§8).
+    ffmpeg_video_encoder: str = "libx264"
+    #: x264's speed/size trade-off, and its quality target. ``veryfast`` at
+    #: CRF 20 is roughly real time on two cores for 1080p and visually
+    #: transparent for anime, which is what FR-P3's timing budget assumes.
+    ffmpeg_preset: str = "veryfast"
+    ffmpeg_crf: int = Field(default=20, ge=0, le=51)
+    #: Target HLS segment length in seconds (FR-P1: "~6 s"). Keyframes are
+    #: forced onto this boundary, so raising it makes seeking coarser and
+    #: lowering it makes the playlist longer.
+    hls_segment_seconds: int = Field(default=6, ge=1, le=60)
+    #: How long one ffmpeg may run before it is killed and the job retried.
+    #: Three hours: a 24-minute episode is about twenty minutes on the
+    #: intended hardware, and a film at ``veryfast`` is still well inside it.
+    #: Deliberately *longer* than :attr:`worker_stale_after`, and that is not a
+    #: mistake: the transcode handler pushes ``jobs.locked_at`` forward every
+    #: ``HEARTBEAT_SECONDS`` from the moment it starts waiting for an encode
+    #: slot until ffmpeg exits (:mod:`arc.services.media.jobs`), so the stale
+    #: sweep never sees a job that is still working, however long it runs.
+    #: ``worker_stale_after`` bounds silence, not work.
+    transcode_timeout_seconds: float = Field(default=10800.0, gt=0)
 
     # --- Library: ingest and matching (M5) --------------------------------
     #: How often the worker walks the download and manual-drop directories
@@ -182,10 +215,14 @@ class Settings(BaseSettings):
     worker_poll_interval: float = Field(default=1.0, gt=0)
     #: On shutdown, how long to let in-flight jobs finish before cancelling.
     worker_drain_timeout: float = Field(default=30.0, ge=0)
-    #: Seconds a job may sit ``running`` before the sweep assumes the worker
-    #: holding it died and puts it back. Must comfortably exceed the longest a
-    #: real job takes, or a slow job is requeued underneath itself.
-    worker_stale_after: float = Field(default=900.0, gt=0)
+    #: Seconds a job may sit ``running`` **without saying anything** before the
+    #: sweep assumes the worker holding it died and puts the row back. It is a
+    #: bound on silence rather than on work: a job longer than this is safe as
+    #: long as it heartbeats, which is why the three-hour ffmpeg timeout may
+    #: exceed these two hours. A job that does *not* heartbeat must finish
+    #: inside this window or it will be requeued underneath itself
+    #: (:mod:`arc.services.media.jobs` is the one that does).
+    worker_stale_after: float = Field(default=7200.0, gt=0)
 
     # --- Feature flags ---------------------------------------------------
     llm_match_suggestions: bool = False
@@ -217,7 +254,16 @@ class Settings(BaseSettings):
 
     @property
     def downloads_dir(self) -> Path:
-        return self.data_dir / "downloads"
+        """Where qBittorrent's finished files land, as an absolute path.
+
+        Resolved, because this one is *compared* rather than merely opened:
+        :func:`arc.services.acquisition.reject.episode_id_of` decides whether a
+        media file is Arc's own by asking whether it sits under this directory,
+        and a ``DATA_DIR`` of ``./data`` (the default) or a ``/tmp`` that is a
+        symlink would otherwise make the same directory answer both ways
+        depending on which side of the comparison it came from.
+        """
+        return (self.data_dir / "downloads").resolve()
 
     @property
     def manual_dir(self) -> Path:
@@ -246,7 +292,15 @@ class Settings(BaseSettings):
 
     @property
     def renditions_dir(self) -> Path:
-        return self.data_dir / "renditions"
+        """Where prepared HLS output lives, as an absolute path.
+
+        Resolved for the same reason as :attr:`downloads_dir`: the transcode
+        handler encodes into a sibling temporary directory and renames it into
+        place, and ``rename`` across what turns out to be two names for one
+        directory is the kind of bug that only appears on the host whose
+        ``DATA_DIR`` is relative.
+        """
+        return (self.data_dir / "renditions").resolve()
 
     @property
     def fonts_dir(self) -> Path:

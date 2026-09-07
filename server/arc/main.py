@@ -22,6 +22,7 @@ from arc.api import (
     home,
     invites,
     jobs,
+    media,
     review,
     schedule,
     users,
@@ -204,6 +205,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(home.router)
     app.include_router(review.router)
     app.include_router(acquisition.router)
+    app.include_router(media.router)
     return app
 
 

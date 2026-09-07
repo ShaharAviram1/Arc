@@ -15,12 +15,23 @@ constructor makes each of those decisions visible in one place.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus, Torrent
+from arc.core.text import trim_middle
+from arc.models import (
+    Anime,
+    Episode,
+    EpisodeState,
+    Job,
+    ListEntry,
+    ListStatus,
+    Rendition,
+    Torrent,
+)
 from arc.services.catalog import preferred_title
 from arc.services.catalog.airing import (
     FINISHED,
@@ -245,6 +256,102 @@ class ReleaseOut(BaseModel):
         )
 
 
+class RenditionOut(BaseModel):
+    """The browser-ready output for an episode (FR-P1, FR-P2).
+
+    Present only once the episode is ``ready``, and deliberately not a URL:
+    M8's ``/media/{episode_id}/index.m3u8`` is derived from the episode id, so
+    a path here would be a second way to address the same file and the one a
+    client would be tempted to trust (spec §7).
+
+    ``subtitle_lang`` is null when the source had no usable text track and the
+    episode was prepared without subtitles — which FR-P2 allows and asks to be
+    flagged, and this is the flag. ``notes`` is the sentence behind the flag.
+    """
+
+    duration: float | None = None
+    width: int | None = None
+    height: int | None = None
+    subtitle_lang: str | None = None
+    audio_lang: str | None = None
+    #: What the plan had to settle for, in whole sentences: "the only subtitle
+    #: tracks are bitmap (hdmv_pgs_subtitle); nothing was burned in", "no en
+    #: subtitle track; used pt instead". Usually empty. Additive and
+    #: order-preserving — a client that does not render them loses nothing, and
+    #: one that does can explain a rendition with no subtitles without the user
+    #: having to ask an admin to read a log.
+    notes: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_rendition(cls, rendition: Rendition, *, notes: Sequence[str] = ()) -> RenditionOut:
+        return cls(
+            duration=rendition.duration,
+            width=rendition.width,
+            height=rendition.height,
+            subtitle_lang=rendition.subtitle_lang,
+            audio_lang=rendition.audio_lang,
+            notes=list(notes),
+        )
+
+
+#: Longest failure detail shown on an episode row. The whole stderr tail is in
+#: the job payload and the admin queue view; this is the sentence-or-two a
+#: person reads on the show page before deciding to press retry (FR-P4).
+MAX_FAILURE_CHARS = 500
+
+
+class PrepareState(BaseModel):
+    """What the latest ``transcode`` job says about one episode (FR-P4).
+
+    Progress, the failure tail and the plan's notes live in that job's payload
+    rather than in columns (:mod:`arc.services.media.jobs` explains why), so
+    this is the one place that knows the payload's shape. Each field is empty
+    except in the state it belongs to: a percentage on a ``ready`` episode is
+    noise, a stale error under an episode that has since succeeded is a lie,
+    and notes are what the *finished* rendition had to settle for, so they are
+    read only once there is one.
+    """
+
+    progress: float | None = None
+    failure_reason: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_job(cls, job: Job | None, state: EpisodeState) -> PrepareState:
+        payload = job.payload if job is not None else {}
+        notes = _notes(payload)
+        if state is EpisodeState.PREPARING:
+            raw = payload.get("progress")
+            value = float(raw) if isinstance(raw, int | float) else 0.0
+            return cls(progress=min(max(value, 0.0), 1.0))
+        if state is EpisodeState.FAILED:
+            detail = payload.get("error_tail")
+            if not isinstance(detail, str) or not detail.strip():
+                detail = job.last_error if job is not None else None
+            if not detail:
+                return cls()
+            # Both ends, not the last 500 characters. The first line names the
+            # failure ("ffmpeg exited 1") and the last lines are ffmpeg's own
+            # complaint; a plain suffix would keep the complaint and drop the
+            # name, leaving a sentence that begins mid-diagnostic.
+            return cls(failure_reason=trim_middle(detail, limit=MAX_FAILURE_CHARS))
+        return cls(notes=notes)
+
+
+def _notes(payload: dict[str, Any]) -> list[str]:
+    """The plan notes the last transcode recorded, if it recorded any.
+
+    Written to the payload by the handler on success only, so they describe
+    the rendition that is on disk. Anything that is not a list of strings is
+    ignored rather than trusted: the payload is JSONB and a hand-edited row
+    must not be able to put an object into the API's response.
+    """
+    raw = payload.get("notes")
+    if not isinstance(raw, list):
+        return []
+    return [note for note in raw if isinstance(note, str)]
+
+
 #: Episode states whose download percentage means something to a user (FR-A7).
 #: Before ``downloading`` there is nothing to report and after ``downloaded``
 #: the number would be a permanent 100 % on an episode that is already
@@ -282,6 +389,16 @@ class EpisodeOut(BaseModel):
     unavailable_reason: str | None = None
     #: The release Arc picked, once it has picked one.
     release: ReleaseOut | None = None
+    #: 0..1 while the episode is ``preparing``, null otherwise (FR-P4). Zero
+    #: means "queued, or ffmpeg has not reported yet", not "stuck": the
+    #: transcode reports every few seconds once it is encoding.
+    prepare_progress: float | None = None
+    #: The tail of the last transcode failure, trimmed for display. Only ever
+    #: set while the state is ``failed`` (FR-P4); the whole thing is in the
+    #: job's payload and in the admin queue view.
+    failure_reason: str | None = None
+    #: The prepared output, once the episode is ``ready`` (FR-P1).
+    rendition: RenditionOut | None = None
 
     @classmethod
     def from_episode(
@@ -293,8 +410,11 @@ class EpisodeOut(BaseModel):
         boundary: int = 0,
         watched: bool = False,
         torrent: Torrent | None = None,
+        rendition: Rendition | None = None,
+        transcode_job: Job | None = None,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module."""
+        prepare = PrepareState.from_job(transcode_job, episode.state)
         return cls(
             id=episode.id,
             number=episode.number,
@@ -311,6 +431,13 @@ class EpisodeOut(BaseModel):
             ),
             unavailable_reason=episode.unavailable_reason,
             release=ReleaseOut.from_torrent(torrent) if torrent is not None else None,
+            prepare_progress=prepare.progress,
+            failure_reason=prepare.failure_reason,
+            rendition=(
+                RenditionOut.from_rendition(rendition, notes=prepare.notes)
+                if rendition is not None and episode.state is EpisodeState.READY
+                else None
+            ),
         )
 
 
@@ -387,6 +514,8 @@ class AnimeDetail(AnimeCore):
         watched: frozenset[int] = frozenset(),
         relation_ids: dict[tuple[str, int], int] | None = None,
         torrents: dict[int, Torrent] | None = None,
+        renditions: dict[int, Rendition] | None = None,
+        transcode_jobs: dict[int, Job] | None = None,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -428,6 +557,8 @@ class AnimeDetail(AnimeCore):
                     boundary=boundary,
                     watched=episode.id in watched,
                     torrent=(torrents or {}).get(episode.id),
+                    rendition=(renditions or {}).get(episode.id),
+                    transcode_job=(transcode_jobs or {}).get(episode.id),
                 )
                 for episode in episodes
             ],
@@ -449,10 +580,13 @@ __all__ = [
     "ListEntryOut",
     "ListEntryPatch",
     "ListRow",
+    "MAX_FAILURE_CHARS",
     "PROGRESS_STATES",
     "NextAiringOut",
+    "PrepareState",
     "RelationOut",
     "ReleaseOut",
+    "RenditionOut",
     "SearchPage",
     "TitleOut",
     "aired_through",

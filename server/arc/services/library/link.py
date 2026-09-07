@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState
 from arc.services.acquisition.states import TERMINAL_STATES, advance_to_matched
+from arc.services.media.names import enqueue_transcode
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,19 @@ async def link(
         media_file.match_candidates = candidates
     moved = advance_to_matched(episode, reason=f"media file {media_file.id} linked")
     await session.flush()
+
+    # FR-P1: "as soon as a MediaFile is matched to an episode, a transcode job
+    # runs". Enqueued in the caller's transaction, so the link and its
+    # consequence land together or neither does, and deduplicated on the
+    # episode, so confirming a review item for an episode whose first file was
+    # already queued does not queue a second encode. An episode already
+    # ``preparing`` or ``ready`` is left alone: ``advance_to_matched`` refused
+    # to move it, and re-encoding what is already playable is exactly what
+    # FR-P5 and the ``force`` path exist to make deliberate.
+    queued = None
+    if episode.state is EpisodeState.MATCHED:
+        queued = await enqueue_transcode(session, episode.id)
+
     log.info(
         "media file linked",
         extra={
@@ -119,6 +133,7 @@ async def link(
             "review_state": review_state.value,
             "confidence": confidence,
             "episode_state_changed": moved,
+            "transcode_job_id": queued.id if queued is not None else None,
         },
     )
     return episode

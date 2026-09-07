@@ -33,8 +33,9 @@ from sqlalchemy import or_, select
 
 from arc.api.anime_schemas import AnimeDetail, AnimeSummary, RelationOut, SearchPage
 from arc.api.deps import AdminUser, CatalogDep, CurrentUser, SessionDep
+from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
-from arc.models import Anime, Episode, Job, ListEntry, Torrent
+from arc.models import Anime, Job, ListEntry
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceNotFound,
@@ -135,23 +136,6 @@ async def search(
     )
 
 
-async def _torrents_for(session: SessionDep, anime_id: int) -> dict[int, Torrent]:
-    """``episode_id → torrent`` for one show, newest row per episode.
-
-    One query for the whole episode list rather than one per row. Ordered by
-    id so that the last write wins when an episode has been re-fetched: the
-    release a user is being shown is the one currently downloading, not the
-    one that was abandoned last week.
-    """
-    rows = await session.scalars(
-        select(Torrent)
-        .join(Episode, Episode.id == Torrent.episode_id)
-        .where(Episode.anime_id == anime_id)
-        .order_by(Torrent.id)
-    )
-    return {torrent.episode_id: torrent for torrent in rows.all()}
-
-
 @router.get(
     "/{anime_id}",
     response_model=AnimeDetail,
@@ -180,6 +164,10 @@ async def detail(
 
     episodes = await episodes_for(session, anime.id)
     entry = await session.get(ListEntry, (user.id, anime.id))
+    # The download percentage, the preparing percentage, the failure sentence
+    # and the rendition all live outside ``episodes`` (FR-A7, FR-P1, FR-P4);
+    # three queries for the whole list rather than three per episode.
+    extras = await episode_extras(session, [episode.id for episode in episodes])
     # ``watched`` stays empty until M8 writes ``watch_progress``; the shape is
     # here so the client can render the mark from day one.
     return AnimeDetail.build(
@@ -188,7 +176,9 @@ async def detail(
         now=now(),
         list_entry=entry,
         relation_ids=await _relation_ids(session, anime),
-        torrents=await _torrents_for(session, anime.id),
+        torrents=extras.torrents,
+        renditions=extras.renditions,
+        transcode_jobs=extras.transcode_jobs,
     )
 
 

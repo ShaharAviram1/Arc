@@ -94,7 +94,8 @@ function BehindCard({ item, timezone }: { item: BehindEntry; timezone?: string }
 
 function NewEpisodeRow({ item, timezone }: { item: NewEpisodeEntry; timezone?: string }) {
   const { anime, episode } = item
-  // No bar here — the row is one line, so the number alone carries it (FR-A7).
+  // Downloading or preparing (FR-A7, FR-P4). No bar here — the row is one
+  // line, so the number alone carries it.
   const percent = episodeProgressPercent(episode)
 
   return (

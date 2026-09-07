@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Index, Integer, String, Text, func
+from sqlalchemy import Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +28,26 @@ from arc.models.enums import JobStatus, enum_column
 DEFAULT_PRIORITY = 100
 DEFAULT_MAX_ATTEMPTS = 3
 
+#: The index behind :func:`arc.services.media.names.latest_transcode_jobs`.
+#:
+#: A transcode's progress and failure tail live in ``payload`` rather than in
+#: columns of their own (:mod:`arc.services.media.jobs` explains why), so the
+#: show page's "which job is this episode's?" is a lookup on
+#: ``payload->>'episode_id'`` — an expression, and one no ordinary index can
+#: serve. Partial on ``type = 'transcode'`` because that key exists on no other
+#: job type: the index then covers a fraction of the queue and stays small
+#: however many catalogue refreshes and ingest scans pass through the table.
+#:
+#: Named as a constant because two other things spell it: the migration that
+#: creates it, and the test that proves it survived one.
+TRANSCODE_EPISODE_INDEX = "ix_jobs_transcode_episode"
+
+#: The expression and the predicate, as SQL. Shared with the migration for the
+#: same reason the name is — an index the models describe one way and the
+#: database another is an index autogenerate will offer to drop every time.
+TRANSCODE_EPISODE_EXPRESSION = "(payload ->> 'episode_id')"
+TRANSCODE_EPISODE_PREDICATE = "type = 'transcode'"
+
 
 class Job(Base):
     """One unit of background work."""
@@ -35,6 +55,11 @@ class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         Index("ix_jobs_status_run_after_priority", "status", "run_after", "priority"),
+        Index(
+            TRANSCODE_EPISODE_INDEX,
+            text(TRANSCODE_EPISODE_EXPRESSION),
+            postgresql_where=text(TRANSCODE_EPISODE_PREDICATE),
+        ),
     )
 
     id: Mapped[int] = bigint_pk()

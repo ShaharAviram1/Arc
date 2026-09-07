@@ -393,7 +393,7 @@ class TestScanJob:
         from arc.services.library.jobs import library_scan
         from arc.services.media import probe as probe_module
 
-        monkeypatch.setattr(probe_module, "ffprobe_path", lambda: None)
+        monkeypatch.setattr(probe_module, "ffprobe_path", lambda *_: None)
         make(data_dir / "manual" / MUSHISHI)
 
         job = Job(type="library_scan", payload={}, status=JobStatus.RUNNING)

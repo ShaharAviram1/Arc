@@ -6,6 +6,15 @@ came back, because what makes it worth having is precisely the junk: episode 7
 from five groups at three resolutions, the *second season*'s episode 7, a
 remake, an English dub of episode 12, and two 01–07 batches. Every one of them
 matched the query and only some of them are the file.
+
+The two ``search_mushoku_s3_11_*.xml`` fixtures were captured the same way and
+are here for the opposite reason: they do not overlap at all. Nyaa ANDs the
+words of a query, so the catalogue's own title (``Mushoku Tensei III: Isekai
+Ittara Honki Dasu - 11``) returns the eight releases that spell the subtitle
+out, the short form (``Mushoku Tensei S3 - 11``) returns the six that do not,
+and the two feeds share no info hash whatsoever. The most seeded 1080p file of
+that episode is in the short feed alone, which is why stopping at the first
+query that returned *something* was a correct ranking over the wrong pool.
 """
 
 from __future__ import annotations
@@ -37,6 +46,7 @@ from arc.services.acquisition.nyaa import (
     title_score,
 )
 from arc.services.acquisition.rules import Rules
+from arc.services.library.parser import strip_season
 from tests.acquisition_helpers import NyaaStub, force_transport, no_sleep, read_fixture
 
 FRIEREN_S1 = Anime(
@@ -51,9 +61,33 @@ FRIEREN_S2 = Anime(
     title_english="Frieren: Beyond Journey's End Season 2",
     episodes=24,
 )
+#: AniList row 178789, copied field for field out of the dev catalogue. The
+#: season marker sits *before* the subtitle, which is what makes the catalogue
+#: title and the release name diverge.
+MUSHOKU_S3 = Anime(
+    anilist_id=178789,
+    title_romaji="Mushoku Tensei III: Isekai Ittara Honki Dasu",
+    title_english="Mushoku Tensei: Jobless Reincarnation Season 3",
+    title_native="無職転生 III ～異世界行ったら本気だす～",
+    synonyms=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season"],
+    episodes=14,
+)
 
 FEED = read_fixture("search_frieren_07.xml")
 EMPTY = read_fixture("search_empty.xml")
+#: ``q=Mushoku Tensei S3 - 11`` and ``q=Mushoku Tensei III: Isekai Ittara Honki
+#: Dasu - 11``, captured the same afternoon. Disjoint by info hash.
+MUSHOKU_SHORT = read_fixture("search_mushoku_s3_11_short.xml")
+MUSHOKU_FULL = read_fixture("search_mushoku_s3_11_full.xml")
+
+MUSHOKU_QUERIES = [
+    "Mushoku Tensei III: Isekai Ittara Honki Dasu - 11",
+    "Mushoku Tensei: Jobless Reincarnation Season 3 - 11",
+    "Mushoku Tensei S3 - 11",
+    "Mushoku Tensei III - 11",
+    "Mushoku Tensei - 11",
+]
+SUBSPLEASE_1080P = "[SubsPlease] Mushoku Tensei S3 - 11 (1080p) [4492A492].mkv"
 
 
 # --- Parsing the feed -------------------------------------------------------
@@ -128,12 +162,40 @@ def test_queries_are_built_in_the_documented_order() -> None:
     ]
 
 
-def test_a_show_whose_title_names_a_season_gets_the_sxxexx_form_too() -> None:
+def test_a_show_whose_title_names_a_season_gets_the_short_forms_too() -> None:
     built = queries(FRIEREN_S2, 7)
 
-    assert built[0] == "Sousou no Frieren 2nd Season - 07"
-    assert built[-1] == "Sousou no Frieren S02E07"
+    assert built == [
+        "Sousou no Frieren 2nd Season - 07",
+        "Frieren: Beyond Journey's End Season 2 - 07",
+        "Sousou no Frieren S2 - 07",
+        "Sousou no Frieren II - 07",
+        "Sousou no Frieren - 07",
+    ]
     assert len(built) <= nyaa_module.MAX_QUERIES
+
+
+def test_a_season_marker_before_a_subtitle_still_yields_the_short_name() -> None:
+    """The bug, in one assertion.
+
+    ``Mushoku Tensei III: Isekai Ittara Honki Dasu`` is what AniList calls
+    season 3; ``Mushoku Tensei S3`` is what SubsPlease calls it. Nyaa ANDs the
+    words, so the first query cannot return the second's releases, and every
+    short form has to be asked for by name.
+    """
+    assert queries(MUSHOKU_S3, 11) == MUSHOKU_QUERIES
+
+
+def test_the_base_title_is_the_franchise_name_in_front_of_the_marker() -> None:
+    """The parser helper the short forms are built from."""
+    mid = strip_season("Mushoku Tensei III: Isekai Ittara Honki Dasu")
+    trailing = strip_season("Sousou no Frieren 2nd Season")
+    plain = strip_season("Mushishi")
+
+    assert (mid.season, mid.base) == (3, "Mushoku Tensei")
+    assert mid.title == "Mushoku Tensei : Isekai Ittara Honki Dasu"
+    assert (trailing.season, trailing.base) == (2, "Sousou no Frieren")
+    assert (plain.season, plain.base) == (None, "Mushishi")
 
 
 def test_a_show_with_only_a_romaji_title_still_builds_queries() -> None:
@@ -248,6 +310,57 @@ def test_episode_twelve_finds_the_dub_and_nothing_else() -> None:
         "[Yameii] Frieren - Beyond Journey's End - S01E12 [English Dub]"
         " [CR WEB-DL 720p] [07AE0439] (Sousou no Frieren)"
     ]
+
+
+def mushoku_keep(feed: str) -> list[str]:
+    kept = filter_items(
+        parse_feed(feed),
+        titles=anime_titles(MUSHOKU_S3),
+        number=11,
+        season=anime_season(MUSHOKU_S3),
+    )
+    return [candidate.item.title for candidate in kept]
+
+
+def test_a_short_season_marker_is_accepted_for_the_entry_that_spells_it_out() -> None:
+    """``S3`` on the release, ``III`` before a subtitle on the entry: one season.
+
+    The parser reads both — a trailing/mid ``III`` is season 3 and so is ``S3``
+    — so the filter needed no change for this. Only the query builder did.
+    """
+    assert anime_season(MUSHOKU_S3) == 3
+    assert mushoku_keep(MUSHOKU_SHORT) == [
+        "[SubsPlease] Mushoku Tensei S3 - 11 (1080p) [4492A492].mkv",
+        "[SubsPlease] Mushoku Tensei S3 - 11 (720p) [0C3D876B].mkv",
+        "[SubsPlease] Mushoku Tensei S3 - 11 (480p) [6D40AB16].mkv",
+    ]
+
+
+def test_the_neighbouring_episode_of_the_right_season_is_rejected() -> None:
+    """``S3 - 10`` is in the feed because ``11`` is elsewhere in its row."""
+    assert any("S3 - 10" in item.title for item in parse_feed(MUSHOKU_SHORT))
+    assert not any("S3 - 10" in title for title in mushoku_keep(MUSHOKU_SHORT))
+
+
+def test_the_asw_and_raze_encodes_are_dropped_as_remakes() -> None:
+    """Both are Nyaa-flagged ``remake``: re-encodes of the SubsPlease file.
+
+    ASW had 907 seeders and would otherwise have been a candidate; the original
+    it re-encoded is three rows above it in the same feed.
+    """
+    remakes = {item.title for item in parse_feed(MUSHOKU_SHORT) if item.remake}
+
+    assert any(title.startswith("[ASW]") for title in remakes)
+    assert any(title.startswith("[Raze]") for title in remakes)
+    assert not (remakes & set(mushoku_keep(MUSHOKU_SHORT)))
+
+
+def test_the_full_title_feed_keeps_the_episode_and_drops_the_others() -> None:
+    kept = mushoku_keep(MUSHOKU_FULL)
+
+    assert len(kept) == 7
+    assert sum(title.startswith("[Erai-raws]") for title in kept) == 3
+    assert not any(" - 09 " in title for title in kept), "episode 9 shares the feed"
 
 
 # --- Sequels: the asymmetry of the title comparison -------------------------
@@ -570,9 +683,10 @@ async def test_a_transport_error_is_retried_then_raises(monkeypatch: pytest.Monk
 # --- The whole search -------------------------------------------------------
 
 
-async def test_the_search_stops_at_the_first_query_that_finds_something(
+async def test_the_search_runs_every_query_even_when_the_first_finds_plenty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The fix: a non-empty first answer is not evidence that it is the pool."""
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub({"Sousou no Frieren - 07": FEED})
 
@@ -581,11 +695,15 @@ async def test_the_search_stops_at_the_first_query_that_finds_something(
             client, FRIEREN_S1, 7, Rules(preferred_groups=("SubsPlease",))
         )
 
-    assert stub.queries == ["Sousou no Frieren - 07"]
+    assert stub.queries == [
+        "Sousou no Frieren - 07",
+        "Frieren: Beyond Journey's End - 07",
+        "Sousou no Frieren 07",
+    ]
     assert ranked[0].candidate.group == "SubsPlease"
 
 
-async def test_the_search_falls_through_to_the_later_queries(
+async def test_the_search_finds_what_only_a_later_query_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
@@ -600,6 +718,79 @@ async def test_the_search_falls_through_to_the_later_queries(
         "Sousou no Frieren 07",
     ]
     assert ranked
+
+
+async def test_the_pool_is_the_union_of_every_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two disjoint feeds, one candidate pool, ranked across both.
+
+    Neither feed alone contains both of these: the SubsPlease 1080p is only in
+    the short one and the Erai-raws 1080p is only in the full one. Before the
+    merge, the full-title query answered first and non-empty and the search
+    never asked the other four.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub({MUSHOKU_QUERIES[0]: MUSHOKU_FULL, MUSHOKU_QUERIES[2]: MUSHOKU_SHORT})
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        ranked = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
+
+    assert stub.queries == MUSHOKU_QUERIES
+    titles = [entry.item.title for entry in ranked]
+    assert SUBSPLEASE_1080P in titles
+    assert any(title.startswith("[Erai-raws]") and "1080p" in title for title in titles)
+
+
+async def test_the_merge_keeps_one_row_per_info_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every query answers the same feed; the pool is that feed, not five of it."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(default=MUSHOKU_SHORT)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        ranked = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
+
+    assert len(stub.queries) == 5
+    hashes = [entry.item.info_hash for entry in ranked]
+    assert len(hashes) == len(set(hashes))
+
+
+async def test_the_most_seeded_1080p_release_wins_across_the_merged_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-A3 with no group preference: resolution, then seeders — over the union.
+
+    4836 seeders against the full-title feed's best of 4181. Ranking was never
+    the bug; being asked to rank six of the fourteen was.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub({MUSHOKU_QUERIES[0]: MUSHOKU_FULL, MUSHOKU_QUERIES[2]: MUSHOKU_SHORT})
+    rules = Rules(preferred_resolution="1080p", fallback_resolution="720p")
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        ranked = await search_for_episode(client, MUSHOKU_S3, 11, rules)
+
+    assert ranked[0].item.title == SUBSPLEASE_1080P
+    assert ranked[0].item.seeders == 4836
+    assert ranked[0].candidate.resolution == "1080p"
+
+
+async def test_five_queries_are_still_spaced_by_the_polite_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running every form costs four pauses, not zero and not a burst."""
+    slept: list[float] = []
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
+    stub = NyaaStub()
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        await search_for_episode(client, MUSHOKU_S3, 11, Rules())
+
+    assert len(stub.queries) == nyaa_module.MAX_QUERIES == 5
+    assert len(slept) == 4, "the first request waits for nothing"
+    assert all(0 < pause <= MIN_INTERVAL for pause in slept)
 
 
 async def test_a_search_that_finds_nothing_returns_an_empty_list(

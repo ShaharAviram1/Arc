@@ -20,7 +20,12 @@ from arc.models.enums import (
     UpdatedBy,
     UserRole,
 )
-from arc.models.job import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job
+from arc.models.job import (
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_PRIORITY,
+    TRANSCODE_EPISODE_INDEX,
+    Job,
+)
 from arc.models.mal import MalLink, MalWriteLog
 from arc.models.media import MediaFile, Rendition
 from arc.models.recs import RecRun
@@ -32,6 +37,7 @@ __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_PRIORITY",
     "DEFAULT_SETTINGS",
+    "TRANSCODE_EPISODE_INDEX",
     "Anime",
     "Base",
     "Episode",

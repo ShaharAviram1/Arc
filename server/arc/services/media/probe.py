@@ -44,9 +44,14 @@ PROBE_TIMEOUT = 30.0
 _warned = False
 
 
-def ffprobe_path() -> str | None:
-    """Where ffprobe is, or ``None`` if it is not on ``PATH``."""
-    return shutil.which(FFPROBE)
+def ffprobe_path(binary: str = FFPROBE) -> str | None:
+    """Where ffprobe is, or ``None`` if it is not on ``PATH``.
+
+    ``binary`` is ``FFPROBE_BIN`` from the settings when a caller has them —
+    M7's transcode does, ingest does not, and neither should have to care
+    which. An absolute path is returned unchanged if it is executable.
+    """
+    return shutil.which(binary)
 
 
 def _warn_once() -> None:
@@ -65,15 +70,15 @@ def reset_warning() -> None:
     _warned = False
 
 
-async def ffprobe_json(path: Path | str) -> dict[str, Any] | None:
+async def ffprobe_json(path: Path | str, *, binary: str = FFPROBE) -> dict[str, Any] | None:
     """Run ffprobe over ``path`` and return its parsed JSON, or ``None``.
 
     ``None`` covers every way this can not produce an answer: no ffprobe
     installed, a non-zero exit, a timeout, output that is not JSON. None of
     them is raised, because none of them is a reason to fail an ingest.
     """
-    binary = ffprobe_path()
-    if binary is None:
+    binary = ffprobe_path(binary) or ""
+    if not binary:
         _warn_once()
         return None
 

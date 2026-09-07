@@ -108,6 +108,19 @@ export interface EpisodeRelease {
   seeders: number | null
 }
 
+/**
+ * What the transcode actually produced, once an episode is `ready` (spec §4.4
+ * FR-P3). `duration` is in seconds; the languages are the tracks that were
+ * kept, and are null when the source had none to keep.
+ */
+export interface EpisodeRendition {
+  duration: number
+  width: number
+  height: number
+  subtitle_lang: string | null
+  audio_lang: string | null
+}
+
 /** Arc's own per-episode state machine (spec §6). */
 export interface EpisodeOut {
   id: number
@@ -127,10 +140,19 @@ export interface EpisodeOut {
    * `downloaded`; null in every other state (FR-A7).
    */
   download_progress: number | null
+  /**
+   * How far the transcode has got, 0–1, while the episode is `preparing`;
+   * null before ffmpeg has reported anything and in every other state (FR-P4).
+   */
+  prepare_progress: number | null
+  /** Why the transcode broke — the tail of ffmpeg's own error; set only for `failed` (FR-P4). */
+  failure_reason: string | null
   /** Why the retry window closed without a release; set only for `unavailable` (FR-A6). */
   unavailable_reason: string | null
   /** The chosen release, once there is one (FR-A3). */
   release: EpisodeRelease | null
+  /** What the transcode produced; sent once the episode is `ready` (FR-P3). */
+  rendition: EpisodeRendition | null
 }
 
 /**
@@ -340,11 +362,11 @@ function clampFraction(value: number): number {
 }
 
 /**
- * How complete the acquisition of an episode is, 0–1, or null when there is no
- * bar to draw. `downloaded` and `matching` are past the transfer, so they read
- * full whether or not the server still sends a number for them; a `downloading`
- * episode qBittorrent has not reported on yet gets the badge alone rather than
- * a bar stuck at zero.
+ * How complete the work on an episode is, 0–1, or null when there is no bar to
+ * draw. `downloaded` and `matching` are past the transfer, so they read full
+ * whether or not the server still sends a number for them; a `downloading`
+ * episode qBittorrent has not reported on yet — or a `preparing` one ffmpeg
+ * has not — gets the badge alone rather than a bar stuck at zero.
  */
 export function episodeProgress(episode: EpisodeOut): number | null {
   switch (episode.state) {
@@ -353,6 +375,11 @@ export function episodeProgress(episode: EpisodeOut): number | null {
     case 'downloaded':
     case 'matching':
       return 1
+    case 'preparing':
+      // The transcode is its own piece of work with its own percentage
+      // (FR-P4), but it is the same bar: from the viewer's side one job runs
+      // from "wanted" to "ready".
+      return episode.prepare_progress === null ? null : clampFraction(episode.prepare_progress)
     default:
       return null
   }
@@ -371,6 +398,31 @@ export function unavailableReason(episode: EpisodeOut): string | null {
   return reason === null || reason === '' ? null : reason
 }
 
+/** The reason a transcode broke, shown only where it applies (FR-P4). */
+export function failureReason(episode: EpisodeOut): string | null {
+  if (episode.state !== 'failed') return null
+  const reason = episode.failure_reason
+  return reason === null || reason === '' ? null : reason
+}
+
+/**
+ * A state that ended badly, with the word the badge already shows and the
+ * explanation behind it. The two cases read the same to a viewer — the episode
+ * is not coming and here is why — so they get the same affordance, and the
+ * label keeps the note from saying "Failed" over an "Unavailable" badge.
+ */
+export interface EpisodeProblem {
+  label: string
+  reason: string
+}
+
+export function episodeProblem(episode: EpisodeOut): EpisodeProblem | null {
+  const unavailable = unavailableReason(episode)
+  if (unavailable !== null) return { label: 'Unavailable', reason: unavailable }
+  const failure = failureReason(episode)
+  return failure === null ? null : { label: 'Failed', reason: failure }
+}
+
 /**
  * `[SubsPlease] · 1080p · 123 seeders` — whichever of the three the server
  * knows, in that order. A release the parser got nothing out of falls back to
@@ -384,6 +436,41 @@ export function releaseLine(release: EpisodeRelease): string {
     parts.push(`${String(release.seeders)} seeder${release.seeders === 1 ? '' : 's'}`)
   }
   return parts.length === 0 ? release.title : parts.join(' · ')
+}
+
+/**
+ * `1080p · subs en · audio ja` — what the file a viewer is about to play
+ * actually is (FR-P4). Height is the resolution people name; the exact pixel
+ * dimensions and the duration are on the player, not in a table cell. A track
+ * the source did not have is left out rather than shown as "none".
+ */
+export function renditionLine(rendition: EpisodeRendition): string {
+  const parts: string[] = []
+  if (rendition.height > 0) parts.push(`${String(rendition.height)}p`)
+  if (rendition.subtitle_lang !== null && rendition.subtitle_lang !== '') {
+    parts.push(`subs ${rendition.subtitle_lang}`)
+  }
+  if (rendition.audio_lang !== null && rendition.audio_lang !== '') {
+    parts.push(`audio ${rendition.audio_lang}`)
+  }
+  return parts.join(' · ')
+}
+
+/**
+ * The muted line under an episode's title: where the file came from, then what
+ * it turned into. Both can be present — a ready episode still names its
+ * release — so they join rather than replace one another, and an episode with
+ * neither gets no line at all. The server only fills `rendition` once an
+ * episode is `ready`, which is what keeps this from claiming a file exists.
+ */
+export function episodeDetailLine(episode: EpisodeOut): string | null {
+  const parts: string[] = []
+  if (episode.release !== null) parts.push(releaseLine(episode.release))
+  if (episode.rendition !== null) {
+    const rendition = renditionLine(episode.rendition)
+    if (rendition !== '') parts.push(rendition)
+  }
+  return parts.length === 0 ? null : parts.join(' · ')
 }
 
 /**
@@ -584,6 +671,36 @@ export function useSetListEntry(): UseMutationResult<ListEntry, Error, SetListEn
       }),
     onSuccess: (entry, { animeId }) => {
       applyListStatus(client, animeId, entry)
+    },
+  })
+}
+
+export interface RetryTranscodeInput {
+  /** The show whose page is on screen; what the refetch is keyed on. */
+  animeId: number
+  episodeId: number
+  /** Re-encode an episode that is already `ready`, rather than retry a failure. */
+  force?: boolean
+}
+
+/**
+ * Put a failed episode back through the transcoder (spec §4.4 FR-P4, admin
+ * only). The server answers 202 and does the work in a job, so there is
+ * nothing in the response worth reading: the episode goes back to `preparing`
+ * and the show page's own poll (FR-A7) carries it from there. Invalidating the
+ * detail query is what starts that poll again, since a page of settled
+ * episodes has stopped asking.
+ */
+export function useRetryTranscode(): UseMutationResult<null, Error, RetryTranscodeInput> {
+  const client = useQueryClient()
+
+  return useMutation<null, Error, RetryTranscodeInput>({
+    mutationFn: ({ episodeId, force }) => {
+      const suffix = force === true ? '?force=true' : ''
+      return apiFetch<null>(`/api/episodes/${episodeId}/transcode${suffix}`, { method: 'POST' })
+    },
+    onSuccess: (_result, { animeId }) => {
+      void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
     },
   })
 }

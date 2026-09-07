@@ -4,15 +4,16 @@ import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   anilistUrl,
   catalogErrorMessage,
+  episodeDetailLine,
+  episodeProblem,
   episodeProgressPercent,
   episodeStateClass,
   episodeStateLabel,
   formatAirDate,
   listErrorMessage,
   malUrl,
-  releaseLine,
-  unavailableReason,
   useAnime,
+  useRetryTranscode,
   useSetListEntry,
   type AnimeDetail,
   type AnimeRelation,
@@ -130,19 +131,28 @@ function ScoreControl({ animeId, score }: { animeId: number; score: number | nul
   )
 }
 
+/** What the bar is measuring, when it is not the transfer itself. */
+const PREPARING_LABEL = 'Preparing'
+const ACQUISITION_LABEL = 'Acquisition progress'
+
+/** Why a transcode retry did not get as far as being queued. */
+const RETRY_FAILED = 'Could not queue a retry.'
+
 /**
- * How far acquisition has got (FR-A7). The bar carries the number for assistive
- * tech and the text beside it carries the same number for everyone else, so
- * neither has to read the other's markup.
+ * How far the work on an episode has got (FR-A7, FR-P4). The bar carries the
+ * number for assistive tech and the text beside it carries the same number for
+ * everyone else, so neither has to read the other's markup. Downloading and
+ * preparing share it — same shape, different label, because a screen reader
+ * has no badge beside it to say which job is running.
  */
-function AcquisitionProgress({ percent }: { percent: number }) {
+function AcquisitionProgress({ percent, label }: { percent: number; label: string }) {
   const text = `${String(percent)}%`
 
   return (
     <span className="mt-1 flex items-center gap-1.5">
       <span
         role="progressbar"
-        aria-label="Acquisition progress"
+        aria-label={label}
         aria-valuenow={percent}
         aria-valuemin={0}
         aria-valuemax={100}
@@ -160,16 +170,17 @@ function AcquisitionProgress({ percent }: { percent: number }) {
 }
 
 /**
- * Why an episode is not coming (FR-A6). "Unavailable" on its own invites the
- * question, so the marker answers it on hover and says the whole thing to a
- * screen reader, which cannot hover.
+ * Why an episode is not coming (FR-A6) or why its transcode broke (FR-P4).
+ * "Unavailable" or "Failed" on its own invites the question, so the marker
+ * answers it on hover and says the whole thing to a screen reader, which
+ * cannot hover.
  */
-function UnavailableHint({ reason }: { reason: string }) {
+function ProblemHint({ label, reason }: { label: string; reason: string }) {
   return (
     <span
       role="img"
       title={reason}
-      aria-label={`Unavailable: ${reason}`}
+      aria-label={`${label}: ${reason}`}
       className="ml-1.5 cursor-help text-xs text-[var(--arc-text-muted)]"
     >
       ⓘ
@@ -177,20 +188,58 @@ function UnavailableHint({ reason }: { reason: string }) {
   )
 }
 
-function EpisodeRow({ episode, timezone }: { episode: EpisodeOut; timezone?: string }) {
+/**
+ * Send a failed episode back to the transcoder (FR-P4). Admin-only, so the
+ * button is rendered only for one — a viewer who cannot retry is better off
+ * not seeing an action that would 403.
+ */
+function RetryTranscode({ animeId, episodeId }: { animeId: number; episodeId: number }) {
+  const retry = useRetryTranscode()
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={retry.isPending}
+        onClick={() => {
+          retry.mutate({ animeId, episodeId })
+        }}
+        className="mt-1 rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-2 py-0.5 text-xs text-[var(--arc-text)] hover:border-[var(--arc-accent)] disabled:opacity-60"
+      >
+        Retry
+      </button>
+      {retry.isError ? (
+        <span role="alert" className="mt-1 text-xs text-[var(--arc-error)]">
+          {RETRY_FAILED}
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+function EpisodeRow({
+  animeId,
+  episode,
+  isAdmin,
+  timezone,
+}: {
+  animeId: number
+  episode: EpisodeOut
+  isAdmin: boolean
+  timezone?: string
+}) {
   const title = episode.title ?? `Episode ${episode.number}`
   const percent = episodeProgressPercent(episode)
-  const reason = unavailableReason(episode)
+  const problem = episodeProblem(episode)
+  const detail = episodeDetailLine(episode)
 
   return (
     <tr className="border-t border-[var(--arc-border)]">
       <td className="px-3 py-2 text-[var(--arc-text-muted)] tabular-nums">{episode.number}</td>
       <td className="px-3 py-2 text-[var(--arc-text)]">
         {title}
-        {episode.release === null ? null : (
-          <span className="mt-0.5 block text-xs text-[var(--arc-text-muted)]">
-            {releaseLine(episode.release)}
-          </span>
+        {detail === null ? null : (
+          <span className="mt-0.5 block text-xs text-[var(--arc-text-muted)]">{detail}</span>
         )}
       </td>
       <td className="px-3 py-2 whitespace-nowrap text-[var(--arc-text-muted)]">
@@ -215,9 +264,19 @@ function EpisodeRow({ episode, timezone }: { episode: EpisodeOut; timezone?: str
             >
               {episodeStateLabel(episode.state)}
             </span>
-            {reason === null ? null : <UnavailableHint reason={reason} />}
+            {problem === null ? null : (
+              <ProblemHint label={problem.label} reason={problem.reason} />
+            )}
           </span>
-          {percent === null ? null : <AcquisitionProgress percent={percent} />}
+          {percent === null ? null : (
+            <AcquisitionProgress
+              percent={percent}
+              label={episode.state === 'preparing' ? PREPARING_LABEL : ACQUISITION_LABEL}
+            />
+          )}
+          {episode.state === 'failed' && isAdmin ? (
+            <RetryTranscode animeId={animeId} episodeId={episode.id} />
+          ) : null}
         </span>
       </td>
       <td className="px-3 py-2 text-center">
@@ -245,7 +304,17 @@ function EpisodeRow({ episode, timezone }: { episode: EpisodeOut; timezone?: str
   )
 }
 
-function Episodes({ episodes, timezone }: { episodes: EpisodeOut[]; timezone?: string }) {
+function Episodes({
+  animeId,
+  episodes,
+  isAdmin,
+  timezone,
+}: {
+  animeId: number
+  episodes: EpisodeOut[]
+  isAdmin: boolean
+  timezone?: string
+}) {
   if (episodes.length === 0) {
     return <p className="mt-3 text-sm text-[var(--arc-text-muted)]">No episodes known yet.</p>
   }
@@ -280,7 +349,13 @@ function Episodes({ episodes, timezone }: { episodes: EpisodeOut[]; timezone?: s
         </thead>
         <tbody>
           {episodes.map((episode) => (
-            <EpisodeRow key={episode.id} episode={episode} timezone={timezone} />
+            <EpisodeRow
+              key={episode.id}
+              animeId={animeId}
+              episode={episode}
+              isAdmin={isAdmin}
+              timezone={timezone}
+            />
           ))}
         </tbody>
       </table>
@@ -426,7 +501,12 @@ export function Show() {
       )}
 
       <h2 className="mt-8 text-lg font-semibold tracking-tight text-[var(--arc-text)]">Episodes</h2>
-      <Episodes episodes={anime.episodes} timezone={timezone} />
+      <Episodes
+        animeId={anime.id}
+        episodes={anime.episodes}
+        isAdmin={me?.role === 'admin'}
+        timezone={timezone}
+      />
 
       {anime.relations.length === 0 ? null : (
         <>

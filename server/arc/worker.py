@@ -40,6 +40,7 @@ from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
 from arc.services.library import jobs as library_jobs  # noqa: F401  (registers handlers)
 from arc.services.library.names import LIBRARY_SCAN
+from arc.services.media.jobs import sweep_transcodes
 
 log = logging.getLogger("arc.worker")
 
@@ -171,6 +172,23 @@ async def _seed_season_sweep(factory: SessionFactory) -> None:
         log.exception("could not seed the season sweep")
 
 
+async def _sweep_transcodes(factory: SessionFactory) -> None:
+    """Queue transcodes for episodes the queue has lost track of (M7, FR-P1).
+
+    Run once at start-up rather than on a timer. Every ordinary transcode is
+    enqueued by the link that caused it, so this only ever finds work when the
+    worker was *not* running at the moment it should have been: a file matched
+    during an outage, an encode killed mid-flight, a retry that came due while
+    the process was down. On a healthy deployment it queues nothing, which is
+    what makes it safe to run on every boot.
+    """
+    try:
+        async with factory() as session:
+            await sweep_transcodes(session)
+    except Exception:  # pragma: no cover - a scheduling failure must not kill the worker
+        log.exception("could not sweep for unfinished transcodes")
+
+
 async def run(settings: Settings) -> None:
     """Run the scheduler and the claim loop until SIGINT/SIGTERM."""
     stop = asyncio.Event()
@@ -289,6 +307,9 @@ async def run(settings: Settings) -> None:
     # have an empty schedule until 03:30 tomorrow, which is exactly the state
     # FR-C7 exists to avoid.
     await _seed_season_sweep(factory)
+    # …and catch up on anything matched, half-encoded or awaiting a retry
+    # while this worker was not running (FR-P1, FR-P4).
+    await _sweep_transcodes(factory)
     log.info(
         "worker started",
         extra={

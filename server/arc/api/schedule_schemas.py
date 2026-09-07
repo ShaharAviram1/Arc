@@ -26,7 +26,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut, ListEntryOut
-from arc.models import ListStatus
+from arc.models import Job, ListStatus, Rendition, Torrent
 from arc.services.catalog.progress import BehindRow, NewEpisodeRow
 from arc.services.catalog.schedule import DAYS_IN_WEEK, PlacedEntry, WeekPlacement
 
@@ -174,18 +174,41 @@ class BehindEntry(BaseModel):
 
 
 class NewEpisodeEntry(BaseModel):
-    """An episode of a followed show that aired in the last seven days."""
+    """An episode of a followed show that aired in the last seven days.
+
+    The episode is the *same* :class:`~arc.api.anime_schemas.EpisodeOut` the
+    show page renders, filled in the same way, which is the point of taking
+    ``torrent``, ``rendition`` and ``transcode_job``: an episode that aired
+    last night is exactly the one most likely to be downloading or preparing
+    right now, and a card that showed only its state — with no percentage, no
+    reason, and no way to tell "queued" from "half done" — would be at its
+    least useful precisely when it matters most (FR-A7, FR-P4).
+    """
 
     anime: AnimeSummary
     episode: EpisodeOut
 
     @classmethod
     def from_row(
-        cls, row: NewEpisodeRow, *, now: datetime, list_status: ListStatus | None = None
+        cls,
+        row: NewEpisodeRow,
+        *,
+        now: datetime,
+        list_status: ListStatus | None = None,
+        torrent: Torrent | None = None,
+        rendition: Rendition | None = None,
+        transcode_job: Job | None = None,
     ) -> NewEpisodeEntry:
         return cls(
             anime=AnimeSummary.from_anime(row.anime, list_status),
-            episode=EpisodeOut.from_episode(row.episode, now=now, anime_status=row.anime.status),
+            episode=EpisodeOut.from_episode(
+                row.episode,
+                now=now,
+                anime_status=row.anime.status,
+                torrent=torrent,
+                rendition=rendition,
+                transcode_job=transcode_job,
+            ),
         )
 
 
@@ -194,7 +217,9 @@ class ContinueWatchingEntry(BaseModel):
 
     Declared now and always empty: ``watch_progress`` is not written until M8,
     and a field that appears later is a client change, while a field that is
-    there from the start and fills up is not.
+    there from the start and fills up is not. :meth:`from_row` is written and
+    typed for the same reason — the row it will be built from is the shape it
+    is built from now, so M8 supplies the list and changes nothing else.
     """
 
     anime: AnimeSummary
@@ -202,6 +227,33 @@ class ContinueWatchingEntry(BaseModel):
     #: Where the player got to, in seconds, and how long the episode is.
     position_s: float = 0.0
     duration_s: float | None = None
+
+    @classmethod
+    def from_row(
+        cls,
+        row: NewEpisodeRow,
+        *,
+        now: datetime,
+        list_status: ListStatus | None = None,
+        position_s: float = 0.0,
+        duration_s: float | None = None,
+        torrent: Torrent | None = None,
+        rendition: Rendition | None = None,
+        transcode_job: Job | None = None,
+    ) -> ContinueWatchingEntry:
+        return cls(
+            anime=AnimeSummary.from_anime(row.anime, list_status),
+            episode=EpisodeOut.from_episode(
+                row.episode,
+                now=now,
+                anime_status=row.anime.status,
+                torrent=torrent,
+                rendition=rendition,
+                transcode_job=transcode_job,
+            ),
+            position_s=position_s,
+            duration_s=duration_s,
+        )
 
 
 class HomePage(BaseModel):

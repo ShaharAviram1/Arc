@@ -550,6 +550,13 @@ class SeasonMark(NamedTuple):
     title: str
     season: int | None = None
     part: int | None = None
+    #: The franchise name the marker was attached to — everything *in front of*
+    #: it. Usually the same string as :attr:`title`, and different exactly when
+    #: the marker sat before a subtitle: ``Mushoku Tensei III: Isekai Ittara
+    #: Honki Dasu`` leaves ``title`` as ``Mushoku Tensei : Isekai Ittara Honki
+    #: Dasu`` — right for matching, useless as a search query — and ``base`` as
+    #: ``Mushoku Tensei``, which is the name release groups actually write.
+    base: str = ""
 
 
 def _season_from_title(title: str) -> SeasonMark:
@@ -564,11 +571,13 @@ def _season_from_title(title: str) -> SeasonMark:
     title = _SEASON_RANGE_RE.sub(" ", title).strip(" \t._-~:")
     season: int | None = None
     part: int | None = None
+    base: str | None = None
 
     middle = _MID_SEASON_RE.search(title)
     if middle:
         marker = next(value for value in middle.groups() if value)
         season = _ROMAN.get(marker.upper()) or _marker_value(marker)
+        base = title[: middle.start()].strip(" \t._-~:") or None
         title = (title[: middle.start()] + " " + title[middle.end() :]).strip(" \t._-~:")
         title = re.sub(r"\s+", " ", title)
 
@@ -611,11 +620,12 @@ def _season_from_title(title: str) -> SeasonMark:
                 title, changed = head, True
     if season is None:
         season = part
-    return SeasonMark(title.strip(" \t._-~:"), season, part)
+    stripped = title.strip(" \t._-~:")
+    return SeasonMark(stripped, season, part, base or stripped)
 
 
 def strip_season(title: str) -> SeasonMark:
-    """``"Overlord IV"`` → ``("Overlord", 4, None)``. The public form.
+    """``"Overlord IV"`` → ``("Overlord", 4, None, "Overlord")``. The public form.
 
     Exported because the matcher runs *catalogue* titles through exactly this
     before comparing them with a filename's: "Vinland Saga Season 2" and a
@@ -805,7 +815,8 @@ def parse(name: str) -> ParsedName:
     title = _JP_EPISODE_RE.sub(" ", title).strip(" \t._-~:")
     title = _JP_DANGLING_RE.sub("", title).strip(" \t._-~:")
     title = re.sub(r"\s+", " ", title)
-    title, title_season, part = _season_from_title(title)
+    marked = _season_from_title(title)
+    title, title_season, part = marked.title, marked.season, marked.part
     if part is None:
         loose_part = _PART_IN_NAME.search(base)
         part = int(loose_part.group(1)) if loose_part else None

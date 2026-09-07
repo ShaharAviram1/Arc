@@ -10,6 +10,7 @@ import {
   FRIEREN,
   HOME_PAGE,
   HOME_PAGE_DOWNLOADING,
+  HOME_PAGE_PREPARING,
 } from '@/test/animeFixtures'
 import { mockApi, TEST_USER, type MockRoutes } from '@/test/apiMock'
 
@@ -82,6 +83,14 @@ describe('Home', () => {
     expect(await screen.findByText('Downloading')).toBeInTheDocument()
     const week = within(section('New this week'))
     expect(week.getByText('42%')).toBeInTheDocument()
+  })
+
+  it('puts the transcode percentage there too (FR-P4)', async () => {
+    renderHome({ 'GET /api/home': { body: HOME_PAGE_PREPARING } })
+
+    expect(await screen.findByText('Preparing')).toBeInTheDocument()
+    const week = within(section('New this week'))
+    expect(week.getByText('30%')).toBeInTheDocument()
   })
 
   it('shows no percentage for an episode that is not being fetched', async () => {

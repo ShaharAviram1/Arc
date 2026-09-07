@@ -127,14 +127,14 @@ that must be verified before the next milestone starts.
   Nyaa/qBit mocked.
 
 ### M7 — Transcode pipeline
-- [ ] ffprobe stream analysis; subtitle/audio track selection (FR-P2)
-- [ ] Font extraction from MKV attachments into a per-job fonts dir
-- [ ] ffmpeg HLS fMP4 transcode with burned-in subs, progress parsing,
+- [x] ffprobe stream analysis; subtitle/audio track selection (FR-P2)
+- [x] Font extraction from MKV attachments into a per-job fonts dir
+- [x] ffmpeg HLS fMP4 transcode with burned-in subs, progress parsing,
       concurrency cap (FR-P1, FR-P3)
-- [ ] `renditions` row, `ready`/`failed` states, retries, priority by user
+- [x] `renditions` row, `ready`/`failed` states, retries, priority by user
       proximity (FR-P4)
-- [ ] Slow test on a 5 s fixture; unit tests on plan building
-- **DoD:** a matched MKV becomes a playable HLS rendition with subtitles
+- [x] Slow test on a 5 s fixture; unit tests on plan building
+- **DoD (verified 2026-09-06 by orchestrator: real 1080p episode encoded in 4 min, 237 fMP4 segments, subtitle burn-in confirmed by eye on an extracted frame; failure path and 2-encode cap covered by tests and a live bogus-file run):** a matched MKV becomes a playable HLS rendition with subtitles
   visible; failures surface with stderr tail; two transcodes run in parallel
   at most (configurable).
 

@@ -13,12 +13,13 @@ So there is one writer, :func:`transition`, and it enforces the table below.
     not_wanted → wanted → searching → downloading → downloaded
        → matching → (review) → matched → preparing → ready
     ready → (retention) → not_wanted
+    ready → preparing                       (a deliberate re-encode, FR-P5)
     searching | downloading | downloaded | matching → unavailable
     unavailable → wanted                    (something wants it again)
     preparing → failed → preparing          (a transcode blew up, retry)
 
-Three edges are in :data:`TRANSITIONS` without being drawn in the spec's
-diagram, and all three are real.
+Four edges are in :data:`TRANSITIONS` without being drawn in the spec's
+diagram, and all four are real.
 
 * **→ matched from anywhere before it.** A file dropped into the manual
   directory belongs to an episode Arc never fetched, and confirming a review
@@ -41,6 +42,12 @@ diagram, and all three are real.
   the daily retry (:data:`~arc.services.acquisition.wants.UNAVAILABLE_RETRY`)
   picks up and the show page explains (FR-A7). Leaving it at ``matching``
   would strand it exactly as ``searching`` used to be stranded.
+* **ready → preparing.** A re-encode (M7): the admin ``force`` path, and the
+  day the subtitle language or the encoder settings change. FR-P5 keeps the
+  source file *precisely* so that a rendition can be redone, which is a
+  promise the state machine has to be able to keep. Only the transcode job
+  takes this edge; a link never does (:func:`advance_to_matched`), so a
+  re-matched file still cannot pull a playable episode backwards.
 
 Everything else raises :class:`IllegalTransition`. That is deliberate: an
 impossible transition is a bug in the caller, and a state machine that
@@ -77,7 +84,7 @@ TRANSITIONS: Final[Mapping[EpisodeState, frozenset[EpisodeState]]] = {
     _S.MATCHED: frozenset({_S.PREPARING}),
     _S.PREPARING: frozenset({_S.READY, _S.FAILED}),
     _S.FAILED: frozenset({_S.PREPARING}) | _TO_MATCHED,
-    _S.READY: frozenset({_S.NOT_WANTED}),
+    _S.READY: frozenset({_S.NOT_WANTED, _S.PREPARING}),
     _S.UNAVAILABLE: frozenset({_S.WANTED, _S.NOT_WANTED}) | _TO_MATCHED,
 }
 

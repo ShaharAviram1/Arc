@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
-from arc.models import Base
+from arc.models import TRANSCODE_EPISODE_INDEX, Base
 from arc.models.settings import DEFAULT_SETTINGS
 from tests.conftest import alembic_config
 
@@ -42,6 +42,28 @@ def _diff(url: str) -> list[Any]:
         try:
             async with engine.connect() as connection:
                 return await connection.run_sync(compare)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def _index_definition(url: str, name: str) -> str | None:
+    """``pg_indexes.indexdef`` for one index on ``jobs``, or ``None``."""
+
+    async def run() -> str | None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT indexdef FROM pg_indexes "
+                        "WHERE tablename = 'jobs' AND indexname = :name"
+                    ),
+                    {"name": name},
+                )
+                row = found.first()
+                return None if row is None else str(row[0])
         finally:
             await engine.dispose()
 
@@ -99,17 +121,39 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     assert seeded["audio_lang"] == "ja"
 
 
-def test_the_history_is_a_single_squashed_revision(test_database_url: str) -> None:
+def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:
     """M3b squashed M1–M3's four revisions into one fresh initial schema.
 
     Nothing had shipped, and a chain whose first revision creates ``anime`` with
     the AniList id as its primary key and whose last one re-keys the table is
-    harder to read than the schema it produces. Asserted rather than left to
-    convention so that the next migration is a deliberate second revision.
+    harder to read than the schema it produces. What is asserted now is what
+    survives that: exactly one root, one head, and no branches — so a second
+    revision is a deliberate link on the end rather than a fork nobody noticed.
     """
     script = ScriptDirectory.from_config(alembic_config(test_database_url))
     revisions = list(script.walk_revisions())
 
-    assert len(revisions) == 1, [rev.revision for rev in revisions]
-    assert revisions[0].down_revision is None
+    roots = [rev.revision for rev in revisions if rev.down_revision is None]
+    assert roots == ["4d1c3479c036"]
+    assert len(script.get_heads()) == 1
+    # walk_revisions goes head to root, one step at a time: a straight chain.
+    assert len(revisions) == len({rev.revision for rev in revisions})
     assert script.get_current_head() == revisions[0].revision
+
+
+def test_the_transcode_episode_index_is_created_by_a_migration(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The one index autogenerate cannot write for itself.
+
+    ``latest_transcode_jobs`` matches on ``payload->>'episode_id'``, which is an
+    expression, and the index is partial on ``type = 'transcode'``. Neither is
+    something a column-level model declaration can express, so both are written
+    out in the migration — and an index that exists only in a migration is an
+    index a future squash can silently drop. This is the assertion that notices.
+    """
+    definition = _index_definition(test_database_url, TRANSCODE_EPISODE_INDEX)
+
+    assert definition is not None, f"{TRANSCODE_EPISODE_INDEX} is not on the jobs table"
+    assert "payload ->> 'episode_id'" in definition
+    assert "WHERE" in definition and "'transcode'" in definition

@@ -88,10 +88,10 @@ TRACKERS: Final[tuple[str, ...]] = (
 #: with no API and no key; the politeness here is the whole contract.
 MIN_INTERVAL: Final[float] = 2.0
 
-#: How long an answer is reused. Ten minutes, because the four queries a
-#: single search makes overlap heavily with the four the *next* episode's
-#: search makes, and because a release that appeared 90 seconds ago will still
-#: be there in nine minutes.
+#: How long an answer is reused. Ten minutes, because the queries a single
+#: search makes overlap heavily with the ones the *next* episode's search
+#: makes — the broad forms are identical but for the number — and because a
+#: release that appeared 90 seconds ago will still be there in nine minutes.
 CACHE_TTL: Final[float] = 600.0
 
 TIMEOUT_SECONDS: Final[float] = 20.0
@@ -106,8 +106,14 @@ RETRY_AFTER: Final[float] = 3.0
 TITLE_THRESHOLD: Final[float] = 0.90
 
 #: Most queries a single search makes, however many the builder produced.
-#: Four × 2 s of spacing is the budget one episode's search may spend.
-MAX_QUERIES: Final[int] = 4
+#: **Every one of them runs**, so this is the budget one episode's search may
+#: spend: five × 2 s of spacing, and rather less in practice because the cache
+#: is shared and the broad forms repeat from episode to episode.
+MAX_QUERIES: Final[int] = 5
+
+#: Season numbers as a release group writes them in a title. Only up to 5:
+#: past that nobody uses numerals, and ``I`` is never written at all.
+ROMAN_SEASONS: Final[dict[int, str]] = {2: "II", 3: "III", 4: "IV", 5: "V"}
 
 #: Episode numbers are padded to two digits, or to three once a show is long
 #: enough that groups start writing ``- 105``.
@@ -209,12 +215,11 @@ class NyaaClient:
     **One instance per process**, handed out by :func:`shared_client`. The
     pacing lock and the cache belong to the instance, so the scope of the
     instance *is* the scope of the politeness: a client per search job would
-    space that job's four queries two seconds apart and let three concurrent
+    space that job's own queries two seconds apart and let three concurrent
     jobs leave together anyway, which is exactly the burst
     :data:`MIN_INTERVAL` exists to prevent. Sharing one client also shares the
-    ten-minute cache, and it is worth sharing — the four queries one episode
-    makes overlap heavily with the four the next episode of the same show
-    makes.
+    ten-minute cache, and it is worth sharing — the queries one episode makes
+    overlap heavily with the ones the next episode of the same show makes.
     """
 
     def __init__(
@@ -389,15 +394,45 @@ def anime_season(anime: Anime) -> int | None:
     return None
 
 
+def _short_forms(name: str, season: int, padded: str) -> list[str]:
+    """The three ways a group abbreviates a later season of ``name``.
+
+    Nyaa ANDs every word of a query, so the *catalogue's* title is the worst
+    possible thing to ask for: ``Mushoku Tensei III: Isekai Ittara Honki Dasu``
+    matches only the releases that spell the whole subtitle out, and the most
+    seeded 1080p file of that very episode — ``[SubsPlease] Mushoku Tensei S3 -
+    11`` — is not one of them. So the franchise name is taken on its own
+    (:attr:`~arc.services.library.parser.SeasonMark.base`) and the season is
+    re-attached the three ways groups write it: ``S3``, ``III``, and not at
+    all. The last is the broadest query of the set and the one that finds the
+    most: it is a subset of every other release's words.
+    """
+    base = strip_season(name).base
+    if not base:
+        return []
+    built = [f"{base} S{season} - {padded}"]
+    roman = ROMAN_SEASONS.get(season)
+    if roman:
+        built.append(f"{base} {roman} - {padded}")
+    built.append(f"{base} - {padded}")
+    return built
+
+
 def queries(anime: Anime, number: int) -> list[str]:
     """What to ask Nyaa for, best first, at most :data:`MAX_QUERIES`.
 
     ``"<title> - 07"`` first because that is how almost every group writes a
     weekly release, and because the dash is what keeps the query from matching
-    a batch. The bare ``"<title> 07"`` is the fallback for groups that do not,
-    and the ``S02E07`` form is what the western-style releases of a later
-    season are named — which is why it is only built when the entry's title
-    says which season it is.
+    a batch. Then the same for the english title, and then — for an entry whose
+    own title names a season — the short forms of :func:`_short_forms`, because
+    a later season is exactly where the catalogue's title and the release's
+    name diverge. A show with no season marker needs none of them: its base
+    *is* its title, and ``"<title> - 07"`` is already the broad form, so the
+    bare ``"<title> 07"`` is the only fallback left for the groups that write
+    no dash.
+
+    All of these run (:func:`search_for_episode` merges them); the order is
+    what decides which survive the cap, not which are worth asking.
     """
     romaji = anime.title_romaji
     english = anime.title_english
@@ -409,16 +444,13 @@ def queries(anime: Anime, number: int) -> list[str]:
         built.append(f"{romaji} - {padded}")
     if english and english != romaji:
         built.append(f"{english} - {padded}")
-    if romaji:
-        built.append(f"{romaji} {padded}")
-    if season is not None:
+    if season is None:
+        if romaji:
+            built.append(f"{romaji} {padded}")
+    else:
         for name in (romaji, english):
-            if not name:
-                continue
-            stem = strip_season(name).title
-            if stem:
-                built.append(f"{stem} S{season:02d}E{padded}")
-                break
+            if name:
+                built.extend(_short_forms(name, season, padded))
 
     seen: dict[str, None] = {}
     for query in built:
@@ -640,40 +672,65 @@ async def search_for_episode(
     *,
     threshold: float = TITLE_THRESHOLD,
 ) -> list[Ranked]:
-    """Run :func:`queries` until one of them yields candidates, then rank.
+    """Run **every** :func:`queries` form, merge by info hash, filter and rank.
 
-    Stopping at the first query that produces anything is the point of the
-    ordering: the romaji ``- 07`` form is what the weekly release is named, and
-    a second request that would find the same five files is two more seconds
-    of somebody else's bandwidth.
+    This used to stop at the first query that produced any candidate, on the
+    theory that the romaji ``- 07`` form is what the weekly release is named
+    and a second request would only find the same files. That is true of a
+    first season and false of every later one. Nyaa ANDs the words of a query,
+    so ``Mushoku Tensei III: Isekai Ittara Honki Dasu - 11`` returns the eight
+    releases that write the subtitle out — a real, plausible, *non-empty*
+    answer — and the ranking then picks the best of those eight without ever
+    seeing ``[SubsPlease] Mushoku Tensei S3 - 11``, which had three times the
+    seeders and was simply not in the pool. A correct ranking over an
+    incomplete pool looks exactly like a correct answer, which is what made it
+    worth two seconds each to close.
+
+    Merging is by ``info_hash`` because the queries overlap heavily by design
+    and the same torrent comes back under several of them; the first feed to
+    mention one wins, which keeps the best query's ordering at the front of the
+    pool for anything the ranker leaves tied.
     """
     titles = anime_titles(anime)
     season = anime_season(anime)
+
+    merged: dict[str, NyaaItem] = {}
+    counts: list[int] = []
     for query in queries(anime, number):
         items = await client.search(query)
-        candidates = filter_items(
-            items, titles=titles, number=number, season=season, threshold=threshold
+        before = len(merged)
+        for item in items:
+            merged.setdefault(item.info_hash, item)
+        counts.append(len(items))
+        log.debug(
+            "nyaa query",
+            extra={
+                "query": query,
+                "anime_id": anime.id,
+                "number": number,
+                "seen": len(items),
+                "new": len(merged) - before,
+            },
         )
-        if candidates:
-            ranked = rank(candidates, rules)
-            log.info(
-                "nyaa candidates",
-                extra={
-                    "query": query,
-                    "anime_id": anime.id,
-                    "number": number,
-                    "seen": len(items),
-                    "kept": len(candidates),
-                    "top": ranked[0].item.title,
-                    "reasons": list(ranked[0].reasons),
-                },
-            )
-            return ranked
-        log.info(
-            "nyaa query found nothing usable",
-            extra={"query": query, "anime_id": anime.id, "number": number, "seen": len(items)},
-        )
-    return []
+
+    candidates = filter_items(
+        merged.values(), titles=titles, number=number, season=season, threshold=threshold
+    )
+    ranked = rank(candidates, rules)
+    log.info(
+        "nyaa candidates",
+        extra={
+            "anime_id": anime.id,
+            "number": number,
+            "queries": len(counts),
+            "per_query": counts,
+            "merged": len(merged),
+            "kept": len(candidates),
+            "top": ranked[0].item.title if ranked else None,
+            "reasons": list(ranked[0].reasons) if ranked else [],
+        },
+    )
+    return ranked
 
 
 def as_dict(ranked: Ranked) -> dict[str, Any]:
@@ -696,6 +753,7 @@ __all__ = [
     "MAX_QUERIES",
     "MIN_INTERVAL",
     "NYAA_NS",
+    "ROMAN_SEASONS",
     "TITLE_THRESHOLD",
     "TRACKERS",
     "Candidate",

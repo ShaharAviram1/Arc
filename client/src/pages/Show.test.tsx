@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
 import { Show } from '@/pages/Show'
 import {
+  CHOSEN_RELEASE,
+  FAILURE_REASON,
   FRIEREN,
   FRIEREN_DETAIL,
   FRIEREN_DETAIL_NO_STATUS,
@@ -17,13 +19,15 @@ import {
   UNAVAILABLE_REASON,
   UNLINKED_RELATION,
 } from '@/test/animeFixtures'
-import { callTo, jsonBodyOf, mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
+import { callTo, jsonBodyOf, mockApi, requestsMade, TEST_ADMIN, TEST_USER } from '@/test/apiMock'
 
 const ME = { body: TEST_USER }
 const MAL_NOTICE =
   'Catalogue data via MyAnimeList — AniList is unavailable. Air dates are estimated.'
 const DETAIL_PATH = `GET /api/anime/${FRIEREN.id}`
 const LIST_PATH = `/api/list/${FRIEREN.id}`
+/** The one failed episode in the fixture, the only one with a Retry button. */
+const TRANSCODE_PATH = '/api/episodes/9007/transcode'
 
 function renderShow(id: number | string = FRIEREN.id) {
   const router = createMemoryRouter(
@@ -119,15 +123,56 @@ describe('Show', () => {
 
     renderShow()
 
-    const bar = await screen.findByRole('progressbar')
+    const bar = await screen.findByRole('progressbar', { name: 'Acquisition progress' })
     expect(bar).toHaveAttribute('aria-valuenow', '42')
     expect(bar).toHaveAttribute('aria-valuemin', '0')
     expect(bar).toHaveAttribute('aria-valuemax', '100')
     expect(bar).toHaveAttribute('aria-valuetext', '42%')
     expect(screen.getByText('42%')).toBeInTheDocument()
-    // Only the transfer gets a bar: searching and wanted are just badges.
-    expect(screen.getAllByRole('progressbar')).toHaveLength(1)
+    // Only work in flight gets a bar: searching and wanted are just badges.
+    expect(screen.getAllByRole('progressbar')).toHaveLength(2)
     expect(screen.getAllByText('Searching')).toHaveLength(2)
+  })
+
+  it('shows how far a transcode has got, on the same bar (FR-P4)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    // Named for the job it is measuring, since the badge beside it is not read
+    // out with it.
+    const bar = await screen.findByRole('progressbar', { name: 'Preparing' })
+    expect(bar).toHaveAttribute('aria-valuenow', '30')
+    expect(bar).toHaveAttribute('aria-valuetext', '30%')
+    expect(screen.getByText('30%')).toBeInTheDocument()
+  })
+
+  it('says why a transcode failed, and offers no retry to a non-admin (FR-P4)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const hint = await screen.findByLabelText(`Failed: ${FAILURE_REASON}`)
+    expect(hint).toHaveAttribute('title', FAILURE_REASON)
+    expect(screen.getAllByText('Failed')).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('lets an admin put a failed episode back through the transcoder (FR-P4)', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+      [`POST ${TRANSCODE_PATH}`]: { status: 202 },
+    })
+
+    renderShow()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Retry' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(`POST ${TRANSCODE_PATH}`)
+    })
+    // One button, on the one failed episode.
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(1)
   })
 
   it('reads downloaded and matching as complete', async () => {
@@ -146,7 +191,7 @@ describe('Show', () => {
 
     await screen.findByRole('heading', { name: FRIEREN.title.preferred })
     const bars = screen.getAllByRole('progressbar')
-    expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['100', '42'])
+    expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['100', '30', '42'])
     expect(screen.getByText('100%')).toBeInTheDocument()
   })
 
@@ -194,11 +239,38 @@ describe('Show', () => {
 
     renderShow()
 
-    // Episode 1 is ready and carries no release, so its cell is the title alone
-    // — the exact-text match lands on the cell itself, not on an inner span.
+    // Episode 1 is ready and carries no release, so the only thing under its
+    // title is what the transcode produced — the exact-text match lands on the
+    // cell itself, not on an inner span.
     const title = await screen.findByText('The Journey’s End')
     expect(title.tagName).toBe('TD')
     expect(screen.getAllByText('[SubsPlease] · 1080p · 123 seeders')).toHaveLength(1)
+  })
+
+  it('says what a ready episode actually is, under its title (FR-P4)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    expect(await screen.findByText('1080p · subs en · audio ja')).toBeInTheDocument()
+    // Only the ready episode has a rendition; nothing else grew a second line.
+    expect(screen.getAllByText(/subs en/)).toHaveLength(1)
+  })
+
+  it('appends the rendition to the release line when the episode has both', async () => {
+    const [first, ...rest] = FRIEREN_DETAIL.episodes
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: { ...FRIEREN_DETAIL, episodes: [{ ...first, release: CHOSEN_RELEASE }, ...rest] },
+      },
+    })
+
+    renderShow()
+
+    expect(
+      await screen.findByText('[SubsPlease] · 1080p · 123 seeders · 1080p · subs en · audio ja'),
+    ).toBeInTheDocument()
   })
 
   it('shows score and progress only once the show is on the list', async () => {
