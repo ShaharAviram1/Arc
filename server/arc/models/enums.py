@@ -80,23 +80,41 @@ class JobStatus(StrEnum):
 
 
 class MalWriteCause(StrEnum):
-    """Why Arc wrote to MAL (spec §4.7 FR-M4, FR-M7).
+    """Why a row is in ``mal_write_log`` (spec §4.7 FR-M4, FR-M7).
 
-    There is no fourth value on purpose: every write must be traceable to a
-    user-originated event or an explicit revert.
+    The first three are the only causes a *write* can carry: every byte Arc
+    sends to MyAnimeList is traceable to a watch completion, an explicit list
+    edit, or an explicit revert. That is the non-negotiable, and
+    :func:`arc.services.mal.writelog.assert_write_cause` is where it is
+    enforced rather than merely documented.
+
+    :attr:`CONFLICT` is the exception that proves it: it is the one cause that
+    never accompanies a write. It records a local change that MyAnimeList
+    overrode during an import (FR-M3) — the change Arc *discarded* — and is
+    only ever paired with :attr:`MalWriteStatus.SKIPPED`, so the log tells the
+    whole story of an entry rather than only the half Arc managed to send.
     """
 
     WATCH = "watch"
     MANUAL = "manual"
     REVERT = "revert"
+    CONFLICT = "conflict"
 
 
 class MalWriteStatus(StrEnum):
-    """Outcome of a MAL write attempt (spec §4.7 FR-M6)."""
+    """Outcome of a MAL write attempt (spec §4.7 FR-M6).
+
+    ``pending`` is written before the request goes out, so a crash mid-write
+    leaves evidence rather than silence; it becomes ``ok`` or ``failed`` when
+    the answer comes back. ``skipped`` means nothing was sent at all — the
+    conflict rows above, and a delete that was overtaken by the show being
+    re-added before the job ran.
+    """
 
     PENDING = "pending"
     OK = "ok"
     FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 class UpdatedBy(StrEnum):

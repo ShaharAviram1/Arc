@@ -61,10 +61,11 @@ from arc.models import (
 )
 from arc.services.acquisition.names import (
     SEARCH_RELEASE,
+    SEARCH_RELEASE_PRIORITY,
     enqueue_compute_wants,
     search_dedupe_key,
 )
-from arc.services.acquisition.rules import look_ahead_n
+from arc.services.acquisition.rules import is_paused, look_ahead_n
 from arc.services.acquisition.states import transition
 from arc.services.catalog.airing import aired_through, is_aired
 from arc.services.jobs.queue import enqueue
@@ -224,7 +225,19 @@ async def compute_wants(session: AsyncSession, *, now: datetime | None = None) -
     Flushes but does not commit; the caller owns the transaction, so the wants,
     the state changes and the ``search_release`` jobs land together or not at
     all.
+
+    While acquisition is paused this does **nothing at all** — no rows read,
+    none written, no episode moved, nothing queued — and answers an empty
+    result. Not "reconcile but skip the searches": the reconciliation is what
+    releases episodes back to ``not_wanted`` and drops rows, and a pause that
+    quietly rewrote a table would be a strange thing for a button labelled
+    *pause* to do. The whole point is that resuming finds the world exactly as
+    the pause left it.
     """
+    if await is_paused(session):
+        log.info("acquisition paused; wants left untouched")
+        return WantsResult()
+
     moment = now or datetime.now(UTC)
     look_ahead = await look_ahead_n(session)
 
@@ -349,6 +362,7 @@ async def _start_searches(
             session,
             SEARCH_RELEASE,
             {"episode_id": episode.id},
+            priority=SEARCH_RELEASE_PRIORITY,
             dedupe_key=search_dedupe_key(episode.id),
         )
         if job.id > newest_job:

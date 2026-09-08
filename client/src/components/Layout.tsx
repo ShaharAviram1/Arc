@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import { useAcquisitionStatus } from '@/lib/acquisition'
 import { useLogout, useMe } from '@/lib/auth'
 import { useReviewSummary } from '@/lib/review'
 
@@ -47,6 +48,30 @@ function ReviewCountPill({ count }: { count: number }) {
     >
       {count}
     </span>
+  )
+}
+
+/**
+ * "Acquisition paused", under the nav, for an admin and only while it is true.
+ *
+ * A pause is invisible from everywhere else in the app — episodes just stop
+ * moving — so the one thing this has to do is stop that being a mystery. No
+ * controls yet: M14's admin panel is where pausing and resuming get buttons.
+ * `role="status"` so a screen reader is told when it appears mid-session,
+ * rather than only on a reload.
+ */
+function AcquisitionPausedNote() {
+  // Nothing while it is loading, and nothing if the poll failed: an absent line
+  // reads as "acquisition is running", which is both the common case and the
+  // right thing to say when we do not know.
+  const { data: acquisition } = useAcquisitionStatus()
+
+  if (!acquisition?.paused) return null
+
+  return (
+    <p role="status" className="mt-4 px-3 text-xs text-[var(--arc-text-muted)]">
+      Acquisition paused
+    </p>
   )
 }
 
@@ -113,6 +138,8 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
+
+        <AcquisitionPausedNote />
 
         <AccountPanel />
       </aside>

@@ -1,9 +1,10 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
+import type { MalSync } from '@/lib/mal'
 import { Show } from '@/pages/Show'
 import {
   CHOSEN_RELEASE,
@@ -16,6 +17,7 @@ import {
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
+  MAL_WRITE_ERROR,
   UNAVAILABLE_REASON,
   UNLINKED_RELATION,
 } from '@/test/animeFixtures'
@@ -440,6 +442,87 @@ describe('Show', () => {
       await userEvent.click(marks[0] as HTMLElement)
 
       expect(await screen.findByRole('alert')).toHaveTextContent('Could not save that.')
+    })
+  })
+
+  describe('the MAL sync indicator (FR-M6)', () => {
+    function detailWithSync(sync: MalSync) {
+      return {
+        ...FRIEREN_DETAIL_ON_LIST,
+        list_entry: { ...listEntry({ progress: 4, score: 9 }), mal_sync: sync },
+      }
+    }
+
+    it('reads as synced when the last write landed', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: detailWithSync({
+            state: 'synced',
+            error: null,
+            last_write_at: '2026-09-07T08:00:00Z',
+          }),
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByText('MAL: synced')).toBeInTheDocument()
+    })
+
+    it('reads as pending while a write is queued', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: detailWithSync({ state: 'pending', error: null, last_write_at: null }),
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByText('MAL: pending')).toBeInTheDocument()
+    })
+
+    it('names the failure and links to the sync log', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: detailWithSync({
+            state: 'failed',
+            error: MAL_WRITE_ERROR,
+            last_write_at: '2026-09-07T08:00:00Z',
+          }),
+        },
+      })
+
+      renderShow()
+
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent(`MAL: failed — ${MAL_WRITE_ERROR}`)
+      expect(within(alert).getByRole('link', { name: 'Sync log' })).toHaveAttribute('href', '/mal')
+    })
+
+    it('says nothing at all when the account is not linked', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: detailWithSync({ state: 'unlinked', error: null, last_write_at: null }),
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByText('Watched 4 / 28')).toBeInTheDocument()
+      expect(screen.queryByText(/^MAL:/)).not.toBeInTheDocument()
+    })
+
+    it('says nothing when the server sent no sync state at all', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL_ON_LIST } })
+
+      renderShow()
+
+      expect(await screen.findByText('Watched 4 / 28')).toBeInTheDocument()
+      expect(screen.queryByText(/^MAL:/)).not.toBeInTheDocument()
     })
   })
 

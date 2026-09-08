@@ -22,6 +22,9 @@ import {
 } from '@tanstack/react-query'
 import { ApiError, apiFetch } from '@/lib/api'
 import { errorDetail } from '@/lib/auth'
+// Type-only, and erased under `verbatimModuleSyntax`: `mal.ts` imports values
+// from here, so this must never become a runtime import.
+import type { MalSync } from '@/lib/mal'
 import {
   HOME_QUERY_KEY,
   isFollowing,
@@ -48,6 +51,11 @@ export const LIST_STATUS_LABELS: Record<ListStatus, string> = {
   on_hold: 'On hold',
   dropped: 'Dropped',
   completed: 'Completed',
+}
+
+/** Narrows a wire string — a select's value, a MAL log entry — to a status. */
+export function isListStatus(value: string): value is ListStatus {
+  return (LIST_STATUSES as readonly string[]).includes(value)
 }
 
 export interface AnimeTitle {
@@ -184,6 +192,14 @@ export interface ListEntry {
   progress: number
   score: number | null
   updated_at: string
+  /**
+   * How this entry stands with MyAnimeList (spec §4.7 FR-M6). Optional
+   * because only the show page's `list_entry` carries it — the aggregates
+   * (`/api/list`, home, schedule) answer a different question and leave it
+   * out, and a badge that is absent must read as "nothing to say", not as
+   * "synced".
+   */
+  mal_sync?: MalSync
 }
 
 export interface MyListItem {

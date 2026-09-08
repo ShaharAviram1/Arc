@@ -44,6 +44,7 @@ from arc.models import Anime, Episode, Job, ListEntry, ListStatus
 from arc.services.catalog.cache import ensure_anime, upsert_summaries
 from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import (
+    CATALOG_PRIORITY,
     PRE_AIR,
     RECONCILE,
     REFRESH,
@@ -157,6 +158,7 @@ async def _enqueue_refreshes(ctx: JobContext, anime_ids: list[int]) -> int:
             ctx.session,
             REFRESH,
             {"anime_id": anime_id},
+            priority=CATALOG_PRIORITY,
             run_after=start + timedelta(seconds=queued * SPACING_SECONDS),
             dedupe_key=key,
         )
@@ -345,6 +347,7 @@ async def catalog_season_sweep(ctx: JobContext) -> None:
 
 
 __all__ = [
+    "CATALOG_PRIORITY",
     "FOLLOWED_STATUSES",
     "PRE_AIR",
     "PRE_AIR_LEAD",

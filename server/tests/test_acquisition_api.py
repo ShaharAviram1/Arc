@@ -7,16 +7,23 @@ contract.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from arc.db import SessionFactory
 from arc.models import EpisodeState, Job, Torrent, UserRole, Want
-from arc.services.acquisition.names import COMPUTE_WANTS, POLL_QBIT, SEARCH_RELEASE
+from arc.services.acquisition.names import (
+    COMPUTE_WANTS,
+    COMPUTE_WANTS_PRIORITY,
+    POLL_QBIT,
+    SEARCH_RELEASE,
+)
+from arc.services.acquisition.rules import PAUSED_KEY, is_paused
 from tests.acquisition_helpers import make_anime, make_entry, make_episodes, make_user
 from tests.conftest import add_user, api_transport, login
 
@@ -249,6 +256,116 @@ async def test_a_dropped_want_is_not_listed(
         await session.commit()
 
     assert (await admin_client.get("/api/acquisition/wants")).json() == []
+
+
+# --- The pause switch -------------------------------------------------------
+#
+# ``settings`` is not in ``CLEANUP_TABLES`` (conftest) — it is seeded by the
+# initial migration and compared key-for-key by ``test_migrations`` — so a test
+# that pauses acquisition has to put the row back itself. The fixture is what
+# makes that unmissable rather than something each test remembers.
+
+
+@pytest.fixture
+async def restore_pause(pg_engine: AsyncEngine) -> AsyncIterator[None]:
+    """Leave ``acquisition_paused`` false however the test ends."""
+    try:
+        yield
+    finally:
+        async with pg_engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE settings SET value = 'false'::jsonb WHERE key = :key"),
+                {"key": PAUSED_KEY},
+            )
+
+
+async def test_a_non_admin_cannot_pause_acquisition(api_app, api_factory: SessionFactory) -> None:
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD, role=UserRole.USER)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        assert (await client.post("/api/acquisition/pause")).status_code == 403
+        assert (await client.get("/api/acquisition/status")).status_code == 403
+
+
+async def test_an_anonymous_caller_cannot_read_the_status(api_client: AsyncClient) -> None:
+    assert (await api_client.get("/api/acquisition/status")).status_code == 401
+    assert (await api_client.post("/api/acquisition/pause")).status_code == 401
+    assert (await api_client.post("/api/acquisition/resume")).status_code == 401
+
+
+async def test_pausing_writes_the_setting_and_says_so(
+    admin_client: AsyncClient, api_factory: SessionFactory, restore_pause: None
+) -> None:
+    response = await admin_client.post("/api/acquisition/pause")
+
+    assert response.status_code == 200
+    assert response.json() == {"paused": True}
+    async with api_factory() as session:
+        assert await is_paused(session) is True
+
+
+async def test_pausing_twice_is_the_same_as_pausing_once(
+    admin_client: AsyncClient, restore_pause: None
+) -> None:
+    await admin_client.post("/api/acquisition/pause")
+
+    assert (await admin_client.post("/api/acquisition/pause")).json() == {"paused": True}
+
+
+async def test_resuming_clears_the_setting_and_queues_a_recompute(
+    admin_client: AsyncClient, api_factory: SessionFactory, restore_pause: None
+) -> None:
+    await admin_client.post("/api/acquisition/pause")
+
+    response = await admin_client.post("/api/acquisition/resume")
+
+    assert response.status_code == 200
+    assert response.json() == {"paused": False}
+    async with api_factory() as session:
+        assert await is_paused(session) is False
+        rows = await session.scalars(select(Job).where(Job.type == COMPUTE_WANTS))
+        queued = list(rows.all())
+    assert len(queued) == 1, "resuming acts on the window rather than waiting for the tick"
+    assert queued[0].priority == COMPUTE_WANTS_PRIORITY
+
+
+async def test_the_status_reports_the_flag_and_what_it_is_holding(
+    admin_client: AsyncClient, api_factory: SessionFactory, restore_pause: None
+) -> None:
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=963007)
+        episodes = await make_episodes(session, anime, 6, aired_through=6)
+        user = await make_user(session, "status@arc.test")
+        await make_entry(session, user, anime, progress=2)
+        episodes[2].state = EpisodeState.SEARCHING
+        episodes[3].state = EpisodeState.DOWNLOADING
+        session.add(Want(user_id=user.id, episode_id=episodes[2].id))
+        session.add(Want(user_id=user.id, episode_id=episodes[3].id))
+        # Dropped wants are not live and must not be counted.
+        session.add(
+            Want(
+                user_id=user.id,
+                episode_id=episodes[4].id,
+                dropped_at=datetime.now(UTC),
+                drop_reason="unwatched",
+            )
+        )
+        await session.commit()
+
+    await admin_client.post("/api/acquisition/pause")
+    body = (await admin_client.get("/api/acquisition/status")).json()
+
+    assert body == {"paused": True, "active_wants": 2, "searching": 1, "downloading": 1}
+
+
+async def test_the_status_of_an_idle_unpaused_arc(admin_client: AsyncClient) -> None:
+    assert (await admin_client.get("/api/acquisition/status")).json() == {
+        "paused": False,
+        "active_wants": 0,
+        "searching": 0,
+        "downloading": 0,
+    }
 
 
 # --- The list hook ----------------------------------------------------------

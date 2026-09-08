@@ -75,6 +75,12 @@ Two Python processes share one codebase and one database:
   `running` jobs whose lock is older than `WORKER_STALE_AFTER` to `pending`,
   or to `failed` if attempts are exhausted. Shutdown drains in-flight jobs up
   to `WORKER_DRAIN_TIMEOUT`, then cancels and resets them to `pending`.
+- Priorities (lower first): `mal_push` 10, `transcode` 0–500 by user
+  distance, `poll_qbit` 50, `match_file` and the catalogue sweep
+  schedulers 100, `compute_wants` 120, `search_release` 150, imports,
+  catalogue refreshes and library scans 200 — so a write a person is
+  waiting for never queues behind bulk work. Bulk jobs hold a slot for
+  about two minutes at most (import chunks of 50 spaced 2 s).
 - API: `POST /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs` (admin-only
   from M2). Success status is `done`.
 
@@ -143,7 +149,7 @@ arc/
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), updated_at |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
-| `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value, cause (watch/manual/revert), status, error, created_at |
+| `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
 | `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason |
 | `torrents` | id, episode_id, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
@@ -341,6 +347,44 @@ arc/
 5. Revert endpoint replays `old_value` through `mal_push` with cause
    `revert`.
 
+### 5.5a MAL sync as built (M9)
+- Link: PKCE `plain`; the `state` is Fernet-encrypted `{user_id, verifier,
+  nonce}` with a 10-minute validity (stateless); the callback is the API
+  route `/api/mal/callback` (register `<API origin>/api/mal/callback` on
+  the MAL app), requires the session, checks the state's user, exchanges
+  the code, stores tokens Fernet-encrypted, queues an import, and redirects
+  to `PUBLIC_URL/mal`. Unlink destroys tokens and keeps the log. A failed
+  refresh empties the token columns (`needs_relink`).
+- Import (on link, every `MAL_IMPORT_INTERVAL_HOURS`, or on demand): pages
+  the list; unknown MAL ids resolved via the catalogue 50 per run with a
+  follow-up job; clean local rows overwritten; dirty rows: newer change
+  wins, and when MAL wins the lost Arc change is logged `cause=conflict,
+  status=skipped`; shows absent on MAL are kept, never deleted.
+- Push: the write log is the queue. Each user event writes one `pending`
+  log row per changed field, with its own cause, in the same transaction
+  as the local change — list set/remove (`manual`), watch completion
+  (`watch`, progress only), revert (`revert`). The push job (deduped per
+  user+anime; the rows are the state, so nothing is lost on dedupe) loads
+  the pending rows, coalesces per field to the latest value (older rows
+  `skipped: superseded`), GETs MAL's current entry, applies the FR-M4 guards
+  per field from that field's cause (a `watch` progress below MAL's number
+  or a `watch` null score → `skipped`, never sent), sends one PATCH or
+  DELETE, and marks rows `ok`. A retryable MAL error keeps the rows
+  `pending` (with the error as a note) and retries with backoff; only when
+  the job's attempts are exhausted, or on a non-retryable 4xx, do rows go
+  `failed`, with `mal_dirty` kept so an import never overwrites the change
+  while Arc's is newer. "Push pending" reopens failed rows. `mal_dirty` is
+  cleared only when a pair has neither pending nor failed rows. A removal
+  closes never-sent edit rows `skipped`; unlink closes pending rows
+  `skipped`; an event landing during a running push queues a follow-up;
+  revert is refused while the field has a queued row. "Push pending" runs the
+  same routine for every pair with pending rows; `mal_import_all` never
+  writes; a show with no MAL id logs `skipped`. Token refresh takes a row
+  lock so concurrent jobs refresh once.
+- Revert: allowed on the newest ok row per (user, anime, field); it applies
+  the old value locally and pushes with cause `revert` (a revert is itself
+  revertible).
+
 ### 5.6 Recommendations
 1. Build candidate pool (≤ 40): current season (top by popularity), relations
    of the user's completed/high-scored shows, popular in top-3 genres, minus
@@ -433,7 +477,8 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue |
 | `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
 | `GET /api/catalog/status` | admin | source health and breaker state |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
+| `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
@@ -446,6 +491,7 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
+| `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows paused, active wants, searching, downloading |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 
 ## 6. External integrations
@@ -537,7 +583,10 @@ requeued, default 7200; transcodes heartbeat their lock),
 `SESSION_TTL_DAYS` (30), `LOGIN_RATE_LIMIT_PER_IP` (10),
 `LOGIN_RATE_LIMIT_PER_EMAIL` (5), `LOGIN_RATE_WINDOW_SECONDS` (900),
 `CORS_ALLOWED_ORIGINS` (comma list, optional; dev origins are added
-automatically when `ENV` is not prod).
+automatically when `ENV` is not prod), `MAL_OAUTH_URL`
+(https://myanimelist.net, the authorize/token host), `MAL_IMPORT_INTERVAL_HOURS`
+(6). `FERNET_KEY` must be set before anyone links MAL and is not rotatable
+without re-linking every account.
 
 Deploy-only (compose/Caddy, not read by the app): `PUBLIC_HOST`,
 `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PUID`, `PGID`, `TZ`.
@@ -672,3 +721,18 @@ env (it is not in the settings table).
   progress only (status untouched) and creates a Watching entry when
   missing; un-mark never rolls back; player outside the sidebar; hls.js
   lazy chunk; beacon reporting.
+- 2026-09-07 — M9 MAL sync: stateless encrypted OAuth state; `conflict`
+  cause and `skipped` status added to the write log (never writes);
+  watch-cause pushes never lower progress or clear a score; import never
+  deletes local data; revert = newest ok row per field.
+- 2026-09-07 — M9 review fix: per-field causes live in pending log rows
+  written at event time, not in the job payload (dedupe was dropping the
+  cause and could let a watch event lower MAL progress); push consumes the
+  rows.
+- 2026-09-08 — Live MAL link verified end to end on the real account (784
+  entries imported in chunks; create, watch advance, revert and delete all
+  landed on MAL and were undone). The first import immediately wanted ~30
+  episodes of the imported Watching/Planned shows and saturated the worker
+  with searches while a MAL push waited; added the acquisition pause switch
+  (migration 4 seeds the key) and job priorities. Acquisition is paused in
+  dev until the owner resumes it.

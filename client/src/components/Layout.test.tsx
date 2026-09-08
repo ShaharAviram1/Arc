@@ -4,10 +4,34 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { routes } from '@/app/router'
 import { createQueryClient } from '@/lib/queryClient'
-import { mockApi, requestsMade, TEST_USER, type MockResponse } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_ADMIN, TEST_USER, type MockResponse } from '@/test/apiMock'
 
 const HEALTH = { body: { status: 'ok', version: '0.1.0', env: 'test' } }
 const REVIEW_SUMMARY = 'GET /api/review/summary'
+const ACQUISITION_STATUS = 'GET /api/acquisition/status'
+const PAUSED_NOTE = 'Acquisition paused'
+
+/** An acquisition status body with the flag set however we say. */
+function status(paused: boolean) {
+  return { body: { paused, active_wants: 4, searching: 1, downloading: 0 } }
+}
+
+/** The signed-in app at `/`, as `me`, with the acquisition status answering. */
+function renderAs(me: typeof TEST_USER, acquisition?: MockResponse) {
+  const fetchMock = mockApi({
+    'GET /api/auth/me': { body: me },
+    'GET /api/health': HEALTH,
+    [REVIEW_SUMMARY]: { body: { pending: 0 } },
+    ...(acquisition ? { [ACQUISITION_STATUS]: acquisition } : {}),
+  })
+  const router = createMemoryRouter(routes, { initialEntries: ['/'] })
+  render(
+    <QueryClientProvider client={createQueryClient()}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  )
+  return fetchMock
+}
 
 /** The signed-in app at `/`, with the review count answering however we say. */
 function renderWithReview(summary: MockResponse) {
@@ -88,5 +112,46 @@ describe('Layout review badge', () => {
 
     await screen.findByLabelText('2 files need review')
     expect(requestsMade(fetchMock).filter((call) => call === REVIEW_SUMMARY)).toHaveLength(1)
+  })
+})
+
+describe('Layout acquisition pause note', () => {
+  it('says so in the sidebar while acquisition is paused', async () => {
+    renderAs(TEST_ADMIN, status(true))
+
+    const note = await screen.findByText(PAUSED_NOTE)
+    // Announced when it appears mid-session, not only on a reload.
+    expect(note).toHaveAttribute('role', 'status')
+    expect(screen.getByRole('complementary')).toContainElement(note)
+  })
+
+  it('says nothing while acquisition is running', async () => {
+    const fetchMock = renderAs(TEST_ADMIN, status(false))
+
+    await screen.findByRole('link', { name: 'Home' })
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(ACQUISITION_STATUS)
+    })
+    expect(screen.queryByText(PAUSED_NOTE)).not.toBeInTheDocument()
+  })
+
+  it('does not ask a non-admin, and never shows them the note', async () => {
+    const fetchMock = renderAs(TEST_USER, status(true))
+
+    await screen.findByRole('link', { name: 'Home' })
+    expect(requestsMade(fetchMock)).not.toContain(ACQUISITION_STATUS)
+    expect(screen.queryByText(PAUSED_NOTE)).not.toBeInTheDocument()
+  })
+
+  it('says nothing when the status cannot be fetched', async () => {
+    const fetchMock = renderAs(TEST_ADMIN, { status: 500, body: { detail: 'boom' } })
+
+    await screen.findByRole('link', { name: 'Home' })
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(ACQUISITION_STATUS)
+    })
+    expect(screen.queryByText(PAUSED_NOTE)).not.toBeInTheDocument()
+    // `retry: false`: a status line is not worth hammering a failing endpoint.
+    expect(requestsMade(fetchMock).filter((call) => call === ACQUISITION_STATUS)).toHaveLength(1)
   })
 })

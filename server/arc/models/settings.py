@@ -36,6 +36,13 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # D — days a ready episode may sit unwatched before the want is
         # dropped (FR-T2).
         "unwatched_days_d": 21,
+        # The acquisition kill switch. False on a fresh install: Arc acquires
+        # by default, and this is the admin's brake for the day a list import
+        # or a rule change asks for more than the machine (or the tracker)
+        # should be given at once. Read by ``compute_wants`` and
+        # ``search_release``; ``poll_qbit`` ignores it, so downloads already in
+        # flight still finish and still reach the library.
+        "acquisition_paused": False,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

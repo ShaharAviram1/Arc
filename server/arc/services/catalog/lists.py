@@ -5,24 +5,41 @@ Three functions, all pure business rules over a session; the routers in
 codes.
 
 The rule that matters most is at the bottom of :func:`set_list_entry`: a
-change made *in Arc* sets ``updated_by = arc`` and ``mal_dirty = true``, and
-nothing here talks to MyAnimeList. M9's ``mal_push`` is what reads the dirty
-flag and writes, so that the "no write without a user-originated event"
-guarantee (FR-M7) has exactly one enforcement point instead of one per
-endpoint.
+change made *in Arc* sets ``updated_by = arc`` and ``mal_dirty = true``,
+records one queued ``mal_write_log`` row per field it actually changed, and
+talks to MyAnimeList not at all. Those rows *are* the push queue
+(:mod:`arc.services.mal.writelog`): they carry the cause — ``manual``, an
+explicit edit — that the FR-M4 guards are decided from, and they are written
+in this transaction so that a list change and the write it owes are one thing
+or neither. The ``mal_push`` job then sends them, which is what keeps the "no
+write without a user-originated event" guarantee (FR-M7) to one enforcement
+point instead of one per endpoint. This module is one of the three places
+allowed to queue such a write (:mod:`arc.services.mal.names` names the other
+two), and it does so for the same reason it recomputes the acquisition window:
+an explicit list edit is a user-originated event, which is precisely what
+FR-M4 permits Arc to write.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Anime, ListEntry, ListStatus, UpdatedBy
+from arc.models import Anime, ListEntry, ListStatus, MalWriteCause, UpdatedBy
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.catalog.cache import ensure_anime
 from arc.services.catalog.service import CatalogService
+from arc.services.mal.names import enqueue_mal_push, is_linked
+from arc.services.mal.sync import record_removal
+from arc.services.mal.writelog import (
+    FIELD_PROGRESS,
+    FIELD_SCORE,
+    FIELD_STATUS,
+    record_pending,
+)
 
 #: A score outside this range is not a list state, it is a typo.
 MIN_SCORE = 1
@@ -82,6 +99,11 @@ async def set_list_entry(
 
     anime = await ensure_anime(session, catalog, anime_id=anime_id)
 
+    # What the entry held before this request, so that the queued write log
+    # rows below describe the change the user actually made. A create has no
+    # "before" on MyAnimeList's side either, which is what ``None``/``0`` say.
+    before = _snapshot(entry)
+
     if entry is None:
         # ``status`` is not None here: a create without one raised above.
         entry = ListEntry(user_id=user_id, anime_id=anime_id, status=status, progress=0)
@@ -116,7 +138,70 @@ async def set_list_entry(
     # fifteen-minute sweep would get there anyway. In the same transaction, so
     # a list change that is rolled back does not leave work behind.
     await enqueue_compute_wants(session)
+    # An explicit list edit is one of the three events FR-M7 allows a MAL write
+    # for. Recorded here as one queued row per changed field and *sent* by the
+    # job: the push has to read MyAnimeList's current values first (FR-M5),
+    # which is not something a request handler should wait on. A no-op for a
+    # user with no MAL link — their edits still set ``mal_dirty``, and the
+    # import decides who wins if they link later (FR-M2, FR-M3).
+    if await is_linked(session, user_id):
+        await _queue_changes(
+            session, user_id=user_id, anime_id=anime_id, before=before, after=entry
+        )
+        await enqueue_mal_push(session, user_id=user_id, anime_id=anime_id)
     return entry, anime
+
+
+@dataclass(frozen=True, slots=True)
+class _Snapshot:
+    """The three MAL-visible fields of a list entry, before a change."""
+
+    status: str | None
+    progress: int
+    score: int | None
+
+
+def _snapshot(entry: ListEntry | None) -> _Snapshot:
+    """What the entry held, or what "not on the list" looks like."""
+    if entry is None:
+        return _Snapshot(status=None, progress=0, score=None)
+    return _Snapshot(status=entry.status.value, progress=entry.progress, score=entry.score)
+
+
+async def _queue_changes(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    anime_id: int,
+    before: _Snapshot,
+    after: ListEntry,
+) -> None:
+    """One queued write log row per field this edit actually moved (FR-M5).
+
+    *Actually* moved: a PUT that re-sends the status a show already has is a
+    request, not a change, and queueing a write for it would put a row in the
+    user's log for something they did not do. The comparison is against the
+    entry's own previous values rather than against MyAnimeList's, because
+    this runs in a request and MyAnimeList is a network away; the push reads
+    the remote values and writes them onto the row it sends.
+    """
+    now = _Snapshot(status=after.status.value, progress=after.progress, score=after.score)
+    for field, old, new in (
+        (FIELD_STATUS, before.status, now.status),
+        (FIELD_SCORE, before.score, now.score),
+        (FIELD_PROGRESS, before.progress, now.progress),
+    ):
+        if old == new:
+            continue
+        await record_pending(
+            session,
+            user_id=user_id,
+            anime_id=anime_id,
+            field=field,
+            old_value=old,
+            new_value=new,
+            cause=MalWriteCause.MANUAL,
+        )
 
 
 async def remove_list_entry(session: AsyncSession, *, user_id: int, anime_id: int) -> bool:
@@ -129,11 +214,23 @@ async def remove_list_entry(session: AsyncSession, *, user_id: int, anime_id: in
     entry = await session.get(ListEntry, (user_id, anime_id))
     if entry is None:
         return False
+
+    # The write log row is written *now*, before the entry is deleted, because
+    # the entry is the only thing that knows what it held — by the time the
+    # push job runs there is nothing left to read an ``old_value`` off (FR-M5).
+    # That pending row is therefore the record of the removal, and the job only
+    # closes it.
+    linked = await is_linked(session, user_id)
+    if linked:
+        await record_removal(session, user_id=user_id, anime_id=anime_id, status=entry.status)
+
     await session.delete(entry)
     await session.flush()
     # A show that left the list wants nothing (FR-W4). Same reasoning as
     # :func:`set_list_entry`: queue it, do not compute it here.
     await enqueue_compute_wants(session)
+    if linked:
+        await enqueue_mal_push(session, user_id=user_id, anime_id=anime_id, delete=True)
     return True
 
 

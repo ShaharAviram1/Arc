@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus, Setting
+from arc.services.acquisition import names as acquisition_names
+from arc.services.catalog import names as catalog_names
 from arc.services.jobs import (
     JobContext,
     backoff,
@@ -34,6 +36,9 @@ from arc.services.jobs import (
     run_worker_loop,
 )
 from arc.services.jobs.runner import MAX_BACKOFF
+from arc.services.library import names as library_names
+from arc.services.mal import names as mal_names
+from arc.services.media import names as media_names
 
 pytestmark = pytest.mark.pg
 
@@ -675,3 +680,114 @@ async def test_job_enqueued_from_the_api_is_run_by_the_worker_loop(
     assert final["attempts"] == 1
     assert final["locked_by"] is None
     assert final["finished_at"] is not None
+
+
+# --- Priorities across the job types ----------------------------------------
+#
+# The numbers live in each service's ``names`` module and are passed at every
+# enqueue. What matters is not any one of them but the *order* they put the
+# queue in, so that is what is asserted: one job of every type, all due at the
+# same instant, claimed one at a time.
+
+
+#: Every job type Arc queues with a priority of its own, grouped into the tiers
+#: the claim loop must take them in. Within a tier the order is ``run_after``
+#: then ``id`` — oldest first — which is a statement about age, not about type,
+#: so a tier is a set.
+EXPECTED_TIERS: list[tuple[int, set[str]]] = [
+    # A person changed a status or finished an episode and MyAnimeList does not
+    # know yet. One HTTP call, and the only failure visible outside Arc.
+    (mal_names.PUSH_PRIORITY, {mal_names.PUSH, mal_names.PUSH_ALL}),
+    # A transcode for an episode somebody is two away from (FR-P3). Its number
+    # is computed per job — ten times the distance, capped at 500 — so unlike
+    # the rest of this table it spans the range rather than sitting at a point:
+    # the very next episode comes out at 10 and shares the tier above, an
+    # episode nobody is waiting for takes the default, and a far-off one sorts
+    # behind the searches. Two episodes out is the middle of that.
+    (2 * media_names.PRIORITY_PER_EPISODE, {media_names.TRANSCODE}),
+    # Bytes already on the disk: finish the download, hand it to the library.
+    (acquisition_names.POLL_QBIT_PRIORITY, {acquisition_names.POLL_QBIT}),
+    # Everything that has not asked for a number sits here — ``match_file``,
+    # and the two catalogue sweeps that only enqueue other jobs.
+    (DEFAULT_PRIORITY, {library_names.MATCH_FILE, catalog_names.REFRESH_ALL}),
+    # Then acquisition, in the order it happens: decide, then go looking.
+    (acquisition_names.COMPUTE_WANTS_PRIORITY, {acquisition_names.COMPUTE_WANTS}),
+    (acquisition_names.SEARCH_RELEASE_PRIORITY, {acquisition_names.SEARCH_RELEASE}),
+    # And last, the bulk work on timers that nobody is waiting for. Every one
+    # of these is 200; they are one tier and are listed as one.
+    (
+        mal_names.IMPORT_PRIORITY,
+        {
+            mal_names.IMPORT,
+            mal_names.IMPORT_ALL,
+            catalog_names.REFRESH,
+            catalog_names.RECONCILE,
+            catalog_names.SEASON_SWEEP,
+            library_names.LIBRARY_SCAN,
+        },
+    ),
+]
+
+
+async def test_the_claim_order_is_the_priority_table(jobs_factory: SessionFactory) -> None:
+    """One job of each type, all due at the same instant, claimed one at a time.
+
+    Enqueued with the tiers *backwards*, so a run that passed because the queue
+    happened to be in insertion order would fail here.
+    """
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    async with jobs_factory() as session:
+        for priority, types in reversed(EXPECTED_TIERS):
+            for job_type in sorted(types):
+                await enqueue(session, job_type, priority=priority, run_after=due)
+        await session.commit()
+
+    claimed: list[str] = []
+    while True:
+        async with jobs_factory() as session:
+            job = await claim_one(session, WORKER)
+            if job is None:
+                break
+            claimed.append(job.type)
+
+    assert len(claimed) == sum(len(types) for _, types in EXPECTED_TIERS)
+    taken = iter(claimed)
+    for priority, types in EXPECTED_TIERS:
+        tier = {next(taken) for _ in types}
+        assert tier == types, f"tier {priority} was claimed as {tier}"
+
+
+async def test_a_mal_push_beats_a_burst_of_searches(jobs_factory: SessionFactory) -> None:
+    """The regression this table exists for.
+
+    Linking a MyAnimeList account imported fifteen watching shows, ``compute_
+    wants`` wanted about thirty episodes, and thirty ``search_release`` jobs —
+    all at the default priority, all enqueued before it — sat in front of the
+    ``mal_push`` the user's own next list change produced. With the numbers
+    passed at every enqueue, the push goes first however long the queue is.
+    """
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    async with jobs_factory() as session:
+        for episode_id in range(30):
+            await enqueue(
+                session,
+                acquisition_names.SEARCH_RELEASE,
+                {"episode_id": episode_id},
+                priority=acquisition_names.SEARCH_RELEASE_PRIORITY,
+                run_after=due,
+            )
+        push = await enqueue(
+            session,
+            mal_names.PUSH,
+            {"user_id": 1, "anime_id": 1},
+            priority=mal_names.PUSH_PRIORITY,
+            run_after=due,
+        )
+        await session.commit()
+        push_id = push.id
+
+    async with jobs_factory() as session:
+        first = await claim_one(session, WORKER)
+
+    assert first is not None
+    assert first.id == push_id, "the user's MAL write must not queue behind thirty searches"

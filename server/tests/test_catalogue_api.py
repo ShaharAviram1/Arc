@@ -588,6 +588,9 @@ async def test_get_list_returns_the_show_and_the_entry(user_client: AsyncClient)
         "progress": 0,
         "score": 9,
         "updated_at": rows[0]["entry"]["updated_at"],
+        # The MyAnimeList badge is a show-page field (M9): computing it per row
+        # here would be a query per card, and the list does not render it.
+        "mal_sync": None,
     }
 
 

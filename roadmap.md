@@ -153,18 +153,21 @@ that must be verified before the next milestone starts.
   advanced.
 
 ### M9 — MyAnimeList sync
-- [ ] Owner prerequisites: `MAL_CLIENT_SECRET` (from the Cloudflare worker
-      secrets of the old AnimeTrack app or the MAL app config page) and Arc's
-      callback URL registered on the MAL app (currently points at the old
-      GitHub Pages `oauth.html`).
-- [ ] MAL OAuth PKCE flow, encrypted token storage, refresh (FR-M1)
-- [ ] Import on link + scheduled re-import with conflict rule (FR-M2, FR-M3)
-- [ ] `mal_push` with write log, dirty flags, idempotent retries, never
+- [x] Owner prerequisites: `MAL_CLIENT_SECRET` in `.env` (from the Cloudflare
+      worker secrets of the old AnimeTrack app or the MAL app config page;
+      leave empty only if the app is registered as public) and
+      `http://localhost:8000/api/mal/callback` registered as a redirect URL on
+      the MAL app (production adds `<PUBLIC_URL origin>/api/mal/callback`).
+      `FERNET_KEY` set (dev key generated 2026-09-07; production needs its
+      own, set once before anyone links).
+- [x] MAL OAuth PKCE flow, encrypted token storage, refresh (FR-M1)
+- [x] Import on link + scheduled re-import with conflict rule (FR-M2, FR-M3)
+- [x] `mal_push` with write log, dirty flags, idempotent retries, never
       lowering progress automatically (FR-M4, FR-M6, FR-M7)
-- [ ] Revert endpoint (FR-M5)
-- [ ] Client: MAL link page, sync log with revert, sync-failure badge on show
-- [ ] Table-driven tests proving "no write without a user event"
-- **DoD:** watching an episode to the end updates MAL progress within a
+- [x] Revert endpoint (FR-M5)
+- [x] Client: MAL link page, sync log with revert, sync-failure badge on show
+- [x] Table-driven tests proving "no write without a user event"
+- **DoD (verified 2026-09-08 by orchestrator LIVE on the owner's MAL account: OAuth consent → import of 783 entries; manual create, watch-driven progress advance, revert and removal each landed on MAL within seconds and the list ended unchanged; re-link through consent repeated per the owner's rule):** watching an episode to the end updates MAL progress within a
   minute; changing status in MAL shows up in Arc after re-import; log lists
   every write; revert works.
 

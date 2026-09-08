@@ -202,6 +202,9 @@ any time, and the owner uses it daily.
 - FR-M5 Every write is recorded in MalWriteLog with the previous value. A
   user can view their log and revert an entry, which writes the previous
   value back (and logs that too).
+  The log also records, as non-writes, conflicts where MAL's newer change
+  overrode an Arc change (`conflict`/`skipped`) and writes that could not
+  apply (no MAL id).
 - FR-M6 Writes are idempotent and retried with backoff; failures surface as a
   badge on the show and in the user's sync page.
 - FR-M7 "Never write a change I did not make": there is no code path that

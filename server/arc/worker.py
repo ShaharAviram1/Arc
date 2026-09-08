@@ -30,16 +30,25 @@ from arc import __version__
 from arc.config import Settings, get_settings
 from arc.core.logging import setup_logging
 from arc.db import SessionFactory, create_engine, create_session_factory
-from arc.models import Anime, Job
+from arc.models import DEFAULT_PRIORITY, Anime, Job
 from arc.services.acquisition import jobs as acquisition_jobs  # noqa: F401  (registers handlers)
-from arc.services.acquisition.names import COMPUTE_WANTS, POLL_QBIT
+from arc.services.acquisition.names import (
+    COMPUTE_WANTS,
+    COMPUTE_WANTS_PRIORITY,
+    POLL_QBIT,
+    POLL_QBIT_PRIORITY,
+)
 from arc.services.acquisition.nyaa import close_shared_client
 from arc.services.auth import purge_expired
 from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers handlers)
+from arc.services.catalog.names import CATALOG_PRIORITY
 from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
 from arc.services.library import jobs as library_jobs  # noqa: F401  (registers handlers)
-from arc.services.library.names import LIBRARY_SCAN
+from arc.services.library.names import LIBRARY_SCAN, LIBRARY_SCAN_PRIORITY
+from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers)
+from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
+from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
 from arc.services.media.jobs import sweep_transcodes
 
 log = logging.getLogger("arc.worker")
@@ -81,6 +90,12 @@ COMPUTE_WANTS_SECONDS = 900
 #: worst-case delay between a torrent finishing and the transcode starting.
 POLL_QBIT_SECONDS = 60
 
+#: How long after start-up the first MyAnimeList import sweep runs. Not
+#: immediately: a worker restart is not a reason to re-read everybody's list,
+#: and the sweep's own six-hourly period gets there soon enough. Five minutes
+#: also keeps it clear of the catalogue work every boot already queues.
+MAL_SWEEP_DELAY_SECONDS = 300
+
 #: How often to look for MAL-only rows that AniList could now identify
 #: (FR-C6). Hourly: the ids only change when an outage has just ended, and the
 #: job is a no-op the rest of the time.
@@ -116,7 +131,7 @@ async def _purge_sessions(factory: SessionFactory) -> None:
         log.exception("session purge failed")
 
 
-async def _enqueue_sweep(factory: SessionFactory, job_type: str) -> None:
+async def _enqueue_sweep(factory: SessionFactory, job_type: str, priority: int) -> None:
     """Put a periodic sweep on the queue rather than running it here.
 
     The scheduler fires in one process; the queue is shared. Going through a
@@ -124,10 +139,16 @@ async def _enqueue_sweep(factory: SessionFactory, job_type: str) -> None:
     queue view (FR-D3), and — because of the dedupe key — does not pile up
     when a worker is behind. The key is the type itself: dedupe only matches
     pending/running rows, so yesterday's finished sweep does not block today's.
+
+    ``priority`` is passed rather than defaulted because a scheduled job is
+    exactly the kind that must not be allowed to sit at the front of the queue
+    by accident: these all fire on timers nobody is watching, and the number
+    lives with the job type in its service's ``names`` module so the worker and
+    every other caller queue it the same way.
     """
     try:
         async with factory() as session:
-            await enqueue(session, job_type, dedupe_key=job_type)
+            await enqueue(session, job_type, priority=priority, dedupe_key=job_type)
             await session.commit()
     except Exception:  # pragma: no cover - a scheduling failure must not kill the worker
         log.exception("could not enqueue sweep", extra={"job_type": job_type})
@@ -162,7 +183,12 @@ async def _seed_season_sweep(factory: SessionFactory) -> None:
             )
             if seen is not None and cached is not None:
                 return
-            await enqueue(session, catalog_jobs.SEASON_SWEEP, dedupe_key=catalog_jobs.SEASON_SWEEP)
+            await enqueue(
+                session,
+                catalog_jobs.SEASON_SWEEP,
+                priority=CATALOG_PRIORITY,
+                dedupe_key=catalog_jobs.SEASON_SWEEP,
+            )
             await session.commit()
         log.info(
             "season pre-cache queued at startup",
@@ -240,14 +266,14 @@ async def run(settings: Settings) -> None:
         hour=CATALOGUE_SWEEP_HOUR,
         minute=0,
         id=catalog_jobs.REFRESH_ALL,
-        args=[factory, catalog_jobs.REFRESH_ALL],
+        args=[factory, catalog_jobs.REFRESH_ALL, DEFAULT_PRIORITY],
     )
     scheduler.add_job(
         _enqueue_sweep,
         "interval",
         seconds=PRE_AIR_SWEEP_SECONDS,
         id=catalog_jobs.PRE_AIR,
-        args=[factory, catalog_jobs.PRE_AIR],
+        args=[factory, catalog_jobs.PRE_AIR, DEFAULT_PRIORITY],
     )
     # Catalogue fallback upkeep (FR-C6, FR-C7): attach AniList ids to rows that
     # arrived through MAL, and pre-cache the season so the schedule survives an
@@ -257,7 +283,7 @@ async def run(settings: Settings) -> None:
         "interval",
         seconds=RECONCILE_SECONDS,
         id=catalog_jobs.RECONCILE,
-        args=[factory, catalog_jobs.RECONCILE],
+        args=[factory, catalog_jobs.RECONCILE, CATALOG_PRIORITY],
     )
     scheduler.add_job(
         _enqueue_sweep,
@@ -265,7 +291,7 @@ async def run(settings: Settings) -> None:
         hour=SEASON_SWEEP_HOUR,
         minute=SEASON_SWEEP_MINUTE,
         id=catalog_jobs.SEASON_SWEEP,
-        args=[factory, catalog_jobs.SEASON_SWEEP],
+        args=[factory, catalog_jobs.SEASON_SWEEP, CATALOG_PRIORITY],
     )
     # Acquisition (FR-A1, FR-A5): recompute the wants, and watch the client.
     # Both start immediately rather than one interval in: a worker that has
@@ -277,7 +303,7 @@ async def run(settings: Settings) -> None:
         "interval",
         seconds=COMPUTE_WANTS_SECONDS,
         id=COMPUTE_WANTS,
-        args=[factory, COMPUTE_WANTS],
+        args=[factory, COMPUTE_WANTS, COMPUTE_WANTS_PRIORITY],
         next_run_time=datetime.now(UTC),
     )
     scheduler.add_job(
@@ -285,7 +311,7 @@ async def run(settings: Settings) -> None:
         "interval",
         seconds=POLL_QBIT_SECONDS,
         id=POLL_QBIT,
-        args=[factory, POLL_QBIT],
+        args=[factory, POLL_QBIT, POLL_QBIT_PRIORITY],
         next_run_time=datetime.now(UTC),
     )
     # Library ingest (FR-L1): walk the download and manual-drop directories.
@@ -298,8 +324,20 @@ async def run(settings: Settings) -> None:
         "interval",
         seconds=settings.library_scan_interval_seconds,
         id=LIBRARY_SCAN,
-        args=[factory, LIBRARY_SCAN],
+        args=[factory, LIBRARY_SCAN, LIBRARY_SCAN_PRIORITY],
         next_run_time=datetime.now(UTC),
+    )
+    # MyAnimeList re-import (FR-M3): pull every linked account's list on the
+    # configured period, default six hours. One sweep job that queues one
+    # import per user, spaced, rather than a job per user on a timer — the
+    # number of linked users is not something the scheduler should know.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        hours=settings.mal_import_interval_hours,
+        id=MAL_IMPORT_ALL,
+        args=[factory, MAL_IMPORT_ALL, MAL_IMPORT_PRIORITY],
+        next_run_time=datetime.now(UTC) + timedelta(seconds=MAL_SWEEP_DELAY_SECONDS),
     )
     scheduler.start()
 
@@ -324,6 +362,7 @@ async def run(settings: Settings) -> None:
             "session_purge_s": SESSION_PURGE_SECONDS,
             "library_scan_s": settings.library_scan_interval_seconds,
             "compute_wants_s": COMPUTE_WANTS_SECONDS,
+            "mal_import_interval_h": settings.mal_import_interval_hours,
             "poll_qbit_s": POLL_QBIT_SECONDS,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
         },

@@ -37,6 +37,30 @@ SEARCH_RELEASE = "search_release"
 #: library (FR-A5). Queue-wide work, deduplicated on the type.
 POLL_QBIT = "poll_qbit"
 
+# --- Queue priorities (lower runs first; the default is 100) ----------------
+#
+# Acquisition is the greediest thing Arc does and the least urgent. A single
+# MAL link can turn into thirty wants and thirty ``search_release`` jobs, each
+# of which holds a worker slot for the length of up to five paced Nyaa queries
+# — and with everything at the default priority those thirty sit in front of
+# the user's own MyAnimeList write. So the three job types here sort *behind*
+# the default, in the order they matter to somebody sitting in front of the
+# app: watch what is already downloading, then work out what is wanted, then go
+# looking for it.
+
+#: Below the default: the poll is a single request to a service on the same
+#: host, and it is the step that turns a finished torrent into a playable
+#: episode. Delaying it delays a file that is already on the disk.
+POLL_QBIT_PRIORITY = 50
+
+#: Above the default: reconciling the whole wants table is a handful of
+#: queries, but nothing is waiting on the answer within the minute.
+COMPUTE_WANTS_PRIORITY = 120
+
+#: And behind that. One search is up to five paced Nyaa requests plus a
+#: qBittorrent call, so a burst of them is what actually starves the queue.
+SEARCH_RELEASE_PRIORITY = 150
+
 
 def search_dedupe_key(episode_id: int) -> str:
     """One queued search per episode, however many people want it (FR-A2)."""
@@ -53,13 +77,18 @@ async def enqueue_compute_wants(session: AsyncSession) -> Job:
     transaction is what makes the list change and its consequence atomic, or
     neither.
     """
-    return await enqueue(session, COMPUTE_WANTS, dedupe_key=COMPUTE_WANTS)
+    return await enqueue(
+        session, COMPUTE_WANTS, priority=COMPUTE_WANTS_PRIORITY, dedupe_key=COMPUTE_WANTS
+    )
 
 
 __all__ = [
     "COMPUTE_WANTS",
+    "COMPUTE_WANTS_PRIORITY",
     "POLL_QBIT",
+    "POLL_QBIT_PRIORITY",
     "SEARCH_RELEASE",
+    "SEARCH_RELEASE_PRIORITY",
     "enqueue_compute_wants",
     "search_dedupe_key",
 ]

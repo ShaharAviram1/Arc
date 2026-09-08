@@ -65,7 +65,10 @@ from arc.models import (
     UpdatedBy,
     WatchProgress,
 )
+from arc.models.enums import MalWriteCause
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.mal.names import enqueue_mal_push, is_linked
+from arc.services.mal.writelog import FIELD_PROGRESS, record_pending
 
 #: Watched at ninety per cent (FR-S4). Ends run about that long past the last
 #: thing anybody watches for.
@@ -241,7 +244,9 @@ async def _advance_list(
         )
         session.add(entry)
 
-    if episode.number > entry.progress:
+    was = entry.progress
+    advanced = episode.number > entry.progress
+    if advanced:
         entry.progress = episode.number
         entry.updated_by = UpdatedBy.ARC
         entry.mal_dirty = True
@@ -255,6 +260,27 @@ async def _advance_list(
     # asked for (FR-M7).
 
     await session.flush()
+    if advanced and await is_linked(session, user_id):
+        # The one *automatic* event allowed to write to MyAnimeList (FR-M4,
+        # FR-M7), and it is recorded only when the number actually moved — a
+        # rewatch changes nothing and must therefore send nothing.
+        #
+        # **Progress and nothing else**, with cause ``watch`` on the row
+        # rather than on the job. That cause is what stops the push lowering
+        # MyAnimeList's progress (:func:`arc.services.mal.sync.decide_push`),
+        # and it has to be per field: the queued job is shared with whatever
+        # else this show owes — a score the user typed a second ago — and
+        # those fields are the user's word, not an automatic event's.
+        await record_pending(
+            session,
+            user_id=user_id,
+            anime_id=episode.anime_id,
+            field=FIELD_PROGRESS,
+            old_value=was,
+            new_value=entry.progress,
+            cause=MalWriteCause.WATCH,
+        )
+        await enqueue_mal_push(session, user_id=user_id, anime_id=episode.anime_id)
     return entry.progress
 
 

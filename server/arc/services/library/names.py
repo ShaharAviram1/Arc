@@ -18,6 +18,13 @@ LIBRARY_SCAN = "library_scan"
 #: Match one ``media_files`` row against the catalogue (FR-L3).
 MATCH_FILE = "match_file"
 
+#: Queue priority for the scan (lower runs first; the default is 100). Behind
+#: the default: it walks two directory trees on a two-minute timer and finds
+#: nothing almost every time, and the files it *does* find are handed on as
+#: :data:`MATCH_FILE` jobs — which keep the default, because by then something
+#: is on the disk and an episode is one match away from being playable.
+LIBRARY_SCAN_PRIORITY = 200
+
 
 def match_dedupe_key(media_file_id: int) -> str:
     """Dedupe key for a ``match_file`` job.
@@ -29,4 +36,4 @@ def match_dedupe_key(media_file_id: int) -> str:
     return f"{MATCH_FILE}:{media_file_id}"
 
 
-__all__ = ["LIBRARY_SCAN", "MATCH_FILE", "match_dedupe_key"]
+__all__ = ["LIBRARY_SCAN", "LIBRARY_SCAN_PRIORITY", "MATCH_FILE", "match_dedupe_key"]

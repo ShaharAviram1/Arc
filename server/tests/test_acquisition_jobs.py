@@ -30,8 +30,13 @@ from arc.services.acquisition.jobs import (
     retry_delay,
     search_release,
 )
-from arc.services.acquisition.names import SEARCH_RELEASE, search_dedupe_key
+from arc.services.acquisition.names import (
+    SEARCH_RELEASE,
+    SEARCH_RELEASE_PRIORITY,
+    search_dedupe_key,
+)
 from arc.services.acquisition.qbit import QbitUnavailable
+from arc.services.acquisition.rules import PAUSED_KEY
 from arc.services.jobs.registry import JobContext
 from arc.services.library.names import MATCH_FILE
 from tests.acquisition_helpers import (
@@ -546,6 +551,105 @@ async def test_a_retry_does_not_deduplicate_against_the_job_making_it(
 
     retries = [job for job in await queued(db_session, SEARCH_RELEASE) if job.id != running.id]
     assert len(retries) == 1
+
+
+# --- The pause switch (FR-A2's burst, held) ---------------------------------
+
+
+async def test_a_paused_search_requeues_itself_and_touches_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No Nyaa query, no magnet, no state change — just a job fifteen minutes on."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962060, email="paused1@arc.test"
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+    before = datetime.now(UTC)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries == [], "a paused search must not ask nyaa anything"
+    assert wired.qbit.calls == [], "nor add a magnet"
+    assert episode.state is EpisodeState.WANTED, "the episode is left exactly as it was"
+    assert await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id)) is None
+
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert len(jobs) == 1, "the search is still owed, so it is still on the queue"
+    assert jobs[0].payload["episode_id"] == episode.id
+    assert jobs[0].priority == SEARCH_RELEASE_PRIORITY
+    delay = jobs[0].run_after - before
+    assert (
+        acquisition_jobs.PAUSED_RETRY - timedelta(seconds=5)
+        <= delay
+        <= (acquisition_jobs.PAUSED_RETRY + timedelta(seconds=5))
+    )
+
+
+async def test_a_paused_search_carries_the_first_attempt_time_forward(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pause must not restart FR-A6's fortnight."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962061, email="paused2@arc.test"
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+    started = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+
+    await search_release(
+        context(
+            db_session,
+            wired.settings,
+            {"episode_id": episode.id, STARTED_KEY: started},
+        )
+    )
+
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert [job.payload[STARTED_KEY] for job in jobs] == [started]
+
+
+async def test_a_paused_search_does_not_pile_up_behind_one_already_queued(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fifteen minutes apart, one row per episode however long the pause lasts."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962062, email="paused3@arc.test"
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}, job_id=1))
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}, job_id=2))
+
+    assert len(await queued(db_session, SEARCH_RELEASE)) == 1
+
+
+async def test_polling_keeps_running_while_acquisition_is_paused(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pausing means stop fetching *more*, not abandon what is already coming.
+
+    The download was started before the pause; it finishes during it, and the
+    file still reaches the library and still becomes something to watch.
+    """
+    wired, episode, torrent = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962063, email="paused4@arc.test"
+    )
+    directory = tmp_path / "downloads" / str(episode.id)
+    directory.mkdir(parents=True)
+    video = directory / "[SubsPlease] Sousou no Frieren - 07 (1080p) [24356E19].mkv"
+    video.write_bytes(b"x" * 4096)
+    wired.qbit.add_torrent(
+        torrent.info_hash,
+        progress=1.0,
+        state="uploading",
+        content_path=f"/data/downloads/{episode.id}",
+        completion_on=int(datetime.now(UTC).timestamp()),
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.MATCHING
+    assert await queued(db_session, MATCH_FILE) != []
 
 
 # --- One Nyaa client for the whole process ----------------------------------

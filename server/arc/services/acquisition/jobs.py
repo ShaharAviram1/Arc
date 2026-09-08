@@ -22,6 +22,14 @@ that arrives with no such value — the daily revival of an episode that already
 gave up — reads it off the last search this episode had instead, so the
 fortnight is cumulative rather than restarted every morning (:func:`_started_at`).
 
+**The pause switch stops two of the three.** ``acquisition_paused`` in
+``settings`` (:func:`arc.services.acquisition.rules.is_paused`) makes
+``compute_wants`` a no-op and turns ``search_release`` into "put me back on the
+queue in fifteen minutes". ``poll_qbit`` keeps running: pausing means *stop
+fetching more*, not *abandon the download that is already 80 % of the way in*,
+and a torrent that finishes during a pause still reaches the library and still
+becomes something to watch.
+
 **qBittorrent being down is not "unavailable".** FR-A6's ``unavailable`` means
 *no acceptable release exists*, which is a statement about Nyaa. A client that
 cannot be reached raises, the runner retries with backoff, and the episode
@@ -46,12 +54,13 @@ from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     POLL_QBIT,
     SEARCH_RELEASE,
+    SEARCH_RELEASE_PRIORITY,
     search_dedupe_key,
 )
 from arc.services.acquisition.nyaa import Ranked, search_for_episode
 from arc.services.acquisition.qbit import QbitClient, QbitError, TorrentInfo, host_path
 from arc.services.acquisition.reject import QBIT_REJECTED
-from arc.services.acquisition.rules import load_rules
+from arc.services.acquisition.rules import is_paused, load_rules
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import compute_wants as reconcile_wants
 from arc.services.jobs.queue import enqueue, find_active
@@ -90,6 +99,12 @@ NO_LONGER_WANTED = "no longer wanted"
 
 #: Payload key holding when the *first* search for this episode ran.
 STARTED_KEY = "attempts_started_at"
+
+#: How long a search waits before looking again while acquisition is paused.
+#: A quarter of an hour, matching the ``compute_wants`` tick: a resumed Arc is
+#: doing its own reconciliation on that period anyway, so a pending search
+#: coming back sooner would only occupy a slot to discover it is still paused.
+PAUSED_RETRY = timedelta(minutes=15)
 
 #: Episode states ``poll_qbit`` will run the completion hand-off from. Both,
 #: so that an episode which reached ``downloaded`` before its file was
@@ -272,6 +287,7 @@ async def _schedule_retry(ctx: JobContext, episode: Episode, *, now: datetime) -
         ctx.session,
         SEARCH_RELEASE,
         {"episode_id": episode.id, STARTED_KEY: started.isoformat()},
+        priority=SEARCH_RELEASE_PRIORITY,
         run_after=now + delay,
         dedupe_key=key,
         exclude_job_id=ctx.job.id,
@@ -292,11 +308,58 @@ async def _schedule_retry(ctx: JobContext, episode: Episode, *, now: datetime) -
     )
 
 
+async def _requeue_paused(ctx: JobContext, episode_id: int, *, now: datetime) -> None:
+    """Put this search back on the queue, unchanged, for a quarter of an hour.
+
+    Requeued rather than failed or dropped: a pause is temporary, and the job
+    row *is* the record that this episode is still owed a search. Nothing about
+    the episode is touched — no state change, no ``torrents`` row, no request
+    to Nyaa — so a resume finds exactly the world the pause left behind.
+
+    ``attempts_started_at`` rides along when the payload has one, so a pause in
+    the middle of FR-A6's fortnight does not restart it. The 14-day clock does
+    keep running while paused, which is the honest reading of "we have been
+    unable to get this episode since": an admin who pauses for a fortnight has
+    genuinely not acquired it, and the daily revival
+    (:data:`~arc.services.acquisition.wants.UNAVAILABLE_RETRY`) is what picks
+    the search back up once acquisition is running again.
+
+    ``exclude_job_id`` for the same reason :func:`_schedule_retry` passes it:
+    this job is *running* under the very key it is queueing under.
+    """
+    payload: dict[str, object] = {"episode_id": episode_id}
+    started = ctx.payload.get(STARTED_KEY)
+    if isinstance(started, str):
+        payload[STARTED_KEY] = started
+    await enqueue(
+        ctx.session,
+        SEARCH_RELEASE,
+        payload,
+        priority=SEARCH_RELEASE_PRIORITY,
+        run_after=now + PAUSED_RETRY,
+        dedupe_key=search_dedupe_key(episode_id),
+        exclude_job_id=ctx.job.id,
+    )
+    ctx.log.info(
+        "acquisition paused; search requeued without touching nyaa",
+        extra={
+            "episode_id": episode_id,
+            "retry_in_s": int(PAUSED_RETRY.total_seconds()),
+        },
+    )
+
+
 @register(SEARCH_RELEASE)
 async def search_release(ctx: JobContext) -> None:
     """Find a release for one episode and start it downloading (FR-A3..A6)."""
     episode_id = int(ctx.payload["episode_id"])
     now = datetime.now(UTC)
+
+    if await is_paused(ctx.session):
+        # Before the episode is even loaded: while paused this handler must
+        # read nothing it might act on and write nothing but its own retry.
+        await _requeue_paused(ctx, episode_id, now=now)
+        return
 
     episode = await ctx.session.get(Episode, episode_id)
     if episode is None:
@@ -595,6 +658,7 @@ __all__ = [
     "LATER_RETRY",
     "NO_LONGER_WANTED",
     "NO_RELEASE",
+    "PAUSED_RETRY",
     "POLL_QBIT",
     "REMOVED_FROM_CLIENT",
     "SEARCH_RELEASE",

@@ -1,4 +1,5 @@
 import {
+  isListStatus,
   LIST_STATUSES,
   LIST_STATUS_LABELS,
   listErrorMessage,
@@ -17,10 +18,6 @@ interface ListStatusControlProps {
 }
 
 const OFF_LIST = ''
-
-function isListStatus(value: string): value is ListStatus {
-  return (LIST_STATUSES as readonly string[]).includes(value)
-}
 
 /**
  * The one control that puts a show on the viewer's list, moves it between

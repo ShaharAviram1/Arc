@@ -25,10 +25,31 @@ RECONCILE = "catalog_reconcile"
 #: of both sources (FR-C7).
 SEASON_SWEEP = "catalog_season_sweep"
 
+#: Queue priority for the catalogue jobs that actually talk to AniList (lower
+#: runs first; the default is 100). Well behind the default: every one of these
+#: is a sweep or a cache refill on a timer, each holds a slot for several paced
+#: upstream requests, and none of them is the reason anybody has the app open.
+#: A show somebody opens is fetched inside the request through the cache, not
+#: through this queue, so nothing a user is looking at waits on it.
+#:
+#: :data:`REFRESH_ALL` and :data:`PRE_AIR` deliberately keep the default: they
+#: make no upstream call at all — they run one ``SELECT`` and enqueue the
+#: spaced-out :data:`REFRESH` jobs that do — so holding them behind the work
+#: they schedule would only delay the scheduling.
+CATALOG_PRIORITY = 200
+
 
 def dedupe_key(anime_id: int) -> str:
     """One queued refresh per show, however many people ask for it."""
     return f"{REFRESH}:{anime_id}"
 
 
-__all__ = ["PRE_AIR", "RECONCILE", "REFRESH", "REFRESH_ALL", "SEASON_SWEEP", "dedupe_key"]
+__all__ = [
+    "CATALOG_PRIORITY",
+    "PRE_AIR",
+    "RECONCILE",
+    "REFRESH",
+    "REFRESH_ALL",
+    "SEASON_SWEEP",
+    "dedupe_key",
+]

@@ -31,7 +31,13 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 
-from arc.api.anime_schemas import AnimeDetail, AnimeSummary, RelationOut, SearchPage
+from arc.api.anime_schemas import (
+    AnimeDetail,
+    AnimeSummary,
+    MalSyncOut,
+    RelationOut,
+    SearchPage,
+)
 from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep
 from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
@@ -45,9 +51,12 @@ from arc.services.catalog import (
     list_status_for,
     upsert_summaries,
 )
+from arc.services.catalog.names import CATALOG_PRIORITY
 from arc.services.catalog.names import REFRESH as REFRESH_JOB
 from arc.services.catalog.names import dedupe_key as refresh_dedupe_key
 from arc.services.jobs import enqueue
+from arc.services.mal.names import is_linked
+from arc.services.mal.writelog import SyncState, sync_state
 from arc.services.playback.progress import completed_episode_ids
 
 log = logging.getLogger(__name__)
@@ -175,6 +184,17 @@ async def detail(
         episodes=episodes,
         now=now(),
         list_entry=entry,
+        # The MyAnimeList badge (FR-M6). One query per show page, and only
+        # here: it is not on a card and not in the list, so nothing else pays
+        # for it.
+        mal_sync=_mal_sync(
+            await sync_state(
+                session,
+                user_id=user.id,
+                anime_id=anime.id,
+                linked=await is_linked(session, user.id),
+            )
+        ),
         # One query for the whole list: which of these the caller has finished
         # (FR-S4). The tick on a show page is per user, so it cannot come from
         # the episode row.
@@ -184,6 +204,11 @@ async def detail(
         renditions=extras.renditions,
         transcode_jobs=extras.transcode_jobs,
     )
+
+
+def _mal_sync(state: SyncState) -> MalSyncOut:
+    """The service's answer as the API's shape."""
+    return MalSyncOut(state=state.state, error=state.error, last_write_at=state.last_write_at)
 
 
 @router.post(
@@ -210,6 +235,7 @@ async def refresh(
         session,
         REFRESH_JOB,
         {"anime_id": anime_id},
+        priority=CATALOG_PRIORITY,
         dedupe_key=refresh_dedupe_key(anime_id),
     )
     await session.commit()

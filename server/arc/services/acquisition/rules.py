@@ -2,8 +2,9 @@
 
 Three global keys — ``preferred_groups``, ``preferred_resolution``,
 ``fallback_resolution`` — plus the window ``look_ahead_n`` that
-:mod:`~arc.services.acquisition.wants` needs, and an optional **per-show
-override** under ``override:anime:<id>``.
+:mod:`~arc.services.acquisition.wants` needs, the kill switch
+``acquisition_paused``, and an optional **per-show override** under
+``override:anime:<id>``.
 
 The override lives in the same key/value table rather than in a column of its
 own on ``anime``, because it is a rule and rules live in ``settings`` (spec
@@ -39,6 +40,14 @@ RULE_KEYS: Final[tuple[str, ...]] = (
 
 #: The window N (FR-A1, FR-T5).
 LOOK_AHEAD_KEY: Final[str] = "look_ahead_n"
+
+#: The kill switch. While it is true :func:`compute_wants` does nothing at all
+#: and every ``search_release`` requeues itself untouched, so nothing new is
+#: asked of Nyaa or qBittorrent and no episode changes state. Deliberately
+#: *not* read by ``poll_qbit``: a download already in flight still finishes and
+#: is still handed to the library, because stranding half a gigabyte of bytes
+#: in the client is not what "stop fetching" means.
+PAUSED_KEY: Final[str] = "acquisition_paused"
 
 #: Hard ceiling on N, whatever the table says. N is admin-editable, and an
 #: admin who types 200 has asked Arc to torrent a whole show — which FR-A1
@@ -122,6 +131,41 @@ async def look_ahead_n(session: AsyncSession) -> int:
     return min(stored, MAX_LOOK_AHEAD)
 
 
+async def is_paused(session: AsyncSession) -> bool:
+    """Whether acquisition is paused.
+
+    A missing row reads as *not* paused, which is both the documented default
+    and the only safe way round: a key that has not been seeded yet must not
+    silently stop Arc fetching, whereas a pause that has to be set again after
+    a migration is a button an admin can press. A value of the wrong JSON type
+    is ignored and logged, like every other rule here — one hand-edited row
+    must not decide whether acquisition runs.
+    """
+    stored = (await _values(session, [PAUSED_KEY])).get(PAUSED_KEY)
+    if stored is None:
+        return bool(DEFAULT_SETTINGS[PAUSED_KEY])
+    if not isinstance(stored, bool):
+        log.warning("acquisition_paused is not a boolean, using the default")
+        return bool(DEFAULT_SETTINGS[PAUSED_KEY])
+    return stored
+
+
+async def set_paused(session: AsyncSession, paused: bool) -> bool:
+    """Set the kill switch, inserting the row if it is not there yet.
+
+    Flushed, not committed: the caller's transaction is what makes "resume, and
+    queue the recompute that acts on it" one act or none.
+    """
+    row = await session.get(Setting, PAUSED_KEY)
+    if row is None:
+        session.add(Setting(key=PAUSED_KEY, value=paused))
+    else:
+        row.value = paused
+    await session.flush()
+    log.info("acquisition pause set", extra={"paused": paused})
+    return paused
+
+
 async def load_rules(session: AsyncSession, anime_id: int | None = None) -> Rules:
     """The rules for ``anime_id``, global rules underneath a show override.
 
@@ -172,9 +216,12 @@ async def load_rules(session: AsyncSession, anime_id: int | None = None) -> Rule
 __all__ = [
     "LOOK_AHEAD_KEY",
     "MAX_LOOK_AHEAD",
+    "PAUSED_KEY",
     "RULE_KEYS",
     "Rules",
+    "is_paused",
     "load_rules",
     "look_ahead_n",
     "override_key",
+    "set_paused",
 ]

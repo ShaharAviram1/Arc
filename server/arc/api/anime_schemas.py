@@ -441,6 +441,22 @@ class EpisodeOut(BaseModel):
         )
 
 
+class MalSyncOut(BaseModel):
+    """How one show stands with MyAnimeList (FR-M6).
+
+    The badge on the show page. ``state`` is ``synced``, ``pending``,
+    ``failed`` or ``unlinked``;
+    :func:`arc.services.mal.writelog.sync_state` decides which, and its
+    docstring explains the precedence between them.
+    """
+
+    state: str
+    #: The message from the most recent failed write, when there is one.
+    error: str | None = None
+    #: When Arc last successfully wrote anything about this show to MAL.
+    last_write_at: datetime | None = None
+
+
 class ListEntryOut(BaseModel):
     """(user, anime) → status, progress, score (FR-W2)."""
 
@@ -451,6 +467,10 @@ class ListEntryOut(BaseModel):
     progress: int
     score: int | None = None
     updated_at: datetime
+    #: MyAnimeList sync state (M9). Populated only on a show page, where one
+    #: extra query per response is nothing; a list of fifty rows would be
+    #: fifty, and none of them is rendered there.
+    mal_sync: MalSyncOut | None = None
 
 
 class ListEntryPatch(BaseModel):
@@ -469,6 +489,19 @@ class ListEntryPatch(BaseModel):
     #: ``null`` clears the score; omitting the field leaves it alone. Pydantic
     #: cannot tell those apart, so the router checks ``model_fields_set``.
     score: int | None = Field(default=None, ge=1, le=10)
+
+
+def _entry_out(entry: ListEntry | None, mal_sync: MalSyncOut | None) -> ListEntryOut | None:
+    """A list entry with its MAL badge attached, or ``None`` if there is none.
+
+    The badge is passed in rather than looked up here: these schemas take no
+    session, deliberately, so that building a response can never turn into a
+    query nobody expected.
+    """
+    if entry is None:
+        return None
+    out = ListEntryOut.model_validate(entry)
+    return out.model_copy(update={"mal_sync": mal_sync}) if mal_sync else out
 
 
 class ListRow(BaseModel):
@@ -511,6 +544,7 @@ class AnimeDetail(AnimeCore):
         episodes: list[Episode],
         now: datetime,
         list_entry: ListEntry | None = None,
+        mal_sync: MalSyncOut | None = None,
         watched: frozenset[int] = frozenset(),
         relation_ids: dict[tuple[str, int], int] | None = None,
         torrents: dict[int, Torrent] | None = None,
@@ -548,7 +582,7 @@ class AnimeDetail(AnimeCore):
             banner_url=anime.banner_url,
             next_airing=NextAiringOut.from_blob(anime.next_airing),
             relations=relations,
-            list_entry=(ListEntryOut.model_validate(list_entry) if list_entry else None),
+            list_entry=_entry_out(list_entry, mal_sync),
             episodes=[
                 EpisodeOut.from_episode(
                     episode,
@@ -581,6 +615,7 @@ __all__ = [
     "ListEntryPatch",
     "ListRow",
     "MAX_FAILURE_CHARS",
+    "MalSyncOut",
     "PROGRESS_STATES",
     "NextAiringOut",
     "PrepareState",

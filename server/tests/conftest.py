@@ -42,6 +42,11 @@ ORIGIN = "http://localhost:5173"
 ADMIN_EMAIL = "admin@arc.test"
 ADMIN_PASSWORD = "adminadmin123"
 
+#: A Fernet key for the tests, fixed rather than generated per run so that a
+#: failure is reproducible and a ciphertext in a fixture stays readable. It is
+#: a throwaway: nothing outside the test suite is ever encrypted with it.
+TEST_FERNET_KEY = "3Yq8kK1kQfQ2s5w8n2Zx0aB6cD9eF1gH3iJ5kL7mN9o="
+
 #: A database of its own, so a developer's `arc` dev data is never dropped by
 #: a test run.
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://arc:arc@localhost:5432/arc_test"
@@ -110,6 +115,11 @@ def settings(test_database_url: str) -> Settings:
     return Settings(  # type: ignore[call-arg]
         env="test",
         database_url=test_database_url,
+        # Encryption is needed by anything that stores a MAL token or seals an
+        # OAuth state (M9). Set here rather than per-test so a route that
+        # reaches for it never fails on configuration in a test about
+        # something else.
+        fernet_key=TEST_FERNET_KEY,
         _env_file=None,
     )
 
@@ -218,6 +228,11 @@ def pg_engine(test_database_url: str) -> Iterator[AsyncEngine]:
 CLEANUP_TABLES = (
     "jobs",
     "watch_progress",
+    # Before ``anime``: ``mal_write_log.anime_id`` is RESTRICT on purpose (the
+    # audit trail must outlive a cache prune), so the rows have to go first or
+    # the delete below fails.
+    "mal_write_log",
+    "mal_links",
     "list_entries",
     # Both cascade from ``episodes``; listed for the same reason as the two
     # below, and because a want is keyed by a user as well as an episode.

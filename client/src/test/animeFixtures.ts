@@ -8,6 +8,7 @@ import type {
   EpisodeRendition,
   ListEntry,
 } from '@/lib/anime'
+import type { MalStatus, MalWrite } from '@/lib/mal'
 import type { PlayInfo } from '@/lib/playback'
 import type {
   BehindEntry,
@@ -548,3 +549,105 @@ export const PLAY_INFO_EPISODE_2: PlayInfo = {
   previous: { id: 9001, number: 1, state: 'ready', ready: true },
   next: null,
 }
+
+/* --- MyAnimeList link and write log (roadmap M9) ---------------------- */
+
+/** A server with no MAL client id: the page can only explain why it is idle. */
+export const MAL_STATUS_UNCONFIGURED: MalStatus = {
+  linked: false,
+  mal_username: null,
+  expires_at: null,
+  last_import_at: null,
+  needs_relink: false,
+  pending_writes: 0,
+  failed_writes: 0,
+  configured: false,
+}
+
+/** Configured, but this viewer has never authorised Arc. */
+export const MAL_STATUS_UNLINKED: MalStatus = { ...MAL_STATUS_UNCONFIGURED, configured: true }
+
+/** A working link with two fields queued and one that gave up (FR-M6). */
+export const MAL_STATUS_LINKED: MalStatus = {
+  linked: true,
+  mal_username: 'arcviewer',
+  expires_at: '2026-09-08T09:00:00Z',
+  last_import_at: '2026-09-07T06:30:00Z',
+  needs_relink: false,
+  pending_writes: 2,
+  failed_writes: 1,
+  configured: true,
+}
+
+/** The refresh token stopped working: nothing syncs until it is re-authorised. */
+export const MAL_STATUS_NEEDS_RELINK: MalStatus = {
+  ...MAL_STATUS_LINKED,
+  needs_relink: true,
+  pending_writes: 0,
+  failed_writes: 0,
+}
+
+export function malWrite(overrides: Partial<MalWrite> = {}): MalWrite {
+  return {
+    id: 1,
+    anime: FRIEREN,
+    field: 'progress',
+    old_value: 3,
+    new_value: 4,
+    cause: 'watch',
+    status: 'ok',
+    error: null,
+    created_at: '2026-09-07T08:00:00Z',
+    revertible: true,
+    ...overrides,
+  }
+}
+
+/** MAL's own complaint about the failed row below. */
+export const MAL_WRITE_ERROR = 'MAL rejected the update: 400 invalid status'
+
+/** The sentence a skipped row carries: why nothing was sent (FR-M4). */
+export const MAL_SKIP_REASON = 'automatic progress never lowers MAL'
+
+/**
+ * One row per shape the log has to render: a progress write that landed and
+ * can be put back, a status change that failed with MAL's reason, a queued
+ * score write that cannot be reverted until it has landed, and a skipped one
+ * whose sentence explains why Arc sent nothing at all.
+ */
+export const MAL_LOG: MalWrite[] = [
+  malWrite(),
+  malWrite({
+    id: 2,
+    field: 'status',
+    old_value: 'watching',
+    new_value: 'on_hold',
+    cause: 'manual',
+    status: 'failed',
+    error: MAL_WRITE_ERROR,
+    created_at: '2026-09-07T07:00:00Z',
+  }),
+  malWrite({
+    id: 3,
+    anime: FRIEREN_SPECIAL,
+    field: 'score',
+    old_value: null,
+    new_value: 8,
+    cause: 'manual',
+    status: 'pending',
+    created_at: '2026-09-07T06:00:00Z',
+    revertible: false,
+  }),
+  malWrite({
+    id: 4,
+    anime: FRIEREN_SPECIAL,
+    field: 'progress',
+    old_value: 9,
+    new_value: 2,
+    cause: 'watch',
+    status: 'skipped',
+    error: MAL_SKIP_REASON,
+    created_at: '2026-09-07T05:00:00Z',
+    revertible: false,
+  }),
+]

@@ -20,6 +20,7 @@ import {
   type EpisodeOut,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
+import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched } from '@/lib/playback'
 
 const SCORES = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
@@ -129,6 +130,44 @@ function ScoreControl({ animeId, score }: { animeId: number; score: number | nul
         </p>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Where this show stands with MyAnimeList (spec §4.7 FR-M6). It sits beside
+ * the controls that cause the writes, because that is where the question comes
+ * up — "did that stick?" — and it says nothing at all when there is no link,
+ * so an unlinked account never carries a badge it cannot act on.
+ *
+ * A failure is the only one that is a problem, so it is the only one that
+ * names the error and offers the sync log, where the write can be retried or
+ * put back.
+ */
+function MalSyncIndicator({ sync }: { sync: MalSync | undefined }) {
+  if (sync === undefined || sync.state === 'unlinked') return null
+
+  if (sync.state === 'failed') {
+    const reason = sync.error === null || sync.error === '' ? null : sync.error
+
+    return (
+      <p role="alert" className="py-1.5 text-sm text-[var(--arc-warn)]">
+        {reason === null ? 'MAL: failed' : `MAL: failed — ${reason}`}{' '}
+        <Link to="/mal" className="text-[var(--arc-accent)] hover:underline">
+          Sync log
+        </Link>
+      </p>
+    )
+  }
+
+  const pending = sync.state === 'pending'
+
+  return (
+    <p
+      className={`py-1.5 text-sm ${pending ? 'text-[var(--arc-accent)]' : 'text-[var(--arc-text-muted)]'}`}
+      title={sync.last_write_at === null ? undefined : `Last write ${sync.last_write_at}`}
+    >
+      {pending ? 'MAL: pending' : 'MAL: synced'}
+    </p>
   )
 }
 
@@ -539,6 +578,7 @@ export function Show() {
                 <p className="py-1.5 text-sm text-[var(--arc-text-muted)]">
                   Watched {entry.progress} / {anime.episode_count ?? '?'}
                 </p>
+                <MalSyncIndicator sync={entry.mal_sync} />
               </>
             )}
           </div>

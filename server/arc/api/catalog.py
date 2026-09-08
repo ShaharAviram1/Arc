@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from arc.api.deps import CatalogDep, SessionDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Job
-from arc.services.catalog.names import SEASON_SWEEP
+from arc.services.catalog.names import CATALOG_PRIORITY, SEASON_SWEEP
 from arc.services.jobs import enqueue
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"], dependencies=[Depends(get_admin_user)])
@@ -82,7 +82,7 @@ async def season_sweep(session: SessionDep) -> Job:
     a season rolls over, after an outage, or on a fresh deployment that has not
     reached 03:30 yet.
     """
-    job = await enqueue(session, SEASON_SWEEP, dedupe_key=SEASON_SWEEP)
+    job = await enqueue(session, SEASON_SWEEP, priority=CATALOG_PRIORITY, dedupe_key=SEASON_SWEEP)
     await session.commit()
     return job
 

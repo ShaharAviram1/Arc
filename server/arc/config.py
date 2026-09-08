@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     #: MAL API v2's base URL. Configurable for the same reason ``ANILIST_URL``
     #: is: the test suite and the local fixture servers point it at a mock.
     mal_api_url: str = "https://api.myanimelist.net/v2"
+    #: Where the OAuth handshake happens (M9). A separate setting rather than
+    #: something derived from :attr:`mal_api_url`, because MAL puts authorize
+    #: and token on the main site rather than on the API host — and because the
+    #: test suite points it at a mock transport.
+    mal_oauth_url: str = "https://myanimelist.net/v1/oauth2"
+    #: How often every linked account's MyAnimeList list is re-imported
+    #: (FR-M3 names six hours as the default).
+    mal_import_interval_hours: float = Field(default=6.0, gt=0)
 
     # --- AniList (M3) ----------------------------------------------------
     #: The GraphQL endpoint. Configurable so the test suite can point it at a

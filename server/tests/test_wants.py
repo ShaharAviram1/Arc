@@ -14,10 +14,20 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Episode, EpisodeState, Job, ListStatus, Want
-from arc.services.acquisition.names import COMPUTE_WANTS, SEARCH_RELEASE
+from arc.models import DEFAULT_PRIORITY, Episode, EpisodeState, Job, ListStatus, Want
+from arc.services.acquisition.names import (
+    COMPUTE_WANTS,
+    SEARCH_RELEASE,
+    SEARCH_RELEASE_PRIORITY,
+)
+from arc.services.acquisition.rules import PAUSED_KEY
 from arc.services.acquisition.states import transition
-from arc.services.acquisition.wants import UNAVAILABLE_RETRY, compute_wants, window
+from arc.services.acquisition.wants import (
+    UNAVAILABLE_RETRY,
+    WantsResult,
+    compute_wants,
+    window,
+)
 from tests.acquisition_helpers import (
     make_anime,
     make_entry,
@@ -552,6 +562,86 @@ async def test_unaired_episodes_are_never_wanted(db_session: AsyncSession) -> No
     await compute_wants(db_session)
 
     assert await wants_of(db_session, user.id) == {rows[5].id}
+
+
+# --- The pause switch -------------------------------------------------------
+
+
+async def test_a_paused_reconciliation_does_nothing_at_all(db_session: AsyncSession) -> None:
+    """Not "reconcile but skip the searches": nothing is read, nothing written."""
+    anime = await make_anime(db_session, anilist_id=960021)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "paused@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    result = await compute_wants(db_session)
+
+    assert result.as_dict() == WantsResult().as_dict(), "a paused run reports nothing done"
+    assert await wants_of(db_session, user.id) == set()
+    assert rows[4].state is EpisodeState.NOT_WANTED
+    assert await search_jobs(db_session) == []
+
+
+async def test_a_pause_leaves_the_wants_it_found_exactly_as_they_were(
+    db_session: AsyncSession,
+) -> None:
+    """The point of pausing: resuming finds the world the pause left behind.
+
+    A show dropped while paused would ordinarily release its episode back to
+    ``not_wanted`` and delete the want. Paused, both survive — and are only
+    undone once acquisition is running again.
+    """
+    anime = await make_anime(db_session, anilist_id=960022)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "kept@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+    entry.status = ListStatus.DROPPED
+    await db_session.flush()
+    await set_setting(db_session, PAUSED_KEY, True)
+    await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+    assert rows[4].state is EpisodeState.WANTED
+
+    # …and resuming applies what the pause held back.
+    await set_setting(db_session, PAUSED_KEY, False)
+    await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == set()
+    assert rows[4].state is EpisodeState.NOT_WANTED
+
+
+async def test_a_non_boolean_pause_setting_is_ignored(db_session: AsyncSession) -> None:
+    """One hand-edited row must not decide whether acquisition runs."""
+    anime = await make_anime(db_session, anilist_id=960023)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "badflag@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    await set_setting(db_session, PAUSED_KEY, "yes please")
+
+    await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+
+async def test_the_searches_a_recompute_queues_sort_behind_the_default(
+    db_session: AsyncSession,
+) -> None:
+    """FR-A1's burst must not overtake the work a person is waiting on."""
+    anime = await make_anime(db_session, anilist_id=960024)
+    await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "priority@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+
+    await compute_wants(db_session)
+
+    jobs = await search_jobs(db_session)
+    assert jobs and {job.priority for job in jobs} == {SEARCH_RELEASE_PRIORITY}
+    assert SEARCH_RELEASE_PRIORITY > DEFAULT_PRIORITY
 
 
 # --- The hook from the list endpoints ---------------------------------------
