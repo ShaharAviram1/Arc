@@ -106,6 +106,7 @@ from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from arc.models import (
     Anime,
@@ -475,6 +476,7 @@ async def _import_one(
 ) -> None:
     """Apply :func:`decide_import` to one entry."""
     entry = await session.get(ListEntry, (user_id, anime.id))
+    before = None if entry is None else (entry.status, entry.progress, entry.score)
     action = decide_import(LocalEntry.of(entry) if entry is not None else None, remote.status)
     if action == "keep":
         report.kept += 1
@@ -514,11 +516,48 @@ async def _import_one(
     entry.updated_by = UpdatedBy.MAL
     entry.mal_dirty = False
     entry.mal_synced_at = now
-    # MAL's own timestamp, not the import's: this column is what §5.5 step 4
-    # compares against MAL next time, and stamping it "now" would make every
-    # imported row look like the most recent change in the world.
-    entry.updated_at = remote.status.updated_at or now
+    _stamp_import(entry, remote.status, before=before, now=now)
     await session.flush()
+
+
+def _stamp_import(
+    entry: ListEntry,
+    remote: MalStatus,
+    *,
+    before: tuple[ListStatus, int, int | None] | None,
+    now: datetime,
+) -> None:
+    """Write ``updated_at`` for an imported row: MAL's moment, or none at all.
+
+    MAL's own timestamp, not the import's: this column is what §5.5 step 4
+    compares against MAL next time, and stamping it "now" would make every
+    imported row look like the most recent change in the world.
+
+    When MAL **omits** ``updated_at`` — it does on very old rows — the fallback
+    used to be ``now``, and that quietly disabled FR-T2 for the whole account.
+    A six-hourly import of a row nobody had touched in a year moved
+    ``list_entries.updated_at`` to the current time on every run;
+    :func:`arc.services.acquisition.wants._drop_stale` measures D from the
+    later of "the episode became ready" and "the user last touched the show",
+    so the D-day clock was reset four times a day and never once ran out. The
+    files of a show somebody gave up on in January would still have been on the
+    disk in December.
+
+    So ``now`` is written only when the import actually changed something. Then
+    it is honest: an unstamped change did happen, and it happened now. When the
+    imported values equal the local ones there is nothing to date, and the row
+    keeps the timestamp it had. ``updated_at`` is forced into that ``UPDATE``
+    with its existing value, because the column's ``onupdate`` would otherwise
+    fill it in with ``now()`` behind the ORM's back — ``mal_synced_at`` moves on
+    every import, so there is always an ``UPDATE`` for it to fire on.
+    """
+    if remote.updated_at is not None:
+        entry.updated_at = remote.updated_at
+        return
+    if before != (entry.status, entry.progress, entry.score):
+        entry.updated_at = now
+        return
+    flag_modified(entry, "updated_at")
 
 
 async def _log_conflict(

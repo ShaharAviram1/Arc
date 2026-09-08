@@ -12,14 +12,14 @@ So there is one writer, :func:`transition`, and it enforces the table below.
 
     not_wanted → wanted → searching → downloading → downloaded
        → matching → (review) → matched → preparing → ready
-    ready → (retention) → not_wanted
+    ready | downloaded | matched | failed → (retention) → not_wanted
     ready → preparing                       (a deliberate re-encode, FR-P5)
     searching | downloading | downloaded | matching → unavailable
     unavailable → wanted                    (something wants it again)
     preparing → failed → preparing          (a transcode blew up, retry)
 
-Four edges are in :data:`TRANSITIONS` without being drawn in the spec's
-diagram, and all four are real.
+Five edges are in :data:`TRANSITIONS` without being drawn in the spec's
+diagram, and all five are real.
 
 * **→ matched from anywhere before it.** A file dropped into the manual
   directory belongs to an episode Arc never fetched, and confirming a review
@@ -33,8 +33,18 @@ diagram, and all four are real.
   starting a download, nothing else writes that row, and the episode sits in
   ``searching`` for ever, telling the show page it is being looked for when
   nobody is looking. Anything with bytes behind it — ``downloading``,
-  ``downloaded``, ``matched`` — is left alone; retention (FR-T1, M10) is what
-  unwinds those.
+  ``downloaded``, ``matched`` — is left alone by the *reconciler*; retention
+  is what unwinds those, through the edge below.
+* **→ not_wanted from downloaded / matched / failed** (M10, FR-T3). Deleting
+  an episode's files "resets the episode to not acquired", and an episode
+  does not have to have reached ``ready`` to have bytes worth deleting: a
+  download whose transcode never ran, a match nothing has encoded yet, an
+  encode that failed a fortnight ago. The edge from ``ready`` is the spec's
+  own; these three are the same arrow from the states in front of it. Only
+  :mod:`arc.services.retention.delete` takes any of them, and only after the
+  files are gone — which is why ``downloading``, ``searching``, ``matching``
+  and ``preparing`` are **not** in the list: work is in flight there, and the
+  deleter refuses those episodes before it gets as far as a transition.
 * **→ unavailable from downloaded / matching.** The file arrived and turned
   out not to be this episode: the torrent vanished from the client before its
   file was readable, or the matcher sent it to review and a person said "not
@@ -79,11 +89,11 @@ TRANSITIONS: Final[Mapping[EpisodeState, frozenset[EpisodeState]]] = {
     _S.WANTED: frozenset({_S.SEARCHING, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.SEARCHING: frozenset({_S.DOWNLOADING, _S.UNAVAILABLE, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.DOWNLOADING: frozenset({_S.DOWNLOADED, _S.UNAVAILABLE}) | _TO_MATCHED,
-    _S.DOWNLOADED: frozenset({_S.MATCHING, _S.UNAVAILABLE}) | _TO_MATCHED,
+    _S.DOWNLOADED: frozenset({_S.MATCHING, _S.UNAVAILABLE, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.MATCHING: frozenset({_S.UNAVAILABLE}) | _TO_MATCHED,
-    _S.MATCHED: frozenset({_S.PREPARING}),
+    _S.MATCHED: frozenset({_S.PREPARING, _S.NOT_WANTED}),
     _S.PREPARING: frozenset({_S.READY, _S.FAILED}),
-    _S.FAILED: frozenset({_S.PREPARING}) | _TO_MATCHED,
+    _S.FAILED: frozenset({_S.PREPARING, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.READY: frozenset({_S.NOT_WANTED, _S.PREPARING}),
     _S.UNAVAILABLE: frozenset({_S.WANTED, _S.NOT_WANTED}) | _TO_MATCHED,
 }

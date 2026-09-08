@@ -232,9 +232,16 @@ any time, and the owner uses it daily.
   a grace period of **G** days has elapsed since the last completion
   (default G = 7).
 - FR-T2 Additionally, if a user who wants the episode has not watched it
-  within **D** days of it becoming ready (default D = 21), that user's want
-  is dropped for that episode, so a dropped-in-practice show does not pin
-  files forever. When no wants remain, FR-T1's grace applies.
+  within **D** days of it becoming ready (default D = 21) — counted from
+  the later of the episode becoming ready and the user's last action on
+  that show, so a show the user just came back to is not dropped by the
+  next tick — that user's want is dropped for that episode, so a
+  dropped-in-practice show does not pin files forever. A dropped want is
+  revived only when the user acts on the show again in Arc. When no wants
+  remain for any reason (watched past, show set to on hold / dropped /
+  completed, removed from the list, or dropped as stale), FR-T1's grace
+  applies from that moment; a want never disappears without leaving a
+  grace anchor behind.
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired.
 - FR-T4 Admin can see disk usage and manually delete or re-fetch.
@@ -342,3 +349,7 @@ preparing → failed → (retry) → preparing
   file rejected in review flags the episode unavailable.
 - 2026-09-07 — FR-S4 clarified: completing an episode of an unlisted show
   adds it as Watching; un-marking never rolls back progress or MAL.
+- 2026-09-08 — FR-T2 clarified after M10 review: the D window also runs
+  from the user's last action on the show; wants that end because the show
+  left watching/planned are dropped (not deleted) so the grace period is
+  never skipped; revival needs an Arc-side action.

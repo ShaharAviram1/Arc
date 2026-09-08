@@ -356,7 +356,15 @@ async def test_the_status_reports_the_flag_and_what_it_is_holding(
     await admin_client.post("/api/acquisition/pause")
     body = (await admin_client.get("/api/acquisition/status")).json()
 
-    assert body == {"paused": True, "active_wants": 2, "searching": 1, "downloading": 1}
+    assert body == {
+        "paused": True,
+        "active_wants": 2,
+        "searching": 1,
+        "downloading": 1,
+        # Nothing is ``ready`` and nothing has a size, so M10's disk figure is
+        # zero here; :mod:`tests.test_retention_api` is where it is exercised.
+        "retained_bytes": 0,
+    }
 
 
 async def test_the_status_of_an_idle_unpaused_arc(admin_client: AsyncClient) -> None:
@@ -365,6 +373,7 @@ async def test_the_status_of_an_idle_unpaused_arc(admin_client: AsyncClient) -> 
         "active_wants": 0,
         "searching": 0,
         "downloading": 0,
+        "retained_bytes": 0,
     }
 
 

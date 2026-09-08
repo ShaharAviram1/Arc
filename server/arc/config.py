@@ -215,6 +215,18 @@ class Settings(BaseSettings):
     #: large enough that the commit is not the expensive part.
     library_scan_commit_every: int = Field(default=25, ge=1)
 
+    # --- Retention (M10) --------------------------------------------------
+    #: When true the retention sweep logs everything it *would* delete and
+    #: deletes nothing — no file, no row, no state change (FR-T1, FR-T3).
+    #:
+    #: An environment variable rather than a row in ``settings`` beside G and
+    #: D, deliberately. G and D are rules an admin tunes from the UI; this is
+    #: an operator's brake on a process that removes files, set before the
+    #: worker starts and normally on only for the first night of a new
+    #: deployment. A "delete nothing" switch that lives in a table Arc itself
+    #: writes to is one bad migration away from being off.
+    retention_dry_run: bool = False
+
     # --- Worker ----------------------------------------------------------
     #: Jobs the worker runs at once. Transcodes have their own, smaller cap
     #: (``max_transcodes``); this is the queue-wide limit.

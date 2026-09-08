@@ -14,7 +14,16 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import DEFAULT_PRIORITY, Episode, EpisodeState, Job, ListStatus, Want
+from arc.models import (
+    DEFAULT_PRIORITY,
+    Episode,
+    EpisodeState,
+    Job,
+    ListEntry,
+    ListStatus,
+    Rendition,
+    Want,
+)
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     SEARCH_RELEASE,
@@ -23,6 +32,8 @@ from arc.services.acquisition.names import (
 from arc.services.acquisition.rules import PAUSED_KEY
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import (
+    REASON_NOT_WANTING,
+    STALE_DROP_REASON,
     UNAVAILABLE_RETRY,
     WantsResult,
     compute_wants,
@@ -245,12 +256,17 @@ async def test_two_users_at_different_progress_merge_into_a_union(
 
 
 @pytest.mark.parametrize("status", [ListStatus.DROPPED, ListStatus.COMPLETED, ListStatus.ON_HOLD])
-async def test_a_show_that_stops_being_watched_loses_its_wants(
+async def test_a_show_that_stops_being_watched_drops_its_wants(
     db_session: AsyncSession, status: ListStatus
 ) -> None:
-    """FR-W4 — and on_hold with it, for the same reason."""
+    """FR-W4 — and on_hold with it, for the same reason.
+
+    Dropped rather than deleted: the row is the moment the episode stopped
+    being wanted, and FR-T1's grace period is counted from it. Deleting it
+    would leave the sweep judging the files by their own age instead.
+    """
     anime = await make_anime(db_session, anilist_id=960006)
-    await make_episodes(db_session, anime, 12, aired_through=12)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
     user = await make_user(db_session, f"drop-{status.value}@arc.test")
     entry = await make_entry(db_session, user, anime, progress=4)
     await compute_wants(db_session)
@@ -260,29 +276,95 @@ async def test_a_show_that_stops_being_watched_loses_its_wants(
     await db_session.flush()
     result = await compute_wants(db_session)
 
-    assert await wants_of(db_session, user.id) == set()
-    assert result.removed == 2
+    assert await wants_of(db_session, user.id) == set(), "no live want is left"
+    assert result.shelved == 2
+    assert result.removed == 0
+    for row in rows[4:6]:
+        want = await db_session.get(Want, (user.id, row.id))
+        assert want is not None, "the row survives, as retention's anchor"
+        assert want.dropped_at is not None
+        assert want.drop_reason == REASON_NOT_WANTING
 
 
-async def test_removing_the_show_from_the_list_removes_the_wants(
+async def test_removing_the_show_from_the_list_drops_the_wants(
     db_session: AsyncSession,
 ) -> None:
+    """A deleted list entry is "no longer watching" by another route."""
     anime = await make_anime(db_session, anilist_id=960007)
-    await make_episodes(db_session, anime, 12, aired_through=12)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
     user = await make_user(db_session, "gone@arc.test")
     entry = await make_entry(db_session, user, anime, progress=4)
     await compute_wants(db_session)
 
     await db_session.delete(entry)
     await db_session.flush()
-    await compute_wants(db_session)
+    result = await compute_wants(db_session)
 
     assert await wants_of(db_session, user.id) == set()
+    assert result.shelved == 2
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.drop_reason == REASON_NOT_WANTING
 
 
-async def test_watching_ahead_slides_the_window_and_drops_what_fell_out(
+async def test_a_second_run_does_not_restamp_a_dropped_want(
     db_session: AsyncSession,
 ) -> None:
+    """``dropped_at`` is when it stopped being wanted, not when it was noticed.
+
+    Restamping it every quarter of an hour would push FR-T1's deletion date
+    away for as long as the show sat on hold, which is precisely the state the
+    grace period is supposed to be counting through.
+    """
+    anime = await make_anime(db_session, anilist_id=960025)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "onhold@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    entry.status = ListStatus.ON_HOLD
+    await db_session.flush()
+    await compute_wants(db_session)
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is not None
+    first = want.dropped_at
+
+    result = await compute_wants(db_session)
+
+    assert want.dropped_at == first
+    assert (result.shelved, result.removed) == (0, 0)
+
+
+async def test_a_show_that_comes_back_revives_its_dropped_wants(
+    db_session: AsyncSession,
+) -> None:
+    """Re-watching an on-hold show fetches the episodes again (FR-W4)."""
+    anime = await make_anime(db_session, anilist_id=960026)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "backagain@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    entry.status = ListStatus.ON_HOLD
+    await db_session.flush()
+    await compute_wants(db_session)
+    assert await wants_of(db_session, user.id) == set()
+
+    entry.status = ListStatus.WATCHING
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+    assert result.revived == 2
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.drop_reason is None
+
+
+async def test_watching_ahead_slides_the_window_and_deletes_what_fell_out(
+    db_session: AsyncSession,
+) -> None:
+    """The other half of FR-W4: past the window is *deleted*, not tombstoned.
+
+    The user watched it, so ``watch_progress.completed_at`` is the moment
+    retention will measure from and the want row has nothing left to say.
+    """
     anime = await make_anime(db_session, anilist_id=960008)
     rows = await make_episodes(db_session, anime, 12, aired_through=12)
     user = await make_user(db_session, "slide@arc.test")
@@ -292,9 +374,11 @@ async def test_watching_ahead_slides_the_window_and_drops_what_fell_out(
 
     entry.progress = 6
     await db_session.flush()
-    await compute_wants(db_session)
+    result = await compute_wants(db_session)
 
     assert await wants_of(db_session, user.id) == {rows[6].id, rows[7].id}
+    assert await db_session.get(Want, (user.id, rows[4].id)) is None
+    assert (result.removed, result.shelved) == (2, 0)
 
 
 async def test_shrinking_the_window_removes_the_far_edge(db_session: AsyncSession) -> None:
@@ -314,6 +398,7 @@ async def test_shrinking_the_window_removes_the_far_edge(db_session: AsyncSessio
 async def test_a_re_wanted_episode_has_its_dropped_at_cleared(
     db_session: AsyncSession,
 ) -> None:
+    """A row dropped for anything but FR-T2 comes back when the window covers it."""
     anime = await make_anime(db_session, anilist_id=960010)
     rows = await make_episodes(db_session, anime, 12, aired_through=12)
     user = await make_user(db_session, "revive@arc.test")
@@ -323,7 +408,7 @@ async def test_a_re_wanted_episode_has_its_dropped_at_cleared(
     want = await db_session.get(Want, (user.id, rows[4].id))
     assert want is not None
     want.dropped_at = datetime.now(UTC)
-    want.drop_reason = "unwatched for D days"
+    want.drop_reason = "the show was on hold"
     await db_session.flush()
 
     result = await compute_wants(db_session)
@@ -374,6 +459,271 @@ async def test_an_unfinished_watch_does_not_move_the_window(db_session: AsyncSes
     await compute_wants(db_session)
 
     assert await wants_of(db_session, user.id) == {rows[2].id, rows[3].id}
+
+
+# --- Stale wants (FR-T2) ----------------------------------------------------
+#
+# The clock is moved by backdating the episode rather than by waiting: an
+# episode "became ready" when its rendition did, and ``state_changed_at`` is
+# the fallback when there is no rendition row. Both are written directly here,
+# which is what makes "22 days ago" mean 22 days.
+
+
+async def ready_since(
+    session: AsyncSession,
+    episode: Episode,
+    *,
+    days: float,
+    entry: ListEntry | None = None,
+    rendition: bool = False,
+) -> Episode:
+    """Put ``episode`` in ``ready`` ``days`` ago, the user quiet ever since.
+
+    The list entry is backdated with it, because the D window runs from the
+    later of the two: an episode ready for a month whose owner changed their
+    list this morning has not been abandoned, and FR-T2 is only about the ones
+    that have.
+    """
+    moment = datetime.now(UTC) - timedelta(days=days)
+    episode.state = EpisodeState.READY
+    episode.state_changed_at = moment
+    if entry is not None:
+        entry.updated_at = moment
+    if rendition:
+        session.add(
+            Rendition(
+                episode_id=episode.id,
+                dir=f"/data/renditions/{episode.id}",
+                playlist_path="index.m3u8",
+                ready_at=moment,
+            )
+        )
+    await session.flush()
+    return episode
+
+
+@pytest.mark.parametrize("rendition", [False, True])
+async def test_a_want_unwatched_for_d_days_is_dropped(
+    db_session: AsyncSession, rendition: bool
+) -> None:
+    """FR-T2: 22 days ready and unwatched, with D at its default of 21."""
+    anime = await make_anime(db_session, anilist_id=960030 + int(rendition))
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, f"stale-{rendition}@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry, rendition=rendition)
+
+    result = await compute_wants(db_session)
+
+    dropped = await db_session.get(Want, (user.id, rows[4].id))
+    assert dropped is not None
+    assert dropped.dropped_at is not None
+    assert dropped.drop_reason == STALE_DROP_REASON
+    assert result.dropped == 1
+    kept = await db_session.get(Want, (user.id, rows[5].id))
+    assert kept is not None and kept.dropped_at is None, "the other half of the window is live"
+
+
+async def test_a_want_unwatched_for_twenty_days_is_kept(db_session: AsyncSession) -> None:
+    """D is a threshold, not a mood: a day short of it changes nothing."""
+    anime = await make_anime(db_session, anilist_id=960032)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "notyet@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=20, entry=entry)
+
+    result = await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is None
+    assert result.dropped == 0
+
+
+async def test_a_longer_d_holds_the_want(db_session: AsyncSession) -> None:
+    """D is admin-editable (FR-T5) and read on every run."""
+    await set_setting(db_session, "unwatched_days_d", 60)
+    anime = await make_anime(db_session, anilist_id=960033)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "longd@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+
+    assert (await compute_wants(db_session)).dropped == 0
+
+
+async def test_an_episode_the_user_watched_is_never_dropped_as_stale(
+    db_session: AsyncSession,
+) -> None:
+    """Watching it is what a want is *for*; the window then moves past it."""
+    from arc.models import WatchProgress
+
+    anime = await make_anime(db_session, anilist_id=960034)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "watched-stale@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+    db_session.add(
+        WatchProgress(
+            user_id=user.id,
+            episode_id=rows[4].id,
+            position_s=1400.0,
+            completed=True,
+            completed_at=datetime.now(UTC) - timedelta(days=21),
+        )
+    )
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    assert result.dropped == 0
+    assert await db_session.get(Want, (user.id, rows[4].id)) is None, (
+        "the row is deleted by the window sliding, not tombstoned"
+    )
+
+
+async def test_a_stale_drop_survives_the_next_recompute(db_session: AsyncSession) -> None:
+    """Otherwise the rule would be undone fifteen minutes after it applied."""
+    anime = await make_anime(db_session, anilist_id=960035)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "sticky@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+    await compute_wants(db_session)
+
+    second = await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is not None
+    assert (second.revived, second.dropped) == (0, 0), "neither revived nor dropped twice"
+
+
+async def test_touching_the_show_again_revives_a_stale_drop(db_session: AsyncSession) -> None:
+    """An Arc-side change: ``list_entries.updated_at`` moves, ``updated_by`` is arc."""
+    anime = await make_anime(db_session, anilist_id=960036)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "cameback@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+    await compute_wants(db_session)
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is not None
+
+    # The user edits the show. In production ``updated_at`` is written by the
+    # ORM's ``onupdate``; here it is set explicitly, because everything in one
+    # test shares a transaction and Postgres's ``now()`` is that transaction's
+    # start — which is *before* the drop this is meant to come after.
+    entry.score = 8
+    entry.updated_at = want.dropped_at + timedelta(minutes=1)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    revived = await db_session.get(Want, (user.id, rows[4].id))
+    assert revived is not None
+    assert revived.dropped_at is None and revived.drop_reason is None
+    assert result.revived == 1
+
+
+async def test_a_mal_import_does_not_revive_a_stale_drop(db_session: AsyncSession) -> None:
+    """The revival rule in full: an Arc-side action, and nothing else.
+
+    A MAL import writes ``updated_by = mal`` and MAL's own timestamp, and it
+    does that for a score as readily as for anything else — so a number typed
+    into MyAnimeList months ago, about an episode the user has plainly not
+    watched, would otherwise start the download again. The MAL-side changes
+    that *should* bring a want back never come through this branch: progress
+    moves the window, and a status change takes the show out of
+    watching/planned and back (:func:`test_a_show_that_comes_back_revives_its_dropped_wants`).
+    """
+    from arc.models import UpdatedBy
+
+    anime = await make_anime(db_session, anilist_id=960039)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "malscore@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+    await compute_wants(db_session)
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is not None
+
+    # A MAL import: the user scored the show on MyAnimeList and nothing else.
+    entry.score = 8
+    entry.updated_by = UpdatedBy.MAL
+    entry.updated_at = want.dropped_at + timedelta(days=1)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    still = await db_session.get(Want, (user.id, rows[4].id))
+    assert still is not None and still.dropped_at is not None
+    assert still.drop_reason == STALE_DROP_REASON
+    assert result.revived == 0
+    assert rows[4].state is EpisodeState.READY, "and nothing was re-fetched"
+
+
+async def test_putting_a_stale_show_on_hold_and_back_revives_it(
+    db_session: AsyncSession,
+) -> None:
+    """The route a MAL-side status change takes back into the window.
+
+    Leaving watching/planned re-labels the row: it is no longer "you did not
+    watch this", it is "you are not watching this show". Coming back is then
+    the ordinary revival, whichever side made either change — which is why the
+    stale rule can insist on an Arc-side action without ever trapping a want
+    the user has plainly come back to.
+    """
+    anime = await make_anime(db_session, anilist_id=960041)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "holdandback@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=22, entry=entry)
+    await compute_wants(db_session)
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.drop_reason == STALE_DROP_REASON
+    dropped_at = want.dropped_at
+
+    entry.status = ListStatus.ON_HOLD
+    await db_session.flush()
+    await compute_wants(db_session)
+    assert want.drop_reason == REASON_NOT_WANTING
+    assert want.dropped_at == dropped_at, "the grace period does not start over"
+
+    entry.status = ListStatus.WATCHING
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert result.revived == 2, "the stale one and the one dropped with the show"
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+
+async def test_a_stale_drop_leaves_the_episode_ready(db_session: AsyncSession) -> None:
+    """FR-T2 drops the *want*; the files are retention's business (FR-T1)."""
+    anime = await make_anime(db_session, anilist_id=960037)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "stillready@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await ready_since(db_session, rows[4], days=30, entry=entry)
+
+    await compute_wants(db_session)
+
+    assert rows[4].state is EpisodeState.READY
+
+
+async def test_only_ready_episodes_go_stale(db_session: AsyncSession) -> None:
+    """An episode still downloading has not been offered to anybody yet."""
+    anime = await make_anime(db_session, anilist_id=960038)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "downloading-stale@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    rows[4].state = EpisodeState.DOWNLOADING
+    rows[4].state_changed_at = datetime.now(UTC) - timedelta(days=40)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is None
+    assert result.dropped == 0
 
 
 # --- What the wants start ---------------------------------------------------

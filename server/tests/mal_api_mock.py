@@ -58,18 +58,25 @@ def entry(
     status: str = "watching",
     score: int = 0,
     progress: int = 0,
-    updated_at: str = "2026-01-01T00:00:00+00:00",
+    updated_at: str | None = "2026-01-01T00:00:00+00:00",
     episodes: int = 12,
 ) -> dict[str, Any]:
-    """One row of an ``animelist`` page, MAL's shape."""
+    """One row of an ``animelist`` page, MAL's shape.
+
+    ``updated_at=None`` leaves the key out altogether, which is what MyAnimeList
+    does for some very old rows — the shape Arc has to survive rather than one
+    it can assume away.
+    """
+    list_status: dict[str, Any] = {
+        "status": status,
+        "score": score,
+        "num_episodes_watched": progress,
+    }
+    if updated_at is not None:
+        list_status["updated_at"] = updated_at
     return {
         "node": {"id": mal_id, "title": title, "num_episodes": episodes},
-        "list_status": {
-            "status": status,
-            "score": score,
-            "num_episodes_watched": progress,
-            "updated_at": updated_at,
-        },
+        "list_status": list_status,
     }
 
 

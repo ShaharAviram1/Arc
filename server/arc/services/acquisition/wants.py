@@ -29,21 +29,72 @@ Merging (FR-A2) is what the table shape does on its own: wants are keyed by
 users wanting episode 7 is three rows and one download.
 
 Dropping (FR-W4). ``dropped``, ``completed`` and ``on_hold`` shows, and shows
-removed from a list entirely, produce no wants, so their rows are deleted — as
-are rows that fell out of the window because the user watched ahead. Deleting
-rather than tombstoning is deliberate here: ``dropped_at`` exists for FR-T2's
-*stale want* rule (M10), which is a statement about one user and one episode
-("you have had this for D days and not watched it") that must survive a
-recompute. A row deleted for being out of the window carries no such
-information — the window is recomputed from the list every fifteen minutes,
-so the row would be recreated the moment it applied again.
+removed from a list entirely, produce no wants — and their rows are **dropped**
+(:data:`REASON_NOT_WANTING`), not deleted. The row is what retention measures
+FR-T1's grace period from: an episode whose only watcher put the show on hold
+this morning has a moment attached to it ("this is when it stopped being
+wanted"), and deleting the row would throw that moment away and leave the sweep
+to judge the files by their own age — an episode dropped an hour ago would then
+be deleted tonight because its bytes happen to be a month old, and the sweep
+would say "nobody wants it and nobody ever did" about something somebody wanted
+until this morning. Keeping the row is also what makes the return trip work:
+the show going back to ``watching`` finds the row in the window again and
+revives it.
+
+Rows that fall out of the *window* are still deleted, and that difference is
+the point. A user who watched episode 5 has moved past it: the completion is in
+``watch_progress``, retention reads *that* as the anchor, and the want row has
+nothing left to say. So the rule is one line — a want whose (user, show) still
+has a ``watching``/``planned`` list entry left the window and is deleted;
+anything else stopped being wanted and is dropped.
+
+Going stale (FR-T2, M10). Every run, a want on an episode that has been
+``ready`` for more than **D** days and that its user has not completed is
+**dropped**: ``dropped_at`` and ``drop_reason`` are written and the row stops
+counting as live, so a show somebody has quietly given up on stops pinning
+files to the disk and retention's grace period (FR-T1) starts running from
+that moment.
+
+That drop has to survive the next reconciliation, fifteen minutes later, or
+it would mean nothing at all — and the reconciler's ordinary behaviour is to
+revive any dropped row whose (user, episode) is back in the window, which it
+still is: the user has not watched anything, so the window has not moved. So
+a stale drop is only cleared when **the user has done something about the show
+in Arc since**: ``list_entries.updated_by == arc`` and an ``updated_at`` later
+than the drop. Every path through ``PUT /api/list/{id}`` writes both, so a
+status change, a progress edit, a score or a re-add after a delete all count.
+
+Why the ``updated_by`` half (the revival rule, in full). ``updated_at`` alone
+would also be moved by a MAL import, and an import's timestamp is MAL's own —
+so a *score* set on MyAnimeList, which says nothing whatsoever about whether
+the user intends to watch this episode, would silently start the download
+again. Arc cannot tell a MAL-side status or progress change from a MAL-side
+score change after the fact, because the previous remote values are not stored
+anywhere; it would take a column per want to remember what the entry looked
+like when the drop happened. It does not need one, because the two MAL-side
+changes that *should* revive a want do it without going through this branch at
+all:
+
+* **progress** moves the window. A row the user's progress has passed leaves
+  ``desired`` and is deleted; the episodes that come into the window instead
+  are inserted live, which is a fetch either way.
+* **status** takes the show out of ``watching``/``planned`` and back. Leaving
+  re-labels the row :data:`REASON_NOT_WANTING` (below), and coming back revives
+  it through the ordinary path, whichever side made the change.
+
+What is left over — a MAL-side score, a MAL row touched with nothing changed —
+is exactly the set of changes that must *not* revive a stale drop. So the rule
+is "Arc-side action, later than the drop", and it is complete rather than
+merely conservative. A row dropped for any other reason is revived as it always
+was.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, or_, select
@@ -56,6 +107,8 @@ from arc.models import (
     Job,
     ListEntry,
     ListStatus,
+    Rendition,
+    UpdatedBy,
     Want,
     WatchProgress,
 )
@@ -69,6 +122,7 @@ from arc.services.acquisition.rules import is_paused, look_ahead_n
 from arc.services.acquisition.states import transition
 from arc.services.catalog.airing import aired_through, is_aired
 from arc.services.jobs.queue import enqueue
+from arc.services.retention.rules import unwatched_period
 
 log = logging.getLogger(__name__)
 
@@ -101,9 +155,41 @@ RELEASABLE: frozenset[EpisodeState] = frozenset(
 #: existed for a fortnight is rude for no gain.
 UNAVAILABLE_RETRY = timedelta(days=1)
 
-#: Why a row was removed, for the log.
-REASON_OUT_OF_WINDOW = "outside the look-ahead window"
-REASON_NOT_WANTING = "the show is no longer watching/planned"
+#: What :func:`_reconcile` writes into ``wants.drop_reason`` when the show
+#: stopped being ``watching``/``planned`` — a status change to ``on_hold``,
+#: ``dropped`` or ``completed``, or the entry removed from the list entirely
+#: (FR-W4). Unlike :data:`STALE_DROP_REASON` it puts no condition on the
+#: revival: the show coming back is the user coming back.
+REASON_NOT_WANTING = "show no longer watching or planned"
+
+#: What FR-T2 writes into ``wants.drop_reason``, and the value
+#: :func:`_reconcile` refuses to revive without a sign that the user came back
+#: to the show. The spec's own words, with D left as D: the number is in
+#: ``settings`` and can be changed on any afternoon, and a row that says "21"
+#: when the setting says 30 would be a lie about a rule rather than a record
+#: of one. The days themselves are in the log line.
+STALE_DROP_REASON = "unwatched for D days"
+
+
+@dataclass(frozen=True, slots=True)
+class _Touch:
+    """When a user last did something to one show, and which side did it.
+
+    Read off ``list_entries``, carried through the reconciliation so that the
+    revival rule is decided from the row rather than from a second query.
+    """
+
+    at: datetime
+    by: UpdatedBy
+
+    def came_back_after(self, dropped_at: datetime) -> bool:
+        """Whether this is the "the user came back" signal FR-T2 waits for.
+
+        An Arc-side change later than the drop, and nothing else. The module
+        docstring has the argument for why MAL-side changes do not belong
+        here — the ones that ought to revive a want never reach this branch.
+        """
+        return self.by is UpdatedBy.ARC and self.at > dropped_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,10 +203,16 @@ class WantsResult:
     #: ``LogRecord``'s own attributes — ``logging`` raises rather than let a
     #: caller shadow it, which turns a log line into a failed job.
     added: int = 0
-    #: Rows deleted because the window or the list moved.
+    #: Rows deleted because the user's progress moved past them.
     removed: int = 0
+    #: Rows dropped because their show is no longer watching/planned (FR-W4).
+    #: Kept rather than deleted, so retention's grace period has a moment to
+    #: run from (:data:`REASON_NOT_WANTING`).
+    shelved: int = 0
     #: Wants whose ``dropped_at`` was cleared because they are live again.
     revived: int = 0
+    #: Wants dropped for going unwatched for D days (FR-T2).
+    dropped: int = 0
     #: Episodes moved ``not_wanted``/``unavailable`` → ``wanted``.
     started: int = 0
     #: ``search_release`` jobs enqueued (a dedupe hit is not counted).
@@ -133,7 +225,9 @@ class WantsResult:
             "wanted": self.wanted,
             "added": self.added,
             "removed": self.removed,
+            "shelved": self.shelved,
             "revived": self.revived,
+            "dropped": self.dropped,
             "started": self.started,
             "searches": self.searches,
             "released": self.released,
@@ -253,8 +347,17 @@ async def compute_wants(session: AsyncSession, *, now: datetime | None = None) -
         session, {(entry.user_id, entry.anime_id) for entry, _ in entries}
     )
 
-    desired: set[tuple[int, int]] = set()
+    # The value is when the user last did something to this show, and which
+    # side did it. That is what decides whether a want dropped for going stale
+    # (FR-T2) is allowed to come back — see :func:`_reconcile`.
+    desired: dict[tuple[int, int], _Touch] = {}
+    #: Every (user, show) with a ``watching``/``planned`` entry, which is how a
+    #: want that left the *window* is told from one whose show stopped being
+    #: wanted at all.
+    wanting: set[tuple[int, int]] = set()
     for entry, anime in entries:
+        wanting.add((entry.user_id, entry.anime_id))
+        touch = _Touch(at=entry.updated_at, by=entry.updated_by)
         progress = max(entry.progress, furthest.get((entry.user_id, entry.anime_id), 0))
         for episode in window(
             episodes.get(anime.id, []),
@@ -264,51 +367,188 @@ async def compute_wants(session: AsyncSession, *, now: datetime | None = None) -
             anime_status=anime.status,
             next_airing=anime.next_airing,
         ):
-            desired.add((entry.user_id, episode.id))
+            desired[(entry.user_id, episode.id)] = touch
 
-    result = await _reconcile(session, desired, now=moment)
+    result = await _reconcile(session, desired, wanting, now=moment)
+    result = await _drop_stale(session, result, now=moment)
     return await _start_searches(session, result, now=moment)
 
 
 async def _reconcile(
-    session: AsyncSession, desired: set[tuple[int, int]], *, now: datetime
+    session: AsyncSession,
+    desired: Mapping[tuple[int, int], _Touch],
+    wanting: Collection[tuple[int, int]],
+    *,
+    now: datetime,
 ) -> WantsResult:
-    """Make ``wants`` equal ``desired``: insert, revive, delete."""
-    existing = {
-        (want.user_id, want.episode_id): want
-        for want in (await session.scalars(select(Want))).all()
-    }
+    """Make ``wants`` equal ``desired``: insert, revive, drop, delete.
+
+    **Leaving is two different things** (FR-W4). A row whose (user, show) still
+    has a ``watching``/``planned`` entry left the *window* — the user watched
+    past it, or N was turned down — and is deleted: there is nothing to
+    remember, and a completion (which is what retention will measure the grace
+    period from) is already in ``watch_progress``. A row whose show is not in
+    ``wanting`` at all stopped being wanted, and is **dropped**
+    (:data:`REASON_NOT_WANTING`) so that retention has the moment it stopped.
+
+    A row that is *already* dropped keeps its ``dropped_at`` — restamping it
+    would push the deletion date away every quarter of an hour for as long as
+    the show sat on hold — but does take the new reason, which is what lets a
+    stale drop come back when the show does (see the module docstring).
+
+    **Reviving** is the subtle one. A row that is in the window and carries a
+    ``dropped_at`` is ordinarily brought back — that is how a want dropped
+    while the show was on hold returns when it goes back to watching. The one
+    exception is FR-T2's stale drop (:data:`STALE_DROP_REASON`): the user has
+    had the episode ready for D days and not watched it, and reviving that on
+    the next tick would undo the rule fifteen minutes after it applied. It
+    comes back when the user has acted on the show *in Arc* since the drop —
+    ``updated_by == arc`` and a later ``updated_at`` — and not for a MAL import
+    that merely moved a score.
+    """
+    rows = await session.execute(
+        select(Want, Episode.anime_id).join(Episode, Episode.id == Want.episode_id)
+    )
+    existing = {(want.user_id, want.episode_id): (want, anime_id) for want, anime_id in rows.all()}
 
     added = revived = 0
-    for key in desired:
-        want = existing.get(key)
-        if want is None:
+    for key, touch in desired.items():
+        found = existing.get(key)
+        if found is None:
             session.add(Want(user_id=key[0], episode_id=key[1]))
             added += 1
             continue
-        if want.dropped_at is not None:
-            # TODO(M10/FR-T2): this is also how a want dropped for going
-            # unwatched for D days comes back to life fifteen minutes later.
-            # When the stale-want sweep lands it must record *why* the row was
-            # dropped and this must leave a ``drop_reason`` of that kind alone
-            # until the user's progress or the window actually moves.
-            want.dropped_at = None
-            want.drop_reason = None
-            revived += 1
+        want = found[0]
+        if want.dropped_at is None:
+            continue
+        if want.drop_reason == STALE_DROP_REASON and not touch.came_back_after(want.dropped_at):
+            continue
+        want.dropped_at = None
+        want.drop_reason = None
+        revived += 1
 
-    stale = [key for key in existing if key not in desired]
-    for user_id, episode_id in stale:
+    removed: list[tuple[int, int]] = []
+    shelved = 0
+    for key, (want, anime_id) in existing.items():
+        if key in desired:
+            continue
+        if (key[0], anime_id) in wanting:
+            removed.append(key)
+            continue
+        if want.dropped_at is None:
+            want.dropped_at = now
+            shelved += 1
+        want.drop_reason = REASON_NOT_WANTING
+    for user_id, episode_id in removed:
         await session.execute(
             delete(Want).where(Want.user_id == user_id, Want.episode_id == episode_id)
         )
     await session.flush()
 
-    if added or revived or stale:
+    if added or revived or removed or shelved:
         log.info(
             "wants reconciled",
-            extra={"added": added, "revived": revived, "removed": len(stale)},
+            extra={
+                "added": added,
+                "revived": revived,
+                "removed": len(removed),
+                "shelved": shelved,
+            },
         )
-    return WantsResult(wanted=len(desired), added=added, removed=len(stale), revived=revived)
+    return WantsResult(
+        wanted=len(desired),
+        added=added,
+        removed=len(removed),
+        shelved=shelved,
+        revived=revived,
+    )
+
+
+async def _drop_stale(session: AsyncSession, result: WantsResult, *, now: datetime) -> WantsResult:
+    """Drop wants on episodes that have sat ready and unwatched for D days (FR-T2).
+
+    Only ``ready`` episodes are considered, because "unwatched" is only a
+    statement about an episode the user *could* have watched: an episode still
+    downloading has not been offered to anybody, and dropping the want for it
+    would cancel the download rather than free anything.
+
+    "Since it became ready" is ``renditions.ready_at`` when there is a
+    rendition — the moment the episode became playable, written once — and the
+    episode's ``state_changed_at`` otherwise. The two agree in the ordinary
+    case; the fallback covers an episode marked ready by a path that left no
+    rendition row, where the alternative would be a want that can never go
+    stale.
+
+    A user who has *completed* the episode is never dropped by this: their
+    want is on its way out through the window instead (the reconciler deletes
+    it as soon as their progress moves), and a drop would put a ``dropped_at``
+    on a row that is about to disappear — which retention would then read as
+    the moment to start counting the grace period from.
+
+    Nor is a user who is **still doing something about the show**. The clock
+    runs from the later of "when the episode became ready" and "when this user
+    last touched this show" (``list_entries.updated_at``), for two reasons.
+    The first is correctness: a user who set a show to watching this morning
+    should not have this afternoon's reconciliation drop the episode that has
+    been sitting ready since last month — they have plainly not given up on
+    it, which is the only thing FR-T2 is trying to detect. The second is that
+    it is what makes the revival above mean anything: without it, a want
+    revived because the user came back would be dropped again by the very same
+    run, and "the user acted, so fetch it again" would last for no time at
+    all. ``updated_at`` moves on an Arc list change and on a MAL import that
+    actually changed something (it carries MAL's own timestamp, so a
+    six-hourly re-import of an untouched row does not move it) — which is
+    exactly "the user did something".
+    """
+    window_d = await unwatched_period(session)
+    cutoff = now - window_d
+    ready_since = func.coalesce(Rendition.ready_at, Episode.state_changed_at)
+    # ``greatest`` ignores nulls in Postgres, so a want whose list entry has
+    # gone (the reconciler is about to delete the row) falls back to the
+    # episode's own readiness rather than never going stale.
+    quiet_since = func.greatest(ready_since, ListEntry.updated_at)
+
+    rows = (
+        await session.execute(
+            select(Want)
+            .join(Episode, Episode.id == Want.episode_id)
+            .outerjoin(Rendition, Rendition.episode_id == Episode.id)
+            .outerjoin(
+                ListEntry,
+                (ListEntry.user_id == Want.user_id) & (ListEntry.anime_id == Episode.anime_id),
+            )
+            .outerjoin(
+                WatchProgress,
+                (WatchProgress.episode_id == Want.episode_id)
+                & (WatchProgress.user_id == Want.user_id)
+                & (WatchProgress.completed.is_(True)),
+            )
+            .where(
+                Want.dropped_at.is_(None),
+                Episode.state == EpisodeState.READY,
+                WatchProgress.user_id.is_(None),
+                ready_since.is_not(None),
+                quiet_since < cutoff,
+            )
+        )
+    ).scalars()
+
+    dropped = 0
+    for want in rows.all():
+        want.dropped_at = now
+        want.drop_reason = STALE_DROP_REASON
+        dropped += 1
+        log.info(
+            "want dropped for going unwatched",
+            extra={
+                "user_id": want.user_id,
+                "episode_id": want.episode_id,
+                "days": int(window_d.total_seconds() // 86400),
+            },
+        )
+    if dropped:
+        await session.flush()
+    return replace(result, dropped=dropped)
 
 
 async def _start_searches(
@@ -374,19 +614,13 @@ async def _start_searches(
             "acquisition window applied",
             extra={"started": started, "searches": searches, "released": released},
         )
-    return WantsResult(
-        wanted=result.wanted,
-        added=result.added,
-        removed=result.removed,
-        revived=result.revived,
-        started=started,
-        searches=searches,
-        released=released,
-    )
+    return replace(result, started=started, searches=searches, released=released)
 
 
 __all__ = [
+    "REASON_NOT_WANTING",
     "RELEASABLE",
+    "STALE_DROP_REASON",
     "STARTABLE",
     "UNAVAILABLE_RETRY",
     "WANTING_STATUSES",

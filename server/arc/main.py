@@ -26,6 +26,7 @@ from arc.api import (
     media,
     media_stream,
     playback,
+    retention,
     review,
     schedule,
     users,
@@ -208,6 +209,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(home.router)
     app.include_router(review.router)
     app.include_router(acquisition.router)
+    app.include_router(retention.router)
     app.include_router(media.router)
     app.include_router(playback.router)
     app.include_router(mal.router)

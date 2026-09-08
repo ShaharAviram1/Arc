@@ -50,6 +50,8 @@ from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers
 from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
 from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
 from arc.services.media.jobs import sweep_transcodes
+from arc.services.retention import jobs as retention_jobs  # noqa: F401  (registers handlers)
+from arc.services.retention.names import RETENTION_PRIORITY, RETENTION_SWEEP
 
 log = logging.getLogger("arc.worker")
 
@@ -95,6 +97,20 @@ POLL_QBIT_SECONDS = 60
 #: and the sweep's own six-hourly period gets there soon enough. Five minutes
 #: also keeps it clear of the catalogue work every boot already queues.
 MAL_SWEEP_DELAY_SECONDS = 300
+
+#: How often the retention sweep runs (FR-T1: "hourly", architecture.md §5.7).
+#: The rule it applies is measured in days, so the period only decides how
+#: promptly a file goes once its grace period has run out — an hour is soon
+#: enough to be tidy and rare enough that a deployment which has nothing to
+#: delete does nothing at all, sixty times a day.
+RETENTION_SWEEP_SECONDS = 3600
+
+#: How long after start-up the first sweep runs. Not immediately: a worker
+#: that has just come up is the least informed it will ever be — a
+#: ``compute_wants`` has not run, so a want dropped as stale during the
+#: outage has not been revived yet — and retention is the one job in Arc
+#: whose mistakes are not recoverable. Ten minutes costs nothing.
+RETENTION_SWEEP_DELAY_SECONDS = 600
 
 #: How often to look for MAL-only rows that AniList could now identify
 #: (FR-C6). Hourly: the ids only change when an outage has just ended, and the
@@ -339,6 +355,16 @@ async def run(settings: Settings) -> None:
         args=[factory, MAL_IMPORT_ALL, MAL_IMPORT_PRIORITY],
         next_run_time=datetime.now(UTC) + timedelta(seconds=MAL_SWEEP_DELAY_SECONDS),
     )
+    # Retention (FR-T1, FR-T2): delete what nobody is going to watch again.
+    # Deliberately not started immediately — see the constant above.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=RETENTION_SWEEP_SECONDS,
+        id=RETENTION_SWEEP,
+        args=[factory, RETENTION_SWEEP, RETENTION_PRIORITY],
+        next_run_time=datetime.now(UTC) + timedelta(seconds=RETENTION_SWEEP_DELAY_SECONDS),
+    )
     scheduler.start()
 
     # …and once now if it has never run. A fresh deployment would otherwise
@@ -364,6 +390,8 @@ async def run(settings: Settings) -> None:
             "compute_wants_s": COMPUTE_WANTS_SECONDS,
             "mal_import_interval_h": settings.mal_import_interval_hours,
             "poll_qbit_s": POLL_QBIT_SECONDS,
+            "retention_sweep_s": RETENTION_SWEEP_SECONDS,
+            "retention_dry_run": settings.retention_dry_run,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
         },
     )

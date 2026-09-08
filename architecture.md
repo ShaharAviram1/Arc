@@ -26,7 +26,7 @@
 | Auth | Session cookies (HTTP-only, Secure, SameSite=Lax), Argon2 password hashes | Simple, robust for a small user base. |
 | Deploy | Docker Compose: `api`, `worker`, `db`, `qbittorrent`, `caddy` | One-box deploy on any VPS that permits torrent traffic. Caddy terminates TLS and serves the built client. |
 | Tests | pytest + pytest-asyncio, httpx test client, Vitest for client | ffmpeg and qBittorrent mocked in CI. |
-| Lint/format | ruff, mypy (strict on core packages), typescript-eslint (type-checked rules) + prettier | TypeScript stays on 6.x until typescript-eslint supports 7 (tracked in roadmap M15). |
+| Lint/format | ruff, mypy (strict on core packages), typescript-eslint (type-checked rules) + prettier | TypeScript stays on 6.x until typescript-eslint supports 7 (tracked in roadmap M16). |
 
 ## 2. System diagram
 
@@ -179,8 +179,10 @@ arc/
 - `compute_wants` (every 15 min, after any list change, and after a watch
   completion): for each `watching`/`planned` entry, `p` = max(furthest
   completed episode, list progress); wants `p+1 … p+N` (`look_ahead_n`,
-  capped at 10) that have aired. `on_hold`/`dropped`/`completed`/off-list
-  → wants deleted. Episodes with a live want in `not_wanted` (or
+  capped at 10) that have aired. A want whose show leaves watching/planned
+  (on_hold/dropped/completed/off-list) is dropped with reason "show no
+  longer watching or planned" (not deleted) so retention keeps a grace
+  anchor; only a want the user watched past is deleted. Episodes with a live want in `not_wanted` (or
   `unavailable` after a 1-day retry delay) → `wanted` + `search_release`.
   A `wanted`/`unavailable` episode with no live want returns to
   `not_wanted`; `searching` onwards is never touched by the reconciler.
@@ -399,11 +401,36 @@ arc/
    Rate limit 10/user/day.
 
 ### 5.7 Retention
-`retention_sweep` (hourly): for each episode in `ready`/`downloaded`, if no
-active wants remain and `max(completed_at of former wanters) + G days <
-now` (or no wanter ever existed and file age > G) → delete rendition and
-source dirs, remove torrent from qBittorrent (with files), state
-`not_wanted`. Stale wants dropped per FR-T2 in `compute_wants`.
+`retention_sweep` (hourly, priority 200, first run 10 min after worker
+start): candidates are `ready|downloaded|matched|failed` episodes with no
+live want. Grace anchor = latest of every completion (`watch_progress.
+completed_at`, any user) and every `wants.dropped_at`; a want that ends
+because the show left watching/planned is dropped, not deleted, so it
+always leaves an anchor; only a want the user watched past is deleted (its
+completion is the anchor). With no anchor at all (manual drops), the
+file's own age (`renditions.ready_at`, else `media_files.created_at`).
+Deletable when anchor + G < now. Deletion: qBittorrent torrent with files
+(Arc category only; "not in client" is a no-op), rendition dir, source
+dir `downloads/<id>` or the manual-drop file, then the rows, then
+`→ not_wanted` (edges added for `downloaded|matched|failed`). Every path
+is resolved and re-checked against `renditions`/`downloads`/`manual` roots
+right before removal; symlinks and out-of-root paths are refused; a live
+want is re-checked immediately before deleting; `RETENTION_DRY_RUN` logs
+the plan only. A `ready` episode with no files on disk is reset to
+`not_wanted` with reason "no files on disk". The deletion also removes the
+episode's leftover dropped want rows, except stale ones (they prevent a
+fetch → drop → delete loop). `retained_bytes` measures `renditions.dir`
+when set. FR-T2 in `compute_wants`: a live want on a `ready`
+episode is dropped ("unwatched for D days") when
+`greatest(ready_at, list_entries.updated_at) < now − D` and the user has
+not completed it; a stale-dropped want is revived only by an Arc-side action
+(`updated_by = arc` and `updated_at > dropped_at`); a MAL import keeps
+the row's `updated_at` when MAL omits one and nothing changed, so an
+unchanged six-hourly import can never keep a want alive. A qBittorrent
+outage skips that episode for this sweep only. Admin:
+`GET /api/retention/preview`, `POST /api/retention/sweep`,
+`POST /api/episodes/{id}/delete-files`; `retained_bytes` on
+`GET /api/acquisition/status`.
 
 ### 5.0 Catalogue sources and fallback (M3b)
 - `CatalogSource` protocol: `search(q, page)`, `by_anilist_id(id)`,
@@ -491,6 +518,7 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
+| `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight) |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows paused, active wants, searching, downloading |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 
@@ -575,7 +603,7 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `QBIT_CATEGORY` (arc), `QBIT_DOWNLOADS_PATH` (/data/downloads), `FFMPEG_BIN`,
 `FFPROBE_BIN`, `FFMPEG_VIDEO_ENCODER` (libx264), `FFMPEG_PRESET` (veryfast),
 `FFMPEG_CRF` (20), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
-(10800), `WORKER_CONCURRENCY`
+(10800), `RETENTION_DRY_RUN` (false), `WORKER_CONCURRENCY`
 (default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
 (seconds to wait for in-flight jobs on shutdown, default 30),
 `WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
@@ -736,3 +764,13 @@ env (it is not in the settings table).
   with searches while a MAL push waited; added the acquisition pause switch
   (migration 4 seeds the key) and job priorities. Acquisition is paused in
   dev until the owner resumes it.
+- 2026-09-08 — M10 retention: grace anchored on completions from
+  watch_progress plus dropped wants (want rows vanish when a user watches
+  past them); the D window also runs from the last list edit so a revived
+  want is not re-dropped by the same run; stale drops are sticky until the
+  user acts; manual-drop root deletable; drop_reason stored as the spec's
+  literal text.
+- 2026-09-08 — M10 review fixes: wants that end because the show left
+  watching/planned are dropped, not deleted; MAL imports keep `updated_at`
+  for undated unchanged rows; stale-drop revival needs an Arc-side action;
+  qBittorrent outage skips per episode; no-files episodes reset.

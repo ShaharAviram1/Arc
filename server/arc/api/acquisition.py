@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from arc.api.deps import EpisodeId, SessionDep, get_admin_user
+from arc.api.deps import EpisodeId, SessionDep, SettingsDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Anime, Episode, EpisodeState, Job, User, Want
 from arc.services.acquisition.names import (
@@ -51,6 +51,7 @@ from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import is_paused, set_paused
 from arc.services.catalog import preferred_title
 from arc.services.jobs import enqueue
+from arc.services.retention.sweep import retained_bytes
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,13 @@ class AcquisitionStatusOut(BaseModel):
     #: Episodes qBittorrent is downloading. Unaffected by the pause: these
     #: finish, and ``poll_qbit`` hands them on (FR-A5).
     downloading: int
+    #: Bytes Arc is holding for episodes it has acquired — sources from
+    #: ``media_files.size``, renditions measured on disk (FR-T4: "admin can
+    #: see disk usage"). It is here rather than under ``/api/retention``
+    #: because this is the page an admin already watches while acquisition is
+    #: running, and "how much is this costing me?" is the question that
+    #: decides whether to press pause.
+    retained_bytes: int = 0
 
 
 class WantOut(BaseModel):
@@ -203,8 +211,8 @@ async def resume(session: SessionDep) -> PauseOut:
     response_model=AcquisitionStatusOut,
     summary="Whether acquisition is paused, and what it is holding (admin)",
 )
-async def acquisition_status(session: SessionDep) -> AcquisitionStatusOut:
-    """Three counts and a flag; no upstream call, so it is cheap to poll."""
+async def acquisition_status(session: SessionDep, settings: SettingsDep) -> AcquisitionStatusOut:
+    """Three counts, a flag and a disk figure; no upstream call."""
     active_wants = await session.scalar(
         select(func.count()).select_from(Want).where(Want.dropped_at.is_(None))
     )
@@ -219,6 +227,7 @@ async def acquisition_status(session: SessionDep) -> AcquisitionStatusOut:
         active_wants=active_wants or 0,
         searching=states.get(EpisodeState.SEARCHING, 0),
         downloading=states.get(EpisodeState.DOWNLOADING, 0),
+        retained_bytes=await retained_bytes(session, settings),
     )
 
 

@@ -38,7 +38,9 @@ from arc.models import (
     MalWriteStatus,
     UpdatedBy,
     User,
+    Want,
 )
+from arc.services.acquisition.wants import STALE_DROP_REASON, compute_wants
 from arc.services.jobs import run_job
 from arc.services.jobs.queue import enqueue
 from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers the handlers)
@@ -392,6 +394,97 @@ async def test_unknown_titles_are_resolved_through_the_catalogue_and_capped(
     # work on a timer, and it must not sit in front of a user's own write.
     assert follow_ups[0].priority == IMPORT_PRIORITY
     assert IMPORT_PRIORITY > PUSH_PRIORITY
+
+
+async def test_a_repeated_import_of_an_undated_row_leaves_updated_at_alone(
+    api_factory: SessionFactory, settings: Settings, user: User, mal: FakeMalApi
+) -> None:
+    """MAL omitting ``updated_at`` must not reset FR-T2's clock four times a day.
+
+    The bug: the fallback for a missing remote timestamp was ``now``, so every
+    six-hourly import moved ``list_entries.updated_at`` to the current time even
+    when it had imported the same three values as the run before it. The stale
+    want rule measures D from the later of "the episode became ready" and "the
+    user last touched the show", so on such an account the D days could never
+    elapse and a show quietly abandoned in January would still have been pinning
+    its files to the disk in December.
+
+    So this runs the import twenty times — five days of them — over a row
+    nothing has changed, and then asks the reconciler for the drop that was
+    impossible before.
+    """
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=11)
+    quiet = datetime.now(UTC) - timedelta(days=40)
+    await make_entry(
+        api_factory,
+        user_id=user.id,
+        anime_id=anime_id,
+        status=ListStatus.WATCHING,
+        progress=3,
+        updated_by=UpdatedBy.MAL,
+        updated_at=quiet,
+    )
+    # An episode ready a month ago, wanted and never watched: FR-T2's subject.
+    async with api_factory() as session:
+        episode = Episode(
+            anime_id=anime_id,
+            number=4,
+            air_at=quiet,
+            state=EpisodeState.READY,
+            state_changed_at=quiet,
+        )
+        session.add(episode)
+        await session.flush()
+        session.add(Want(user_id=user.id, episode_id=episode.id))
+        await session.commit()
+        episode_id = episode.id
+    mal.pages = [[entry(11, status="watching", progress=3, updated_at=None)]]
+
+    for _ in range(20):
+        assert await run(api_factory, settings, IMPORT, {"user_id": user.id}) is JobStatus.DONE
+
+    row = await entry_of(api_factory, user_id=user.id, anime_id=anime_id)
+    assert row is not None
+    assert row.updated_at == quiet, "an import that changed nothing dated nothing"
+
+    async with api_factory() as session:
+        result = await compute_wants(session)
+        want = await session.get(Want, (user.id, episode_id))
+        await session.commit()
+
+    assert result.dropped == 1
+    assert want is not None and want.dropped_at is not None
+    assert want.drop_reason == STALE_DROP_REASON
+
+
+async def test_an_import_that_changes_something_undated_is_dated_now(
+    api_factory: SessionFactory, settings: Settings, user: User, mal: FakeMalApi
+) -> None:
+    """The other half: an unstamped change did happen, and it happened now.
+
+    Keeping the old timestamp here would be the opposite lie — a progress the
+    user really did move on MyAnimeList, filed under a date that predates it.
+    """
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=11)
+    quiet = datetime.now(UTC) - timedelta(days=40)
+    await make_entry(
+        api_factory,
+        user_id=user.id,
+        anime_id=anime_id,
+        status=ListStatus.WATCHING,
+        progress=3,
+        updated_by=UpdatedBy.MAL,
+        updated_at=quiet,
+    )
+    mal.pages = [[entry(11, status="watching", progress=6, updated_at=None)]]
+
+    await run(api_factory, settings, IMPORT, {"user_id": user.id})
+
+    row = await entry_of(api_factory, user_id=user.id, anime_id=anime_id)
+    assert row is not None and row.progress == 6
+    assert row.updated_at > quiet
 
 
 async def test_an_import_for_an_unlinked_user_does_nothing(

@@ -23,18 +23,21 @@ class Want(Base):
     :func:`arc.services.acquisition.wants.compute_wants`, and the two ways a
     want ends are deliberately different.
 
-    A want that lapses because the *window* moved — the user watched ahead,
-    dropped the show, removed it from their list — is **deleted**. There is
-    nothing to remember: the window is recomputed from the list every fifteen
-    minutes, so the row would come back the moment it applied again, and a
-    tombstone for it would have to be distinguished from the other kind on
-    every read.
+    A want that lapses because the *window* moved — the user watched ahead, or
+    N was turned down — is **deleted**. There is nothing to remember: the
+    window is recomputed from the list every fifteen minutes, so the row would
+    come back the moment it applied again, and where it matters (the user
+    watched the episode) ``watch_progress.completed_at`` is a better record of
+    the same fact than a tombstone would be.
 
-    A want dropped by FR-T2 — "you have had this ready for D days and have not
-    watched it" (M10) — is **kept**, with ``dropped_at`` and ``drop_reason``.
-    That one is a statement about a user and an episode rather than about the
-    window, it must survive the next recompute, and it is what makes "why was
-    this never fetched?" answerable.
+    A want that stops because the user stopped wanting it is **kept**, with
+    ``dropped_at`` and ``drop_reason``. Two rules end that way: FR-W4's "the
+    show is no longer watching/planned" and FR-T2's "you have had this ready
+    for D days and have not watched it" (M10). Both are statements about a user
+    and an episode rather than about the window, both must survive the next
+    recompute, and both are what retention counts FR-T1's grace period from —
+    an episode whose last want was dropped this morning is not a month-old file
+    nobody ever asked for, however old its bytes are.
     """
 
     __tablename__ = "wants"
@@ -55,8 +58,9 @@ class Want(Base):
         ForeignKey("episodes.id", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[datetime] = created_at()
-    #: Null while the want is live. Set when the show is dropped/completed or
-    #: the episode went unwatched for D days (FR-T2).
+    #: Null while the want is live. Set when the show stopped being
+    #: watching/planned — on hold, dropped, completed, off the list (FR-W4) —
+    #: or the episode went unwatched for D days (FR-T2).
     dropped_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     drop_reason: Mapped[str | None] = mapped_column(String(64))
 

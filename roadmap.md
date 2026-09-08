@@ -172,11 +172,11 @@ that must be verified before the next milestone starts.
   every write; revert works.
 
 ### M10 — Retention
-- [ ] `retention_sweep` with G, and stale-want drop with D (FR-T1, FR-T2)
-- [ ] Delete source + rendition + qBit torrent; reset state; re-acquire on
+- [x] `retention_sweep` with G, and stale-want drop with D (FR-T1, FR-T2)
+- [x] Delete source + rendition + qBit torrent; reset state; re-acquire on
       demand (FR-T3)
-- [ ] Frozen-clock tests
-- **DoD:** files disappear on schedule and only then; a re-watch request
+- [x] Frozen-clock tests
+- **DoD (verified 2026-09-08 by orchestrator: frozen-clock rule matrix in the suite; live sweep on a scratch episode deleted rendition, source, rows and reset state while the real episode stayed byte-identical; re-acquire proven at service level since acquisition is paused in dev):** files disappear on schedule and only then; a re-watch request
   re-acquires.
 
 ### M11 — Phase 1 hardening and deploy
@@ -195,7 +195,7 @@ CLAUDE.md).
 
 ---
 
-## Phase 2 — Recommendations, review, admin, polish
+## Phase 2 — Recommendations, review, admin, UI overhaul, polish
 
 ### M12 — Recommendations
 - [ ] Candidate pool builder (FR-R2)
@@ -226,7 +226,25 @@ CLAUDE.md).
 - **DoD:** every admin-configurable value in spec is editable without
   touching env or DB.
 
-### M15 — Quality and finish
+### M15 — UI overhaul
+- [ ] Design pass over every page once all of them exist (after M14):
+      visual language (type scale, spacing, colour tokens, cover/poster
+      treatment, badges, empty and loading states), consistent components
+      (cards, tables, controls, toasts), and a coherent dark theme with a
+      light variant if cheap.
+- [ ] Layout: sidebar/nav rework incl. phone navigation and logout (the
+      current sidebar is hidden on phone widths), a proper page shell, and
+      player chrome that matches.
+- [ ] Home, Schedule, Search, Show, Player, MAL, Recommendations, Review,
+      Admin each reviewed against the design; screenshots before/after in
+      `notes/` or a design canvas.
+- [ ] Keep every behaviour and test green; no API changes; component
+      changes covered by the existing RTL tests.
+- **DoD:** the owner signs off on each page in the browser; no functional
+  regressions (full suite green); phone layout usable for Home and Player
+  (spec §5).
+
+### M16 — Quality and finish
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Notifications of failures in-app (banner) — email/push remain out of
       scope
@@ -234,6 +252,7 @@ CLAUDE.md).
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
 - [ ] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
       of 2026-09-05; see architecture.md decision log)
+- [ ] Responsive/accessibility items not already closed by M15
 - [ ] Full test suite green in CI; coverage report
 - [ ] Final docs sweep: spec, architecture, roadmap, README all current
 - **DoD:** "finished product" — every FR in spec.md is implemented or
@@ -249,7 +268,7 @@ M0 → M1 → M2 → M3 → M3b → M4
               M3b → M5 → M6 → M7 → M8 → M9 → M10 → M11
                                      M8 → M12
                                      M5 → M13
-                                     M11 → M14 → M15
+                                     M11 → M14 → M15 → M16
 ```
 
 M4 (schedule) can proceed in parallel with M5–M6 once M3 lands.
