@@ -25,6 +25,7 @@ from arc.api import (
     media,
     media_stream,
     playback,
+    recs,
     retention,
     review,
     schedule,
@@ -89,6 +90,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.catalog.aclose()
+        # Built lazily by the recommendations router, so it is usually absent.
+        recs_model = getattr(app.state, "recs_model", None)
+        closer = getattr(recs_model, "aclose", None)
+        if callable(closer):
+            await closer()
         await engine.dispose()
         log.info("database engine disposed")
         log.info("api stopped")
@@ -188,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media.router)
     app.include_router(playback.router)
     app.include_router(mal.router)
+    app.include_router(recs.router)
     # Not under ``/api``: the streaming routes are proxied as their own prefix
     # and are asked for by a media element rather than by the client's query
     # layer (arc/api/media_stream.py). They take the same session dependency.

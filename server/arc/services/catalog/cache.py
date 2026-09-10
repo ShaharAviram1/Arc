@@ -137,6 +137,8 @@ def _summary_values(media: CatalogMedia) -> dict[str, Any]:
         "season": media.season,
         "season_year": media.season_year,
         "cover_url": media.cover_url,
+        "popularity": media.popularity,
+        "average_score": media.average_score,
         "summary_source": media.source,
     }
 

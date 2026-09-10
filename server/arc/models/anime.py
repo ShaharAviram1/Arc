@@ -101,6 +101,20 @@ class Anime(Base):
 
     cover_url: Mapped[str | None] = mapped_column(Text)
     banner_url: Mapped[str | None] = mapped_column(Text)
+    #: How many people have the show on a list (AniList ``popularity``, MAL
+    #: ``num_list_users``), and the average score on AniList's 0–100 scale
+    #: (MAL's 0–10 ``mean`` is scaled on the way in). The recommendation pool
+    #: ranks by them — the season by popularity, the genre matches by score
+    #: (§5.6) — which is the only thing they are for, so they are unindexed:
+    #: both queries already filter to a few hundred rows before sorting.
+    #:
+    #: Null on any row written before these columns existed, and on a source
+    #: that does not publish them. They fill in on the row's next refresh
+    #: rather than by a backfill job: `NULLS LAST` in both orderings means a
+    #: null sorts to the bottom, which is the right default for an unranked
+    #: title anyway.
+    popularity: Mapped[int | None] = mapped_column(Integer)
+    average_score: Mapped[int | None] = mapped_column(Integer)
     #: A real array rather than JSONB: genres are queried ("top-3 genres" in
     #: the recommendation candidate pool, §5.6) and Postgres can index them.
     genres: Mapped[list[str] | None] = mapped_column(ARRAY(String))

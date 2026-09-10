@@ -1,0 +1,173 @@
+{
+  "name": "mood_like_mushishi",
+  "prompt": "like Mushishi",
+  "list": [
+    {
+      "anime_id": 41,
+      "title": "Mushishi",
+      "genres": [
+        "Adventure",
+        "Mystery",
+        "Supernatural"
+      ],
+      "status": "completed",
+      "score": 10,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 42,
+      "title": "Aria the Animation",
+      "genres": [
+        "Fantasy",
+        "Slice of Life"
+      ],
+      "status": "completed",
+      "score": 8,
+      "progress": 13,
+      "episodes": 13
+    },
+    {
+      "anime_id": 43,
+      "title": "Shingeki no Kyojin",
+      "genres": [
+        "Action",
+        "Drama",
+        "Fantasy"
+      ],
+      "status": "dropped",
+      "score": 5,
+      "progress": 3,
+      "episodes": 25
+    },
+    {
+      "anime_id": 44,
+      "title": "Yuru Camp",
+      "genres": [
+        "Slice of Life"
+      ],
+      "status": "watching",
+      "score": null,
+      "progress": 5,
+      "episodes": 12
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 141,
+      "title": "Natsume Yuujinchou",
+      "genres": [
+        "Drama",
+        "Supernatural",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Episodic",
+        "Iyashikei",
+        "Youkai"
+      ],
+      "synopsis": "A boy who can see spirits inherits a book of their names and spends his afternoons giving them back, one quiet encounter at a time.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Supernatural, Slice of Life"
+    },
+    {
+      "anime_id": 142,
+      "title": "Kino no Tabi",
+      "genres": [
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Episodic",
+        "Travel",
+        "Philosophy"
+      ],
+      "synopsis": "A traveller and a talking motorcycle stay three days in each country they find, long enough to understand its one strange rule and not long enough to fix it.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 143,
+      "title": "Ginga Tetsudou no Yoru",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Surreal",
+        "Melancholy",
+        "Movie"
+      ],
+      "synopsis": "Two boys ride a train through the night sky and only one of them is going to get off at a station.",
+      "season": null,
+      "season_year": null,
+      "format": "MOVIE",
+      "episodes": 1,
+      "why": "shares your genres: Adventure, Fantasy"
+    },
+    {
+      "anime_id": 144,
+      "title": "Houseki no Kuni",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "CGI",
+        "Philosophy",
+        "Body Horror"
+      ],
+      "synopsis": "Immortal gem-people are hunted for their bodies, and the most brittle of them keeps losing pieces of who she was.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 145,
+      "title": "Chainsaw Man Season 2",
+      "genres": [
+        "Action",
+        "Horror"
+      ],
+      "tags": [
+        "Gore",
+        "Devils"
+      ],
+      "synopsis": "The devil hunters come back, louder.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 12,
+      "why": "airing this season (Fall 2026)"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 141,
+        "title": "Natsume Yuujinchou",
+        "case": "This is the answer to your prompt without qualification: episodic, gentle, one supernatural encounter per episode resolved by understanding rather than force. Where Mushishi keeps Ginko at arm's length from the people he helps, Natsume gives its lead friends and lets that hurt, so it is warmer than the thing you asked for and no less quiet. Given that you scored Mushishi a 10 and are currently working through Yuru Camp, the pace should be exactly right."
+      },
+      {
+        "anime_id": 142,
+        "title": "Kino no Tabi",
+        "case": "Structurally this is the closest thing in the pool to Mushishi, a traveller who arrives, observes a self-contained strangeness and declines to interfere. It is colder than Aria the Animation and much less consoling, but it has the same refusal to hurry. Thirteen episodes, each of them self-contained."
+      },
+      {
+        "anime_id": 143,
+        "title": "Ginga Tetsudou no Yoru",
+        "case": "A single film rather than a series, and the most purely atmospheric thing here. It shares Mushishi's willingness to let a sequence run long because the mood is the point, and it shares Aria the Animation's belief that a journey can be its own subject. It is the shortest commitment in this list and the one most likely to stay with you."
+      }
+    ]
+  }
+}

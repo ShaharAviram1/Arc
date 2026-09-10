@@ -114,17 +114,31 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 SUMMARY_FIELDS = (
     "id,title,alternative_titles{synonyms,en,ja},main_picture{large},"
     "num_episodes,status,start_date,end_date,start_season{year,season},"
-    "broadcast{day_of_the_week,start_time},media_type"
+    "broadcast{day_of_the_week,start_time},media_type,mean,num_list_users"
 )
 
 #: Everything a show page renders. ``related_anime`` nodes carry no ``idMal``
 #: of their own — the node *is* a MAL id — so relations arrive MAL-keyed and
 #: the API resolves them against the local rows.
 DETAIL_FIELDS = SUMMARY_FIELDS + (
-    ",synopsis,mean,genres{name},studios{name},"
+    ",synopsis,genres{name},studios{name},"
     "related_anime{node{id,title,media_type},relation_type},"
     "average_episode_duration"
 )
+
+
+def _mean_to_score(mean: float | int | str | None) -> int | None:
+    """MAL's 0–10 ``mean`` as AniList's 0–100 ``averageScore``.
+
+    One column holds both, so the two sources have to agree on a scale. MAL's
+    is the odd one out, so it is the one converted.
+    """
+    if mean is None:
+        return None
+    try:
+        return round(float(mean) * 10)
+    except TypeError, ValueError:
+        return None
 
 
 def _titles(raw: dict[str, Any]) -> MediaTitle:
@@ -296,6 +310,13 @@ def parse_anime(raw: dict[str, Any], *, full: bool, now: datetime | None = None)
         "season": str(season).upper() if season else None,
         "season_year": start_season.get("year"),
         "cover_url": (raw.get("main_picture") or {}).get("large"),
+        # AniList's two ranking numbers, in MAL's currencies. ``num_list_users``
+        # is the same idea as ``popularity`` — how many people have it on a
+        # list — and ``mean`` is a 0–10 score, so it is scaled to AniList's
+        # 0–100 to keep one comparable column (§5.6). Both are null when MAL
+        # has no rating yet, which is normal for an unaired show.
+        "popularity": raw.get("num_list_users"),
+        "average_score": _mean_to_score(raw.get("mean")),
         "broadcast": broadcast,
         "start_date": start_date,
         # Carried by a summary as well as a detail record: a season row with no

@@ -12,6 +12,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 import pytest
@@ -20,6 +21,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -222,11 +224,14 @@ def pg_engine(test_database_url: str) -> Iterator[AsyncEngine]:
 # fixtures commit for real and clean up afterwards.
 
 
-#: Emptied after every test that uses ``api_factory``, in this order. Most of
-#: the foreign keys cascade, but deleting explicitly — children first — keeps
-#: the intent obvious and survives someone changing an ``ondelete`` later.
+#: Emptied before the session and after every test that uses ``api_factory``.
+#: Order is no longer load-bearing — the cleanup is a single ``TRUNCATE …
+#: CASCADE`` (:func:`_truncate`) — but the list is kept grouped by aggregate so
+#: it stays readable, and ``CASCADE`` covers anything referencing these that
+#: somebody forgets to add.
 CLEANUP_TABLES = (
     "jobs",
+    "rec_runs",
     "watch_progress",
     # Before ``anime``: ``mal_write_log.anime_id`` is RESTRICT on purpose (the
     # audit trail must outlive a cache prune), so the rows have to go first or
@@ -251,21 +256,69 @@ CLEANUP_TABLES = (
 )
 
 
+async def _truncate(connection: Any) -> None:
+    """Empty every table the API tests write to, in one statement.
+
+    ``TRUNCATE`` rather than a sequence of ``DELETE``s, and this is the whole
+    fix for a class of cross-test failure. A ``DELETE`` list has to be in
+    foreign-key order, and when one of them raises — a constraint the list has
+    drifted out of step with — every table after it is left populated. That is
+    how a ``users`` row survived a teardown and made every subsequent login in
+    the session 401 on a duplicate email.
+
+    One statement, ``CASCADE`` so the order does not matter, and
+    ``RESTART IDENTITY`` so ids do not creep up across a long run.
+    """
+    tables = ", ".join(CLEANUP_TABLES)
+    await connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def clean_slate(test_database_url: str) -> None:
+    """Empty the test database once, before anything runs.
+
+    Belt to the per-test teardown's braces: a run killed part-way through — a
+    Ctrl-C, a crash, an OOM — leaves rows behind that no ``finally`` will ever
+    reach, and without this the *next* invocation inherits them and fails in a
+    way that looks nothing like its cause.
+
+    Deliberately silent when there is no database. It is autouse and
+    session-scoped, so raising or skipping here would take the entire suite
+    with it — including every test that needs no database at all. The pg
+    fixtures complain loudly and specifically when they are actually asked for.
+    """
+    if os.environ.get("ARC_SKIP_PG_TESTS") == "1":
+        return
+
+    async def run() -> None:
+        engine = create_async_engine(test_database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await _truncate(connection)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    except OSError, SQLAlchemyError:
+        return
+
+
 @pytest.fixture
 async def api_factory(pg_engine: AsyncEngine) -> AsyncIterator[SessionFactory]:
-    """Real (committing) sessions, with the account tables emptied afterwards.
+    """Real (committing) sessions, with the tables emptied afterwards.
 
-    Order matters on the way out: ``sessions`` and ``invites`` both reference
-    ``users``. ``sessions`` cascades and ``invites.created_by`` nulls out, but
-    deleting explicitly and in order keeps the intent obvious.
+    The cleanup is in a ``finally`` so it runs when the test *errors* as well
+    as when it fails, and it is one ``TRUNCATE`` so it cannot half-succeed
+    (:func:`_truncate`). Between the two, a test that blows up in the middle
+    cannot leave rows for the next one to trip over.
     """
     factory = create_session_factory(pg_engine)
     try:
         yield factory
     finally:
         async with pg_engine.begin() as connection:
-            for table in CLEANUP_TABLES:
-                await connection.execute(text(f"DELETE FROM {table}"))
+            await _truncate(connection)
 
 
 @pytest.fixture

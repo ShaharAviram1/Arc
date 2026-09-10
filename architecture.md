@@ -108,7 +108,8 @@ arc/
         media/                   ffprobe, transcode plan, HLS packaging
         acquisition/             want computation, window logic
         retention/               cleanup rules
-        recs/                    candidate pool, Claude prompt, schema
+        recs/                    candidate pool, continuations, model prompt,
+                                 schema, provider chain
         jobs/                    job table, claim/run/retry, handlers registry
       core/                      security, sessions, errors, logging
     tests/
@@ -142,7 +143,7 @@ arc/
 | `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
-| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB, anime-only), next_airing (JSONB), refreshed_at |
+| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
 | `episodes` | id, anime_id, number, title, air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
@@ -388,17 +389,181 @@ arc/
   revertible).
 
 ### 5.6 Recommendations
-1. Build candidate pool (≤ 40): current season (top by popularity), relations
-   of the user's completed/high-scored shows, popular in top-3 genres, minus
-   anything on the user's list except planned.
-2. Call Claude (`claude-opus-5`, `thinking: {type: "adaptive"}`,
-   `output_config.format` JSON schema `{picks: [{anilist_id, title, case}]}`,
-   3–5 picks, server-side `fallbacks: "default"` enabled) with a system prompt
-   describing the task and a user message containing the history summary, the
-   prompt, and the candidate pool with synopsis/genres/tags. Streaming used
-   to avoid timeouts. Handle `stop_reason == "refusal"` gracefully.
-3. Persist `rec_runs`; client renders picks with covers and add-to-planned.
-   Rate limit 10/user/day.
+`arc/services/recs/`: `base` (protocol, exceptions, retry), `chain` +
+`factory` (which model answers), `claude` + `openai_compat` (the two
+backends), `pool`, `continuations`, `history`, `prompt`, `schema`, `runs`.
+
+1. **Candidate pool** (≤ 40, `pool.py`, FR-R2). Three sources, in order,
+   de-duplicated by internal `anime_id`, each with a share of the forty so a
+   season cannot fill it on its own (20 season / 12 relations / the rest
+   genres; unused shares go back to the season):
+   *(a)* cached `anime` rows in the current and next season, most popular
+   first (see **Ranking** below);
+   *(b)* `anime.relations` of completed shows scored ≥ 8 (all completed if the
+   user scores nothing), resolved against local rows, with at most 10 misses
+   fetched through the catalogue and upserted — every fetch is optional and a
+   failure skips the title, never the run;
+   *(c)* local rows sharing ≥ 2 of the user's top-3 genres (weighted by score
+   over completed + watching; an unscored entry counts 5).
+   Every source is bounded: the season query is `LIMIT 4×40`, relation seeds
+   are cut to the best 50 completed shows before flattening, and the optional
+   catalogue fetches stop at 10 calls **or** a 5 s wall clock, whichever comes
+   first — the deadline is what saves a page from a catalogue that is answering
+   slowly rather than failing, since the breaker never trips. Both the pool and
+   the continuations section share one `resolve_relations`, so those bounds are
+   spent once between them.
+
+   **Ranking.** The season orders by `popularity DESC NULLS LAST, id` — a
+   season is more titles than the pool takes and "what everyone else is
+   watching" is the only honest signal a source with no personal input has. The
+   genre source orders by `average_score DESC NULLS LAST` instead, and that is
+   the one place the two differ: it has already matched on the user's taste, so
+   the question left is "is it good", not "is it known". Both columns are
+   nullable and fill in on a row's next refresh; `NULLS LAST` puts an unranked
+   row where it belongs meanwhile, so no backfill is needed.
+
+   **Exclusions**, beyond FR-R2's "anything on the list but planned":
+   - formats outside `TV`, `TV_SHORT`, `ONA`, `MOVIE` — an allow-list, because
+     the tail of AniList's vocabulary (OVA, SPECIAL, MUSIC, MANGA) is not
+     something anyone starts watching on a recommendation;
+   - titles matching recap/special/short patterns (`recap`, `theater`,
+     `theatre`, `mini`, `special`, `picture drama`, `omake`, `daze`, `pv`) on
+     **word boundaries** — a substring test would drop *Administrator* for
+     containing "mini";
+   - **direct continuations of listed shows** (relations of type `SEQUEL`,
+     `PREQUEL`, `SIDE_STORY`, `SPIN_OFF`, `ALTERNATIVE`, `PARENT`, `SUMMARY`).
+     A sequel scores well on every signal the pool has and needs none of them,
+     so it goes to its own section instead — see below.
+   Each candidate carries id, title, genres, ≤ 6 tag names, a plain-text
+   synopsis truncated to ~400 chars, season, format, episode count, and a
+   `why` naming the source.
+
+1b. **Continuations** (`continuations.py`) — "new in your franchises",
+   deterministic and **without a model call**, because "season two of the show
+   you finished" is a fact rather than an argument. Sources are shows the user
+   is watching, has completed, or has planned; relations counted are `SEQUEL`,
+   `SIDE_STORY`, `SPIN_OFF`, `ALTERNATIVE` and anything in `MOVIE` format
+   (`PREQUEL`/`PARENT`/`SUMMARY` point backwards and are merely excluded from
+   the pool). Anything already on the list is dropped — including planned,
+   unlike the pool — as are recaps and disallowed formats. Ordered by the
+   source show's score, then newest first by season; capped at 8. Each carries
+   a finished sentence: "Sequel to Frieren, which you completed", "Movie in the
+   Assassination Classroom series (on your planned list)".
+
+2. **The prompt.** The mood text (FR-R1) is the only span a stranger writes,
+   so it is fenced between `<mood>`/`</mood>` and the system prompt says in as
+   many words that the span is a preference to satisfy and never an instruction
+   to follow. Defence in depth rather than the defence: step 4 checks the picks
+   against the pool afterwards, so a run that obeyed a hostile mood could still
+   only return shows it was offered.
+2b. **History summary** (`history.py`, FR-R3): top-rated (≤ 10), recently
+   completed (≤ 10), watching with progress (≤ 10), dropped (≤ 5), planned
+   titles (≤ 20). A pure function over the `(anime, entry)` rows the run
+   already loaded.
+3. **The call — a chain, not a model.** Gemini's free tier allows about 20
+   requests per day *per model for the whole deployment*, against Arc's own
+   limit of 10 runs per user per day, so one model is a countdown rather than a
+   setting. `chain.py` holds `[(provider, model), …]` — the primary provider's
+   models in `RECS_MODEL` order, then the fallback provider's — and is itself a
+   `RecsModel`, so nothing above it knows there is more than one. `base.py`
+   holds what the backends share (protocol, exceptions, `parse_picks`, timing,
+   the single retry); `factory.py` reads the config into a chain, sharing **one
+   HTTP client per provider** and dropping entries whose provider has no key,
+   so the chain's length is the honest answer to "is anything configured"
+   (empty → `None` → `configured: false` → 503).
+   - **What advances the chain.** Only `RecsUnavailable`. A `RecsRefused` or a
+     `RecsFailed` **stops** it and raises: a refusal is a judgement about the
+     request and a schema mismatch is a prompt problem, so every later entry
+     would answer the same way and walking on would spend a paid fallback to be
+     told no twice.
+   - **Daily-quota cooldown.** A 429 is ambiguous — "too fast" or "that is your
+     lot for today" — and Gemini distinguishes them in the body, so
+     `is_daily_quota` reads it: `RESOURCE_EXHAUSTED` with a `PerDay` quota id,
+     or `generate_content_free_tier_requests` with `limit: 20`. A daily one
+     puts the entry on cooldown until the next **08:00 UTC**; Google's free
+     quotas reset at midnight US-Pacific, which is 08:00 UTC in standard time
+     and 07:00 in daylight time, and the later is chosen deliberately (coming
+     off an hour early costs one wasted request, an hour late costs nothing
+     because the next entry answers). A per-minute 429 just moves on. Cooldowns
+     live in memory on the chain, which lives as long as the app; losing them on
+     a restart costs one request. Anything unrecognised is treated as
+     transient. A spent daily quota also suppresses the backend's own retry —
+     retrying it is certain to fail, and the live rotation check showed it
+     costing a second and a round trip before the chain moved on anyway.
+   - **Budgets, both backends.** `max_tokens` 16000 with reasoning turned down
+     (`reasoning_effort: "low"` / `output_config.effort: "low"`). The one number
+     that must not be guessed: on both providers the reasoning is drawn from the
+     *same* budget as the answer, so a small `max_tokens` does not shorten the
+     answer, it deletes it — measured on Gemini at 50 tokens (`finish_reason:
+     length`, no content, zero completion tokens) and again at 6000 (828
+     characters of JSON ending mid-string, *without* reporting `length`).
+   - **Timeouts and retry.** `TIMEOUT_SECONDS` 20 per attempt, SDK
+     `max_retries=0`, one retry of Arc's own after 1 s — retrying
+     unavailability and truncated/empty streams, never a refusal or a schema
+     mismatch. So a chain entry costs at most ~41 s before the next is tried.
+   - `openai_compat.py` (**gemini**, **openrouter**):
+     `AsyncOpenAI.chat.completions.create` against the provider's base URL,
+     `response_format` = `{type: json_schema, json_schema: {name, schema,
+     strict: true}}`, streamed inside `async with` with
+     `stream_options.include_usage` (usage arrives on a final choice-less
+     chunk; its absence is tolerated). `reasoning_effort` goes to both — it is
+     the portable spelling, and Google's own `thinking_config` passthrough is
+     awkward (it nests under a body field itself named `extra_body`; the obvious
+     `{google: …}` is a 400) *and* rejected outright by `gemini-2.5-flash`.
+     `finish_reason` `length`, or unparseable JSON on a stream that never said
+     `stop`, → `RecsFailed("truncated")`; `content_filter` or a non-empty
+     `refusal` → `RecsRefused`; empty content on a clean stop →
+     `RecsFailed("empty")`; an `error` field on a chunk (a gateway failing
+     mid-stream at HTTP 200) → `RecsUnavailable`. OpenRouter also gets
+     `HTTP-Referer`/`X-Title`.
+   - `claude.py` (**anthropic**): `client.beta.messages.stream` with `thinking:
+     {type: "adaptive"}` (never `budget_tokens` — a 400 on Claude 5),
+     `output_config` carrying **both** the JSON schema and `effort: "low"`,
+     `fallbacks: "default"` + beta `server-side-fallback-2026-07-01`.
+   Both map their SDK's **base** error class (`openai.APIError` /
+   `anthropic.APIError`) to `RecsUnavailable`, so a subclass neither names is a
+   502 rather than a 500. `RecsResult` carries `provider` as well as `model`
+   (the id the *server* reported), and the run logs both. Tests inject fakes;
+   no backend is reached from `make test`.
+4. **Validation** (`runs.validate_picks`): a pick whose `anime_id` was not in
+   the pool, or which is on the user's list with any status but `planned`, is
+   dropped; duplicates collapse; more than 5 are truncated; the stored title is
+   the catalogue's. Fewer than 3 survivors are logged and stored as-is — the
+   model is never called twice for one run.
+4b. **Transactions.** The run commits after the pool is built and *before* the
+   model is called. Building the pool can insert `anime` rows (a relation the
+   catalogue had to fetch), and holding those row locks across a 20-second call
+   to a third party would stall every writer touching them. The consequence —
+   a fetched relation survives a failed run — is the right way round: it is
+   cache. "A `rec_runs` row exists only on success" still holds; the row is
+   written after the picks are validated.
+5. **Persistence and rate limit** (FR-R5): one `rec_runs` row per run carrying
+   the prompt, the pool as sent, one tagged list holding both kinds of entry
+   (`{kind: "pick", anime_id, title, case}` and `{kind: "continuation",
+   anime_id, title, because}` — one JSONB column, so no migration; a row
+   written before the tag existed has no `kind` and reads as a pick), and the
+   model
+   that answered (truncated to the column's 64 characters; the provider goes to
+   the log rather than a new column). Ten runs per user per 24 h, counted from
+   `rec_runs(user_id, created_at)` — no new column; the wait is measured from
+   the oldest run in the window. The rate limit is checked before the pool is
+   built, so a refused run costs nothing. Check-then-act without a lock, so two
+   simultaneous requests can land an eleventh run; accepted, because the limit
+   bounds cost rather than stating an invariant.
+6. **API**: `GET /api/recs` returns the newest run, the remaining budget,
+   `configured`, and — **for admins only, the field is omitted entirely for
+   everyone else** — `chain`, so an operator can see how much of the day's free
+   tier is left; `POST /api/recs/runs` creates one. `RecRunOut` splits the
+   stored list back into `picks` (the model's, with `case`) and
+   `continuations` (deterministic, with `because`). Errors map 429 (limit, with
+   `retry_after_seconds` and `Retry-After`), 503 (the selected provider's key
+   is unset, or the model refused), 502 (upstream), 409 (empty pool), 422
+   (prompt over 300 chars).
+   Without the selected provider's key the API answers 503 and `config_check`
+   logs one WARNING naming the provider and the variable it wanted (not an
+   error: a deployment that never wanted recommendations is valid, and
+   `/api/health`'s count must still reach zero). The 503 refusal detail is
+   provider-neutral — "The model declined this request".
 
 ### 5.7 Retention
 `retention_sweep` (hourly, priority 200, first run 10 min after worker
@@ -505,6 +670,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
 | `GET /api/catalog/status` | admin | source health and breaker state |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
+| `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
 | `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
@@ -530,7 +696,9 @@ Mutating requests must carry an allowed `Origin`.
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
 | Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 5 query forms per episode (romaji and english full titles, plus season-stripped base title with `S<k>`, roman numeral, and plain), ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows differently (`Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
 | qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
-| Anthropic API | `ANTHROPIC_API_KEY` | n/a | Python SDK `anthropic`; model `claude-opus-5`; structured outputs; streaming. |
+| Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
+| OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
+| Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
 
 ## 7. Security
 
@@ -633,7 +801,16 @@ hostnames).
 App settings (read by `arc/config.py`; secrets are `SecretStr`, never
 logged): `ENV` (dev|prod), `LOG_LEVEL`, `PUBLIC_URL`, `DATABASE_URL`,
 `SECRET_KEY`, `FERNET_KEY`, `MAL_CLIENT_ID`, `MAL_CLIENT_SECRET`,
-`MAL_REDIRECT_URI`, `ANTHROPIC_API_KEY`, `LLM_MATCH_SUGGESTIONS` (bool),
+`MAL_REDIRECT_URI`, `RECS_PROVIDER` (gemini|openrouter|anthropic, default
+gemini), `RECS_MODEL` (comma-separated, tried in order; default
+`gemini-3.5-flash,gemini-3.6-flash,gemini-2.5-flash`),
+`RECS_FALLBACK_PROVIDER` (blank = no fallback), `RECS_FALLBACK_MODEL`
+(comma-separated; defaults to `openai/gpt-5-mini` when the fallback is
+openrouter), `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
+(all optional — a model name that does not match its provider, a missing
+primary key, and a fallback named without its key are each a startup WARNING),
+`GEMINI_BASE_URL`, `OPENROUTER_BASE_URL` (blank = the provider's default),
+`LLM_MATCH_SUGGESTIONS` (bool),
 `QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `DATA_DIR`, `MAX_TRANSCODES`,
 `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `MATCH_AUTO_THRESHOLD` (0.85),
 `MATCH_MIN_CANDIDATE` (0.40), `MATCH_MIN_TITLE_FOR_AUTO` (0.92; above the
@@ -676,6 +853,14 @@ languages) live in the `settings` table and are editable by admin, seeded by
 the initial migration. `MAX_TRANSCODES` is host capacity and lives only in
 env (it is not in the settings table).
 
+Configuration problems are checked at startup by both the api and the worker
+(`arc/core/config_check.py`) and logged at two levels. **ERROR** means the
+deployment is broken -- a missing `SECRET_KEY`, a localhost `PUBLIC_URL` -- and
+is what `GET /api/health` counts as `config_warnings`; a healthy deploy reports
+0. **WARNING** means an optional feature is off and does *not* count: today,
+the recommendations key being unset, and a `RECS_MODEL` that does not look like
+the selected `RECS_PROVIDER`'s.
+
 ## 10. Testing strategy
 
 - Parser/matcher: corpus of ≥ 200 real release names with expected
@@ -689,6 +874,14 @@ env (it is not in the settings table).
   fallback for fast runs.
 - Media: ffmpeg invoked on a 5-second fixture in a dedicated test marked
   `slow`; mocked elsewhere.
+- Recommendations: every backend is behind a `RecsModel` protocol and is a
+  fake everywhere except `server/tests/recs_eval`, whose `live` test calls
+  whichever provider `RECS_PROVIDER` names (and skips when that provider has
+  no key). `live` is excluded by pytest `addopts` so `make test` never
+  spends money; run it with `uv run pytest -m live` and an exported key. The
+  eval itself is five frozen runs (list + pool + recorded answer) asserting
+  what FR-R3/FR-R4 imply: 3–5 picks, all from the pool, none already watched,
+  every case naming a show from the user's history.
 
 ## 11. Decision log
 
@@ -836,3 +1029,84 @@ env (it is not in the settings table).
 - 2026-09-08 — gluetun sidecar behind compose profiles (`vpn` default,
   `novpn`); seeding disabled via qBittorrent preferences + a stop-on-seed
   poll; dev's 697 torrent now stopped rather than seeding.
+- 2026-09-10 — M12 server: `arc/services/recs/` (pool, history, prompt,
+  schema, claude, runs) and `GET`/`POST /api/recs`. Picks are identified by
+  Arc's internal `anime_id` rather than §5.6's original `anilist_id` — the
+  catalogue moved to internal ids in M3b and a cached row may have no AniList
+  id. The pool gives each source a share of the forty (20/12/rest) because a
+  season alone is larger than the pool; `anime` has no popularity column, so
+  seasonal order is insertion (`id`) order, which is the order the
+  `POPULARITY_DESC` sweep wrote. 3–5 picks and the pool-membership rule are
+  enforced in code, not in the schema (structured outputs support neither
+  `minItems` nor string lengths). `RECS_MODEL` added (default
+  `claude-opus-5`); a missing `ANTHROPIC_API_KEY` in prod is a WARNING rather
+  than an ERROR and does not count towards `/api/health`'s
+  `config_warnings`, so a phase 1 deploy still reports zero. Rate limit reads
+  `rec_runs` directly — no migration. Prompt eval in `server/tests/recs_eval`
+  with five recorded runs; the live test is marked `live` and excluded from
+  `make test` by `addopts`.
+- 2026-09-10 — Recommendations ship on Gemini free tier via its
+  OpenAI-compatible endpoint; Anthropic and OpenRouter selectable by
+  RECS_PROVIDER. One `RecsModel` protocol, two implementations
+  (`claude.py`, `openai_compat.py`) and a `build_recs_model` factory that
+  returns `None` — never raises — when the selected provider has no key.
+  `LLM_API_KEY`/`LLM_BASE_URL` added; `RECS_MODEL` default becomes
+  `gemini-3.8-flash` and is not interchangeable between providers. Three
+  things were established against the live endpoint and contradict how the
+  options are usually written up: Gemini takes its `thinking_config` under
+  a body field itself named `extra_body` (`{google: …}` at the top level is
+  a 400); its reasoning tokens are drawn from `max_tokens`, so 6000 returned
+  half-written JSON and the budget is now 16000; and a truncated answer can
+  arrive without `finish_reason: length`, so unparseable JSON on a stream
+  that never said `stop` is treated as truncation. The refusal 503 detail is
+  now provider-neutral ("The model declined this request").
+  **Open for the owner:** the Gemini free tier allows 20 requests per day
+  per model for the whole deployment, while FR-R5's limit is 10 runs per
+  *user* per day — so a third active user can exhaust the provider before
+  Arc's own limit binds, and they see a 502. Options: lower FR-R5's limit,
+  add a deployment-wide daily cap, or pay for a Gemini tier.
+- 2026-09-10 -- M12 review pass. `arc/services/recs/base.py` now holds the
+  `RecsModel` protocol, the exception hierarchy, `parse_picks` and the retry,
+  so neither backend imports the other. Both budgets raised to 16000 tokens
+  with reasoning turned down, because on **both** providers the reasoning is
+  drawn from the same budget as the answer and a small one deletes it rather
+  than shortening it. Per-attempt timeout 20 s, SDK retries off, one retry of
+  our own after 1 s -- retrying unavailability and truncated/empty streams,
+  never a refusal or a schema mismatch. Gemini's `thinking_config` passthrough
+  replaced by the portable top-level `reasoning_effort: low`:
+  `gemini-2.5-flash` rejects the Google form outright (400 "Thinking level is
+  not supported for this model"), and an OpenAI-compatible provider that does
+  not understand the portable one ignores it. Default `RECS_MODEL` is now
+  `gemini-3.5-flash` on measurement -- 3.7 and 3.8 were both under "high
+  demand" (early-terminated streams, a 503, one 47 s answer) while 3.5 answered
+  a full forty-candidate prompt in about four seconds. The run commits after
+  building the pool and before calling the model, so no Postgres row locks are
+  held across a third-party call; a fetched relation therefore survives a
+  failed run, which is correct (it is cache). The mood prompt is fenced and the
+  system prompt states it is data. Pool sources bounded (season `LIMIT 4x cap`,
+  50 relation seeds, 10 fetches or a 5 s deadline). `config_check` gained a
+  `RECS_MODEL`/`RECS_PROVIDER` mismatch warning, and the factory treats a
+  placeholder key as no key.
+- 2026-09-10 — Recommendation model chain: Gemini free-tier models in rotation
+  with a daily-quota cooldown, OpenRouter as the paid fallback (owner
+  decision). `RECS_MODEL` and `RECS_FALLBACK_MODEL` are comma-separated lists
+  tried in order; keys are per provider (`GEMINI_API_KEY`,
+  `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`) because the chain holds two
+  providers at once, which `LLM_API_KEY` could not express. Only
+  `RecsUnavailable` advances the chain — a refusal or an unusable answer stops
+  it, since neither is about availability. A 429 is classified from its body:
+  a per-day quota id (or the free tier's `limit: 20`) means the model is spent
+  and it is skipped until the next 08:00 UTC; anything else is transient and
+  merely moves on. Cooldowns are in memory on the chain object, so a restart
+  costs one wasted request. `GET /api/recs` exposes the chain's state to admins
+  only.
+- 2026-09-10 — Continuations shown as a deterministic secondary section; main
+  pool ranks by AniList popularity/score and excludes recaps, specials and
+  franchise continuations (owner decision). `anime` gained `popularity` and
+  `average_score` (migration `95d81ee797af`, nullable and unindexed, filled
+  from AniList's `popularity`/`averageScore` and MAL's
+  `num_list_users`/`mean`×10); existing rows fill in on their next refresh
+  rather than by a backfill, since `NULLS LAST` sorts an unranked row where it
+  belongs anyway. Continuations reuse the pool's bounded relation resolution
+  and are stored in `rec_runs.picks` beside the picks with a `kind` tag, so
+  neither the column nor the API's existing pick shape changed.

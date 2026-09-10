@@ -129,6 +129,12 @@ class CatalogMedia:
     season: str | None = None
     season_year: int | None = None
     cover_url: str | None = None
+    #: How many people have the show on a list, and the average score out of
+    #: 100. Summary fields, because the recommendation pool ranks by them and
+    #: only ever sees summaries for a season (§5.6). Both are null from a
+    #: source that does not publish them.
+    popularity: int | None = None
+    average_score: int | None = None
     #: Only meaningful when ``full``; empty on a search result.
     banner_url: str | None = None
     description: str | None = None

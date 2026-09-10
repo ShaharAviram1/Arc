@@ -1,0 +1,151 @@
+{
+  "name": "almost_empty",
+  "prompt": null,
+  "list": [
+    {
+      "anime_id": 21,
+      "title": "Cowboy Bebop",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Sci-Fi"
+      ],
+      "status": "planned",
+      "score": null,
+      "progress": 0,
+      "episodes": 26
+    },
+    {
+      "anime_id": 22,
+      "title": "Steins;Gate",
+      "genres": [
+        "Drama",
+        "Sci-Fi",
+        "Thriller"
+      ],
+      "status": "planned",
+      "score": null,
+      "progress": 0,
+      "episodes": 24
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 21,
+      "title": "Cowboy Bebop",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Space",
+        "Episodic",
+        "Bounty Hunters"
+      ],
+      "synopsis": "Four bounty hunters and a dog work the solar system for money they immediately lose, and each of them is running from something they will eventually have to stop running from.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 26,
+      "why": "shares your genres: Action, Sci-Fi"
+    },
+    {
+      "anime_id": 22,
+      "title": "Steins;Gate",
+      "genres": [
+        "Drama",
+        "Sci-Fi",
+        "Thriller"
+      ],
+      "tags": [
+        "Time Travel",
+        "Slow Burn",
+        "Tragedy"
+      ],
+      "synopsis": "A self-styled mad scientist discovers he can send text messages into the past, and spends the second half of the show undoing what he did in the first.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 24,
+      "why": "shares your genres: Drama, Sci-Fi"
+    },
+    {
+      "anime_id": 121,
+      "title": "Sousou no Frieren",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Elf",
+        "Time Skip",
+        "Slow Burn"
+      ],
+      "synopsis": "The elf who helped kill the demon king outlives the party that did it with her, and sets out to learn, far too late, what her friends were.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 28,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 122,
+      "title": "Odd Taxi",
+      "genres": [
+        "Drama",
+        "Mystery"
+      ],
+      "tags": [
+        "Talking Animals",
+        "Crime",
+        "Ensemble"
+      ],
+      "synopsis": "A walrus drives a taxi through a city where a girl has gone missing, and every fare he picks up turns out to be one thread of the same knot.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 123,
+      "title": "Planetes",
+      "genres": [
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Space",
+        "Workplace",
+        "Realistic"
+      ],
+      "synopsis": "The crew that clears orbital debris for a living get the jobs nobody photographs, and the show takes their careers as seriously as its physics.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 26,
+      "why": "shares your genres: Drama, Sci-Fi"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 21,
+        "title": "Cowboy Bebop",
+        "case": "You have Cowboy Bebop on your plan-to-watch list already and there is no reason to wait. It is episodic, so it costs you one twenty-minute session to find out whether you like it, and the arc underneath the episodes only sharpens on a rewatch. Start here rather than with anything longer."
+      },
+      {
+        "anime_id": 123,
+        "title": "Planetes",
+        "case": "Both things on your list are science fiction, so this is the third one worth knowing about. It shares Cowboy Bebop's lived-in, unglamorous space and its interest in people whose jobs are beneath the notice of the setting they live in. Where Steins;Gate escalates, Planetes stays at ground level and gets its weight from that."
+      },
+      {
+        "anime_id": 122,
+        "title": "Odd Taxi",
+        "case": "If the reason Steins;Gate is on your list is the slow reveal that everything was connected, this does the same thing in thirteen episodes and does it with a much lighter touch. It is a mystery told almost entirely in conversations in a car. It is also the shortest thing here, which makes it a good second pick alongside Cowboy Bebop."
+      }
+    ]
+  }
+}

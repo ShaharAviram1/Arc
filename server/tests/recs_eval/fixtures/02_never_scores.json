@@ -1,0 +1,172 @@
+{
+  "name": "never_scores",
+  "prompt": "something short and funny",
+  "list": [
+    {
+      "anime_id": 11,
+      "title": "Nichijou",
+      "genres": [
+        "Comedy",
+        "Slice of Life"
+      ],
+      "status": "completed",
+      "score": null,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 12,
+      "title": "Kaguya-sama wa Kokurasetai",
+      "genres": [
+        "Comedy",
+        "Romance"
+      ],
+      "status": "completed",
+      "score": null,
+      "progress": 12,
+      "episodes": 12
+    },
+    {
+      "anime_id": 13,
+      "title": "Dandadan",
+      "genres": [
+        "Action",
+        "Comedy",
+        "Supernatural"
+      ],
+      "status": "watching",
+      "score": null,
+      "progress": 6,
+      "episodes": 12
+    },
+    {
+      "anime_id": 14,
+      "title": "Mob Psycho 100",
+      "genres": [
+        "Action",
+        "Comedy",
+        "Supernatural"
+      ],
+      "status": "planned",
+      "score": null,
+      "progress": 0,
+      "episodes": 12
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 111,
+      "title": "Asobi Asobase",
+      "genres": [
+        "Comedy",
+        "Slice of Life"
+      ],
+      "tags": [
+        "School",
+        "Gag",
+        "Female Protagonist"
+      ],
+      "synopsis": "Three girls in a games club escalate every trivial disagreement into open warfare, drawn beautifully right up until the moment their faces stop being drawn beautifully.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy, Slice of Life"
+    },
+    {
+      "anime_id": 112,
+      "title": "Pop Team Epic",
+      "genres": [
+        "Comedy"
+      ],
+      "tags": [
+        "Gag",
+        "Surreal",
+        "Parody"
+      ],
+      "synopsis": "A sketch show that changes animation style, voice cast and format whenever it suspects you have got comfortable.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy"
+    },
+    {
+      "anime_id": 14,
+      "title": "Mob Psycho 100",
+      "genres": [
+        "Action",
+        "Comedy",
+        "Supernatural"
+      ],
+      "tags": [
+        "Psychic Powers",
+        "Coming of Age"
+      ],
+      "synopsis": "An overwhelmingly powerful middle schooler would rather join the body improvement club than fight anybody, and his fraudulent mentor is not helping.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy, Supernatural"
+    },
+    {
+      "anime_id": 113,
+      "title": "Hinamatsuri",
+      "genres": [
+        "Comedy",
+        "Sci-Fi",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Yakuza",
+        "Deadpan",
+        "Found Family"
+      ],
+      "synopsis": "A psychic girl falls out of the ceiling into a yakuza lieutenant's apartment and refuses to leave, and the show is funniest when it is being sincere.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy, Slice of Life"
+    },
+    {
+      "anime_id": 114,
+      "title": "Vinland Saga",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Historical",
+        "Revenge"
+      ],
+      "synopsis": "A boy joins the band of mercenaries who killed his father, and waits.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 24,
+      "why": "airing this season (Fall 2026)"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 111,
+        "title": "Asobi Asobase",
+        "case": "You asked for short and funny, and at twelve episodes this is the closest thing in the pool to Nichijou's particular register of escalating nonsense. It has the same trick of playing an utterly trivial stake completely straight until the animation itself gives up. Given how much of Kaguya-sama wa Kokurasetai is people over-planning tiny social manoeuvres, the games club should land."
+      },
+      {
+        "anime_id": 113,
+        "title": "Hinamatsuri",
+        "case": "This is the deadpan end of what you already watch, and it is twelve episodes. The comedy comes from a psychic child and a career criminal negotiating domestic life, which is Nichijou's absurd-premise-played-flat approach with an actual through line. It also has the sincerity that Dandadan sneaks in between fights, so it should not feel like a change of diet."
+      },
+      {
+        "anime_id": 14,
+        "title": "Mob Psycho 100",
+        "case": "This is already on your plan-to-watch list and it is the obvious next thing while you are part way through Dandadan. Both are supernatural action comedies whose real subject is a teenager trying to be a decent person with powers he did not ask for, and Mob Psycho gets there in twelve episodes. Since you have not started it, this is mostly a nudge."
+      }
+    ]
+  }
+}

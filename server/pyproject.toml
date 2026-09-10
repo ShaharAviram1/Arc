@@ -13,11 +13,12 @@ dependencies = [
     "anitopy>=2.1",
     "rapidfuzz>=3.10",
     "httpx>=0.28",
-    "anthropic>=0.40",
+    "anthropic>=1.4.0",
     "argon2-cffi>=23.1",
     "cryptography>=43",
     "apscheduler>=3.11",
     "python-multipart>=0.0.20",
+    "openai>=3.11.0",
 ]
 
 [dependency-groups]
@@ -65,8 +66,13 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# ``-m "not live"`` is a spending guard, not a preference: the live eval calls
+# the real Anthropic API, and a developer who happens to have ANTHROPIC_API_KEY
+# exported must not pay for `make test`. A command-line ``-m`` replaces this
+# one, so `uv run pytest -m live` still runs them.
+addopts = "-ra --strict-markers -m 'not live'"
 markers = [
     "pg: needs a running PostgreSQL (make dev-db); set ARC_SKIP_PG_TESTS=1 to skip",
     "slow: exercises real ffmpeg/qBittorrent instead of a mock",
+    "live: calls the real recommendation provider (RECS_PROVIDER); costs quota. Excluded from `make test` by addopts; run with `uv run pytest -m live`, and it skips when the selected provider has no key",
 ]

@@ -1,19 +1,11 @@
 import { Link } from 'react-router-dom'
 import { CoverThumb } from '@/components/CoverThumb'
 import { ListStatusControl } from '@/components/ListStatusControl'
-import type { AnimeSummary } from '@/lib/anime'
-
-/** "TV · 28 eps · 2023"; empty parts are dropped rather than left blank. */
-function secondaryLine(anime: AnimeSummary): string {
-  const parts: string[] = []
-  if (anime.format !== null) parts.push(anime.format)
-  if (anime.episodes !== null) parts.push(`${anime.episodes} eps`)
-  if (anime.season_year !== null) parts.push(String(anime.season_year))
-  return parts.join(' · ')
-}
+import { SourceBadge } from '@/components/SourceBadge'
+import { summaryLine, type AnimeSummary } from '@/lib/anime'
 
 export function AnimeCard({ anime }: { anime: AnimeSummary }) {
-  const secondary = secondaryLine(anime)
+  const secondary = summaryLine(anime)
 
   return (
     <article className="flex flex-col overflow-hidden rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)]">
@@ -31,16 +23,7 @@ export function AnimeCard({ anime }: { anime: AnimeSummary }) {
         {secondary === '' ? null : (
           <p className="text-xs text-[var(--arc-text-muted)]">{secondary}</p>
         )}
-        {anime.source === 'mal' ? (
-          <p>
-            <span
-              title="AniList is unavailable; this result came from MyAnimeList"
-              className="inline-block rounded-full border border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10 px-1.5 py-0.5 text-[0.625rem] text-[var(--arc-warn)]"
-            >
-              via MAL
-            </span>
-          </p>
-        ) : null}
+        <SourceBadge source={anime.source} />
         <ListStatusControl
           animeId={anime.id}
           status={anime.list_status}

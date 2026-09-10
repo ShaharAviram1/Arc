@@ -1,0 +1,191 @@
+{
+  "name": "heavy_scorer",
+  "prompt": null,
+  "list": [
+    {
+      "anime_id": 1,
+      "title": "Sousou no Frieren",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "status": "completed",
+      "score": 10,
+      "progress": 28,
+      "episodes": 28
+    },
+    {
+      "anime_id": 2,
+      "title": "Mushishi",
+      "genres": [
+        "Adventure",
+        "Mystery",
+        "Supernatural"
+      ],
+      "status": "completed",
+      "score": 9,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 3,
+      "title": "Shouwa Genroku Rakugo Shinjuu",
+      "genres": [
+        "Drama"
+      ],
+      "status": "completed",
+      "score": 9,
+      "progress": 13,
+      "episodes": 13
+    },
+    {
+      "anime_id": 4,
+      "title": "Ping Pong the Animation",
+      "genres": [
+        "Drama",
+        "Sports"
+      ],
+      "status": "completed",
+      "score": 8,
+      "progress": 11,
+      "episodes": 11
+    },
+    {
+      "anime_id": 5,
+      "title": "Dungeon Meshi",
+      "genres": [
+        "Adventure",
+        "Comedy",
+        "Fantasy"
+      ],
+      "status": "watching",
+      "score": null,
+      "progress": 14,
+      "episodes": 24
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 101,
+      "title": "Kusuriya no Hitorigoto",
+      "genres": [
+        "Drama",
+        "Mystery"
+      ],
+      "tags": [
+        "Historical",
+        "Female Protagonist",
+        "Politics"
+      ],
+      "synopsis": "A poisons-obsessed apothecary is sold into the imperial rear palace and starts quietly solving the deaths nobody wants explained.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 24,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 102,
+      "title": "Natsume Yuujinchou",
+      "genres": [
+        "Drama",
+        "Supernatural",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Episodic",
+        "Iyashikei",
+        "Youkai"
+      ],
+      "synopsis": "A boy who can see spirits inherits a book of their names and spends his afternoons giving them back, one quiet encounter at a time.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama, Supernatural"
+    },
+    {
+      "anime_id": 103,
+      "title": "Houseki no Kuni",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "CGI",
+        "Philosophy",
+        "Time Skip"
+      ],
+      "synopsis": "Immortal gem-people are hunted for their bodies, and the most brittle of them keeps losing pieces of who she was.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 104,
+      "title": "Sonny Boy",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Surreal",
+        "Philosophy",
+        "Isekai"
+      ],
+      "synopsis": "A classroom drifts out of the world and the students discover rules, powers and each other in a sequence of empty universes.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 105,
+      "title": "Kaijuu 8-gou Season 2",
+      "genres": [
+        "Action",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Monsters",
+        "Adult Protagonist"
+      ],
+      "synopsis": "The clean-up crew turned defence force goes back to work, with more paperwork and larger monsters.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 12,
+      "why": "airing this season (Fall 2026)"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 102,
+        "title": "Natsume Yuujinchou",
+        "case": "You gave Mushishi a 9, and this is the other great episodic show about a quiet person walking into someone else's small supernatural problem and leaving it a little better. It has the same structure Mushishi does, one self-contained visit per episode, with the emotional weight carried by the people rather than the spirits. If what you liked about Sousou no Frieren was the long, patient accumulation of small farewells, Natsume does that too."
+      },
+      {
+        "anime_id": 103,
+        "title": "Houseki no Kuni",
+        "case": "Sousou no Frieren is a 10 on your list and this shares its real subject, which is what centuries do to somebody who cannot die. It is a fantasy adventure on the surface and a slow, unsparing character study underneath, the same trick Shouwa Genroku Rakugo Shinjuu pulls with a much smaller cast. The CGI is a genuine stylistic choice here rather than a budget one."
+      },
+      {
+        "anime_id": 104,
+        "title": "Sonny Boy",
+        "case": "You scored Ping Pong the Animation an 8, so you can clearly sit with a show that trusts its visual language over its dialogue. Sonny Boy is the most formally adventurous series on this list and it uses that freedom to ask what a group of teenagers owes each other. It is twelve episodes and it does not explain itself, which is the same deal Ping Pong offered."
+      },
+      {
+        "anime_id": 101,
+        "title": "Kusuriya no Hitorigoto",
+        "case": "This is the closest thing airing now to Shouwa Genroku Rakugo Shinjuu, a period drama that cares more about institutions and grudges than about spectacle. The mysteries are small and pharmacological rather than violent, which should suit somebody who rated Mushishi a 9. It is also currently airing, so you would be watching it week to week alongside Dungeon Meshi."
+      }
+    ]
+  }
+}

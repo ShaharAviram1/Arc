@@ -1,0 +1,194 @@
+{
+  "name": "drops_a_lot",
+  "prompt": "nothing set in a school, and please no filler",
+  "list": [
+    {
+      "anime_id": 31,
+      "title": "Monster",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Thriller"
+      ],
+      "status": "completed",
+      "score": 9,
+      "progress": 74,
+      "episodes": 74
+    },
+    {
+      "anime_id": 32,
+      "title": "Vinland Saga",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "status": "completed",
+      "score": 8,
+      "progress": 24,
+      "episodes": 24
+    },
+    {
+      "anime_id": 33,
+      "title": "Bleach",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Supernatural"
+      ],
+      "status": "dropped",
+      "score": 4,
+      "progress": 60,
+      "episodes": 366
+    },
+    {
+      "anime_id": 34,
+      "title": "Assassination Classroom",
+      "genres": [
+        "Action",
+        "Comedy"
+      ],
+      "status": "dropped",
+      "score": 5,
+      "progress": 4,
+      "episodes": 22
+    },
+    {
+      "anime_id": 35,
+      "title": "Kimetsu no Yaiba",
+      "genres": [
+        "Action",
+        "Supernatural"
+      ],
+      "status": "on_hold",
+      "score": null,
+      "progress": 9,
+      "episodes": 26
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 131,
+      "title": "Shin Sekai Yori",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Dystopian",
+        "Time Skip",
+        "Psychological"
+      ],
+      "synopsis": "A thousand years from now, children with psychic powers grow up inside a village that is very careful about which of them are allowed to grow up at all.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 25,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 132,
+      "title": "Kaiba",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Memory",
+        "Surreal",
+        "Dystopian"
+      ],
+      "synopsis": "In a world where memories are stored, traded and stolen, a man with a hole in his chest goes looking for the one he lost.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Drama, Adventure"
+    },
+    {
+      "anime_id": 133,
+      "title": "Golden Kamuy",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Historical",
+        "Ensemble",
+        "Survival"
+      ],
+      "synopsis": "A veteran of the Russo-Japanese war and an Ainu girl hunt a gold cache mapped across the tattooed skins of escaped convicts.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Action, Adventure"
+    },
+    {
+      "anime_id": 134,
+      "title": "Zankyou no Terror",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Thriller"
+      ],
+      "tags": [
+        "Terrorism",
+        "Police",
+        "Short"
+      ],
+      "synopsis": "Two teenagers bomb Tokyo landmarks and set riddles for the detective chasing them, and the reason why is worse than the bombings.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama, Thriller"
+    },
+    {
+      "anime_id": 135,
+      "title": "Boku no Hero Academia Season 8",
+      "genres": [
+        "Action",
+        "Comedy"
+      ],
+      "tags": [
+        "School",
+        "Superhero",
+        "Long Running"
+      ],
+      "synopsis": "The hero course returns for another year of training arcs and tournament brackets.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 25,
+      "why": "airing this season (Fall 2026)"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 134,
+        "title": "Zankyou no Terror",
+        "case": "Eleven episodes, no school setting and structurally incapable of filler, which is three of the things you asked for. You scored Monster a 9, and this is the same shape of story compressed by a factor of seven, a patient investigator against two people whose logic you slowly come to understand. It will not overstay its welcome the way Bleach did."
+      },
+      {
+        "anime_id": 131,
+        "title": "Shin Sekai Yori",
+        "case": "You dropped Bleach sixty episodes in and put Kimetsu no Yaiba on hold, so the risk here is length rather than quality, and this is twenty-five episodes that use every one of them. It has Monster's interest in how ordinary institutions produce monstrous people, told across three time skips. There is no school arc and nothing repeats."
+      },
+      {
+        "anime_id": 133,
+        "title": "Golden Kamuy",
+        "case": "Vinland Saga is the other thing you finished and rated well, and this is the closest match in the pool: a historical adventure that takes its period seriously, cares about its supporting cast and is genuinely funny between the violence. Twelve episodes per season means it never sprawls the way the shows you dropped did. Nothing about it is set in a classroom."
+      },
+      {
+        "anime_id": 132,
+        "title": "Kaiba",
+        "case": "This is the outlier of the four and the shortest, at twelve episodes. Its subject is memory and identity, which is what Monster keeps circling, but the style could not be further from it. Worth one episode to find out, and if it is not for you, you have lost twenty minutes rather than the sixty episodes Bleach took."
+      }
+    ]
+  }
+}

@@ -235,6 +235,8 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
             season=raw.get("season"),
             season_year=raw.get("seasonYear"),
             cover_url=_cover(raw.get("coverImage")),
+            popularity=raw.get("popularity"),
+            average_score=raw.get("averageScore"),
             # Only the season query asks for this; a search result leaves it
             # null, and the cache is careful never to write a null summary
             # ``next_airing`` over a cached one (FR-C3).
@@ -257,6 +259,8 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
         season=raw.get("season"),
         season_year=raw.get("seasonYear"),
         cover_url=_cover(raw.get("coverImage")),
+        popularity=raw.get("popularity"),
+        average_score=raw.get("averageScore"),
         banner_url=raw.get("bannerImage"),
         description=strip_html(raw.get("description")),
         genres=[str(genre) for genre in (raw.get("genres") or [])],

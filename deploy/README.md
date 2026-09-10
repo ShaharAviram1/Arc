@@ -80,7 +80,12 @@ everything else in the file has a working default.
 | `QBIT_PASS` | a long random string | Also has to be set inside qBittorrent — see §2.5. |
 | `WIREGUARD_*` | from the VPN provider's config file | The torrent client's tunnel — see §5.1. Unless you deliberately set `COMPOSE_PROFILES=novpn`, gluetun will not start without them. |
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | your address, ≥ 10 characters | For the first boot only. Blank the password again afterwards. |
-| `ANTHROPIC_API_KEY` | phase 2 | Needed only for recommendations (M12) and match suggestions (`LLM_MATCH_SUGGESTIONS=true`). |
+| `RECS_PROVIDER` / `RECS_MODEL` | `gemini` / `gemini-3.5-flash,gemini-3.6-flash,gemini-2.5-flash` | The recommendations page (M12) tries these models **in order**. Gemini's free tier allows ~20 requests/day/model *for the whole deployment*, against Arc's own limit of 10 runs per user per day — so several models is extra daily quota, not redundancy. |
+| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | Free tier, no billing account. |
+| `RECS_FALLBACK_PROVIDER` / `RECS_FALLBACK_MODEL` | `openrouter` / `openai/gpt-5-mini` | Used once every model above is spent for the day. Blank means no fallback: the page 502s until the quota resets (08:00 UTC). |
+| `OPENROUTER_API_KEY` | https://openrouter.ai/keys | Paid. Only needed if you set a fallback — but it is the thing that keeps working on the day the free tier does not. |
+| `GEMINI_BASE_URL`, `OPENROUTER_BASE_URL` | blank | Endpoint overrides (a proxy, a regional host). Blank uses the provider's default. |
+| `ANTHROPIC_API_KEY` | phase 2 | **Only** for an `anthropic` chain entry and for match suggestions (`LLM_MATCH_SUGGESTIONS=true`). A Gemini deployment leaves it blank. |
 | `MAX_TRANSCODES` | ≤ vCPU/2 | Host capacity, not a rule. |
 | `ARC_DATA_DIR` | `/mnt/HC_Volume_<id>/arc_data` | Absolute path of an existing directory on the data disk, owned by `PUID:PGID`. When set, `make` adds `deploy/docker-compose.host.yml`, which binds the `arc_data` volume there; unset keeps a plain named volume on the root disk. Fixed once the volume exists (see the note in that file). |
 
@@ -553,7 +558,7 @@ docker run --rm -e PUBLIC_HOST=arc.example.com \
 
 | Symptom | Look at |
 |---|---|
-| `config_warnings` > 0 on `/api/health` | `docker compose … logs api \| grep "configuration problem"` — one ERROR line per key, naming the key and what it breaks. |
+| `config_warnings` > 0 on `/api/health` | `docker compose … logs api \| grep "configuration problem"` — one line per key, naming the key and what it breaks. **ERROR** means the deployment is broken and `config_warnings` counts it; **WARNING** means a feature is off and the count stays zero (today: no recommendations key, or a `RECS_MODEL` that does not match `RECS_PROVIDER`). A healthy deploy reports 0 and may still log warnings. |
 | Invite links point at `localhost` | `PUBLIC_HOST` is unset or wrong; compose builds `PUBLIC_URL` from it. |
 | The client's writes 403 | Same cause: the CSRF check accepts `PUBLIC_URL`'s origin. |
 | MAL consent screen errors on the redirect | §2.3 — the URI must match the registered one exactly. |

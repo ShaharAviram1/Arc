@@ -10,6 +10,7 @@ import type {
 } from '@/lib/anime'
 import type { MalStatus, MalWrite } from '@/lib/mal'
 import type { PlayInfo } from '@/lib/playback'
+import type { RecContinuation, RecModelStatus, RecPick, RecRun, RecsPage } from '@/lib/recs'
 import type {
   BehindEntry,
   ContinueWatchingEntry,
@@ -651,3 +652,107 @@ export const MAL_LOG: MalWrite[] = [
     revertible: false,
   }),
 ]
+
+/**
+ * Recommendations (spec §4.8, roadmap M12). Two picks, because that is enough
+ * to show the grid and one of each interesting shape: a show that is not on
+ * the list at all, and one already planned that came from MAL — the two states
+ * the status control and the source badge have to render side by side.
+ */
+export const REC_CASE_FRIEREN =
+  'You rated Mushishi a 9 and finished Natsume in a week, so a quiet fantasy that spends its ' +
+  'episodes on small human moments is squarely your taste. It is also the only long show here ' +
+  'you could start tonight and still be caught up by the weekend.'
+
+export const REC_CASE_SPECIAL =
+  'A side story to something you already planned, and short enough to fit an evening. Worth it ' +
+  'mainly if the first one lands.'
+
+export const REC_PICKS: RecPick[] = [
+  { anime: FRIEREN, case: REC_CASE_FRIEREN },
+  { anime: FRIEREN_SPECIAL, case: REC_CASE_SPECIAL },
+]
+
+/** A sequel Arc has a row for, offered as a continuation rather than a pick. */
+export const FRIEREN_SEASON_2: AnimeSummary = {
+  ...FRIEREN,
+  id: 189327,
+  title: {
+    romaji: 'Sousou no Frieren 2nd Season',
+    english: null,
+    native: '葬送のフリーレン 第2期',
+    preferred: 'Sousou no Frieren 2nd Season',
+  },
+  episodes: null,
+  status: 'RELEASING',
+  season: 'WINTER',
+  season_year: 2026,
+  anilist_id: UNLINKED_RELATION.anilist_id,
+  mal_id: UNLINKED_RELATION.mal_id,
+  source: 'anilist',
+  list_status: null,
+}
+
+/**
+ * Shows following on from the list. Deliberately not one of the picks: the two
+ * sections render side by side and each anime must own one status control.
+ */
+export const REC_CONTINUATIONS: RecContinuation[] = [
+  {
+    anime: FRIEREN_SEASON_2,
+    because: 'Follows Frieren: Beyond Journey’s End, which is on your list.',
+  },
+]
+
+/**
+ * The fallback chain an admin sees: one model good for today, one that has
+ * spent its daily quota, and a third reached through a different provider —
+ * the three shapes the line has to render.
+ */
+export const REC_CHAIN: RecModelStatus[] = [
+  { provider: 'gemini', model: 'gemini-3.5-flash', available: true },
+  { provider: 'gemini', model: 'gemini-2.5-flash', available: false },
+  { provider: 'openrouter', model: 'openai/gpt-5-mini', available: true },
+]
+
+export const REC_RUN: RecRun = {
+  id: 7,
+  prompt: 'something short and funny',
+  created_at: '2026-09-10T08:00:00Z',
+  model: 'claude-opus-5',
+  candidate_count: 38,
+  picks: REC_PICKS,
+  continuations: REC_CONTINUATIONS,
+}
+
+/** A run stored before continuations existed: the key is absent, not empty. */
+export const REC_RUN_WITHOUT_CONTINUATIONS: RecRun = {
+  id: REC_RUN.id,
+  prompt: REC_RUN.prompt,
+  created_at: REC_RUN.created_at,
+  model: REC_RUN.model,
+  candidate_count: REC_RUN.candidate_count,
+  picks: REC_PICKS,
+}
+
+/** A viewer who has run once today and has nine left. No chain: not an admin. */
+export const RECS_PAGE: RecsPage = {
+  run: REC_RUN,
+  remaining_today: 9,
+  limit_per_day: 10,
+  configured: true,
+}
+
+/** The same page as an admin gets it: the fallback chain comes with it. */
+export const RECS_PAGE_ADMIN: RecsPage = { ...RECS_PAGE, chain: REC_CHAIN }
+
+/** Nothing run yet: the empty state, with the full day's allowance. */
+export const RECS_PAGE_EMPTY: RecsPage = {
+  run: null,
+  remaining_today: 10,
+  limit_per_day: 10,
+  configured: true,
+}
+
+/** No Anthropic key on the server: there is nothing to offer. */
+export const RECS_PAGE_UNCONFIGURED: RecsPage = { ...RECS_PAGE_EMPTY, configured: false }

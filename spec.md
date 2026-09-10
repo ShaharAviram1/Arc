@@ -213,18 +213,31 @@ any time, and the owner uses it daily.
 ### 4.8 Recommendations (phase 2)
 - FR-R1 Recommendations page with an optional free-text mood prompt ("something
   short and funny", "like Mushishi").
-- FR-R2 The server builds a candidate pool from AniList: current season,
-  relations/sequels of completed shows, popular shows in the user's top
-  genres, and shows similar to the user's highest-rated. Excludes anything in
-  the user's list except `planned`.
+- FR-R2 The server builds a candidate pool (≤ 40) from the cached catalogue:
+  current and next season ranked by popularity, popular/well-scored shows in
+  the user's top genres, and relations of the user's completed shows.
+  Excludes anything in the user's list except `planned`, recaps/specials/
+  shorts, and direct continuations of listed shows (those go to FR-R6).
+  Revised 2026-09-10 after a three-model comparison showed pool quality, not
+  the model, limited the picks.
 - FR-R3 The server sends the user's history summary (top-rated, recently
   completed, dropped with reasons if any), the prompt, and the candidate pool
-  to Claude and asks for 3–5 picks, each with a **short argued case**
+  to a language model (Gemini's free tier by default; Claude or OpenRouter by
+  configuration) and asks for 3–5 picks, each with a **short argued case**
   (2–4 sentences) that references the user's actual history.
 - FR-R4 Output is structured (JSON schema) so the client can render picks with
   covers and one-click "add to planned".
-- FR-R5 Runs are stored so the page is instant on reload; a "refresh" button
-  runs again. Rate limit: 10 runs per user per day.
+- FR-R5 Runs are stored so the page is instant on reload; pressing "Get picks"
+  with the box unchanged is the refresh. Rate limit: 10 runs per user per day.
+- FR-R6 "New in your franchises": alongside the picks, a deterministic list
+  (≤ 8, no model call) of sequels, movies, side stories and spin-offs of shows
+  on the user's list that the user has not added, each with a one-line reason
+  ("Sequel to X, which you completed"). Added 2026-09-10 (owner decision):
+  continuations are worth surfacing but are not the main recommendation.
+- FR-R7 The model is behind a provider chain: Gemini free-tier models in
+  rotation with a daily-quota cooldown, then a paid OpenRouter fallback
+  (`openai/gpt-5-mini`); Anthropic selectable. Every run records which model
+  answered.
 
 ### 4.9 Retention and cleanup
 - FR-T1 An episode's files (source + rendition) are deleted when **all** of
@@ -290,7 +303,7 @@ preparing → failed → (retry) → preparing
   should be `ready` within 2 h of a suitable release appearing on Nyaa, on
   the intended host hardware.
 - **Security:** all API and media routes require a session; media URLs are
-  not guessable without auth; secrets (MAL tokens, Claude key) stored
+  not guessable without auth; secrets (MAL tokens, model API keys) stored
   encrypted at rest / in env; invite tokens single-use and expiring.
 - **Observability:** structured logs; every job records duration and outcome;
   admin page exposes queue depths.
@@ -325,7 +338,8 @@ preparing → failed → (retry) → preparing
 ## 10. Decision log
 
 - 2026-09-05 — Stack: Python/FastAPI server, React/Vite/TS client, Postgres,
-  qBittorrent sidecar, ffmpeg, Claude for recs and match suggestions.
+  qBittorrent sidecar, ffmpeg, a language model (Gemini free tier by default;
+  Claude or OpenRouter selectable) for recs and match suggestions.
 - 2026-09-05 — Multi-user from day one; shared library; per-user wants drive
   acquisition; email+password invite-only auth; admin role.
 - 2026-09-05 — Every file is fully transcoded with subtitles burned in
@@ -353,6 +367,12 @@ preparing → failed → (retry) → preparing
   from the user's last action on the show; wants that end because the show
   left watching/planned are dropped (not deleted) so the grace period is
   never skipped; revival needs an Arc-side action.
+- 2026-09-10 — FR-R6 continuations section and FR-R7 provider chain added;
+  FR-R2 pool revised (popularity/score ranking, recap and continuation
+  exclusions). Owner decisions after the live three-model comparison.
+- 2026-09-10 — Recommendations ship on Gemini's free AI Studio tier through its
+  OpenAI-compatible endpoint; Anthropic (Claude) and OpenRouter stay selectable
+  via `RECS_PROVIDER`. Owner's call: zero cost for the demo, same feature set.
 - 2026-09-09 — Host revised to CPX22 + 100 GB volume: the CX line is out of
   stock at Hetzner; CPX32 costs double for headroom Arc does not use.
 - 2026-09-09 — Public host is `arc.atomworks.dev` (owner's umbrella domain on

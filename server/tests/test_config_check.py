@@ -27,6 +27,8 @@ GOOD = {
     "mal_client_secret": "fedcba9876543210",
     "mal_redirect_uri": "https://arc.example.com/api/mal/callback",
     "qbit_pass": "a-real-qbittorrent-password",
+    # RECS_PROVIDER defaults to gemini, so this is the key that stack needs.
+    "gemini_api_key": "AIza-a-real-gemini-key",
 }
 
 
@@ -35,11 +37,12 @@ def prod(**overrides: object) -> Settings:
 
 
 def keys(settings: Settings) -> set[str]:
-    return {warning.key for warning in config_check.warnings(settings)}
+    """The ERROR-level keys. The one warning-level check has its own test."""
+    return {warning.key for warning in config_check.errors(settings)}
 
 
-def test_a_fully_configured_production_stack_has_no_warnings() -> None:
-    assert config_check.warnings(prod()) == []
+def test_a_fully_configured_production_stack_has_no_errors() -> None:
+    assert config_check.errors(prod()) == []
     assert config_check.count(prod()) == 0
 
 
@@ -124,9 +127,7 @@ def test_a_local_public_url_is_a_production_problem(url: str) -> None:
 
 def test_a_local_mal_redirect_uri_is_a_production_problem() -> None:
     """The shipped default, and the usual reason a real MAL link fails."""
-    warnings = config_check.warnings(
-        prod(mal_redirect_uri="http://localhost:8000/api/mal/callback")
-    )
+    warnings = config_check.errors(prod(mal_redirect_uri="http://localhost:8000/api/mal/callback"))
 
     assert [w.key for w in warnings] == ["MAL_REDIRECT_URI"]
     # The message has to say what to do, because the fix is in two places: the
@@ -135,10 +136,261 @@ def test_a_local_mal_redirect_uri_is_a_production_problem() -> None:
     assert "MAL application" in warnings[0].message
 
 
-def test_the_anthropic_key_is_only_required_when_the_feature_is_on() -> None:
+def test_the_anthropic_key_is_only_an_error_when_the_match_feature_is_on() -> None:
+    """A phase 1 deployment with no Anthropic key is finished, not broken."""
     assert keys(prod(anthropic_api_key=None)) == set()
     assert keys(prod(anthropic_api_key=None, llm_match_suggestions=True)) == {"ANTHROPIC_API_KEY"}
     assert keys(prod(anthropic_api_key="sk-ant-real", llm_match_suggestions=True)) == set()
+
+
+# --- The recommendations backend (M12) --------------------------------------
+
+
+def recs_warnings(settings: Settings) -> list[config_check.ConfigWarning]:
+    """The warning-level lines, which is where the backend's key is reported."""
+    return [w for w in config_check.warnings(settings) if w.level == "warning"]
+
+
+#: The model each provider is expected to be paired with. Switching provider
+#: without switching model is itself a warning now, so a test about *keys* has
+#: to set both or it is testing two things at once.
+MODELS = {
+    "gemini": "gemini-3.5-flash",
+    "openrouter": "anthropic/claude-opus-5",
+    "anthropic": "claude-opus-5",
+}
+
+#: The key field each provider reads, for the same reason.
+KEYS = {
+    "gemini": "gemini_api_key",
+    "openrouter": "openrouter_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
+def blank_keys() -> dict[str, None]:
+    """Every provider key unset — the starting point for a "no key" test."""
+    return dict.fromkeys(KEYS.values())
+
+
+@pytest.mark.parametrize(
+    ("provider", "key"),
+    [
+        ("gemini", "GEMINI_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+    ],
+)
+def test_a_missing_backend_key_is_a_warning_naming_the_provider(provider: str, key: str) -> None:
+    """One line, so an operator who *meant* to set it sees it.
+
+    It must not be an error: ``/api/health`` publishes the error count and a
+    deploy smoke test asserts it is zero.
+    """
+    settings = prod(recs_provider=provider, recs_model=MODELS[provider], **blank_keys())
+
+    found = recs_warnings(settings)
+
+    assert [w.key for w in found] == [key]
+    assert provider in found[0].message
+    assert "503" in found[0].message
+    assert config_check.count(settings) == 0
+
+
+@pytest.mark.parametrize("provider", ["gemini", "openrouter", "anthropic"])
+def test_the_right_key_silences_it(provider: str) -> None:
+    settings = prod(
+        recs_provider=provider,
+        recs_model=MODELS[provider],
+        **{**blank_keys(), KEYS[provider]: "a-real-looking-key"},
+    )
+
+    assert config_check.warnings(settings) == []
+
+
+def test_the_wrong_provider_s_key_does_not_silence_it() -> None:
+    """The failure worth catching: the right key for the provider not selected."""
+    on_gemini = recs_warnings(
+        prod(
+            recs_provider="gemini",
+            recs_model=MODELS["gemini"],
+            **{**blank_keys(), "anthropic_api_key": "sk-ant-real"},
+        )
+    )
+    on_anthropic = recs_warnings(
+        prod(
+            recs_provider="anthropic",
+            recs_model=MODELS["anthropic"],
+            **{**blank_keys(), "gemini_api_key": "AIza-real"},
+        )
+    )
+
+    assert [w.key for w in on_gemini] == ["GEMINI_API_KEY"]
+    assert [w.key for w in on_anthropic] == ["ANTHROPIC_API_KEY"]
+
+
+def test_a_key_for_an_unselected_provider_is_not_itself_a_problem() -> None:
+    """LLM_API_KEY set while RECS_PROVIDER=anthropic is fine and says nothing."""
+    settings = prod(
+        recs_provider="anthropic",
+        recs_model=MODELS["anthropic"],
+        anthropic_api_key="sk-ant-real",
+        gemini_api_key="AIza-a-real-looking-key",
+    )
+
+    assert config_check.warnings(settings) == []
+
+
+def test_the_match_feature_and_the_backend_are_reported_separately() -> None:
+    """Two features, two keys, two levels — an operator can fix either alone."""
+    settings = prod(
+        recs_provider="gemini",
+        recs_model=MODELS["gemini"],
+        llm_match_suggestions=True,
+        **blank_keys(),
+    )
+
+    found = config_check.warnings(settings)
+
+    assert [(w.key, w.level) for w in found] == [
+        ("ANTHROPIC_API_KEY", "error"),
+        ("GEMINI_API_KEY", "warning"),
+    ]
+    assert config_check.count(settings) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("gemini", "claude-opus-5"), ("anthropic", "gemini-3.5-flash")],
+)
+def test_a_model_that_does_not_match_the_provider_is_a_warning(provider: str, model: str) -> None:
+    """Asking Gemini for claude-opus-5 is a 404 on the first run and silence
+    before it, so the mismatch is worth one line at boot."""
+    settings = prod(
+        recs_provider=provider,
+        recs_model=model,
+        **{**blank_keys(), KEYS[provider]: "a-real-looking-key"},
+    )
+
+    found = recs_warnings(settings)
+
+    assert [w.key for w in found] == ["RECS_MODEL"]
+    assert model in found[0].message
+    assert config_check.count(settings) == 0
+
+
+def test_a_matching_model_says_nothing() -> None:
+    assert (
+        config_check.warnings(
+            prod(
+                recs_provider="gemini",
+                recs_model="gemini-3.5-flash,gemini-2.5-flash",
+                gemini_api_key="AIza-real",
+            )
+        )
+        == []
+    )
+    assert (
+        config_check.warnings(
+            prod(
+                recs_provider="anthropic",
+                recs_model="claude-opus-5",
+                **{**blank_keys(), "anthropic_api_key": "sk-ant-real"},
+            )
+        )
+        == []
+    )
+
+
+def test_openrouter_model_names_are_not_checked() -> None:
+    """It serves every vendor, so there is no prefix that could be wrong."""
+    for model in ("anthropic/claude-opus-5", "google/gemini-3.5-flash", "meta/llama"):
+        assert (
+            config_check.warnings(
+                prod(
+                    recs_provider="openrouter",
+                    recs_model=model,
+                    **{**blank_keys(), "openrouter_api_key": "sk-or-real"},
+                )
+            )
+            == []
+        )
+
+
+def test_a_fallback_provider_without_its_key_is_its_own_warning() -> None:
+    """The operator has said what happens when the free tier runs out, and it
+    will not."""
+    settings = prod(
+        recs_provider="gemini",
+        recs_model=MODELS["gemini"],
+        recs_fallback_provider="openrouter",
+        recs_fallback_model="google/gemini-2.5-flash",
+        **{**blank_keys(), "gemini_api_key": "AIza-real"},
+    )
+
+    found = recs_warnings(settings)
+
+    assert [w.key for w in found] == ["OPENROUTER_API_KEY"]
+    assert "RECS_FALLBACK_PROVIDER" in found[0].message
+    assert config_check.count(settings) == 0
+
+
+def test_a_fully_configured_chain_says_nothing() -> None:
+    settings = prod(
+        recs_provider="gemini",
+        recs_model="gemini-3.5-flash,gemini-2.5-flash",
+        recs_fallback_provider="openrouter",
+        recs_fallback_model="google/gemini-2.5-flash",
+        gemini_api_key="AIza-real",
+        openrouter_api_key="sk-or-real",
+    )
+
+    assert config_check.warnings(settings) == []
+
+
+def test_no_fallback_configured_is_not_a_warning() -> None:
+    """Blank means "no fallback", which is a choice rather than a mistake."""
+    settings = prod(recs_provider="gemini", recs_model=MODELS["gemini"], gemini_api_key="AIza-real")
+
+    assert config_check.warnings(settings) == []
+
+
+def test_the_fallback_model_list_is_checked_per_entry() -> None:
+    settings = prod(
+        recs_provider="gemini",
+        recs_model=MODELS["gemini"],
+        recs_fallback_provider="anthropic",
+        recs_fallback_model="claude-opus-5,gemini-3.5-flash",
+        gemini_api_key="AIza-real",
+        anthropic_api_key="sk-ant-real",
+    )
+
+    found = recs_warnings(settings)
+
+    assert [w.key for w in found] == ["RECS_FALLBACK_MODEL"]
+    assert "gemini-3.5-flash" in found[0].message
+
+
+def test_every_primary_model_in_the_list_is_checked() -> None:
+    settings = prod(
+        recs_provider="gemini",
+        recs_model="gemini-3.5-flash,claude-opus-5,gemini-2.5-flash",
+        gemini_api_key="AIza-real",
+    )
+
+    found = recs_warnings(settings)
+
+    assert [w.key for w in found] == ["RECS_MODEL"]
+    assert "claude-opus-5" in found[0].message
+
+
+def test_a_warning_is_logged_at_warning_level(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="arc.core.config_check"):
+        errors = config_check.log_warnings(prod(**blank_keys()), component="api")
+
+    assert errors == 0
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert caplog.records[0].config_key == "GEMINI_API_KEY"  # type: ignore[attr-defined]
 
 
 def test_the_bootstrap_admin_is_not_a_warning() -> None:

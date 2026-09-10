@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-09 (M0–M11 done; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-10 (M0–M12 done; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -214,16 +214,28 @@ CLAUDE.md).
 ## Phase 2 — Recommendations, review, admin, UI overhaul, polish
 
 ### M12 — Recommendations
-- [ ] Candidate pool builder (FR-R2)
-- [ ] Claude call: `claude-opus-5`, adaptive thinking, structured output
-      schema, streaming, fallbacks, refusal handling (FR-R3, FR-R4)
-- [ ] `rec_runs` persistence, rate limit 10/day (FR-R5)
-- [ ] Recommendations page with mood prompt, picks with argued cases,
-      add-to-planned (FR-R1)
-- [ ] Prompt eval: small fixture set of user histories with expected
-      properties (references history, no already-watched picks)
+- [x] Candidate pool builder (FR-R2): season by popularity, genre matches by
+      score, relations; excludes list entries except planned, recaps and
+      specials, and franchise continuations; ≤ 40; bounded catalogue fetches
+- [x] Model call behind a provider chain (FR-R7): Gemini free-tier models in
+      rotation with a daily-quota cooldown, OpenRouter (`openai/gpt-5-mini`)
+      as paid fallback, Anthropic selectable (`claude-opus-5`, adaptive
+      thinking, `output_config.format`, streaming, server-side fallbacks,
+      refusal handling). JSON-schema output, picks re-validated server-side
+      (FR-R3, FR-R4)
+- [x] `rec_runs` persistence, rate limit 10/day counted from the table (FR-R5)
+- [x] Recommendations page: mood prompt (pre-filled from the last run, one
+      button), picks with argued cases, add-to-planned, "New in your
+      franchises" continuations (FR-R6), admin-only model-chain line (FR-R1)
+- [x] Prompt eval: six fixture histories incl. a 40-candidate pool, offline
+      property checks; a `live` marker test against the real provider
 - **DoD:** a vague prompt returns 3–5 grounded picks in under 30 s; picks
   never include shows already on the list (except planned).
+  Verified by the orchestrator 2026-09-10 on the owner's real list (578
+  entries): Gemini 3.5 Flash answered in 2.7–15 s with 3 in-pool,
+  history-grounded picks; the chain rotated past a spent model live; the
+  OpenRouter leg answered on GPT-5 mini; browser run showed picks,
+  continuations, add-to-planned and the admin line.
 
 ### M13 — Match review UI and LLM suggestions
 - [ ] Review page: queue, candidates, search-other-title, manual episode,
@@ -274,6 +286,22 @@ CLAUDE.md).
 - **DoD:** "finished product" — every FR in spec.md is implemented or
   explicitly marked out of scope; owner has used it daily for two weeks
   without manual intervention.
+
+### Demo prep — the professor's walkthrough (after M16, before the review)
+Raised 2026-09-10. The reviewer does not know anime and has no MAL account,
+so the product has to explain itself. Scope to be decided with the owner
+closer to the date; candidates:
+- [ ] A demo account seeded by `arc.cli demo-list` with a plausible list, a
+      few ready episodes and a recommendation run, so every page has content
+      without a MAL link
+- [ ] Plain-language framing on each page: what the page does and which
+      external service it talks to (AniList, MAL, Nyaa, qBittorrent, Claude),
+      one sentence each — the "multiple API calls" the course asks for,
+      visible in the UI
+- [ ] A guided tour or a short "How Arc works" page with the pipeline
+      diagram (list → want → search → download → transcode → play → sync)
+- [ ] A live-status panel (jobs, integrations, VPN exit) the reviewer can open
+      to see the system working, reusing the M14 admin data
 
 ---
 

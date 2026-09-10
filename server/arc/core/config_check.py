@@ -22,6 +22,20 @@ the same: a key that is **missing**, and one that still holds a **placeholder**
 production ``SECRET_KEY`` of ``dev-only-not-secret-change-me`` is not
 configuration, it is a published secret.
 
+There is a second, quieter level: :attr:`ConfigWarning.level` ``"warning"``.
+It is for configuration that is genuinely optional but whose absence turns a
+whole page off — today, the recommendation chain (M12): the primary provider's
+key, a fallback provider named without one, and a model name that does not look
+like the provider it is listed under. Which variable holds which key depends on
+the provider (:meth:`Settings.recs_key_env`), and every message names both,
+because the failure worth catching is a key set for a provider that is not in
+the chain. A
+deployment without recommendations is a valid, complete Arc, so this must not
+be an ERROR and must not count towards the number ``/api/health`` publishes
+(:func:`count` is errors only) — but an operator who *meant* to configure it
+should see one line saying the page will answer 503 rather than discover it
+from a user.
+
 Deliberately *not* checked:
 
 * ``POSTGRES_PASSWORD`` — deploy-only, not read by the app at all, and already
@@ -29,20 +43,24 @@ Deliberately *not* checked:
 * ``BOOTSTRAP_ADMIN_EMAIL`` / ``BOOTSTRAP_ADMIN_PASSWORD`` — needed for exactly
   one boot and then deliberately blanked (services/auth/bootstrap.py). Warning
   about them forever would train an operator to ignore this list.
-* ``ANTHROPIC_API_KEY`` — phase 2. Checked only when ``LLM_MATCH_SUGGESTIONS``
-  is on, which is the one configuration that cannot work without it.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlsplit
 
 from arc.config import Settings
 from arc.core.security import origin_of
 
 log = logging.getLogger(__name__)
+
+#: How loudly a problem is reported. ``"error"`` is "this deployment is broken
+#: and the operator has not noticed"; ``"warning"`` is "a feature is off, on
+#: purpose or otherwise".
+Level = Literal["error", "warning"]
 
 #: Hosts that mean "this machine". A ``PUBLIC_URL`` on one of them is a
 #: development leftover anywhere it is not development.
@@ -68,6 +86,9 @@ class ConfigWarning:
     key: str
     #: What is wrong, in one sentence, and what it breaks.
     message: str
+    #: ERROR by default — everything on this list was an error before the
+    #: level existed, and a new entry should have to opt out of being one.
+    level: Level = "error"
 
 
 def _value(settings: Settings, name: str) -> str:
@@ -164,8 +185,9 @@ def warnings(settings: Settings) -> list[ConfigWarning]:
             )
         )
 
-    # Only when the feature that needs it is on: this is phase 2, and an
-    # operator running phase 1 has no reason to hold an Anthropic key.
+    # Match suggestions (M13) need Anthropic specifically, whatever the
+    # recommendations provider is. An ERROR: the flag says the feature is on,
+    # and it cannot work.
     if settings.llm_match_suggestions and is_placeholder(
         "anthropic_api_key", _value(settings, "anthropic_api_key")
     ):
@@ -176,36 +198,137 @@ def warnings(settings: Settings) -> list[ConfigWarning]:
             )
         )
 
+    # The recommendation chain (M12). Warnings, never errors: without a key
+    # the page answers 503 and the rest of Arc is entirely unaffected, so a
+    # deployment that never wanted recommendations is a finished product
+    # rather than a broken one — and `/api/health`'s count must still reach
+    # zero. Each line names the provider *and* the variable, because the whole
+    # failure mode here is a key set for the provider that is not selected.
+    if is_placeholder(
+        settings.recs_key_field(settings.recs_provider),
+        settings.recs_key(settings.recs_provider),
+    ):
+        found.append(
+            ConfigWarning(
+                key=settings.recs_key_env(settings.recs_provider),
+                message=(
+                    f"not set while RECS_PROVIDER is {settings.recs_provider!r}; "
+                    "recommendations will answer 503 unless a fallback provider is configured"
+                ),
+                level="warning",
+            )
+        )
+
+    # A fallback named but not usable is worth its own line: the operator has
+    # said what should happen when the free tier runs out, and it will not.
+    fallback = settings.recs_fallback_provider
+    if fallback:
+        if is_placeholder(settings.recs_key_field(fallback), settings.recs_key(fallback)):
+            found.append(
+                ConfigWarning(
+                    key=settings.recs_key_env(fallback),
+                    message=(
+                        f"not set while RECS_FALLBACK_PROVIDER is {fallback!r}; "
+                        "the fallback will be skipped and the page will 502 once the "
+                        "primary provider's daily quota is spent"
+                    ),
+                    level="warning",
+                )
+            )
+        if not settings.recs_fallback_models:
+            found.append(
+                ConfigWarning(
+                    key="RECS_FALLBACK_MODEL",
+                    message=(
+                        f"is empty and {fallback!r} has no default; the fallback will be skipped"
+                    ),
+                    level="warning",
+                )
+            )
+
+    # RECS_MODEL and RECS_PROVIDER are set independently and mean nothing
+    # apart: asking Gemini for ``claude-opus-5`` is a 404 on the first run and
+    # nothing before it. Checked per entry, because both are lists now. A
+    # warning rather than an error because the prefixes are a heuristic — a
+    # provider may ship a name that breaks the pattern — and because being
+    # wrong here must not stop a boot.
+    for label, provider, models in (
+        ("RECS_MODEL", settings.recs_provider, settings.recs_models),
+        ("RECS_FALLBACK_MODEL", fallback, settings.recs_fallback_models),
+    ):
+        prefix = MODEL_PREFIXES.get(provider or "")
+        if not prefix:
+            continue
+        for model in models:
+            if not model.lower().startswith(prefix):
+                found.append(
+                    ConfigWarning(
+                        key=label,
+                        message=(
+                            f"lists {model!r}, which does not look like a {provider!r} "
+                            f"model (expected a name starting {prefix!r}); "
+                            "that entry will fail on its first run"
+                        ),
+                        level="warning",
+                    )
+                )
+
     return found
 
 
+def errors(settings: Settings) -> list[ConfigWarning]:
+    """Only the problems that mean the deployment is broken."""
+    return [warning for warning in warnings(settings) if warning.level == "error"]
+
+
 def count(settings: Settings) -> int:
-    """How many production configuration problems there are. Zero in dev."""
-    return len(warnings(settings))
+    """How many production configuration *errors* there are. Zero in dev.
+
+    Errors only, deliberately: this is the number ``/api/health`` publishes and
+    a deploy smoke test asserts is zero, and a valid deployment without an
+    Anthropic key must be able to reach zero.
+    """
+    return len(errors(settings))
+
+
+#: What a model name is expected to start with, per provider. OpenRouter is
+#: absent on purpose: it serves every vendor, so ``anthropic/claude-opus-5``
+#: and ``google/gemini-3.5-flash`` are both right and there is nothing to
+#: check.
+MODEL_PREFIXES = {"gemini": "gemini", "anthropic": "claude"}
+
+
+#: ``level`` → the logging level it is emitted at.
+_LEVELS: dict[Level, int] = {"error": logging.ERROR, "warning": logging.WARNING}
 
 
 def log_warnings(settings: Settings, *, component: str) -> int:
-    """Log one ERROR per problem and return how many there were.
+    """Log one line per problem and return how many were *errors*.
 
     ``component`` names the process ("api", "worker") so that two containers
-    complaining about the same key are still two distinct lines.
+    complaining about the same key are still two distinct lines. The return
+    value matches :func:`count` — the callers use it as "how bad is this".
     """
     found = warnings(settings)
     for warning in found:
-        log.error(
+        log.log(
+            _LEVELS[warning.level],
             "configuration problem: %s %s",
             warning.key,
             warning.message,
             extra={"component": component, "config_key": warning.key},
         )
-    return len(found)
+    return sum(1 for warning in found if warning.level == "error")
 
 
 __all__ = [
     "LOCAL_HOSTS",
     "PLACEHOLDER_MARKERS",
+    "MODEL_PREFIXES",
     "ConfigWarning",
+    "Level",
     "count",
+    "errors",
     "is_local_origin",
     "is_placeholder",
     "log_warnings",

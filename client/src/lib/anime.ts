@@ -25,6 +25,8 @@ import { errorDetail } from '@/lib/auth'
 // Type-only, and erased under `verbatimModuleSyntax`: `mal.ts` imports values
 // from here, so this must never become a runtime import.
 import type { MalSync } from '@/lib/mal'
+// `recs.ts` only imports types from here, so this direction is the runtime one.
+import { RECS_QUERY_KEY, type RecsPage } from '@/lib/recs'
 import {
   HOME_QUERY_KEY,
   isFollowing,
@@ -247,6 +249,19 @@ export function animeSearchQueryKey(
 
 export function listQueryKey(status?: ListStatus): readonly [string, string] {
   return [LIST_QUERY_KEY, status ?? 'all']
+}
+
+/**
+ * "TV · 28 eps · 2023" — the muted line under a title, wherever a show is
+ * shown as a card. Parts the catalogue does not know are dropped rather than
+ * left blank, so a sparse record gets a short line or none at all.
+ */
+export function summaryLine(anime: AnimeSummary): string {
+  const parts: string[] = []
+  if (anime.format !== null) parts.push(anime.format)
+  if (anime.episodes !== null) parts.push(`${String(anime.episodes)} eps`)
+  if (anime.season_year !== null) parts.push(String(anime.season_year))
+  return parts.join(' · ')
 }
 
 /** Below this a title match is meaningless and the server answers 422. */
@@ -642,6 +657,47 @@ function applyToHome(client: QueryClient, animeId: number, status: ListStatus | 
   })
 }
 
+/**
+ * The recommendations page. Its picks are a stored snapshot the server will
+ * not recompute (spec §4.8 FR-R5), so there is no refetch to bridge to here:
+ * the patch *is* the answer, and without it the add-to-planned select on a
+ * pick would snap back the moment anything re-rendered.
+ */
+function applyToRecs(client: QueryClient, animeId: number, status: ListStatus | null): void {
+  client.setQueriesData<RecsPage>({ queryKey: [RECS_QUERY_KEY] }, (current) => {
+    if (current === undefined || current.run === null) return current
+    const { run } = current
+    const continuations = run.continuations ?? []
+
+    const inPicks = run.picks.some((pick) => pick.anime.id === animeId)
+    const inContinuations = continuations.some((entry) => entry.anime.id === animeId)
+    if (!inPicks && !inContinuations) return current
+
+    return {
+      ...current,
+      run: {
+        ...run,
+        picks: inPicks
+          ? run.picks.map((pick) =>
+              pick.anime.id === animeId ? { ...pick, anime: withStatus(pick.anime, status) } : pick,
+            )
+          : run.picks,
+        // Only rewritten when there is something to rewrite: a run stored
+        // before continuations existed must not grow an empty array here.
+        ...(inContinuations
+          ? {
+              continuations: continuations.map((entry) =>
+                entry.anime.id === animeId
+                  ? { ...entry, anime: withStatus(entry.anime, status) }
+                  : entry,
+              ),
+            }
+          : {}),
+      },
+    }
+  })
+}
+
 /** Patch every cached view of this anime so the UI never shows a stale status. */
 function applyListStatus(client: QueryClient, animeId: number, entry: ListEntry | null): void {
   client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
@@ -669,6 +725,7 @@ function applyListStatus(client: QueryClient, animeId: number, entry: ListEntry 
   // patch below is only good enough to bridge the refetch that follows it.
   applyToSchedule(client, animeId, entry?.status ?? null)
   applyToHome(client, animeId, entry?.status ?? null)
+  applyToRecs(client, animeId, entry?.status ?? null)
 
   void client.invalidateQueries({ queryKey: [LIST_QUERY_KEY] })
   void client.invalidateQueries({ queryKey: [ANIME_QUERY_KEY, 'search'] })

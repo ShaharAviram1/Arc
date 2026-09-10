@@ -91,7 +91,10 @@ directly. Anything with logic goes through a Writer.
 - Secrets only via env; never commit `.env`.
 - Commits: small, one concern each, imperative subject line. Do not commit
   or push unless the user asks.
-- LLM calls: Anthropic Python SDK, model `claude-opus-5`, adaptive thinking,
+- LLM calls go through the provider switch in `arc/services/recs` (`RECS_PROVIDER`:
+  `gemini` ships by default on the free AI Studio tier via its OpenAI-compatible
+  endpoint; `openrouter` and `anthropic` are selectable). The Anthropic backend
+  uses the Anthropic Python SDK, model `claude-opus-5`, adaptive thinking,
   structured outputs via `output_config.format`, streaming, server-side
   fallbacks enabled, `stop_reason == "refusal"` handled. Load the
   `claude-api` skill before writing or changing any such call.

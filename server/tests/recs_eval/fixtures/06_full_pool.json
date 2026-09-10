@@ -1,0 +1,947 @@
+{
+  "name": "full_pool",
+  "prompt": "something contemplative, and not too long",
+  "list": [
+    {
+      "anime_id": 1,
+      "title": "Mushishi",
+      "genres": [
+        "Adventure",
+        "Mystery",
+        "Supernatural"
+      ],
+      "status": "completed",
+      "score": 10,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 2,
+      "title": "Monster",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Thriller"
+      ],
+      "status": "completed",
+      "score": 9,
+      "progress": 74,
+      "episodes": 74
+    },
+    {
+      "anime_id": 3,
+      "title": "Cowboy Bebop",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Sci-Fi"
+      ],
+      "status": "completed",
+      "score": 9,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 4,
+      "title": "Nichijou",
+      "genres": [
+        "Comedy",
+        "Slice of Life"
+      ],
+      "status": "completed",
+      "score": 7,
+      "progress": 26,
+      "episodes": 26
+    },
+    {
+      "anime_id": 5,
+      "title": "Steins;Gate",
+      "genres": [
+        "Drama",
+        "Sci-Fi",
+        "Thriller"
+      ],
+      "status": "completed",
+      "score": 8,
+      "progress": 24,
+      "episodes": 24
+    },
+    {
+      "anime_id": 6,
+      "title": "Dandadan",
+      "genres": [
+        "Action",
+        "Comedy",
+        "Supernatural"
+      ],
+      "status": "watching",
+      "score": null,
+      "progress": 7,
+      "episodes": 12
+    },
+    {
+      "anime_id": 7,
+      "title": "Shingeki no Kyojin",
+      "genres": [
+        "Action",
+        "Drama",
+        "Fantasy"
+      ],
+      "status": "dropped",
+      "score": 5,
+      "progress": 3,
+      "episodes": 25
+    },
+    {
+      "anime_id": 8,
+      "title": "Bleach",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Supernatural"
+      ],
+      "status": "dropped",
+      "score": 4,
+      "progress": 60,
+      "episodes": 366
+    },
+    {
+      "anime_id": 9,
+      "title": "Serial Experiments Lain",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Sci-Fi"
+      ],
+      "status": "planned",
+      "score": null,
+      "progress": 0,
+      "episodes": 13
+    }
+  ],
+  "pool": [
+    {
+      "anime_id": 201,
+      "anilist_id": 5201,
+      "title": "Kusuriya no Hitorigoto",
+      "genres": [
+        "Drama",
+        "Mystery"
+      ],
+      "tags": [
+        "Historical",
+        "Female Protagonist",
+        "Politics"
+      ],
+      "synopsis": "A poisons-obsessed apothecary is sold into the imperial rear palace and starts quietly solving the deaths nobody wants explained.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 24,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 202,
+      "anilist_id": 5202,
+      "title": "Natsume Yuujinchou",
+      "genres": [
+        "Drama",
+        "Supernatural",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Episodic",
+        "Iyashikei",
+        "Youkai"
+      ],
+      "synopsis": "A boy who can see spirits inherits a book of their names and spends his afternoons giving them back, one quiet encounter at a time.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama, Supernatural"
+    },
+    {
+      "anime_id": 203,
+      "anilist_id": 5203,
+      "title": "Houseki no Kuni",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "CGI",
+        "Philosophy",
+        "Time Skip"
+      ],
+      "synopsis": "Immortal gem-people are hunted for their bodies, and the most brittle of them keeps losing pieces of who she was.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 204,
+      "anilist_id": 5204,
+      "title": "Sonny Boy",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Surreal",
+        "Philosophy",
+        "Ensemble"
+      ],
+      "synopsis": "A classroom drifts out of the world and the students discover rules, powers and each other in a sequence of empty universes.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 205,
+      "anilist_id": 5205,
+      "title": "Odd Taxi",
+      "genres": [
+        "Drama",
+        "Mystery"
+      ],
+      "tags": [
+        "Talking Animals",
+        "Crime",
+        "Ensemble"
+      ],
+      "synopsis": "A walrus drives a taxi through a city where a girl has gone missing, and every fare he picks up is one thread of the same knot.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 206,
+      "anilist_id": 5206,
+      "title": "Kaiba",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Memory",
+        "Surreal",
+        "Dystopian"
+      ],
+      "synopsis": "In a world where memories are stored, traded and stolen, a man with a hole in his chest goes looking for the one he lost.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 207,
+      "anilist_id": 5207,
+      "title": "Shin Sekai Yori",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Dystopian",
+        "Time Skip",
+        "Psychological"
+      ],
+      "synopsis": "A thousand years from now, children with psychic powers grow up inside a village that is very careful about which of them are allowed to grow up at all.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 25,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 208,
+      "anilist_id": 5208,
+      "title": "Ping Pong the Animation",
+      "genres": [
+        "Drama",
+        "Sports"
+      ],
+      "tags": [
+        "Coming of Age",
+        "Distinct Art"
+      ],
+      "synopsis": "Two friends who have played table tennis together since childhood find out what each of them is actually for.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama, Sports"
+    },
+    {
+      "anime_id": 209,
+      "anilist_id": 5209,
+      "title": "Planetes",
+      "genres": [
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Space",
+        "Workplace",
+        "Realistic"
+      ],
+      "synopsis": "The crew that clears orbital debris get the jobs nobody photographs, and the show takes their careers as seriously as its physics.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 26,
+      "why": "shares your genres: Drama, Sci-Fi"
+    },
+    {
+      "anime_id": 210,
+      "anilist_id": 5210,
+      "title": "Kino no Tabi",
+      "genres": [
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Episodic",
+        "Travel",
+        "Philosophy"
+      ],
+      "synopsis": "A traveller and a talking motorcycle stay three days in each country they find, long enough to understand its one strange rule.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 211,
+      "anilist_id": 5211,
+      "title": "Vinland Saga",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Historical",
+        "Revenge"
+      ],
+      "synopsis": "A boy joins the band of mercenaries who killed his father, and waits.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 24,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 212,
+      "anilist_id": 5212,
+      "title": "Golden Kamuy",
+      "genres": [
+        "Action",
+        "Adventure",
+        "Drama"
+      ],
+      "tags": [
+        "Historical",
+        "Ensemble",
+        "Survival"
+      ],
+      "synopsis": "A war veteran and an Ainu girl hunt a gold cache mapped across the tattooed skins of escaped convicts.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 213,
+      "anilist_id": 5213,
+      "title": "Zankyou no Terror",
+      "genres": [
+        "Drama",
+        "Mystery",
+        "Thriller"
+      ],
+      "tags": [
+        "Terrorism",
+        "Police",
+        "Short"
+      ],
+      "synopsis": "Two teenagers bomb Tokyo landmarks and set riddles for the detective chasing them, and the reason why is worse than the bombings.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 214,
+      "anilist_id": 5214,
+      "title": "Aria the Animation",
+      "genres": [
+        "Fantasy",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Iyashikei",
+        "Water",
+        "Gentle"
+      ],
+      "synopsis": "An apprentice gondolier learns her trade on a terraformed Mars where nothing much happens and all of it matters.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Fantasy, Slice of Life"
+    },
+    {
+      "anime_id": 215,
+      "anilist_id": 5215,
+      "title": "Mononoke",
+      "genres": [
+        "Fantasy",
+        "Horror",
+        "Mystery"
+      ],
+      "tags": [
+        "Episodic",
+        "Distinct Art",
+        "Youkai"
+      ],
+      "synopsis": "A medicine seller cannot kill a spirit until he knows its form, its truth and its reason, and the asking is the story.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Fantasy, Mystery"
+    },
+    {
+      "anime_id": 216,
+      "anilist_id": 5216,
+      "title": "Dungeon Meshi",
+      "genres": [
+        "Adventure",
+        "Comedy",
+        "Fantasy"
+      ],
+      "tags": [
+        "Cooking",
+        "Party Dynamics"
+      ],
+      "synopsis": "A party too poor to restock eats its way down a dungeon, and the cooking turns out to be the ecology lesson.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 24,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 217,
+      "anilist_id": 5217,
+      "title": "Sousou no Frieren",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Elf",
+        "Time Skip",
+        "Slow Burn"
+      ],
+      "synopsis": "The elf who helped kill the demon king outlives the party that did it, and sets out to learn what her friends were.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 28,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 218,
+      "anilist_id": 5218,
+      "title": "Kaijuu 8-gou Season 2",
+      "genres": [
+        "Action",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Monsters",
+        "Adult Protagonist"
+      ],
+      "synopsis": "The clean-up crew turned defence force goes back to work, with more paperwork and larger monsters.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 12,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 219,
+      "anilist_id": 5219,
+      "title": "Chainsaw Man Season 2",
+      "genres": [
+        "Action",
+        "Horror"
+      ],
+      "tags": [
+        "Gore",
+        "Devils"
+      ],
+      "synopsis": "The devil hunters come back, louder.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 12,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 220,
+      "anilist_id": 5220,
+      "title": "Boku no Hero Academia Season 8",
+      "genres": [
+        "Action",
+        "Comedy"
+      ],
+      "tags": [
+        "School",
+        "Superhero"
+      ],
+      "synopsis": "The hero course returns for another year of training arcs and tournament brackets.",
+      "season": "FALL",
+      "season_year": 2026,
+      "format": "TV",
+      "episodes": 25,
+      "why": "airing this season (Fall 2026)"
+    },
+    {
+      "anime_id": 221,
+      "anilist_id": 5221,
+      "title": "Bocchi the Rock",
+      "genres": [
+        "Comedy",
+        "Music",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Band",
+        "Anxiety"
+      ],
+      "synopsis": "A guitarist who cannot speak to people joins a band, and the show animates her panic rather than describing it.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy, Slice of Life"
+    },
+    {
+      "anime_id": 222,
+      "anilist_id": 5222,
+      "title": "Shouwa Genroku Rakugo Shinjuu",
+      "genres": [
+        "Drama"
+      ],
+      "tags": [
+        "Historical",
+        "Theatre",
+        "Adult Cast"
+      ],
+      "synopsis": "Two rakugo apprentices spend their lives arguing, through the art itself, about what it is for.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama"
+    },
+    {
+      "anime_id": 223,
+      "anilist_id": 5223,
+      "title": "Made in Abyss",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Descent",
+        "Body Horror"
+      ],
+      "synopsis": "Children climb down a hole that charges an escalating toll for every metre back up.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 224,
+      "anilist_id": 5224,
+      "title": "Yuru Camp",
+      "genres": [
+        "Slice of Life"
+      ],
+      "tags": [
+        "Camping",
+        "Iyashikei"
+      ],
+      "synopsis": "Girls camp in the cold months, and the show is mostly about equipment and quiet.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Slice of Life"
+    },
+    {
+      "anime_id": 225,
+      "anilist_id": 5225,
+      "title": "Hyouka",
+      "genres": [
+        "Mystery",
+        "Slice of Life"
+      ],
+      "tags": [
+        "School",
+        "Small Stakes"
+      ],
+      "synopsis": "A boy who conserves energy is talked into a literature club and into caring about very small mysteries.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 22,
+      "why": "shares your genres: Mystery, Slice of Life"
+    },
+    {
+      "anime_id": 226,
+      "anilist_id": 5226,
+      "title": "Uchouten Kazoku",
+      "genres": [
+        "Comedy",
+        "Fantasy",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Tanuki",
+        "Family",
+        "Kyoto"
+      ],
+      "synopsis": "A family of shapeshifting tanuki in Kyoto keep failing at dignity and succeeding at being a family.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Fantasy, Slice of Life"
+    },
+    {
+      "anime_id": 227,
+      "anilist_id": 5227,
+      "title": "Barakamon",
+      "genres": [
+        "Comedy",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Rural",
+        "Mentor"
+      ],
+      "synopsis": "A calligrapher exiled to an island for punching a critic is slowly repaired by the children who will not leave him alone.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy, Slice of Life"
+    },
+    {
+      "anime_id": 228,
+      "anilist_id": 5228,
+      "title": "Shouwa no Kuni",
+      "genres": [
+        "Drama",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Historical",
+        "Family"
+      ],
+      "synopsis": "A postwar family in a small town, told in the ordinary weeks between the events a history book would keep.",
+      "season": "WINTER",
+      "season_year": 2027,
+      "format": "TV",
+      "episodes": 12,
+      "why": "starts next season (Winter 2027)"
+    },
+    {
+      "anime_id": 229,
+      "anilist_id": 5229,
+      "title": "Kaguya-sama wa Kokurasetai",
+      "genres": [
+        "Comedy",
+        "Romance"
+      ],
+      "tags": [
+        "School",
+        "Deadpan"
+      ],
+      "synopsis": "Two student council officers each refuse to confess first, and treat that as a military problem.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Comedy"
+    },
+    {
+      "anime_id": 230,
+      "anilist_id": 5230,
+      "title": "Mushishi Zoku Shou",
+      "genres": [
+        "Adventure",
+        "Mystery",
+        "Supernatural"
+      ],
+      "tags": [
+        "Episodic",
+        "Iyashikei"
+      ],
+      "synopsis": "More of Ginko's walking, and the same refusal to make the mushi into villains.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 10,
+      "why": "shares your genres: Adventure, Supernatural"
+    },
+    {
+      "anime_id": 231,
+      "anilist_id": 5231,
+      "title": "Tatami Galaxy",
+      "genres": [
+        "Comedy",
+        "Drama",
+        "Mystery"
+      ],
+      "tags": [
+        "Time Loop",
+        "Monologue",
+        "Kyoto"
+      ],
+      "synopsis": "A student relives two years of university choosing differently each time and arriving at the same regret.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama, Mystery"
+    },
+    {
+      "anime_id": 232,
+      "anilist_id": 5232,
+      "title": "Ginga Eiyuu Densetsu",
+      "genres": [
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Space Opera",
+        "Politics",
+        "Long"
+      ],
+      "synopsis": "Two brilliant commanders on opposite sides argue, through a war, about whether democracy or a good autocrat is worse.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 110,
+      "why": "shares your genres: Drama, Sci-Fi"
+    },
+    {
+      "anime_id": 233,
+      "anilist_id": 5233,
+      "title": "Sakamichi no Apollon",
+      "genres": [
+        "Drama",
+        "Music"
+      ],
+      "tags": [
+        "Jazz",
+        "Friendship",
+        "1960s"
+      ],
+      "synopsis": "A transfer student is dragged into a jazz basement and into the first friendship he has not calculated.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 12,
+      "why": "shares your genres: Drama"
+    },
+    {
+      "anime_id": 234,
+      "anilist_id": 5234,
+      "title": "Mahoutsukai no Yome",
+      "genres": [
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Folklore",
+        "Slow Burn"
+      ],
+      "synopsis": "A girl with no future left is bought at auction by an inhuman magus who says he intends to make her his bride.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 24,
+      "why": "shares your genres: Drama, Fantasy"
+    },
+    {
+      "anime_id": 235,
+      "anilist_id": 5235,
+      "title": "Ousama Ranking",
+      "genres": [
+        "Adventure",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Underdog",
+        "Friendship"
+      ],
+      "synopsis": "A deaf, weak prince nobody expects anything of sets out to be a better king than the ones who dismissed him.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 23,
+      "why": "shares your genres: Adventure, Drama"
+    },
+    {
+      "anime_id": 236,
+      "anilist_id": 5236,
+      "title": "Heike Monogatari",
+      "genres": [
+        "Drama",
+        "Historical"
+      ],
+      "tags": [
+        "Tragedy",
+        "Court",
+        "Foreknowledge"
+      ],
+      "synopsis": "A girl who can see the future watches a clan she has come to love walk into the fall she cannot stop.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama"
+    },
+    {
+      "anime_id": 237,
+      "anilist_id": 5237,
+      "title": "Sarazanmai",
+      "genres": [
+        "Comedy",
+        "Drama",
+        "Fantasy"
+      ],
+      "tags": [
+        "Surreal",
+        "Musical",
+        "Secrets"
+      ],
+      "synopsis": "Three boys are turned into kappa and made to extract each other's secrets, which is exactly as invasive as it sounds.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 11,
+      "why": "shares your genres: Drama, Fantasy"
+    },
+    {
+      "anime_id": 238,
+      "anilist_id": 5238,
+      "title": "Sonny Boy: Nagareboshi",
+      "genres": [
+        "Drama",
+        "Sci-Fi"
+      ],
+      "tags": [
+        "Short",
+        "Surreal"
+      ],
+      "synopsis": "A companion piece that takes one of the drifting worlds and stays in it.",
+      "season": "WINTER",
+      "season_year": 2027,
+      "format": "TV",
+      "episodes": 6,
+      "why": "starts next season (Winter 2027)"
+    },
+    {
+      "anime_id": 239,
+      "anilist_id": 5239,
+      "title": "Kono Oto Tomare",
+      "genres": [
+        "Drama",
+        "Music"
+      ],
+      "tags": [
+        "Club",
+        "Ensemble",
+        "Koto"
+      ],
+      "synopsis": "A koto club nobody wanted becomes the only place several difficult teenagers are tolerated.",
+      "season": null,
+      "season_year": null,
+      "format": "TV",
+      "episodes": 13,
+      "why": "shares your genres: Drama"
+    },
+    {
+      "anime_id": 240,
+      "anilist_id": 5240,
+      "title": "Shinsekai Diner",
+      "genres": [
+        "Fantasy",
+        "Slice of Life"
+      ],
+      "tags": [
+        "Food",
+        "Episodic",
+        "Portal"
+      ],
+      "synopsis": "A diner with a door into another world serves whoever comes through it, one dish and one problem per episode.",
+      "season": "WINTER",
+      "season_year": 2027,
+      "format": "TV",
+      "episodes": 12,
+      "why": "starts next season (Winter 2027)"
+    }
+  ],
+  "answer": {
+    "picks": [
+      {
+        "anime_id": 202,
+        "title": "Natsume Yuujinchou",
+        "case": "You gave Mushishi a 10, and this is the other great episodic series about a quiet person walking into somebody else's small supernatural problem and leaving it a little better. It asks for thirteen episodes and no commitment beyond one at a time, which answers the not-too-long half of what you asked for. Where Mushishi keeps Ginko at arm's length, Natsume lets its lead have friends, so it is the warmer of the two."
+      },
+      {
+        "anime_id": 205,
+        "title": "Odd Taxi",
+        "case": "Monster is a 9 on your list, and this is the same pleasure — an ensemble of apparently unrelated people whose connections tighten every episode — compressed into thirteen. Almost all of it is conversations in a car, so the contemplative pace you asked for is structural rather than decorative. It also has the clean, deliberate ending that Bleach never got round to."
+      },
+      {
+        "anime_id": 210,
+        "title": "Kino no Tabi",
+        "case": "Structurally this is the closest thing in the pool to Mushishi: a traveller arrives, observes one self-contained strangeness, and declines to fix it. It is colder than Natsume Yuujinchou and considerably less consoling, but it shares the refusal to hurry that made Mushishi work for you. Thirteen self-contained episodes."
+      },
+      {
+        "anime_id": 204,
+        "title": "Sonny Boy",
+        "case": "Given Steins;Gate at an 8, you can sit with a series that withholds its rules for a long time. Sonny Boy is the most formally adventurous thing here and it uses that freedom to ask what a group of teenagers owes each other, in twelve episodes and without explaining itself. If Cowboy Bebop earned its 9 partly on atmosphere, this trades on the same account."
+      }
+    ]
+  }
+}

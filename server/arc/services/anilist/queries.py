@@ -20,6 +20,10 @@ for the daily pre-cache (FR-C7).
 from __future__ import annotations
 
 #: Fields shared by the search results, the season list and the by-id queries.
+#: ``popularity`` (list-member count) and ``averageScore`` (0–100) are in the
+#: *summary* fragment on purpose: the recommendation pool ranks a whole season
+#: by them (§5.6), and the season sweep only ever fetches summaries — asking
+#: for them per title later would be forty round trips for two integers.
 #: ``coverImage`` asks for ``extraLarge`` first: AniList's ``large`` is 230 px
 #: wide, which is visibly soft on a show page, and ``extraLarge`` is what every
 #: client here renders.
@@ -34,6 +38,8 @@ fragment ArcSummary on Media {
   season
   seasonYear
   coverImage { extraLarge large }
+  popularity
+  averageScore
 }
 """
 

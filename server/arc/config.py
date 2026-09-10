@@ -13,10 +13,48 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Env = Literal["dev", "test", "prod"]
+
+#: Which backend answers the recommendations page (§5.6). ``gemini`` and
+#: ``openrouter`` are both OpenAI-compatible and share one implementation;
+#: ``anthropic`` is the native SDK.
+RecsProvider = Literal["gemini", "openrouter", "anthropic"]
+
+#: The OpenAI-compatible endpoint each provider is reached on when its
+#: ``*_BASE_URL`` override is unset. Anthropic is absent because it does not go
+#: through that client at all.
+PROVIDER_BASE_URLS: dict[str, str] = {
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+#: ``provider -> the settings field its key lives in``. One place that knows
+#: the mapping, so the factory, the config check and the operator-facing
+#: message cannot drift apart.
+PROVIDER_KEY_FIELDS: dict[str, str] = {
+    "gemini": "gemini_api_key",
+    "openrouter": "openrouter_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+#: What a fallback provider gets when one is named with no model. Only
+#: OpenRouter has an obvious answer. ``openai/gpt-5-mini`` on the owner's
+#: measurement: it gave the best picks of three candidates compared against a
+#: real watch list, and it is cheap enough to be a fallback rather than an
+#: event.
+FALLBACK_DEFAULT_MODELS: dict[str, str] = {"openrouter": "openai/gpt-5-mini"}
+
+
+def split_models(raw: str) -> list[str]:
+    """A comma-separated model list, trimmed, in order, without blanks.
+
+    Whitespace is tolerated everywhere because this is an environment variable
+    a person edits by hand: ``a, b ,c`` and ``a,b,c`` mean the same thing.
+    """
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 class ConfigurationError(RuntimeError):
@@ -109,7 +147,64 @@ class Settings(BaseSettings):
     #: short enough that a blip is over in five minutes.
     catalog_breaker_seconds: float = Field(default=300.0, ge=0)
 
+    # --- Recommendations: the model chain (M12, §5.6) --------------------
+    #
+    # Not one model but a *chain*, because production runs on Gemini's free
+    # tier and each model there allows only about twenty requests a day for
+    # the whole deployment. So the primary provider is tried across several
+    # models in turn, and when the day's quota is gone everywhere a paid
+    # fallback provider takes over. Every key is optional; a deployment that
+    # wants no recommendations sets none and the page says so.
+
+    #: The primary provider, and the models to try on it **in order**, as a
+    #: comma-separated list (read through :attr:`recs_models`). Each name must
+    #: be one that provider actually serves; a mismatch is a startup warning.
+    #:
+    #: The default order is deliberate. ``gemini-3.5-flash`` leads on
+    #: measurement rather than novelty: 3.7 and 3.8 were both under "high
+    #: demand" when this was chosen — early-terminated streams, a 503, one
+    #: answer that took 47 s — while 3.5 answered the full forty-candidate
+    #: prompt in about four seconds, twice. 3.6 and 2.5 follow as fresh daily
+    #: quotas rather than as better models.
+    recs_provider: RecsProvider = "gemini"
+    recs_model: str = "gemini-3.5-flash,gemini-3.6-flash,gemini-2.5-flash"
+
+    #: Where to go when every primary model is spent or unreachable. Empty
+    #: means "nowhere": the chain ends, and the page answers 502 until the
+    #: quota resets. ``openrouter`` is the intended value — it is paid, so it
+    #: is the thing that keeps working on the day the free tier does not.
+    recs_fallback_provider: RecsProvider | None = None
+    #: The fallback's models, same comma-separated form
+    #: (:attr:`recs_fallback_models`). Blank with an ``openrouter`` fallback
+    #: means the documented default rather than nothing, because a fallback
+    #: provider named without a model is almost certainly a half-finished
+    #: edit rather than an intention.
+    recs_fallback_model: str = ""
+
+    @field_validator("recs_fallback_provider", mode="before")
+    @classmethod
+    def _blank_fallback_is_none(cls, value: object) -> object:
+        """``RECS_FALLBACK_PROVIDER=`` means "no fallback", not a broken boot.
+
+        Blanking a variable is how an operator turns something off, and
+        pydantic would otherwise reject the empty string against the Literal.
+        """
+        return None if isinstance(value, str) and not value.strip() else value
+
+    #: One key per provider, all optional. Per-provider rather than one shared
+    #: ``LLM_API_KEY`` because the chain can hold two providers at once: the
+    #: whole point is that Gemini and OpenRouter are configured *together*.
+    gemini_api_key: SecretStr | None = None
+    openrouter_api_key: SecretStr | None = None
+
+    #: Endpoint overrides, for a proxy, a regional endpoint, or a test's mock
+    #: transport. Unset means the provider's documented default.
+    gemini_base_url: str | None = None
+    openrouter_base_url: str | None = None
+
     # --- Anthropic -------------------------------------------------------
+    #: Used by the ``anthropic`` provider (primary or fallback) and by M13's
+    #: match suggestions. Unset is fine on a Gemini deployment.
     anthropic_api_key: SecretStr | None = None
 
     # --- Nyaa (M6) -------------------------------------------------------
@@ -270,6 +365,54 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def recs_models(self) -> list[str]:
+        """The primary provider's models, in the order they are tried."""
+        return split_models(self.recs_model)
+
+    @property
+    def recs_fallback_models(self) -> list[str]:
+        """The fallback provider's models, in order. Empty when there is none.
+
+        A named fallback provider with no model falls back to the documented
+        default where one exists (:data:`FALLBACK_DEFAULT_MODELS`), because
+        naming a provider and no model is far more likely to be a half-finished
+        edit than a deliberate "configure it but never use it".
+        """
+        if self.recs_fallback_provider is None:
+            return []
+        chosen = split_models(self.recs_fallback_model)
+        if chosen:
+            return chosen
+        return split_models(FALLBACK_DEFAULT_MODELS.get(self.recs_fallback_provider, ""))
+
+    def recs_key_field(self, provider: str) -> str:
+        """The settings field ``provider``'s key lives in."""
+        return PROVIDER_KEY_FIELDS[provider]
+
+    def recs_key_env(self, provider: str) -> str:
+        """The environment variable an operator would set for ``provider``."""
+        return PROVIDER_KEY_FIELDS[provider].upper()
+
+    def recs_key(self, provider: str) -> str:
+        """``provider``'s key as a plain string, or ``""`` when it is unset."""
+        raw = getattr(self, PROVIDER_KEY_FIELDS[provider], None)
+        if raw is None:
+            return ""
+        getter = getattr(raw, "get_secret_value", None)
+        return str(getter()) if callable(getter) else str(raw)
+
+    def recs_base_url(self, provider: str) -> str | None:
+        """``provider``'s endpoint, or ``None`` for anthropic.
+
+        The override wins when set; otherwise the provider's documented
+        default. Anthropic never uses this — it has its own client.
+        """
+        if provider == "anthropic":
+            return None
+        override = getattr(self, f"{provider}_base_url", None)
+        return str(override) if override else PROVIDER_BASE_URLS[provider]
 
     @property
     def extra_origins(self) -> tuple[str, ...]:
