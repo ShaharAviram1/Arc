@@ -1,18 +1,23 @@
-"""Putting work on the queue.
+"""Putting work on the queue, and the two buttons above it.
 
 Enqueuing is a plain insert into ``jobs``; the worker finds the row on its
 next poll. :func:`enqueue` *flushes* but does not commit, so that a job can
 be enqueued in the same transaction as the change that caused it — a want is
 written and its ``search_release`` job appears together, or neither does.
 The caller commits.
+
+:func:`retry_job` and :func:`cancel_job` are the admin queue view's two
+controls (FR-D3). Both are state transitions on a row rather than anything the
+worker has to be told about, which is why they live here and not in the runner:
+the worker's next poll picks up whatever the table now says.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import DEFAULT_MAX_ATTEMPTS, DEFAULT_PRIORITY, Job, JobStatus
@@ -25,6 +30,36 @@ ACTIVE_STATUSES = (JobStatus.PENDING, JobStatus.RUNNING)
 #: would mean a migration and an index for something a JSONB expression index
 #: can do later if the queue ever gets big enough to need one.
 DEDUPE_FIELD = "dedupe_key"
+
+
+#: Statuses a job may be sent back to the queue from. ``cancelled`` is in the
+#: list for the same reason ``failed`` is: both mean the row has stopped and
+#: nothing is holding it, so "actually, run it" is a decision an admin is
+#: allowed to change their mind about.
+RETRYABLE: Final[tuple[JobStatus, ...]] = (JobStatus.FAILED, JobStatus.CANCELLED)
+
+#: And the one status a job may be cancelled from. Not ``running``: the handler
+#: is executing inside a worker right now, and there is no safe way to stop it
+#: from a different process — an ffmpeg encode or a torrent add would be left
+#: half-done with a row saying it never happened.
+CANCELLABLE: Final[tuple[JobStatus, ...]] = (JobStatus.PENDING,)
+
+NOT_RETRYABLE = (
+    "a {status} job cannot be retried; only a failed or cancelled one can. "
+    "Queue the work again instead."
+)
+NOT_CANCELLABLE = "a {status} job cannot be cancelled; only a pending one can."
+RUNNING_NOT_CANCELLABLE = (
+    "this job is running: a worker is executing it right now, and Arc cannot "
+    "stop it safely mid-flight. Wait for it to finish or fail."
+)
+
+
+class JobTransition(RuntimeError):
+    """A job is not in a status the requested transition is allowed from.
+
+    Carries the sentence a person should read; the router turns it into a 409.
+    """
 
 
 async def find_active(
@@ -113,4 +148,105 @@ async def enqueue(
     return job
 
 
-__all__ = ["ACTIVE_STATUSES", "DEDUPE_FIELD", "enqueue", "find_active"]
+async def _guarded(
+    session: AsyncSession, job: Job, allowed: tuple[JobStatus, ...], values: dict[str, Any]
+) -> bool:
+    """Apply ``values`` to ``job`` only while its status is still in ``allowed``.
+
+    The status goes in the ``WHERE`` clause rather than being read into Python
+    first, because between a ``SELECT`` and an ``UPDATE`` a worker can claim the
+    very row being cancelled: the read says ``pending``, the write lands on a
+    job that is now ``running``, and Arc has marked work cancelled that is
+    executing. Postgres closes that on its own — the ``UPDATE`` takes a row
+    lock, so it either wins (and the claim's ``FOR UPDATE SKIP LOCKED`` steps
+    over the row) or waits for the claim to commit and then re-checks the
+    qualification against the new status and matches nothing.
+
+    ``job`` is refreshed either way, so the caller's error message names the
+    status the row *actually* holds rather than the one it held a moment ago.
+    Returns whether the update applied.
+    """
+    result = cast(
+        CursorResult[Any],
+        await session.execute(
+            update(Job)
+            .where(Job.id == job.id, Job.status.in_(allowed))
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    await session.refresh(job)
+    return bool(result.rowcount)
+
+
+async def retry_job(session: AsyncSession, job: Job) -> Job:
+    """Put a stopped job back on the queue, due now (flushed, not committed).
+
+    ``attempts`` goes back to zero, so a job that exhausted its budget gets a
+    full one rather than failing again on the first exception; ``last_error``
+    is **kept**, because it is the reason somebody is pressing retry and
+    clearing it would erase the diagnosis the moment the fix is tried. The
+    lock and the finish timestamps are cleared: the row is pending, and a
+    pending row that claims to have started an hour ago is a lie the queue view
+    would show.
+
+    Raises :class:`JobTransition` for a job that is not failed or cancelled.
+    """
+    applied = await _guarded(
+        session,
+        job,
+        RETRYABLE,
+        {
+            "status": JobStatus.PENDING,
+            "attempts": 0,
+            "run_after": datetime.now(UTC),
+            "locked_by": None,
+            "locked_at": None,
+            "started_at": None,
+            "finished_at": None,
+        },
+    )
+    if not applied:
+        raise JobTransition(NOT_RETRYABLE.format(status=job.status.value))
+    return job
+
+
+async def cancel_job(session: AsyncSession, job: Job) -> Job:
+    """Take a pending job off the queue (flushed, not committed).
+
+    ``cancelled`` is a terminal status the claim never selects, so this is the
+    whole of the operation — there is nobody to notify.
+
+    Raises :class:`JobTransition` for anything that is not pending, with a
+    different sentence for ``running`` because that is the case an admin will
+    actually hit and "only a pending one can" does not explain why. That case
+    includes losing the race to a worker by a millisecond, which is why the
+    status is re-read from the row rather than trusted from before the write.
+    """
+    applied = await _guarded(
+        session,
+        job,
+        CANCELLABLE,
+        {"status": JobStatus.CANCELLED, "finished_at": datetime.now(UTC)},
+    )
+    if not applied:
+        if job.status is JobStatus.RUNNING:
+            raise JobTransition(RUNNING_NOT_CANCELLABLE)
+        raise JobTransition(NOT_CANCELLABLE.format(status=job.status.value))
+    return job
+
+
+__all__ = [
+    "ACTIVE_STATUSES",
+    "CANCELLABLE",
+    "DEDUPE_FIELD",
+    "NOT_CANCELLABLE",
+    "NOT_RETRYABLE",
+    "RETRYABLE",
+    "RUNNING_NOT_CANCELLABLE",
+    "JobTransition",
+    "cancel_job",
+    "enqueue",
+    "find_active",
+    "retry_job",
+]

@@ -54,10 +54,15 @@ PAUSED_KEY: Final[str] = "acquisition_paused"
 #: exists to forbid ("Nothing outside this window is fetched").
 MAX_LOOK_AHEAD: Final[int] = 10
 
+#: What every per-show override key starts with. Named so that the admin panel
+#: can *list* the overrides (:func:`arc.services.settings.read_overrides`)
+#: without a second copy of the string to keep in step with this one.
+OVERRIDE_PREFIX: Final[str] = "override:anime:"
+
 
 def override_key(anime_id: int) -> str:
     """The ``settings`` key holding one show's rule override."""
-    return f"override:anime:{anime_id}"
+    return f"{OVERRIDE_PREFIX}{anime_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,19 +155,31 @@ async def is_paused(session: AsyncSession) -> bool:
     return stored
 
 
-async def set_paused(session: AsyncSession, paused: bool) -> bool:
+async def set_paused(session: AsyncSession, paused: bool, *, admin_id: int | None = None) -> bool:
     """Set the kill switch, inserting the row if it is not there yet.
 
     Flushed, not committed: the caller's transaction is what makes "resume, and
     queue the recompute that acts on it" one act or none.
+
+    The **only** writer of this key. The pause/resume buttons and the rules
+    editor (:func:`arc.services.settings.write_values`) both come through here,
+    so the two cannot drift into writing it differently — and both leave the
+    same audit line, with the previous value and the admin who changed it, in
+    the shape :func:`~arc.services.settings.write_values` uses for every other
+    rule. This one decides whether Arc downloads anything at all, so "who
+    stopped acquisition, and when?" has to be answerable from the log.
     """
     row = await session.get(Setting, PAUSED_KEY)
+    old = row.value if row is not None else DEFAULT_SETTINGS[PAUSED_KEY]
     if row is None:
         session.add(Setting(key=PAUSED_KEY, value=paused))
     else:
         row.value = paused
     await session.flush()
-    log.info("acquisition pause set", extra={"paused": paused})
+    log.info(
+        "setting changed",
+        extra={"setting": PAUSED_KEY, "old": old, "new": paused, "admin_id": admin_id},
+    )
     return paused
 
 
@@ -216,6 +233,7 @@ async def load_rules(session: AsyncSession, anime_id: int | None = None) -> Rule
 __all__ = [
     "LOOK_AHEAD_KEY",
     "MAX_LOOK_AHEAD",
+    "OVERRIDE_PREFIX",
     "PAUSED_KEY",
     "RULE_KEYS",
     "Rules",

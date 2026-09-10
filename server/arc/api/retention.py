@@ -24,7 +24,10 @@ is not an error there either.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -34,7 +37,7 @@ from arc.api.jobs import JobOut
 from arc.models import Anime, Episode, EpisodeState, Job
 from arc.services.catalog import preferred_title
 from arc.services.retention.names import enqueue_delete_files, enqueue_retention_sweep
-from arc.services.retention.sweep import PROTECTED_STATES, candidates
+from arc.services.retention.sweep import PROTECTED_STATES, candidates, retained_usage
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +125,76 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
     )
 
 
+class DiskUsageOut(BaseModel):
+    """``shutil.disk_usage`` on ``DATA_DIR``, in bytes."""
+
+    total: int
+    used: int
+    free: int
+
+
+class RetainedOut(BaseModel):
+    """What Arc is holding, split into the two things it holds."""
+
+    #: Torrent payloads, from ``media_files.size``.
+    sources: int
+    #: HLS output, measured on disk.
+    renditions: int
+    total: int
+
+
+class DiskOut(BaseModel):
+    """``GET /api/retention/disk`` (FR-T4, FR-D3).
+
+    Two different measurements side by side, deliberately. ``data_dir`` is the
+    *filesystem* — what the host says is left, including everything Arc did not
+    put there — and ``retained`` is Arc's own share of it. The gap between them
+    is the answer to "I deleted 40 GB and the disk is still full".
+    """
+
+    data_dir: DiskUsageOut
+    retained: RetainedOut
+    episodes_retained: int
+
+
+def _disk_usage(path: Path) -> DiskUsageOut:
+    """Filesystem figures for ``path``, or for the nearest parent that exists.
+
+    ``DATA_DIR`` may not have been created yet on a fresh install, and a GET
+    is the wrong place to create it. Walking up finds the filesystem it will
+    be created on, which is the number the admin is actually asking for; if
+    even the root is unreadable the figures are zeros rather than a 500.
+    """
+    for candidate in (path, *path.parents):
+        try:
+            usage = shutil.disk_usage(candidate)
+        except OSError:
+            continue
+        return DiskUsageOut(total=usage.total, used=usage.used, free=usage.free)
+    return DiskUsageOut(total=0, used=0, free=0)
+
+
+@router.get(
+    "/api/retention/disk",
+    response_model=DiskOut,
+    summary="Disk usage: the filesystem and Arc's share of it (admin, FR-T4)",
+)
+async def disk(session: SessionDep, settings: SettingsDep) -> DiskOut:
+    """Read-only, and safe to poll.
+
+    The rendition half walks directories, which is why it goes through
+    :func:`~arc.services.retention.sweep.retained_usage` — the same function
+    the acquisition page's ``retained_bytes`` uses, on a worker thread.
+    """
+    usage = await retained_usage(session, settings)
+    data_dir = await asyncio.to_thread(_disk_usage, settings.data_dir)
+    return DiskOut(
+        data_dir=data_dir,
+        retained=RetainedOut(sources=usage.sources, renditions=usage.renditions, total=usage.total),
+        episodes_retained=usage.episodes,
+    )
+
+
 @router.post(
     "/api/retention/sweep",
     response_model=JobOut,
@@ -173,6 +246,9 @@ async def delete_files(episode_id: EpisodeId, session: SessionDep) -> Job:
 __all__ = [
     "EPISODE_NOT_FOUND",
     "IN_FLIGHT",
+    "DiskOut",
+    "DiskUsageOut",
+    "RetainedOut",
     "RetentionItemOut",
     "RetentionPreviewOut",
     "router",

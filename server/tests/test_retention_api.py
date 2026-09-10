@@ -215,3 +215,88 @@ async def test_the_acquisition_status_reports_the_bytes_on_disk(
     assert body["retained_bytes"] == preview["episodes"][0]["bytes"]
     assert body["paused"] is False
     assert output_dir_for(retention_settings, episode_id).exists(), "nothing was deleted"
+
+
+# --- GET /api/retention/disk ------------------------------------------------
+
+
+async def test_the_disk_page_splits_arcs_bytes_from_the_filesystems(
+    retention_app: FastAPI,
+    retention_settings: Settings,
+    api_factory: SessionFactory,
+    admin: AsyncClient,
+) -> None:
+    """Two different measurements: what the host has, and Arc's share of it."""
+    episode_id = await deletable_episode(api_factory, retention_settings, anilist_id=971050)
+
+    body = (await admin.get("/api/retention/disk")).json()
+
+    assert sorted(body) == ["data_dir", "episodes_retained", "retained"]
+    assert sorted(body["data_dir"]) == ["free", "total", "used"]
+    assert body["data_dir"]["total"] > 0
+    assert body["data_dir"]["free"] <= body["data_dir"]["total"]
+
+    source = Path(retention_settings.downloads_dir / str(episode_id) / "episode.mkv")
+    assert body["retained"]["sources"] == source.stat().st_size
+    assert body["retained"]["renditions"] > 0
+    assert body["retained"]["total"] == (
+        body["retained"]["sources"] + body["retained"]["renditions"]
+    )
+    assert body["episodes_retained"] == 1
+
+
+async def test_the_disk_page_agrees_with_the_acquisition_status(
+    retention_app: FastAPI,
+    retention_settings: Settings,
+    api_factory: SessionFactory,
+    admin: AsyncClient,
+) -> None:
+    """One implementation, so two pages cannot report different totals."""
+    await deletable_episode(api_factory, retention_settings, anilist_id=971060)
+
+    disk = (await admin.get("/api/retention/disk")).json()
+    status = (await admin.get("/api/acquisition/status")).json()
+
+    assert disk["retained"]["total"] == status["retained_bytes"]
+
+
+async def test_an_empty_library_reports_zero_without_failing(
+    retention_app: FastAPI, admin: AsyncClient
+) -> None:
+    body = (await admin.get("/api/retention/disk")).json()
+
+    assert body["retained"] == {"sources": 0, "renditions": 0, "total": 0}
+    assert body["episodes_retained"] == 0
+    assert body["data_dir"]["total"] > 0
+
+
+async def test_a_data_dir_that_does_not_exist_yet_still_reports_the_filesystem(
+    settings: Settings, pg_engine: AsyncEngine, api_factory: SessionFactory, tmp_path: Path
+) -> None:
+    """A fresh install has no ``DATA_DIR``; a GET must not create one either."""
+    missing = tmp_path / "not-created-yet"
+    app = create_app(settings.model_copy(update={"data_dir": missing}))
+    app.state.engine = pg_engine
+    app.state.session_factory = api_factory
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+
+    async with api_transport(app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        body = (await client.get("/api/retention/disk")).json()
+
+    assert body["data_dir"]["total"] > 0
+    assert not missing.exists()
+
+
+async def test_a_non_admin_cannot_see_the_disk(
+    retention_app: FastAPI, api_factory: SessionFactory
+) -> None:
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD, role=UserRole.USER)
+
+    async with api_transport(retention_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        assert (await client.get("/api/retention/disk")).status_code == 403
+
+
+async def test_an_anonymous_caller_cannot_see_the_disk(api_client: AsyncClient) -> None:
+    assert (await api_client.get("/api/retention/disk")).status_code == 401

@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from arc.api.deps import EpisodeId, SessionDep, SettingsDep, get_admin_user
+from arc.api.deps import AdminUser, EpisodeId, SessionDep, SettingsDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Anime, Episode, EpisodeState, Job, User, Want
 from arc.services.acquisition.names import (
@@ -49,6 +49,7 @@ from arc.services.acquisition.names import (
 )
 from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import is_paused, set_paused
+from arc.services.acquisition.status import qbit_status
 from arc.services.catalog import preferred_title
 from arc.services.jobs import enqueue
 from arc.services.retention.sweep import retained_bytes
@@ -100,6 +101,38 @@ class AcquisitionStatusOut(BaseModel):
     #: running, and "how much is this costing me?" is the question that
     #: decides whether to press pause.
     retained_bytes: int = 0
+
+
+class QbitTorrentOut(BaseModel):
+    """One torrent as qBittorrent reports it, plus Arc's episode id."""
+
+    hash: str
+    name: str
+    #: qBittorrent's own state string (``downloading``, ``stalledUP``, …).
+    state: str
+    #: 0..1.
+    progress: float
+    #: Total bytes of the torrent's files; 0 while the metadata is unknown.
+    size: int
+    #: Bytes per second, right now.
+    dlspeed: int
+    upspeed: int
+    #: Null for anything in Arc's category that Arc has no ``torrents`` row for.
+    episode_id: int | None = None
+
+
+class QbitStatusOut(BaseModel):
+    """``GET /api/acquisition/qbit`` — is the client there, and what has it?
+
+    Never an error response. An unreachable client is ``reachable: false`` with
+    the reason in ``error``, because "qBittorrent is down" is the answer the
+    admin came for, not a failure of the endpoint that was asked.
+    """
+
+    reachable: bool
+    version: str | None = None
+    error: str | None = None
+    torrents: list[QbitTorrentOut] = []
 
 
 class WantOut(BaseModel):
@@ -173,7 +206,7 @@ async def poll_now(session: SessionDep) -> Job:
     response_model=PauseOut,
     summary="Stop acquiring anything new (admin)",
 )
-async def pause(session: SessionDep) -> PauseOut:
+async def pause(session: SessionDep, admin: AdminUser) -> PauseOut:
     """Set the kill switch.
 
     Nothing is cancelled: searches already queued stay queued and requeue
@@ -181,9 +214,9 @@ async def pause(session: SessionDep) -> PauseOut:
     and are ingested. What stops is *starting* things — no new want is
     computed, no new query goes to Nyaa, no new magnet reaches qBittorrent.
     """
-    paused = await set_paused(session, True)
+    paused = await set_paused(session, True, admin_id=admin.id)
     await session.commit()
-    log.info("acquisition paused by an admin")
+    log.info("acquisition paused by an admin", extra={"admin_id": admin.id})
     return PauseOut(paused=paused)
 
 
@@ -192,17 +225,17 @@ async def pause(session: SessionDep) -> PauseOut:
     response_model=PauseOut,
     summary="Start acquiring again (admin)",
 )
-async def resume(session: SessionDep) -> PauseOut:
+async def resume(session: SessionDep, admin: AdminUser) -> PauseOut:
     """Clear the kill switch and recompute the window immediately.
 
     The recompute is queued in the same transaction as the flag, so resuming
     cannot half-happen. Deduplicated like every other ``compute_wants``, so a
     resume while the fifteen-minute tick is already pending adds nothing.
     """
-    paused = await set_paused(session, False)
+    paused = await set_paused(session, False, admin_id=admin.id)
     job = await queue_wants(session)
     await session.commit()
-    log.info("acquisition resumed by an admin", extra={"job_id": job.id})
+    log.info("acquisition resumed by an admin", extra={"job_id": job.id, "admin_id": admin.id})
     return PauseOut(paused=paused)
 
 
@@ -228,6 +261,39 @@ async def acquisition_status(session: SessionDep, settings: SettingsDep) -> Acqu
         searching=states.get(EpisodeState.SEARCHING, 0),
         downloading=states.get(EpisodeState.DOWNLOADING, 0),
         retained_bytes=await retained_bytes(session, settings),
+    )
+
+
+@router.get(
+    "/api/acquisition/qbit",
+    response_model=QbitStatusOut,
+    summary="Whether qBittorrent is reachable, and what it is holding (admin, FR-D3)",
+)
+async def qbit(session: SessionDep, settings: SettingsDep) -> QbitStatusOut:
+    """Two calls to the client with a five-second budget; nothing is written.
+
+    The only route in Arc that talks to qBittorrent inside a request. It is
+    read-only and it cannot fail: see
+    :func:`arc.services.acquisition.status.qbit_status`.
+    """
+    found = await qbit_status(session, settings)
+    return QbitStatusOut(
+        reachable=found.reachable,
+        version=found.version,
+        error=found.error,
+        torrents=[
+            QbitTorrentOut(
+                hash=torrent.hash,
+                name=torrent.name,
+                state=torrent.state,
+                progress=torrent.progress,
+                size=torrent.size,
+                dlspeed=torrent.dlspeed,
+                upspeed=torrent.upspeed,
+                episode_id=torrent.episode_id,
+            )
+            for torrent in found.torrents
+        ],
     )
 
 
@@ -269,4 +335,12 @@ async def list_wants(
     ]
 
 
-__all__ = ["MAX_LIMIT", "AcquisitionStatusOut", "PauseOut", "WantOut", "router"]
+__all__ = [
+    "MAX_LIMIT",
+    "AcquisitionStatusOut",
+    "PauseOut",
+    "QbitStatusOut",
+    "QbitTorrentOut",
+    "WantOut",
+    "router",
+]

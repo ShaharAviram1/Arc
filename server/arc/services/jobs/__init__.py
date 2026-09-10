@@ -20,8 +20,21 @@ must import them (the worker does).
 from __future__ import annotations
 
 from arc.services.jobs import builtin as builtin  # noqa: F401  (registers handlers)
+from arc.services.jobs.heartbeat import (
+    HEARTBEAT_STALE_AFTER,
+    check_heartbeat,
+    heartbeat_at,
+    heartbeat_path,
+    touch_heartbeat,
+)
 from arc.services.jobs.loop import run_worker_loop
-from arc.services.jobs.queue import enqueue, find_active
+from arc.services.jobs.queue import (
+    JobTransition,
+    cancel_job,
+    enqueue,
+    find_active,
+    retry_job,
+)
 from arc.services.jobs.registry import (
     JobContext,
     JobHandler,
@@ -39,18 +52,26 @@ from arc.services.jobs.runner import (
 )
 
 __all__ = [
+    "HEARTBEAT_STALE_AFTER",
     "JobContext",
     "JobHandler",
+    "JobTransition",
     "UnknownJobType",
     "backoff",
+    "cancel_job",
+    "check_heartbeat",
     "claim_one",
     "claim_statement",
     "enqueue",
     "find_active",
     "get_handler",
+    "heartbeat_at",
+    "heartbeat_path",
     "register",
     "registered_types",
     "requeue_stale",
+    "retry_job",
     "run_job",
     "run_worker_loop",
+    "touch_heartbeat",
 ]

@@ -127,6 +127,14 @@ class TorrentInfo:
     save_path: str | None = None
     #: Epoch seconds, or a negative sentinel while it is still downloading.
     completion_on: int | None = None
+    #: Total bytes of the torrent's selected files. Reported to the admin
+    #: panel (FR-D3) rather than used by any rule: what Arc keeps on disk is
+    #: measured from the files themselves (``retained_usage``), because a
+    #: torrent that finished last month may have had its data deleted since.
+    size: int = 0
+    #: Bytes per second, right now, as the client reports them.
+    dlspeed: int = 0
+    upspeed: int = 0
 
     @property
     def complete(self) -> bool:
@@ -143,17 +151,42 @@ class TorrentInfo:
         info_hash = raw.get("hash")
         if not isinstance(info_hash, str) or not info_hash:
             return None
-        progress = raw.get("progress")
         completion = raw.get("completion_on")
         return cls(
             hash=info_hash.lower(),
             name=str(raw.get("name") or ""),
-            progress=float(progress) if isinstance(progress, int | float) else 0.0,
+            progress=_fraction(raw.get("progress")),
             state=str(raw.get("state") or ""),
             content_path=raw.get("content_path") or None,
             save_path=raw.get("save_path") or None,
             completion_on=int(completion) if isinstance(completion, int | float) else None,
+            size=_number(raw.get("size")),
+            dlspeed=_number(raw.get("dlspeed")),
+            upspeed=_number(raw.get("upspeed")),
         )
+
+
+def _fraction(value: Any) -> float:
+    """A 0..1 progress out of a JSON field.
+
+    Clamped rather than trusted: the client has been seen to report a hair over
+    1.0 on a completed torrent, and the value is rendered straight into a
+    progress bar's width.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0.0
+    return min(max(float(value), 0.0), 1.0)
+
+
+def _number(value: Any) -> int:
+    """A non-negative integer out of a JSON field, or 0 for anything else.
+
+    qBittorrent reports ``-1`` for a size it does not know yet (a magnet whose
+    metadata has not arrived), and a display field is not worth raising over.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0
+    return max(int(value), 0)
 
 
 def _added(response: httpx.Response) -> bool:
@@ -249,9 +282,19 @@ class QbitClient:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None
+        cls,
+        settings: Settings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = TIMEOUT_SECONDS,
     ) -> QbitClient:
-        """Build one from the environment, raising if it is not configured."""
+        """Build one from the environment, raising if it is not configured.
+
+        ``timeout`` is a parameter because the admin panel's status probe
+        (:mod:`arc.services.acquisition.status`) waits a fraction of what a
+        background job may: a page an admin is staring at cannot hang for
+        twenty seconds on a client that is not answering.
+        """
         return cls(
             base_url=settings.qbit_url,
             username=settings.require("qbit_user"),
@@ -259,6 +302,7 @@ class QbitClient:
             category=settings.qbit_category,
             downloads_path=settings.qbit_downloads_path,
             transport=transport,
+            timeout=timeout,
         )
 
     async def __aenter__(self) -> Self:
@@ -327,6 +371,17 @@ class QbitClient:
                 )
             return response
         raise QbitUnavailable("qbittorrent kept refusing the session")  # pragma: no cover
+
+    async def version(self) -> str:
+        """The client's own version string (``v5.2.0``), for the admin panel.
+
+        ``app/version`` is the cheapest authenticated call qBittorrent has, so
+        it doubles as the reachability probe in
+        :func:`arc.services.acquisition.status.qbit_status`: an answer means
+        the URL, the credentials and the session are all good.
+        """
+        response = await self.request("GET", "/app/version")
+        return response.text.strip()
 
     async def has(self, info_hash: str) -> bool:
         """Whether the client is holding this torrent, in any category."""

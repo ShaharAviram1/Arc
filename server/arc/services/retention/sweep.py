@@ -558,6 +558,60 @@ async def candidates(
 # --- How much is on the disk ------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class RetainedUsage:
+    """What Arc is holding for retained episodes, split in two (FR-T4).
+
+    The split is the point: sources are torrent payloads that retention will
+    delete on schedule, renditions are the browser-ready output that costs a
+    third as much and is what a viewer actually needs. An admin deciding
+    whether to buy more disk is deciding between those two numbers.
+    """
+
+    sources: int
+    renditions: int
+    #: How many episodes the figures cover.
+    episodes: int
+
+    @property
+    def total(self) -> int:
+        return self.sources + self.renditions
+
+
+async def retained_usage(session: AsyncSession, settings: Settings) -> RetainedUsage:
+    """:func:`retained_bytes`, itemised, plus the episode count.
+
+    One implementation for both: a disk page that could disagree with the
+    figure on the acquisition page would be worse than one number.
+    """
+    sources = await session.scalar(
+        select(func.coalesce(func.sum(MediaFile.size), 0))
+        .join(Episode, Episode.id == MediaFile.episode_id)
+        .where(Episode.state.in_(RETAINED_STATES))
+    )
+    episodes = await session.scalar(
+        select(func.count()).select_from(Episode).where(Episode.state.in_(RETAINED_STATES))
+    )
+    directories = [
+        Path(stored) if stored else output_dir_for(settings, episode_id)
+        for episode_id, stored in (
+            await session.execute(
+                select(Rendition.episode_id, Rendition.dir)
+                .join(Episode, Episode.id == Rendition.episode_id)
+                .where(Episode.state.in_(RETAINED_STATES))
+            )
+        ).all()
+    ]
+
+    def measure() -> int:
+        return sum(dir_size(directory) for directory in directories)
+
+    renditions = await asyncio.to_thread(measure) if directories else 0
+    return RetainedUsage(
+        sources=int(sources or 0), renditions=renditions, episodes=int(episodes or 0)
+    )
+
+
 async def retained_bytes(session: AsyncSession, settings: Settings) -> int:
     """Bytes Arc is currently holding for retained episodes (FR-T4).
 
@@ -576,27 +630,7 @@ async def retained_bytes(session: AsyncSession, settings: Settings) -> int:
     pair :func:`build_targets` weighs up when it works out what a deletion
     would free.
     """
-    sources = await session.scalar(
-        select(func.coalesce(func.sum(MediaFile.size), 0))
-        .join(Episode, Episode.id == MediaFile.episode_id)
-        .where(Episode.state.in_(RETAINED_STATES))
-    )
-    directories = [
-        Path(stored) if stored else output_dir_for(settings, episode_id)
-        for episode_id, stored in (
-            await session.execute(
-                select(Rendition.episode_id, Rendition.dir)
-                .join(Episode, Episode.id == Rendition.episode_id)
-                .where(Episode.state.in_(RETAINED_STATES))
-            )
-        ).all()
-    ]
-
-    def measure() -> int:
-        return sum(dir_size(directory) for directory in directories)
-
-    renditions = await asyncio.to_thread(measure) if directories else 0
-    return int(sources or 0) + renditions
+    return (await retained_usage(session, settings)).total
 
 
 __all__ = [
@@ -609,12 +643,14 @@ __all__ = [
     "RETAINED_STATES",
     "RETENTION_REASON",
     "Deletable",
+    "RetainedUsage",
     "Targets",
     "allowed_roots",
     "build_targets",
     "candidates",
     "dir_size",
     "retained_bytes",
+    "retained_usage",
     "safe_path",
     "targets_for_episode",
 ]

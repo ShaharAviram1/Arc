@@ -23,9 +23,7 @@ import os
 import signal
 import socket
 import sys
-import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
@@ -51,6 +49,29 @@ from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers 
 from arc.services.catalog.names import CATALOG_PRIORITY
 from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
+
+# Re-exported: the liveness file is written here and read by ``--check`` and by
+# ``GET /api/jobs/summary`` (arc/services/jobs/heartbeat.py), so it lives in the
+# services package. These names stay importable from ``arc.worker`` because
+# that is where the healthcheck and its tests have always found them.
+from arc.services.jobs.heartbeat import (
+    HEARTBEAT_FILENAME as HEARTBEAT_FILENAME,
+)
+from arc.services.jobs.heartbeat import (
+    HEARTBEAT_SECONDS as HEARTBEAT_SECONDS,
+)
+from arc.services.jobs.heartbeat import (
+    HEARTBEAT_STALE_AFTER as HEARTBEAT_STALE_AFTER,
+)
+from arc.services.jobs.heartbeat import (
+    check_heartbeat as check_heartbeat,
+)
+from arc.services.jobs.heartbeat import (
+    heartbeat_path as heartbeat_path,
+)
+from arc.services.jobs.heartbeat import (
+    touch_heartbeat as touch_heartbeat,
+)
 from arc.services.library import jobs as library_jobs  # noqa: F401  (registers handlers)
 from arc.services.library.names import LIBRARY_SCAN, LIBRARY_SCAN_PRIORITY
 from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers)
@@ -63,7 +84,6 @@ from arc.services.retention.names import RETENTION_PRIORITY, RETENTION_SWEEP
 
 log = logging.getLogger("arc.worker")
 
-HEARTBEAT_SECONDS = 30
 #: How often to look for jobs abandoned by a dead worker.
 STALE_SWEEP_SECONDS = 300
 #: How often to delete expired session rows. A scheduler task rather than a
@@ -133,63 +153,9 @@ RETENTION_SWEEP_DELAY_SECONDS = 600
 RECONCILE_SECONDS = 3600
 
 
-#: File under ``DATA_DIR`` whose modification time is the worker's liveness
-#: signal. Written on start-up and re-written by every heartbeat tick.
-HEARTBEAT_FILENAME = "worker.heartbeat"
-
-#: How stale that file may be before ``--check`` calls the worker dead. Three
-#: beats: one missed tick is a busy event loop, three is a process that has
-#: stopped running its scheduler. Deliberately generous, because the cost of a
-#: false negative is Docker killing a healthy worker mid-transcode.
-HEARTBEAT_STALE_AFTER = HEARTBEAT_SECONDS * 3
-
-
 def worker_id() -> str:
     """Identity written to ``jobs.locked_by`` — ``host:pid``, ≤ 64 chars."""
     return f"{socket.gethostname()}:{os.getpid()}"[:64]
-
-
-def heartbeat_path(settings: Settings) -> Path:
-    """Where the liveness file lives.
-
-    Under ``DATA_DIR`` rather than ``/tmp`` because that is the one directory
-    the deployment already guarantees is writable by the worker's user, and
-    because ``docker compose exec`` runs the check inside the same container
-    and therefore sees the same path.
-    """
-    return settings.data_dir / HEARTBEAT_FILENAME
-
-
-def touch_heartbeat(settings: Settings) -> None:
-    """Record that the worker is alive, now. Never raises.
-
-    A failure here must not kill the worker: it would turn "the log directory
-    is full" into "no episodes are transcoded". The healthcheck will notice
-    soon enough, which is exactly its job.
-    """
-    path = heartbeat_path(settings)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - depends on the filesystem
-        log.warning(
-            "could not write the heartbeat file", extra={"path": str(path), "error": str(exc)}
-        )
-
-
-def check_heartbeat(settings: Settings, *, now: float | None = None) -> bool:
-    """Whether the heartbeat file is fresh enough to call the worker healthy.
-
-    ``False`` for a missing file too: a worker that has not started has not
-    written one, and "no evidence of life" is the same answer as "last seen an
-    hour ago" as far as a container healthcheck is concerned.
-    """
-    path = heartbeat_path(settings)
-    try:
-        age = (time.time() if now is None else now) - path.stat().st_mtime
-    except OSError:
-        return False
-    return age <= HEARTBEAT_STALE_AFTER
 
 
 def _heartbeat(settings: Settings) -> None:

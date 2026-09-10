@@ -367,6 +367,10 @@ preparing → failed → (retry) → preparing
   from the user's last action on the show; wants that end because the show
   left watching/planned are dropped (not deleted) so the grace period is
   never skipped; revival needs an Arc-side action.
+- 2026-09-10 — M14 as built: admin panel (users/invites, validated rules editor,
+  jobs with retry/cancel and worker heartbeat, storage with retention preview
+  and per-episode delete/re-fetch, acquisition with qBittorrent status).
+  Per-show override editing deferred to M16.
 - 2026-09-10 — M13 as built: match suggestions (FR-L5) ride the FR-R7 provider
   chain, can be asked for on demand from the review page, and are stored on
   the file with model and confidence; a failed re-ask never replaces a good

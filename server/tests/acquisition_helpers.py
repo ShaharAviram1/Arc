@@ -171,8 +171,16 @@ class QbitStub:
     new torrent and **409 Conflict** for one it already holds.
     """
 
-    def __init__(self, *, password: str = "adminadmin", api_version: str = "5"):
+    def __init__(
+        self,
+        *,
+        password: str = "adminadmin",
+        api_version: str = "5",
+        version: str = "v5.2.0",
+    ):
         self.api_version = api_version
+        #: What ``app/version`` answers — the string the admin panel shows.
+        self.version = version
         self.password = password
         self.logged_in = False
         self.logins = 0
@@ -266,6 +274,8 @@ class QbitStub:
                 if torrent["hash"].lower() in hashes.lower().split("|"):
                     torrent["state"] = "stoppedUP" if self.api_version == "5" else "pausedUP"
             return httpx.Response(200, text="")
+        if path.endswith("/app/version"):
+            return httpx.Response(200, text=self.version)
         if path.endswith("/app/setPreferences"):
             raw = self._form(request).get("json", "{}")
             self.preferences.append(json.loads(raw))
@@ -290,6 +300,9 @@ class QbitStub:
         content_path: str | None = None,
         category: str = "arc",
         completion_on: int = -1,
+        size: int = 0,
+        dlspeed: int = 0,
+        upspeed: int = 0,
     ) -> None:
         self.torrents.append(
             {
@@ -301,6 +314,9 @@ class QbitStub:
                 "save_path": content_path,
                 "category": category,
                 "completion_on": completion_on,
+                "size": size,
+                "dlspeed": dlspeed,
+                "upspeed": upspeed,
             }
         )
 

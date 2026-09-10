@@ -33,6 +33,12 @@ export interface AcquisitionStatus {
   searching: number
   /** Episodes qBittorrent is downloading. Unaffected by the pause. */
   downloading: number
+  /**
+   * Bytes Arc is holding for episodes it has acquired (FR-T4). Optional on the
+   * wire — the server defaults it to 0 — so read it through `?? 0` rather than
+   * assuming a server that sends it.
+   */
+  retained_bytes?: number
 }
 
 export const acquisitionStatusQueryKey = ['acquisition', 'status'] as const

@@ -82,7 +82,20 @@ Two Python processes share one codebase and one database:
   waiting for never queues behind bulk work. Bulk jobs hold a slot for
   about two minutes at most (import chunks of 50 spaced 2 s).
 - API: `POST /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs` (admin-only
-  from M2). Success status is `done`.
+  from M2). Success status is `done`. M14 adds the admin queue view's controls:
+  `GET /api/jobs/summary` (depths per status, pending work per type, and the
+  worker's liveness), `POST /api/jobs/{id}/retry` (`failed`/`cancelled` →
+  `pending`, attempts reset, `last_error` kept) and `POST /api/jobs/{id}/cancel`
+  (`pending` → `cancelled`; a `running` job cannot be stopped safely from
+  another process, so that is a 409). Both are status-guarded UPDATEs in
+  `arc/services/jobs/queue.py` (`WHERE id = … AND status IN (…)`, 409 when no row
+  matches), so a worker claiming the row between the read and the write cannot
+  end up with executing work marked cancelled; the worker's next poll acts on
+  whatever the table then says.
+- The worker's liveness file (`$DATA_DIR/worker.heartbeat`, rewritten every
+  30 s, stale after 90 s) lives in `arc/services/jobs/heartbeat.py` so that the
+  API can `stat` it without importing the worker; `arc.worker` re-exports the
+  names the container healthcheck (`python -m arc.worker --check`) uses.
 
 ## 3. Repository layout
 
@@ -110,7 +123,9 @@ arc/
         retention/               cleanup rules
         recs/                    candidate pool, continuations, model prompt,
                                  schema, provider chain
-        jobs/                    job table, claim/run/retry, handlers registry
+        jobs/                    job table, claim/run/retry, handlers registry,
+                                 worker heartbeat (read by the API's summary)
+        settings.py              validation + reads/writes of the rules table
       core/                      security, sessions, errors, logging
     tests/
       fixtures/release_names.txt corpus of real filenames + expected parse
@@ -155,7 +170,7 @@ arc/
 | `torrents` | id, episode_id, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
-| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang) |
+| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused), plus per-show overrides under `override:anime:<id>`. Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 
 ## 5. Key flows
 
@@ -747,7 +762,10 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
 | `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard) |
 | `PATCH /api/users/me` | any | change own timezone (IANA, validated) |
-| `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue |
+| `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue; the listing takes `status=`, `type=`, `limit=` (≤ 200), `offset=`, newest id first |
+| `GET /api/jobs/summary` | admin | `{by_status: {pending, running, done, failed, cancelled}, by_type_pending: {type: count}, worker: {heartbeat_at, alive}}` — `alive` is the heartbeat file younger than 90 s, the same decision the container healthcheck makes |
+| `POST /api/jobs/{id}/retry`, `POST /api/jobs/{id}/cancel` | admin | 200 `JobOut`. Retry: `failed`/`cancelled` → `pending`, `attempts` 0, `run_after` now, lock and finish timestamps cleared, `last_error` kept. Cancel: `pending` → `cancelled`. 409 for any other status (a `running` job cannot be stopped safely), 404 unknown |
+| `GET /api/settings`, `PUT /api/settings` | admin | the rules editor (FR-D2, FR-T5): `{values, defaults, overrides[{anime_id, title, preferred_groups, resolution}]}` for every `DEFAULT_SETTINGS` key. PUT takes a partial object of those keys and writes only what it names; 422 `{detail: [{loc: ["body", key], msg, type}]}` for an unknown key or a refused value (resolutions ∈ 2160p/1080p/720p/480p and fallback ≠ preferred — enforced only when the patch names one of the two, so a hand-edited collision does not block unrelated edits — N 0..10, G and D 0..365, ≤ 20 groups of ≤ 64 chars de-duplicated case-insensitively, languages 2–8 lowercase letters/dashes). Writing `acquisition_paused` goes through the same `set_paused` the pause button uses, and clearing it enqueues `compute_wants` in the same transaction, so unpausing from the editor and from the button do the same thing. Overrides are read-only here; editing them is M16 |
 | `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
 | `GET /api/catalog/status` | admin | source health and breaker state |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
@@ -767,8 +785,10 @@ Mutating requests must carry an allowed `Origin`.
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight) |
+| `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, total}, episodes_retained}` — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows paused, active wants, searching, downloading |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
+| `GET /api/acquisition/qbit` | admin | `{reachable, version, error, torrents[{hash, name, state, progress, size, dlspeed, upspeed, episode_id}]}`. The only route that calls qBittorrent inside a request (`app/version` + `torrents/info?category=arc`, read-only, `asyncio.timeout` bounding the **whole probe** at 5 s — the client logs in and retries a 403 once, so a per-request budget would be six of them) and the only one that **never fails**: down, wrong password or unconfigured is `reachable: false` with the reason in `error`, because that is the answer the admin came for. `episode_id` comes from Arc's `torrents` rows, not from the client's tags |
 
 ## 6. External integrations
 
@@ -934,8 +954,11 @@ override `DATABASE_URL` and `QBIT_URL` with the service hostnames
 
 Rule values (N, G, D, groups, resolution,
 languages) live in the `settings` table and are editable by admin, seeded by
-the initial migration. `MAX_TRANSCODES` is host capacity and lives only in
-env (it is not in the settings table).
+the initial migration. **Every key in `DEFAULT_SETTINGS` is admin-editable at
+runtime** through `GET`/`PUT /api/settings` — nothing in that table needs a
+redeploy, a shell or a database console to change, which is M14's definition
+of done. `MAX_TRANSCODES` is host capacity and lives only in env (it is not in
+the settings table).
 
 Configuration problems are checked at startup by both the api and the worker
 (`arc/core/config_check.py`) and logged at two levels. **ERROR** means the
@@ -1212,3 +1235,5 @@ two together.
   now means
   "the M12 chain is configured" rather than "there is an Anthropic key", and
   the config check names the flag rather than `ANTHROPIC_API_KEY`.
+- 2026-09-10 — M14: settings API (validated), job retry/cancel + summary,
+  qBittorrent status, disk usage; overrides editor deferred to M16.

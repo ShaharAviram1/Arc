@@ -9,6 +9,7 @@ skipping, because a silent skip is how a broken schema reaches main. Set
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -29,7 +30,7 @@ from alembic import command
 from arc.config import Settings
 from arc.db import SessionFactory, create_session_factory
 from arc.main import create_app
-from arc.models import User, UserRole
+from arc.models import DEFAULT_SETTINGS, User, UserRole
 from arc.services.acquisition import nyaa
 from arc.services.auth import create_user
 from arc.services.recs import factory as recs_factory
@@ -276,6 +277,36 @@ CLEANUP_TABLES = (
 )
 
 
+async def _reseed_settings(connection: Any) -> None:
+    """Put ``settings`` back to exactly what the initial migration seeds.
+
+    ``settings`` is deliberately **not** in :data:`CLEANUP_TABLES`: truncating
+    it would leave a database with no seeded rules at all, which is not a state
+    the application is ever in and not what ``test_migrations`` compares
+    against. It is restored instead — anything a test added is deleted, and
+    every seeded key is written back to its :data:`DEFAULT_SETTINGS` value.
+
+    It belongs here rather than in a fixture per test file because the table is
+    global state that outlives the transaction that wrote it, and every file
+    that touches it would otherwise need a ``finally`` of its own — which is
+    precisely what went wrong: the transcode tests set ``sub_lang`` to ``7`` and
+    never put it back, and the only thing hiding it was that
+    ``test_migrations.py`` happens to collate before ``test_transcode_jobs.py``.
+    """
+    await connection.execute(
+        text("DELETE FROM settings WHERE NOT (key = ANY(:keys))"),
+        {"keys": list(DEFAULT_SETTINGS)},
+    )
+    for key, value in DEFAULT_SETTINGS.items():
+        await connection.execute(
+            text(
+                "INSERT INTO settings (key, value) VALUES (:key, CAST(:value AS jsonb)) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+            ),
+            {"key": key, "value": json.dumps(value)},
+        )
+
+
 async def _truncate(connection: Any) -> None:
     """Empty every table the API tests write to, in one statement.
 
@@ -288,9 +319,13 @@ async def _truncate(connection: Any) -> None:
 
     One statement, ``CASCADE`` so the order does not matter, and
     ``RESTART IDENTITY`` so ids do not creep up across a long run.
+
+    ``settings`` is the one table that is restored rather than emptied
+    (:func:`_reseed_settings`).
     """
     tables = ", ".join(CLEANUP_TABLES)
     await connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
+    await _reseed_settings(connection)
 
 
 @pytest.fixture(scope="session", autouse=True)

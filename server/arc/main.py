@@ -32,6 +32,7 @@ from arc.api import (
     users,
 )
 from arc.api import list as list_api
+from arc.api import settings as settings_api
 from arc.api.auth import SessionRefreshMiddleware
 from arc.api.csrf import OriginCheckMiddleware
 from arc.config import Settings, get_settings
@@ -183,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(invites.router)
     app.include_router(users.router)
     app.include_router(jobs.router)
+    app.include_router(settings_api.router)
     app.include_router(anime.router)
     app.include_router(catalog.router)
     app.include_router(list_api.router)

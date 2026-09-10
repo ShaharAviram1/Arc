@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-10 (M0–M13 done; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-10 (M0–M14 done; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -255,13 +255,21 @@ CLAUDE.md).
   applied.
 
 ### M14 — Admin panel
-- [ ] Users & invites management, deactivate (FR-D1)
-- [ ] Rules editor: groups, resolution, N, G, D, languages (FR-D2)
-- [ ] Jobs view with retry/cancel; qBittorrent status; disk usage; manual
-      delete/re-fetch (FR-D3, FR-T4)
-- [ ] Global review queue (FR-D4)
+- [x] Users & invites management, deactivate/reactivate, role change,
+      one-time invite links (FR-D1)
+- [x] Rules editor: groups, resolutions, N, G, D, languages, pause — validated
+      `GET/PUT /api/settings`, defaults shown, reset per field; per-show
+      overrides listed read-only (editor in M16) (FR-D2)
+- [x] Jobs view with filters, summary and worker heartbeat, retry/cancel;
+      qBittorrent status; disk usage and retained bytes; retention preview,
+      sweep now, per-episode delete/re-fetch (FR-D3, FR-T4)
+- [x] Global review queue (FR-D4): the M13 Review page is already global;
+      Admin shows the pending count and links to it
 - **DoD:** every admin-configurable value in spec is editable without
-  touching env or DB.
+  touching env or DB. Verified by the orchestrator 2026-09-10 in dev: all five
+  tabs render live data; a rule saved from the page landed in `settings`
+  (logged old→new with the admin id) and was reverted the same way; Retry on
+  a failed job put it back through the worker.
 
 ### M15 — UI overhaul
 - [ ] Design pass over every page once all of them exist (after M14):
