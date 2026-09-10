@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
@@ -20,7 +20,9 @@ vi.mock('hls.js', async () => await import('@/test/hlsMock'))
 
 const EPISODE_ID = 9001
 const PLAY_PATH = `GET /api/episodes/${String(EPISODE_ID)}/play`
+const PROGRESS_PATH = 'POST /api/progress'
 const PROGRESS_RESULT = { completed: false, newly_completed: false, list_progress: null }
+const PROGRESS_UNSAVED = 'Progress isn’t being saved — check your connection.'
 
 function renderPlayer(routes: MockRoutes = { [PLAY_PATH]: { body: PLAY_INFO } }) {
   const fetchMock = mockApi({
@@ -406,6 +408,19 @@ describe('Player', () => {
     expect(document.querySelector('video')).toBeNull()
   })
 
+  it('offers a retry when the play info could not be loaded at all', async () => {
+    const { fetchMock } = renderPlayer({ [PLAY_PATH]: { status: 500, body: { detail: 'boom' } } })
+
+    expect(
+      await screen.findByRole('heading', { name: 'Could not load this episode' }),
+    ).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === PLAY_PATH)).toHaveLength(2)
+    })
+  })
+
   it('does not call the API for a non-numeric episode id', () => {
     const fetchMock = mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
     const router = createMemoryRouter([{ path: '/watch/:episodeId', element: <Player /> }], {
@@ -428,5 +443,112 @@ describe('Player', () => {
     view.unmount()
 
     expect(instances[0]?.destroy).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * A progress write that does not land is invisible by design — nothing about
+ * the video changes — so the only thing that tells a viewer their place is
+ * being lost is this strip. One miss is not worth saying anything about; a run
+ * of them is.
+ */
+describe('Player progress reporting failures', () => {
+  const FAILING_PROGRESS = { status: 500, body: { detail: 'boom' } }
+
+  /**
+   * One forced report. `pause` bypasses the reporter's minimum gap, so each
+   * call is exactly one write — and no `loadedmetadata` is fired, which keeps
+   * the resume toast (and its own Dismiss) out of the way.
+   */
+  function reportAt(video: HTMLVideoElement, position: number): void {
+    video.currentTime = position
+    fireEvent.timeUpdate(video)
+    fireEvent.pause(video)
+  }
+
+  async function progressWrites(
+    fetchMock: ReturnType<typeof mockApi>,
+    count: number,
+  ): Promise<void> {
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === PROGRESS_PATH)).toHaveLength(count)
+    })
+  }
+
+  function banner(): HTMLElement {
+    const strip = screen.getByText(PROGRESS_UNSAVED).closest('[role="status"]')
+    if (strip === null) throw new Error('the warning is not in a status region')
+    return strip as HTMLElement
+  }
+
+  /** A run of failed writes, one at a time: each is a separate mutation. */
+  async function failWrites(
+    video: HTMLVideoElement,
+    fetchMock: ReturnType<typeof mockApi>,
+    positions: number[],
+  ): Promise<void> {
+    let sent = requestsMade(fetchMock).filter((path) => path === PROGRESS_PATH).length
+    for (const position of positions) {
+      reportAt(video, position)
+      await progressWrites(fetchMock, ++sent)
+    }
+  }
+
+  function failingPlayer() {
+    return renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO },
+      'POST /api/progress': FAILING_PROGRESS,
+    })
+  }
+
+  it('says nothing until three writes in a row have failed', async () => {
+    const { fetchMock } = failingPlayer()
+    const video = await readyVideo()
+
+    await failWrites(video, fetchMock, [100])
+    expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
+
+    await failWrites(video, fetchMock, [200])
+    expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
+
+    await failWrites(video, fetchMock, [300])
+    expect(await screen.findByText(PROGRESS_UNSAVED)).toBeInTheDocument()
+    // Non-blocking: the video is still there and still playable.
+    expect(document.querySelector('video')).toBeInTheDocument()
+  })
+
+  it('takes the warning back down as soon as a write lands', async () => {
+    const { fetchMock } = failingPlayer()
+    const video = await readyVideo()
+
+    await failWrites(video, fetchMock, [100, 200, 300])
+    await screen.findByText(PROGRESS_UNSAVED)
+
+    // The connection comes back; the next report is the proof.
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      [PLAY_PATH]: { body: PLAY_INFO },
+      'POST /api/progress': { body: PROGRESS_RESULT },
+    })
+    reportAt(video, 400)
+
+    await waitFor(() => {
+      expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
+    })
+  })
+
+  it('lets the viewer wave the warning away', async () => {
+    const { fetchMock } = failingPlayer()
+    const video = await readyVideo()
+
+    await failWrites(video, fetchMock, [100, 200, 300])
+    await screen.findByText(PROGRESS_UNSAVED)
+
+    await userEvent.click(within(banner()).getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
+
+    // A fourth failure does not bring back something already waved away.
+    await failWrites(video, fetchMock, [500])
+    expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
   })
 })

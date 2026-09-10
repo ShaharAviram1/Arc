@@ -1,8 +1,10 @@
-"""The three acquisition handlers: wants, search, poll (architecture.md §5.1).
+"""The acquisition handlers: wants, search, poll, policy (architecture.md §5.1).
 
 ``compute_wants`` decides *what*; ``search_release`` decides *which release*
 and starts it; ``poll_qbit`` watches it finish and hands the file to the
-library. Between them they cover FR-A1 through FR-A6.
+library. Between them they cover FR-A1 through FR-A6. ``qbit_apply_policy`` is
+housekeeping alongside them: it writes Arc's no-seeding, capped-upload policy
+to the client (spec §9), and ``poll_qbit`` stops anything that got past it.
 
 All three are idempotent, and each is idempotent for a different reason.
 ``compute_wants`` reconciles a whole table against the lists, so a second run
@@ -10,7 +12,8 @@ finds nothing to do. ``search_release`` refuses to act on an episode that is
 not ``wanted`` or ``searching``, and qBittorrent answers ``Ok.`` to a magnet it
 already holds. ``poll_qbit`` reads the client's live state and writes what it
 says, and the ``media_files.path`` unique constraint is what keeps a
-re-delivered file from being indexed twice.
+re-delivered file from being indexed twice. (``qbit_apply_policy`` writes the
+same fixed values every time, which is idempotence for free.)
 
 **The retry schedule (FR-A6) lives in the job payload, not in a column.**
 A search that finds nothing requeues *itself* with a delay and carries
@@ -53,12 +56,19 @@ from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     POLL_QBIT,
+    QBIT_POLICY,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
     search_dedupe_key,
 )
 from arc.services.acquisition.nyaa import Ranked, search_for_episode
-from arc.services.acquisition.qbit import QbitClient, QbitError, TorrentInfo, host_path
+from arc.services.acquisition.qbit import (
+    SEEDING_STATES,
+    QbitClient,
+    QbitError,
+    TorrentInfo,
+    host_path,
+)
 from arc.services.acquisition.reject import QBIT_REJECTED
 from arc.services.acquisition.rules import is_paused, load_rules
 from arc.services.acquisition.states import transition
@@ -588,50 +598,63 @@ async def poll_qbit(ctx: JobContext) -> None:
         ctx.log.debug("no torrents to poll")
         return
 
+    synced = finished = vanished = 0
+    seeding: list[str] = []
     async with QbitClient.from_settings(ctx.settings) as qbit:
         live = {info.hash: info for info in await qbit.torrents()}
 
-    synced = finished = vanished = 0
-    for torrent, episode in rows:
-        info = live.get(torrent.info_hash.lower())
-        if info is None:
-            was = torrent.qbit_state
-            torrent.qbit_state = "missing"
-            # ``downloaded`` as well as ``downloading``: an episode whose
-            # torrent finished but whose file was not readable yet sits in
-            # ``downloaded`` waiting for the next poll, and if the torrent is
-            # deleted in between, that wait would never end.
-            if episode.state in COMPLETABLE:
-                transition(episode, EpisodeState.UNAVAILABLE, reason=REMOVED_FROM_CLIENT)
-                vanished += 1
-                ctx.log.warning(
-                    "a torrent Arc was downloading is gone from the client",
-                    extra={"episode_id": episode.id, "hash": torrent.info_hash},
-                )
-            elif was != "missing":
-                ctx.log.info(
-                    "a torrent Arc had finished with is gone from the client",
-                    extra={
-                        "episode_id": episode.id,
-                        "hash": torrent.info_hash,
-                        "state": episode.state.value,
-                    },
-                )
-            continue
+        for torrent, episode in rows:
+            info = live.get(torrent.info_hash.lower())
+            if info is None:
+                was = torrent.qbit_state
+                torrent.qbit_state = "missing"
+                # ``downloaded`` as well as ``downloading``: an episode whose
+                # torrent finished but whose file was not readable yet sits in
+                # ``downloaded`` waiting for the next poll, and if the torrent
+                # is deleted in between, that wait would never end.
+                if episode.state in COMPLETABLE:
+                    transition(episode, EpisodeState.UNAVAILABLE, reason=REMOVED_FROM_CLIENT)
+                    vanished += 1
+                    ctx.log.warning(
+                        "a torrent Arc was downloading is gone from the client",
+                        extra={"episode_id": episode.id, "hash": torrent.info_hash},
+                    )
+                elif was != "missing":
+                    ctx.log.info(
+                        "a torrent Arc had finished with is gone from the client",
+                        extra={
+                            "episode_id": episode.id,
+                            "hash": torrent.info_hash,
+                            "state": episode.state.value,
+                        },
+                    )
+                continue
 
-        torrent.progress = info.progress
-        if torrent.qbit_state != QBIT_REJECTED:
-            # ``rejected`` is a decision, not a state qBittorrent has an
-            # opinion about: the client is still happily seeding a file a
-            # person has said is not this episode
-            # (:mod:`arc.services.acquisition.reject`), and overwriting the
-            # note with ``stalledUP`` sixty seconds later would lose the only
-            # record of why that download is not to be trusted.
-            torrent.qbit_state = info.state
-        synced += 1
-        if info.complete and episode.state in COMPLETABLE:
-            await _complete(ctx, episode, torrent, info)
-            finished += 1
+            torrent.progress = info.progress
+            if torrent.qbit_state != QBIT_REJECTED:
+                # ``rejected`` is a decision, not a state qBittorrent has an
+                # opinion about: the client is still happily seeding a file a
+                # person has said is not this episode
+                # (:mod:`arc.services.acquisition.reject`), and overwriting the
+                # note with ``stalledUP`` sixty seconds later would lose the
+                # only record of why that download is not to be trusted.
+                torrent.qbit_state = info.state
+            synced += 1
+            if info.state in SEEDING_STATES and not ctx.settings.qbit_seeding:
+                seeding.append(info.hash)
+            if info.complete and episode.state in COMPLETABLE:
+                await _complete(ctx, episode, torrent, info)
+                finished += 1
+
+        # Belt and braces to ``qbit_apply_policy`` (spec §9). The share-ratio
+        # limit is what normally stops these, and it only applies to torrents
+        # the client held when the policy was written — so anything added
+        # before that, or by a client that ignored the limit, is stopped here.
+        # Every hash came out of ``qbit.torrents()`` above, which is filtered
+        # to Arc's category, so nothing anyone else added is touched.
+        if seeding:
+            await qbit.stop(seeding)
+            ctx.log.info("seeding torrents stopped", extra={"count": len(seeding)})
 
     await ctx.session.flush()
     ctx.log.info(
@@ -643,10 +666,36 @@ async def poll_qbit(ctx: JobContext) -> None:
             "synced": synced,
             "finished": finished,
             "vanished": vanished,
+            "stopped_seeding": len(seeding),
             "progress": {
                 torrent.info_hash[:8]: round(torrent.progress or 0.0, 3) for torrent, _ in rows
             },
         },
+    )
+
+
+@register(QBIT_POLICY)
+async def qbit_apply_policy(ctx: JobContext) -> None:
+    """Write Arc's seeding policy to the client (spec §9).
+
+    Queued at every worker start-up and once a day. Both, because the two
+    failure modes are different: a fresh container comes up with qBittorrent's
+    defaults (seed forever, upload unlimited), and a long-lived one can be
+    changed by hand in the Web UI. Neither should be able to leave Arc seeding.
+
+    Nothing is caught here. qBittorrent being unreachable raises
+    :class:`~arc.services.acquisition.qbit.QbitUnavailable`, the runner retries
+    with backoff, and "the client is not up yet" resolves itself — which is
+    exactly why this is a job rather than a line in ``arc.worker``.
+    """
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        sent = await qbit.apply_policy(
+            seeding=ctx.settings.qbit_seeding,
+            upload_limit_kib=ctx.settings.qbit_upload_limit_kib,
+        )
+    ctx.log.info(
+        "qbittorrent policy written",
+        extra={"job_id": ctx.job.id, "seeding": ctx.settings.qbit_seeding, **sent},
     )
 
 
@@ -660,12 +709,14 @@ __all__ = [
     "NO_RELEASE",
     "PAUSED_RETRY",
     "POLL_QBIT",
+    "QBIT_POLICY",
     "REMOVED_FROM_CLIENT",
     "SEARCH_RELEASE",
     "STARTED_KEY",
     "compute_wants",
     "largest_video",
     "poll_qbit",
+    "qbit_apply_policy",
     "retry_delay",
     "search_release",
 ]

@@ -27,6 +27,13 @@ set -a
 case "${DATA_DIR:-}" in ""|/*) ;; *) export DATA_DIR="$PWD/${DATA_DIR#./}";; esac
 set +a
 
+# Dev runs the torrent client on the backend network, not behind the VPN: the
+# tunnel is a production mitigation (spec §9) and a WireGuard config is not
+# something a checkout should need. Set here rather than left to .env so that
+# a .env holding the production `COMPOSE_PROFILES=vpn` still gives `make dev`
+# a qBittorrent it can reach on localhost.
+export COMPOSE_PROFILES=novpn
+
 COMPOSE=(docker compose --env-file .env
 	-f deploy/docker-compose.yml
 	-f deploy/docker-compose.dev.yml)

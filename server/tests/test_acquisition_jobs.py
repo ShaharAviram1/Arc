@@ -27,15 +27,17 @@ from arc.services.acquisition.jobs import (
     STARTED_KEY,
     largest_video,
     poll_qbit,
+    qbit_apply_policy,
     retry_delay,
     search_release,
 )
 from arc.services.acquisition.names import (
+    QBIT_POLICY,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
     search_dedupe_key,
 )
-from arc.services.acquisition.qbit import QbitUnavailable
+from arc.services.acquisition.qbit import SEEDING_STATES, QbitUnavailable
 from arc.services.acquisition.rules import PAUSED_KEY
 from arc.services.jobs.registry import JobContext
 from arc.services.library.names import MATCH_FILE
@@ -1021,6 +1023,139 @@ async def test_a_torrent_outside_arcs_category_is_never_touched(
     await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
 
     assert episode.state is EpisodeState.UNAVAILABLE, "invisible to Arc is the same as gone"
+
+
+# --- Seeding policy (spec §9) -----------------------------------------------
+
+
+async def test_a_completed_torrent_that_is_seeding_is_stopped(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Belt and braces: the ratio limit misses torrents added before it."""
+    wired, episode, torrent = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962050, email="seed1@arc.test"
+    )
+    episode.state = EpisodeState.READY
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=1.0, state="uploading")
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.stopped == [torrent.info_hash.lower()]
+    assert wired.qbit.torrents[0]["state"] == "stoppedUP"
+
+
+@pytest.mark.parametrize("state", sorted(SEEDING_STATES))
+async def test_every_seeding_state_is_stopped(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
+) -> None:
+    wired, episode, torrent = await downloading(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962051 + sorted(SEEDING_STATES).index(state),
+        email=f"seed-{state}@arc.test",
+    )
+    episode.state = EpisodeState.READY
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=1.0, state=state)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.stopped == [torrent.info_hash.lower()]
+
+
+async def test_a_torrent_already_stopped_is_left_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962056, email="seed2@arc.test"
+    )
+    episode.state = EpisodeState.READY
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=1.0, state="stoppedUP")
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.stopped == []
+
+
+async def test_a_downloading_torrent_is_not_stopped(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _, torrent = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962057, email="seed3@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.4, state="downloading")
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.stopped == []
+
+
+async def test_a_seeding_deployment_leaves_the_torrent_uploading(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``QBIT_SEEDING=true`` is the switch that turns all of this off."""
+    wired, episode, torrent = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962058, email="seed4@arc.test"
+    )
+    episode.state = EpisodeState.READY
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=1.0, state="uploading")
+    seeding = acquisition_settings(tmp_path, qbit_seeding=True)
+
+    await poll_qbit(context(db_session, seeding, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.stopped == []
+    assert wired.qbit.torrents[0]["state"] == "uploading"
+
+
+async def test_the_policy_handler_writes_the_preferences(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _ = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962059, email="policy1@arc.test"
+    )
+
+    await qbit_apply_policy(context(db_session, wired.settings, {}, job_type=QBIT_POLICY))
+
+    assert wired.qbit.preferences == [
+        {
+            "up_limit": 512 * 1024,
+            "max_ratio_enabled": True,
+            "max_ratio": 0,
+            "max_ratio_act": 0,
+            "max_seeding_time_enabled": True,
+            "max_seeding_time": 0,
+        }
+    ]
+
+
+async def test_the_policy_handler_honours_the_upload_limit_setting(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _ = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962060, email="policy2@arc.test"
+    )
+    capped = acquisition_settings(tmp_path, qbit_upload_limit_kib=128, qbit_seeding=True)
+
+    await qbit_apply_policy(context(db_session, capped, {}, job_type=QBIT_POLICY))
+
+    assert wired.qbit.preferences == [{"up_limit": 131072}]
+
+
+async def test_the_policy_handler_raises_when_the_client_is_down(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """So the runner retries it: "not up yet" is exactly the expected case."""
+    wired, _ = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962061, email="policy3@arc.test"
+    )
+    wired.qbit.down = True
+
+    with pytest.raises(QbitUnavailable):
+        await qbit_apply_policy(context(db_session, wired.settings, {}, job_type=QBIT_POLICY))
 
 
 # --- compute_wants as a handler ---------------------------------------------

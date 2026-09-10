@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-05.
+> changes. Last updated: 2026-09-09 (M0–M11 done; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -180,13 +180,29 @@ that must be verified before the next milestone starts.
   re-acquires.
 
 ### M11 — Phase 1 hardening and deploy
-- [ ] Structured logging, job duration metrics, error surfaces in UI
-- [ ] Rate limiting on login; security review of media routes
-- [ ] Responsive pass on Home and Player for phone
-- [ ] Production Compose deploy on the chosen host (hosting decision needed
-      here at the latest), TLS via Caddy, backups for Postgres
-- [ ] README: deploy + operations
-- [ ] Seed/demo path so a fresh user (the professor) sees content
+- [x] Structured logging, job duration metrics, error surfaces in UI
+      (shared `ErrorState` with retry on every page; progress-save banner
+      after 3 consecutive failures)
+- [x] Rate limiting on login (M2); security review of media routes (M8)
+- [~] Responsive pass on Home and Player for phone → moved to M15 (UI
+      overhaul) by owner decision
+- [x] Hosting decided 2026-09-08: Hetzner CX33 + 250 GB volume, own project,
+      seeding off, qBittorrent behind gluetun (see spec §9 / architecture §8)
+- [x] Production Compose hardened: healthchecks (incl. worker heartbeat),
+      restart policies, log rotation, backup service + restore, client baked
+      into the Caddy image, security headers, startup config check, VPN
+      profiles, seeding policy
+- [x] Deployed 2026-09-09 to `https://arc.atomworks.dev` (Hetzner CPX22 +
+      100 GB volume, Mullvad WireGuard via gluetun, Caddy TLS). Verified in
+      production by the orchestrator: health with 0 config warnings, VPN exit
+      IP ≠ host IP, one full loop (want → Nyaa → download → match →
+      transcode → HLS playback in Chrome with progress saved; torrent stopped
+      at 100 % with 0 upload), MAL link over the production callback and a
+      783-row import with acquisition paused. Invite path checked from the
+      CLI; the professor's own invite is issued at the end of development
+      (owner decision).
+- [x] README: deploy + operations (`deploy/README.md` runbook)
+- [x] Seed/demo path: `python -m arc.cli {status,invite,warm-catalogue,demo-list}`
 - **DoD:** the site is reachable over HTTPS, the professor can log in via an
   invite, and one full loop works in production.
 

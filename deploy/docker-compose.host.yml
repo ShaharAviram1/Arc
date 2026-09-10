@@ -1,0 +1,18 @@
+# Production host override (architecture.md §8): keep the media volume on the
+# host's dedicated data disk instead of Docker's default volume directory.
+#
+# The Makefile adds this file automatically whenever ARC_DATA_DIR is set in
+# .env. ARC_DATA_DIR must be an absolute path to an existing directory — on
+# the Hetzner box that is a directory on the attached volume, e.g.
+# /mnt/HC_Volume_106832060/arc_data. Dev leaves ARC_DATA_DIR unset and keeps
+# the plain named volume.
+#
+# Once the volume exists, Docker keeps its bind target; changing ARC_DATA_DIR
+# later needs `docker volume rm arc_arc_data` (after stopping the stack).
+volumes:
+  arc_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${ARC_DATA_DIR:?ARC_DATA_DIR must be an absolute path to the media directory}

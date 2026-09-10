@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,8 +34,9 @@ from arc.api import list as list_api
 from arc.api.auth import SessionRefreshMiddleware
 from arc.api.csrf import OriginCheckMiddleware
 from arc.config import Settings, get_settings
+from arc.core import config_check
 from arc.core.logging import setup_logging
-from arc.core.security import allowed_origins, origin_of
+from arc.core.security import allowed_origins
 from arc.db import create_engine, create_session_factory
 from arc.services.auth import LoginRateLimiter, RateLimitWindow, bootstrap_admin
 from arc.services.catalog.factory import create_catalog
@@ -57,18 +57,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     log.info("api starting", extra={"env": settings.env, "version": __version__})
 
-    # Everything Arc hands a user — invite links, the MAL redirect — is built
-    # from PUBLIC_URL, and its origin is the one the CSRF check accepts. A
-    # production stack still pointing at localhost therefore sends out links
-    # nobody can follow and refuses its own client's writes. Loud, but not
-    # fatal: an operator mid-deploy is better served by an API that runs and
-    # complains than by one that will not start.
-    if settings.is_prod and _is_local_origin(settings.public_url):
-        log.error(
-            "PUBLIC_URL is a localhost address in production; "
-            "invite links and the CSRF origin check will both be wrong",
-            extra={"public_url": settings.public_url},
-        )
+    # One ERROR line per production key that is missing or still holds an
+    # example value (arc/core/config_check.py). Loud, but not fatal: an
+    # operator mid-deploy is better served by an API that runs and complains
+    # than by one that will not start. ``GET /api/health`` reports the count.
+    config_check.log_warnings(settings, component="api")
 
     engine = create_engine(settings)
     app.state.engine = engine
@@ -105,24 +98,6 @@ def _safe_url(url: str) -> str:
     """``postgresql+asyncpg://arc:pw@host/db`` → ``…@host/db`` for logging."""
     _, _, tail = url.rpartition("@")
     return tail or url
-
-
-#: Hosts that mean "this machine". A ``PUBLIC_URL`` on one of them is a
-#: development leftover anywhere it is not development.
-LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"})
-
-
-def _is_local_origin(url: str) -> bool:
-    """Whether ``url``'s origin points at the machine the API runs on.
-
-    An unparseable ``PUBLIC_URL`` counts as local: it is at least as broken as
-    a localhost one, and the same log line is the right answer to both.
-    """
-    origin = origin_of(url)
-    if origin is None:
-        return True
-    host = urlsplit(origin).hostname or ""
-    return host in LOCAL_HOSTS or host.endswith(".localhost")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

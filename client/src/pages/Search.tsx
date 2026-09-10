@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AnimeCard } from '@/components/AnimeCard'
+import { ErrorState } from '@/components/ErrorState'
 import { catalogErrorMessage, isSearchable, useAnimeSearch } from '@/lib/anime'
 
 /** Long enough that a typed word is one request, short enough to feel live. */
@@ -39,7 +40,10 @@ export function Search() {
     }
   }, [input, query])
 
-  const { data, error, isError, isFetching, isPlaceholderData } = useAnimeSearch(query, page)
+  const { data, error, isError, isFetching, isPlaceholderData, refetch } = useAnimeSearch(
+    query,
+    page,
+  )
 
   function handleChange(value: string) {
     setInput(value)
@@ -76,7 +80,14 @@ export function Search() {
       {!isSearchable(query) ? (
         <Note>Search the catalogue by title</Note>
       ) : isError ? (
-        <Note>{catalogErrorMessage(error, 'Search failed. Try again.')}</Note>
+        <ErrorState
+          className="mt-8"
+          message={catalogErrorMessage(error, 'Search failed. Try again.')}
+          pending={isFetching}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
       ) : data === undefined ? (
         <Note>Searching…</Note>
       ) : (

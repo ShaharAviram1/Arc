@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { ErrorState } from '@/components/ErrorState'
 import {
   formatMalDate,
   formatMalValue,
@@ -461,7 +462,7 @@ function WriteLog() {
  */
 export function Mal() {
   const notice = useLinkOutcome()
-  const { data: status, isPending, isError, error } = useMalStatus()
+  const { data: status, isPending, isError, isFetching, error, refetch } = useMalStatus()
 
   return (
     <section className="mx-auto max-w-5xl">
@@ -474,9 +475,14 @@ export function Mal() {
           Loading…
         </p>
       ) : isError ? (
-        <p role="alert" className="mt-4 text-sm text-[var(--arc-error)]">
-          {malErrorMessage(error)}
-        </p>
+        <ErrorState
+          className="mt-4"
+          message={malErrorMessage(error)}
+          pending={isFetching}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
       ) : !status.configured ? (
         <p className="mt-4 max-w-2xl rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-2 text-sm text-[var(--arc-text-muted)]">
           {NOT_CONFIGURED}

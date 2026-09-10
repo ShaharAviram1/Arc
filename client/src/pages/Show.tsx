@@ -1,5 +1,6 @@
 import { Link, useParams } from 'react-router-dom'
 import { CoverThumb } from '@/components/CoverThumb'
+import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   anilistUrl,
@@ -500,7 +501,7 @@ export function Show() {
   const { id } = useParams()
   const animeId = Number(id)
   const { data: me } = useMe()
-  const { data: anime, isPending, isError, error } = useAnime(animeId)
+  const { data: anime, isPending, isError, isFetching, error, refetch } = useAnime(animeId)
 
   if (!Number.isInteger(animeId) || animeId <= 0) {
     return <NotFoundState />
@@ -517,9 +518,13 @@ export function Show() {
   if (isError) {
     if (isStatus(error, 404)) return <NotFoundState />
     return (
-      <p role="alert" className="text-sm text-[var(--arc-error)]">
-        {catalogErrorMessage(error, 'Could not load this show.')}
-      </p>
+      <ErrorState
+        message={catalogErrorMessage(error, 'Could not load this show.')}
+        pending={isFetching}
+        onRetry={() => {
+          void refetch()
+        }}
+      />
     )
   }
 

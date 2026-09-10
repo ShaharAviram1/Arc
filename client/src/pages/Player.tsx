@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { ErrorState } from '@/components/ErrorState'
 import { isStatus } from '@/lib/auth'
 import {
   formatClock,
@@ -34,8 +35,26 @@ const SEEK_STEP = 5
 const EDITABLE = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
 
 const NOT_READY_TITLE = 'Episode not ready'
+/** A failed mark-watched used to say nothing at all, which reads as "done". */
+const MARK_WATCHED_FAILED = 'Could not mark that watched. Try again.'
 const NOT_READY_BODY =
   'Arc has no playable file for this episode yet. It may still be downloading or being prepared.'
+
+const LOAD_FAILED_TITLE = 'Could not load this episode'
+const LOAD_FAILED_BODY = 'Could not load this episode. Try again shortly.'
+
+/**
+ * How many progress writes have to fail in a row before the viewer is told.
+ *
+ * One failure is normal: a report is fire-and-forget, it is never retried, and
+ * the next one is ten seconds away with a better position in it, so saying
+ * anything about a single miss would be noise about something already fixed.
+ * Three in a row is half a minute of a viewer's place going nowhere, which is
+ * worth interrupting for — but only just, hence a strip rather than a dialog.
+ */
+const PROGRESS_FAILURE_LIMIT = 3
+
+const PROGRESS_UNSAVED = 'Progress isn’t being saved — check your connection.'
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
@@ -144,7 +163,7 @@ function EndOverlay({ info, onDismiss }: { info: PlayInfo; onDismiss: () => void
  * and no reporter left over from the episode just finished.
  */
 function PlayerView({ id }: { id: number }) {
-  const { data, isPending, isError, error } = usePlayInfo(id)
+  const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -154,6 +173,17 @@ function PlayerView({ id }: { id: number }) {
 
   const [resumedAt, setResumedAt] = useState<number | null>(null)
   const [finished, setFinished] = useState(false)
+  /**
+   * Consecutive failed progress writes, and whether the viewer has waved the
+   * warning away. Both live here rather than in `ProgressReporter`: the
+   * reporter is framework-free and knows only about time and media events,
+   * while "how many in a row have failed" is a fact about the mutation, which
+   * is React's. Counted with an updater so `report` below never has to depend
+   * on the count — a new `report` identity would rebuild the reporter and send
+   * a spurious final beacon.
+   */
+  const [progressFailures, setProgressFailures] = useState(0)
+  const [progressWarningDismissed, setProgressWarningDismissed] = useState(false)
 
   const serverDuration = data?.duration ?? 0
   const { mutate: reportProgress } = useReportProgress()
@@ -165,7 +195,14 @@ function PlayerView({ id }: { id: number }) {
         { episode_id: id, position_s: position, duration_s: duration },
         {
           onSuccess: (result) => {
+            // A write that landed says the connection is back, so the run of
+            // failures ends and the warning is armed again for the next one.
+            setProgressFailures(0)
+            setProgressWarningDismissed(false)
             if (result.newly_completed) setFinished(true)
+          },
+          onError: () => {
+            setProgressFailures((count) => count + 1)
           },
         },
       )
@@ -249,18 +286,34 @@ function PlayerView({ id }: { id: number }) {
   }
 
   if (isError) {
+    // 404 is the server saying "no rendition"; anything else is Arc failing,
+    // and telling the viewer their episode is not ready would be a statement
+    // about their library that this client has no basis for. Only the second
+    // is worth a retry: a missing rendition is not made by asking again.
+    if (isStatus(error, 404)) return <NotReady message={NOT_READY_BODY} />
+
     return (
-      <NotReady
-        message={
-          isStatus(error, 404) ? NOT_READY_BODY : 'Could not load this episode. Try again shortly.'
-        }
-      />
+      <div className="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center p-6 text-center">
+        <h1 className="text-xl font-semibold text-[var(--arc-text)]">{LOAD_FAILED_TITLE}</h1>
+        <ErrorState
+          className="mt-2"
+          message={LOAD_FAILED_BODY}
+          pending={isFetching}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
+        <Link to="/" className="mt-6 text-sm text-[var(--arc-accent)] hover:underline">
+          Back to home
+        </Link>
+      </div>
     )
   }
 
   const info: PlayInfo = data
   const { anime, episode, previous, next } = info
   const episodeLabel = `Episode ${String(episode.number)}`
+  const progressWarning = progressFailures >= PROGRESS_FAILURE_LIMIT && !progressWarningDismissed
 
   function onReady(mediaDuration: number) {
     const video = videoRef.current
@@ -305,6 +358,30 @@ function PlayerView({ id }: { id: number }) {
           <NeighbourLink episode={next} label="Next" />
         </nav>
       </header>
+
+      {/*
+        Deliberately a strip under the header and not a dialog: nothing about
+        the episode has stopped working, so playback carries on and the viewer
+        decides whether to care. `status` rather than `alert` for the same
+        reason — it is worth reading, not worth interrupting.
+      */}
+      {progressWarning ? (
+        <div
+          role="status"
+          className="mx-4 mt-3 flex items-center gap-3 self-start rounded-md border border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10 px-3 py-1.5 text-xs text-[var(--arc-warn)]"
+        >
+          <span>{PROGRESS_UNSAVED}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setProgressWarningDismissed(true)
+            }}
+            className="text-[var(--arc-warn)] underline-offset-2 hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
 
       {resumedAt === null ? null : (
         <div
@@ -373,6 +450,11 @@ function PlayerView({ id }: { id: number }) {
             Mark watched
           </button>
         )}
+        {markWatched.isError ? (
+          <span role="alert" className="text-[var(--arc-error)]">
+            {MARK_WATCHED_FAILED}
+          </span>
+        ) : null}
         <span className="ml-auto">Space play/pause · ← → 5s · F fullscreen · M mute</span>
       </footer>
     </div>

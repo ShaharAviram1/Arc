@@ -1,10 +1,52 @@
 # Arc — production stack (architecture.md §8).
 #
+# ---------------------------------------------------------------------------
+# Host requirements
+# ---------------------------------------------------------------------------
+# * Linux host whose provider **permits BitTorrent traffic** (spec §9 —
+#   torrenting on a host that forbids it is a terms-of-service problem, not a
+#   technical one; choose the provider accordingly).
+# * **≥ 4 vCPU.** Software x264 at `veryfast` transcodes a 24-minute 1080p
+#   episode in roughly real time on two cores; MAX_TRANSCODES defaults to 2 and
+#   should stay at or below vCPU/2 so an encode never starves the API.
+# * **≥ 200 GB disk**, persistent. Budget ~1.4 GB for the source of a 1080p
+#   episode plus ~0.5 GB for its HLS rendition — about 2 GB per retained
+#   episode. Retention (G/D in the settings table) is what bounds the total.
+# * **≥ 4 GB RAM**, Docker with Compose v2+, and ports 80 and 443 open (6881
+#   too in no-VPN mode; behind the VPN, BitTorrent arrives through the tunnel).
+# * `/dev/net/tun` available to containers, for the VPN sidecar. Every ordinary
+#   VPS has it; some container hosts do not, and those need `VPN` off.
+#
+# ---------------------------------------------------------------------------
+# Running it
+# ---------------------------------------------------------------------------
 # Always run these from the repository root and pass `--env-file .env`: the
 # .env lives at the root, but Compose would otherwise look for it next to
 # this file. `make up` / `make dev` do it for you.
 #
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+#
+# ---------------------------------------------------------------------------
+# VPN mode — one switch, `COMPOSE_PROFILES` in .env
+# ---------------------------------------------------------------------------
+# `vpn` (the default, and what .env.example ships) runs qBittorrent inside a
+# gluetun WireGuard container; `novpn` runs it on the backend network directly.
+# Nothing else in the stack changes, and the api and worker say
+# `http://qbittorrent:8080` either way.
+#
+#   COMPOSE_PROFILES=vpn    docker compose --env-file .env -f deploy/… config
+#   COMPOSE_PROFILES=novpn  docker compose --env-file .env -f deploy/… config
+#
+# The Makefile supplies `vpn` when .env names no profile, because Compose has
+# no notion of a default profile and an .env written before this existed would
+# otherwise start no torrent client at all. Enable exactly one of the two: with
+# both, two containers answer to the name `qbittorrent`.
+#
+# `make up` is build → up → migrate: migrations run as a one-off `api`
+# container (`docker compose run --rm api uv run alembic upgrade head`) rather
+# than as a service, because a service would need its own healthcheck and
+# ordering to express "exactly once, before the others, and fail loudly", and
+# a one-off container expresses all of that by being a command that exits.
 #
 # Local development uses the override alongside this file, which publishes db
 # and qbittorrent on localhost and leaves api/worker/caddy to `make dev`:
@@ -13,6 +55,49 @@
 #     -f deploy/docker-compose.dev.yml up -d db qbittorrent
 
 name: arc
+
+# Every service gets the same rotation. Without it Docker's json-file driver
+# grows without limit, and the first symptom of that is a host with no disk
+# left for renditions — i.e. the logs take out the product. 20 MB × 5 is
+# 100 MB per service, which holds days of Arc's structured lines.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+# The torrent client, minus its networking — which is the whole of the
+# difference between the two services built from this (see them below).
+x-qbittorrent: &qbittorrent
+  image: lscr.io/linuxserver/qbittorrent:latest
+  environment:
+    PUID: ${PUID:-1000}
+    PGID: ${PGID:-1000}
+    TZ: ${TZ:-UTC}
+    WEBUI_PORT: 8080
+  volumes:
+    - qbit_config:/config
+    - arc_data:/data
+  # The Web UI answering is the only liveness signal this container has that
+  # means anything to Arc: the worker reaches it over exactly this port, and a
+  # qBittorrent that is running but has not finished starting its API is
+  # indistinguishable from a dead one as far as an `add torrent` is concerned.
+  # 401/403 count as healthy — that is the API answering, and this probe
+  # deliberately holds no credentials. `curl` without `-f`, so any HTTP
+  # response is an exit 0 and the grep is what decides; a refused connection
+  # produces no status line and fails.
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version | grep -qE '^(200|401|403)$$'",
+      ]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 60s
+  restart: unless-stopped
 
 x-arc-image: &arc-image
   build:
@@ -30,13 +115,23 @@ x-arc-image: &arc-image
     ENV: prod
     DATA_DIR: /data
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-arc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-arc}
+    # In no-VPN mode that name is the qbittorrent container; behind the VPN it
+    # is gluetun, which holds qBittorrent's network namespace and carries the
+    # name as an alias. Structurally the same URL in both modes, on purpose.
     QBIT_URL: http://qbittorrent:8080
     # Where users actually reach Arc, which is Caddy's hostname over TLS —
     # not the host-side dev URL in .env. Invite links are built from this and
     # its origin is the one the CSRF check accepts, so a stack left pointing
     # at localhost sends out links nobody can follow. The api logs an error
-    # at startup if this still looks local in prod.
+    # at startup if this still looks local in prod, and `/api/health` reports
+    # the count of such problems (arc/core/config_check.py).
     PUBLIC_URL: https://${PUBLIC_HOST:-localhost}
+    # Host capacity, passed through from .env so it can be tuned per machine
+    # without editing this file (architecture.md §9). Named here rather than
+    # left to env_file alone so the two knobs that decide how hard this host
+    # works are visible where the host requirements are written down.
+    MAX_TRANSCODES: ${MAX_TRANSCODES:-2}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
   restart: unless-stopped
 
 services:
@@ -55,19 +150,142 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    <<: *logging
     networks:
       - backend
 
-  qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+  # Nightly `pg_dump` to the `backups` volume, 14 days retained
+  # (deploy/backup.sh). A sidecar rather than a host cron job so that a
+  # deployment is one `docker compose up` and the backups survive the host
+  # being rebuilt; `make backup` runs one on demand, `make restore file=…`
+  # puts one back.
+  backup:
+    image: postgres:18
+    entrypoint: ["/bin/bash", "/backup.sh"]
+    command: ["loop"]
     environment:
-      PUID: ${PUID:-1000}
-      PGID: ${PGID:-1000}
-      TZ: ${TZ:-UTC}
-      WEBUI_PORT: 8080
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB:-arc}
+      POSTGRES_USER: ${POSTGRES_USER:-arc}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
     volumes:
-      - qbit_config:/config
-      - arc_data:/data
+      - ./backup.sh:/backup.sh:ro
+      # `make restore` runs this in a one-off container of the same service,
+      # so the script travels with the volume it reads from.
+      - ./restore.sh:/restore.sh:ro
+      - backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    # "Is there a recent dump?" — the only question worth asking of a backup
+    # service, and the one a process check cannot answer: a container happily
+    # sleeping in its loop while every pg_dump fails looks perfectly alive.
+    # The window is twice the interval in minutes, so one missed nightly dump
+    # is tolerated and two are not.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -n \"$$(find /backups -maxdepth 1 -name 'arc-*.sql.gz' -mmin -$$((BACKUP_INTERVAL_SECONDS / 30)) -print -quit)\"",
+        ]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    <<: *logging
+    networks:
+      - backend
+
+  # --- The torrent client, in one of two shapes ----------------------------
+  #
+  # `qbittorrent-vpn` (profile `vpn`, the default) shares gluetun's network
+  # namespace, so every packet it sends leaves through the tunnel or not at
+  # all. `qbittorrent` (profile `novpn`) is the same container on the backend
+  # network, for a host where the provider permits BitTorrent from its own IP.
+  # Exactly one of the two runs; both are the same image, the same volumes and
+  # the same healthcheck (the anchor above), and they share `qbit_config`, so
+  # switching modes keeps the Web UI password and the torrents.
+  #
+  # In VPN mode the api and worker still reach the Web UI at
+  # `http://qbittorrent:8080`: gluetun carries that name as a network alias,
+  # and it is an honest one — gluetun *is* qBittorrent's network stack. That is
+  # what keeps QBIT_URL out of the mode switch: one profile decides everything.
+  gluetun:
+    profiles: ["vpn"]
+    # Pinned to the stable major tag rather than `latest`: v3 is where the
+    # WIREGUARD_* variables below mean what this file says they mean.
+    image: qmcgaw/gluetun:v3
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      # `custom` = a WireGuard config from any provider (the four WIREGUARD_*
+      # values below). Naming a provider gluetun knows (`mullvad`, `airvpn`,
+      # `protonvpn`, …) instead means the server list is gluetun's, and then
+      # only the private key and addresses are needed plus SERVER_COUNTRIES or
+      # SERVER_CITIES to choose where to come out. Both shapes are wired here;
+      # .env decides which by what it sets.
+      VPN_SERVICE_PROVIDER: ${VPN_PROVIDER:-custom}
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
+      WIREGUARD_PRESHARED_KEY: ${WIREGUARD_PRESHARED_KEY:-}
+      # The *server's* public key and endpoint — the `[Peer]` half of the
+      # provider's .conf. Left empty for a named provider, which brings its
+      # own. (gluetun still accepts the older VPN_ENDPOINT_IP/PORT spelling;
+      # these are the current names.)
+      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:-}
+      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:-}
+      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-}
+      SERVER_COUNTRIES: ${VPN_SERVER_COUNTRIES:-}
+      SERVER_CITIES: ${VPN_SERVER_CITIES:-}
+      # gluetun's firewall drops everything that is not the tunnel — that is
+      # the kill switch, and it is on by default. This is the one hole: the
+      # backend subnet, so the api and worker can reach the Web UI that gluetun
+      # publishes on qBittorrent's behalf. Without it the answer never comes
+      # back and every acquisition job times out.
+      FIREWALL_OUTBOUND_SUBNETS: 172.29.0.0/16
+      # How long the tunnel has to answer the first health check before
+      # gluetun restarts it. The default (6s) is short enough that a slow
+      # first handshake looks like a broken one.
+      HEALTH_VPN_DURATION_INITIAL: 30s
+      TZ: ${TZ:-UTC}
+    # gluetun's own HEALTHCHECK ships in the image: it pings a public address
+    # *through the tunnel*, so "healthy" means the VPN is up, not merely that
+    # the process is. That is exactly the condition qbittorrent-vpn waits for
+    # below, and re-declaring it here could only make it say less.
+    expose:
+      - "8080"
+    restart: unless-stopped
+    <<: *logging
+    networks:
+      backend:
+        # See the block comment above: in VPN mode this container answers to
+        # the name `qbittorrent`, because it holds qBittorrent's network.
+        aliases:
+          - qbittorrent
+    # No published 6881. Incoming BitTorrent connections arrive through the
+    # tunnel (or not at all, on a provider without port forwarding); a hole in
+    # the host's firewall would reach nothing but this container's loopback.
+
+  qbittorrent-vpn:
+    <<: [*qbittorrent, *logging]
+    profiles: ["vpn"]
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        # Not `service_started`: qBittorrent announces to trackers seconds
+        # after it starts, and starting it before the tunnel is up is the one
+        # moment the host's own IP could appear in a swarm.
+        condition: service_healthy
+
+  qbittorrent:
+    <<: [*qbittorrent, *logging]
+    profiles: ["novpn"]
     # Web UI is reachable on the internal network only (security §7); the dev
     # override publishes it on localhost for debugging.
     expose:
@@ -76,7 +294,6 @@ services:
       # BitTorrent listen port. Change together with qBittorrent's setting.
       - "6881:6881"
       - "6881:6881/udp"
-    restart: unless-stopped
     # Backend only. qBittorrent talks to the open internet and is the service
     # most likely to be compromised; keeping it off the frontend network means
     # it cannot appear as a peer to the api and therefore cannot forge the
@@ -85,7 +302,7 @@ services:
       - backend
 
   api:
-    <<: *arc-image
+    <<: [*arc-image, *logging]
     depends_on:
       db:
         condition: service_healthy
@@ -127,25 +344,66 @@ services:
       - arc_data:/data
     expose:
       - "8000"
+    # `/api/health` needs no database and no session, which is exactly what a
+    # liveness probe should need. Python rather than curl: the server image is
+    # python:3.14-slim and carries no curl, and adding one to the image for
+    # the sake of a healthcheck is a package and a CVE feed for something the
+    # interpreter already does.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status == 200 else 1)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - frontend
       - backend
 
   worker:
-    <<: *arc-image
+    <<: [*arc-image, *logging]
     depends_on:
       db:
         condition: service_healthy
     command: ["python", "-m", "arc.worker"]
     volumes:
       - arc_data:/data
+    # The worker has no port to probe, so its liveness is a file: the
+    # scheduler rewrites $DATA_DIR/worker.heartbeat every 30 s and `--check`
+    # exits 0 while that file is under 90 s old (arc/worker.py). Deliberately
+    # not a database query — that would report Postgres's health, and a worker
+    # wedged with a dead event loop and a healthy database would pass.
+    #
+    # `interval` is longer than the beat and `retries` generous because the
+    # cost of a false negative is Docker restarting a worker in the middle of
+    # a three-hour transcode.
+    healthcheck:
+      test: ["CMD", "python", "-m", "arc.worker", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - backend
 
   caddy:
-    image: caddy:2
+    # Caddy with the built client baked in (client/Dockerfile). Before M11
+    # this bind-mounted ../client/dist, which made `make up` depend on the
+    # host having Node and a fresh `pnpm build` — and served a stale bundle in
+    # silence when it did not.
+    build:
+      context: ../client
+      dockerfile: Dockerfile
+      target: web
+    image: arc-web:latest
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
     ports:
@@ -154,10 +412,19 @@ services:
       - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../client/dist:/srv:ro
       - caddy_data:/data
       - caddy_config:/config
+    # Caddy's own admin API on the loopback interface, which is up once the
+    # config has loaded. It says nothing about certificates — a host waiting
+    # on Let's Encrypt is starting normally, not unhealthy.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
+    <<: *logging
     networks:
       - frontend
 
@@ -185,3 +452,8 @@ volumes:
   arc_data:
   caddy_data:
   caddy_config:
+  #: Gzipped pg_dump output, 14 days of it. A volume of its own rather than a
+  #: directory inside pgdata: a backup on the same filesystem as the database
+  #: is already a compromise, and one *inside the database's own volume* is
+  #: deleted by the same `docker volume rm` that loses the database.
+  backups:

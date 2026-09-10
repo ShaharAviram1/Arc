@@ -288,6 +288,20 @@ describe('Schedule', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the schedule.')
   })
+
+  it('offers a retry that asks for the season again', async () => {
+    const fetchMock = mockApi({
+      'GET /api/schedule': { status: 500, body: { detail: 'boom' } },
+    })
+
+    renderSchedule()
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === 'GET /api/schedule')).toHaveLength(2)
+    })
+  })
 })
 
 describe('Schedule list writes', () => {

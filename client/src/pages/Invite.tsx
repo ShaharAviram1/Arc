@@ -6,6 +6,7 @@ import {
   authErrorMessage,
   browserTimezone,
   isEmailTaken,
+  isStatus,
   MIN_PASSWORD_LENGTH,
   useAcceptInvite,
   useInvite,
@@ -33,10 +34,19 @@ export function Invite() {
   if (invite.isPending) return <AuthPending />
 
   if (invite.isError || !invite.data) {
+    // A 404 really does mean "used up or never existed" (the server answers
+    // 404 for every bad token on purpose). Anything else — a 500, an offline
+    // browser — is about Arc, not about the link, and saying "invite not
+    // valid" makes people throw away a link that still works.
+    const spent = isStatus(invite.error, 404) || !invite.isError
     return (
       <AuthShell
-        title="Invite not valid"
-        subtitle="This invite link is invalid or has already been used."
+        title={spent ? 'Invite not valid' : 'Could not check that invite'}
+        subtitle={
+          spent
+            ? 'This invite link is invalid or has already been used.'
+            : authErrorMessage(invite.error)
+        }
       >
         <Link className="text-sm text-[var(--arc-accent)] hover:underline" to="/login">
           Go to sign in

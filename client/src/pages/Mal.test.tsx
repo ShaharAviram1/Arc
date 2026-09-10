@@ -60,6 +60,21 @@ describe('Mal', () => {
     expect(requestsMade(fetchMock)).toEqual(['GET /api/mal/status'])
   })
 
+  it('reports a status the server could not give, with a way to ask again', async () => {
+    const fetchMock = mockApi({ [STATUS_PATH]: { status: 500, body: { detail: 'boom' } } })
+
+    renderMal()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Something went wrong. Try again.')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === 'GET /api/mal/status')).toHaveLength(
+        2,
+      )
+    })
+  })
+
   describe('not linked', () => {
     it('says what Arc will read and write before anything is authorised', async () => {
       mockApi({ [STATUS_PATH]: { body: MAL_STATUS_UNLINKED }, [LOG_PATH]: { body: [] } })

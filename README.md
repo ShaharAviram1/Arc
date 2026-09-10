@@ -109,22 +109,89 @@ Docker.
 ## Layout
 
 ```
-server/     FastAPI app (arc.main) and worker (arc.worker), Alembic, pytest
-client/     React + TypeScript + Vite SPA
-deploy/     docker-compose.yml, docker-compose.dev.yml, Caddyfile
+server/     FastAPI app (arc.main), worker (arc.worker), CLI (arc.cli), Alembic, pytest
+client/     React + TypeScript + Vite SPA, and the Dockerfile that builds it into Caddy
+deploy/     docker-compose.yml, docker-compose.dev.yml, Caddyfile, backup/restore, README (the runbook)
 scripts/    dev.sh (what `make dev` runs)
 ```
 
-## Deploy
+## Operator commands
 
-Everything runs on a single Docker Compose host: `caddy` (TLS + static
-client), `api`, `worker`, `db`, `qbittorrent`
-([architecture.md §8](architecture.md)).
+`python -m arc.cli` is the handful of things that have to be done on a host
+with no browser session yet. Every command is idempotent, so re-running one
+after a half-finished deploy is safe.
 
 ```bash
-cp .env.example .env      # set PUBLIC_HOST, POSTGRES_PASSWORD, SECRET_KEY, FERNET_KEY…
-pnpm --dir client build   # Caddy serves client/dist
-make up                   # docker compose up -d --build
+cd server
+uv run python -m arc.cli status         # users, lists, episodes, jobs, disk, source health
+uv run python -m arc.cli invite --email prof@example.edu     # prints the link, once
+uv run python -m arc.cli warm-catalogue                       # season cache + refresh sweep
+uv run python -m arc.cli demo-list --user-email prof@example.edu \
+    --add "Sousou no Frieren" --add "Vinland Saga"
+```
+
+In production the same commands run inside the api container, which already
+knows where the database is:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml \
+  run --rm api python -m arc.cli status
+```
+
+- `invite` — a seven-day, single-use link (`--expires-in-hours` up to 720).
+  Printed once: Arc stores only `sha256(token)`. `--admin` promotes an address
+  that already has an account — invites carry no role, so the order is
+  invite → accept → `--admin`.
+- `warm-catalogue` — queues the season pre-cache (what the schedule renders
+  from) and a refresh of every followed show. Without it a fresh deployment
+  has an empty schedule until 03:30 UTC.
+- `demo-list` — adds shows to a user's list as *watching*, looked up by title
+  through the catalogue, so a new user's first Home page is not empty. It
+  prints the title it matched. A list entry is what drives acquisition, so
+  this will start Arc looking for episodes unless acquisition is paused.
+- `status` — read-only; safe against a live deployment.
+
+## Deploy
+
+Everything runs on a single Docker Compose host: `caddy` (TLS + the built
+client), `api`, `worker`, `db`, `qbittorrent` behind a `gluetun` WireGuard
+sidecar, and a `backup` sidecar ([architecture.md §8](architecture.md)).
+
+Only the torrent client uses the VPN, and it has no other route out —
+`COMPOSE_PROFILES=vpn` in `.env` (the default) is the switch, `novpn` runs
+qBittorrent on the host's own address instead. Arc also tells the client not
+to seed and caps its upload. Both are in
+[deploy/README.md §5](deploy/README.md); `make dev` never uses the VPN.
+
+```bash
+cp .env.example .env      # then fill in the production keys — see below
+make up                   # build, migrate, start
+```
+
+`make up` is three steps in order: `docker compose build`, then the migration
+as a one-off `api` container (`… run --rm api alembic upgrade head`), then
+`up -d`. The client is built **inside** the image by `client/Dockerfile`, so
+the host needs no Node and there is no `client/dist` to keep in step.
+
+Production keys that must be real before `make up` — `PUBLIC_HOST`,
+`PUBLIC_URL`, `SECRET_KEY`, `FERNET_KEY` (generate once, **never rotate**),
+`POSTGRES_PASSWORD`, `MAL_CLIENT_ID` / `MAL_CLIENT_SECRET`, `MAL_REDIRECT_URI`
+(`https://<host>/api/mal/callback`, registered on the MAL application too),
+`QBIT_PASS`, the `WIREGUARD_*` values from the VPN provider's config file
+(unless `COMPOSE_PROFILES=novpn`), `BOOTSTRAP_ADMIN_*` for the first boot, and
+`ANTHROPIC_API_KEY` for phase 2. Arc checks the list itself: in production the api and worker log
+one ERROR per key that is missing or still an example value, and
+`GET /api/health` reports the count as `config_warnings` (a healthy deployment
+answers `0`).
+
+Backups: the `backup` service dumps Postgres nightly into the `backups`
+volume and keeps 14 days.
+
+```bash
+make backup                                  # take one now
+make backups                                 # list them
+make restore file=<name>.sql.gz              # over the live database
+make restore file=<name>.sql.gz db=arc_check # into a scratch db, to verify one
 ```
 
 Raw `docker compose` invocations must be run from the repository root with
@@ -134,6 +201,13 @@ Raw `docker compose` invocations must be run from the repository root with
 docker compose --env-file .env -f deploy/docker-compose.yml ps
 ```
 
-The hosting provider is still undecided, and full deployment and operations
-notes land with milestone M11 — treat the above as the shape of the deploy,
-not as a production runbook.
+**The full runbook is [deploy/README.md](deploy/README.md)**: host
+requirements and disk sizing, DNS, the whole `.env` table, registering the MAL
+redirect URI, qBittorrent's first-run password in production, the first login
+and the professor's invite, seeding a fresh deployment, pausing and resuming
+acquisition, the VPN (getting a WireGuard config, verifying the tunnel, running
+without it), logs, backups and restore, upgrading, and a troubleshooting table.
+
+The host is a Hetzner CX33 with a 250 GB volume ([spec.md §9](spec.md)); the
+runbook assumes nothing about the provider beyond its own requirements
+section.

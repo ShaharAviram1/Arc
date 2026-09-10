@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
@@ -15,7 +16,7 @@ import {
   HOME_PAGE_DOWNLOADING,
   HOME_PAGE_PREPARING,
 } from '@/test/animeFixtures'
-import { mockApi, TEST_USER, type MockRoutes } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_USER, type MockRoutes } from '@/test/apiMock'
 
 const HEALTH = { status: 'ok', version: '0.1.0', env: 'dev' }
 
@@ -170,6 +171,17 @@ describe('Home', () => {
     renderHome({ 'GET /api/home': { status: 500, body: { detail: 'boom' } } })
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load your home page.')
+  })
+
+  it('offers a retry that asks for the page again', async () => {
+    const fetchMock = renderHome({ 'GET /api/home': { status: 500, body: { detail: 'boom' } } })
+
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === 'GET /api/home')).toHaveLength(2)
+    })
   })
 
   it('still shows the API status when /api/health responds', async () => {

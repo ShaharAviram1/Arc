@@ -1,8 +1,9 @@
 """The qBittorrent Web API, as much of it as Arc needs (FR-A5).
 
-Four calls — ``auth/login``, ``torrents/add``, ``torrents/info`` and
-``torrents/delete`` (architecture.md §6) — and one piece of arithmetic that is
-easy to get wrong and expensive to get wrong: **the path mapping**.
+A handful of calls — ``auth/login``, ``torrents/add``, ``torrents/info``,
+``torrents/delete``, ``torrents/stop`` and ``app/setPreferences``
+(architecture.md §6) — and one piece of arithmetic that is easy to get wrong
+and expensive to get wrong: **the path mapping**.
 
 qBittorrent runs in its own container and writes to ``/data/downloads``. The
 worker may run on the host and see the same bytes at ``./data/downloads``, or
@@ -26,10 +27,18 @@ qBittorrent's session lasts an hour by default and the worker is long-lived,
 so the first call after an idle night gets a 403. :meth:`QbitClient.request`
 logs in again and retries once; a second 403 is a real authentication failure
 and raises.
+
+**Arc owns the client's seeding policy** (:meth:`QbitClient.apply_policy`,
+spec §9). Arc does not seed: the share-ratio limit is 0 and its action is
+"stop", the seeding-time limit is 0, and the upload rate is capped. That is a
+legal mitigation rather than a tuning knob, and it is applied to the *client*
+rather than to each torrent so that it also covers whatever was added before
+Arc got there.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -63,6 +72,26 @@ COMPLETE_STATES: Final[frozenset[str]] = frozenset(
         "completed",
     }
 )
+
+#: The subset of :data:`COMPLETE_STATES` that means "finished, and still
+#: giving something back". These are the states ``poll_qbit`` stops a torrent
+#: out of when seeding is off; the paused/stopped ones are where it puts it.
+SEEDING_STATES: Final[frozenset[str]] = frozenset(
+    {
+        "uploading",
+        "stalledUP",
+        "queuedUP",
+        "forcedUP",
+    }
+)
+
+#: ``max_ratio_act``: what qBittorrent does when a share limit is reached. 0 is
+#: *stop the torrent* — 1 removes it, 2 turns on super seeding and 3 removes it
+#: with its files (qBittorrent 5.2's ``ShareLimitAction``). Stop, deliberately:
+#: what happens to the *data* is retention's decision (FR-T1), and a client
+#: that deletes a source the moment it finishes would take the file out from
+#: under the transcode that is about to read it.
+STOP_AT_SHARE_LIMIT: Final[int] = 0
 
 #: Progress at which a torrent is finished whatever it calls its state. Floats
 #: from a JSON API are not compared for equality with 1.0 — 0.9999999 is a
@@ -358,6 +387,75 @@ class QbitClient:
         )
         return save_path
 
+    async def apply_policy(
+        self, *, seeding: bool = False, upload_limit_kib: int = 512
+    ) -> dict[str, object]:
+        """Write Arc's seeding policy to the client. Returns what it sent.
+
+        Three settings, and they are the mitigations spec §9 lists rather than
+        performance tuning:
+
+        * ``max_ratio 0`` with ``max_ratio_act`` = :data:`STOP_AT_SHARE_LIMIT`
+          — the torrent is stopped as soon as it has finished, because a ratio
+          of zero has already been reached the moment there is anything to
+          share;
+        * ``max_seeding_time 0`` — the same statement in the other unit, so a
+          client that disagrees about when a ratio limit counts still stops;
+        * ``up_limit`` — a global upload cap in bytes per second, which
+          applies *while downloading* too, where a ratio limit cannot.
+
+        ``dht`` and ``pex`` are left exactly as they are: turning them off
+        would break the swarms Arc downloads from, and they are not what a
+        copyright notice is about.
+
+        With ``seeding`` true only the rate cap is sent. Not "nothing at all":
+        an operator who wants to seed still wants a bounded upload, and — more
+        to the point — leaving the ratio settings alone means Arc does not
+        silently undo a limit the operator set by hand.
+
+        Preferences are sent as a JSON blob in a form field named ``json``,
+        which is qBittorrent's own shape for this endpoint, and only the keys
+        named here are touched.
+        """
+        prefs: dict[str, object] = {"up_limit": upload_limit_kib * 1024}
+        if not seeding:
+            prefs |= {
+                "max_ratio_enabled": True,
+                "max_ratio": 0,
+                "max_ratio_act": STOP_AT_SHARE_LIMIT,
+                "max_seeding_time_enabled": True,
+                "max_seeding_time": 0,
+            }
+        await self.request("POST", "/app/setPreferences", data={"json": json.dumps(prefs)})
+        log.info("qbittorrent policy applied", extra={"seeding": seeding, **prefs})
+        return prefs
+
+    async def stop(self, hashes: list[str]) -> None:
+        """Stop (pause) torrents the caller has already seen in the listing.
+
+        ``torrents/stop`` is qBittorrent 5's name for it; 4.x calls the same
+        thing ``torrents/pause`` and answers 404 to the new name, so a 404 —
+        or any other refusal that is not "the client is unreachable" — falls
+        back once. The client is whatever the operator pulled.
+
+        **Only hashes from :meth:`torrents` may be passed.** That listing is
+        filtered to Arc's category, which is the same guarantee
+        :meth:`delete` buys itself with an extra request; this method is called
+        from ``poll_qbit``, which has just made that request.
+        """
+        wanted = sorted({value.lower() for value in hashes if value})
+        if not wanted:
+            return
+        data = {"hashes": "|".join(wanted)}
+        try:
+            await self.request("POST", "/torrents/stop", data=data)
+        except QbitUnavailable:
+            raise
+        except QbitError:
+            log.info("this qbittorrent has no torrents/stop; using torrents/pause")
+            await self.request("POST", "/torrents/pause", data=data)
+        log.info("torrents stopped", extra={"count": len(wanted)})
+
     async def torrents(self) -> list[TorrentInfo]:
         """Everything in Arc's category, as ``hash → state`` rows."""
         response = await self.request("GET", "/torrents/info", params={"category": self.category})
@@ -409,6 +507,8 @@ __all__ = [
     "API",
     "COMPLETE_PROGRESS",
     "COMPLETE_STATES",
+    "SEEDING_STATES",
+    "STOP_AT_SHARE_LIMIT",
     "QbitClient",
     "QbitError",
     "QbitUnavailable",

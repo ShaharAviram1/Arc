@@ -133,6 +133,21 @@ class Settings(BaseSettings):
     #: one onto the other. They differ whenever the client runs in its own
     #: container, which is every deployment (architecture.md §8).
     qbit_downloads_path: str = "/data/downloads"
+    #: Whether Arc lets the client seed what it has downloaded. **False**, and
+    #: that is a product decision rather than a preference (spec §9: seeding
+    #: off, upload capped, torrent client behind a VPN). The worker enforces it
+    #: on the client itself — a share-ratio limit of 0 whose action is "stop" —
+    #: and ``poll_qbit`` stops any torrent that reached a seeding state before
+    #: the policy did. Set it true only on a host where seeding is wanted and
+    #: allowed; Arc then leaves both alone.
+    qbit_seeding: bool = False
+    #: Upload rate cap for the whole client, KiB/s, sent as qBittorrent's
+    #: ``up_limit`` (which is bytes/s, so this is multiplied by 1024). It
+    #: applies while a torrent is *downloading* too — BitTorrent gives back
+    #: what you give — so it is a cap, not a switch: 0 would be unlimited in
+    #: qBittorrent's own terms, and 512 KiB/s is enough to keep a swarm
+    #: interested without the host uploading anything worth noticing.
+    qbit_upload_limit_kib: int = Field(default=512, ge=0)
 
     # --- Media -----------------------------------------------------------
     data_dir: Path = Path("./data")

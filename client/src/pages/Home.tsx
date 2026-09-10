@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { CoverThumb } from '@/components/CoverThumb'
+import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   catalogErrorMessage,
@@ -207,7 +208,7 @@ function NewEpisodeRow({ item, timezone }: { item: NewEpisodeEntry; timezone?: s
  */
 export function Home() {
   const { data: me } = useMe()
-  const { data, error, isError } = useHome()
+  const { data, error, isError, isFetching, refetch } = useHome()
   const timezone = me?.timezone
 
   return (
@@ -215,9 +216,14 @@ export function Home() {
       <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">Home</h1>
 
       {isError ? (
-        <p role="alert" className="mt-6 text-sm text-[var(--arc-error)]">
-          {catalogErrorMessage(error, 'Could not load your home page.')}
-        </p>
+        <ErrorState
+          className="mt-6"
+          message={catalogErrorMessage(error, 'Could not load your home page.')}
+          pending={isFetching}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
       ) : data === undefined ? (
         <p role="status" className="mt-6 text-sm text-[var(--arc-text-muted)]">
           Loading…

@@ -15,7 +15,9 @@ import pytest
 
 from arc.config import ConfigurationError
 from arc.services.acquisition.qbit import (
+    API,
     COMPLETE_STATES,
+    STOP_AT_SHARE_LIMIT,
     QbitClient,
     QbitError,
     QbitUnavailable,
@@ -247,6 +249,104 @@ async def test_deleting_only_foreign_hashes_makes_no_request() -> None:
         await qbit.delete(["bbb"])
 
     assert stub.deleted == []
+
+
+# --- Policy: no seeding, capped upload (spec §9) -----------------------------
+
+
+async def test_the_policy_stops_seeding_and_caps_the_upload() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        sent = await qbit.apply_policy(seeding=False, upload_limit_kib=512)
+
+    assert stub.preferences == [
+        {
+            "up_limit": 524288,
+            "max_ratio_enabled": True,
+            "max_ratio": 0,
+            "max_ratio_act": STOP_AT_SHARE_LIMIT,
+            "max_seeding_time_enabled": True,
+            "max_seeding_time": 0,
+        }
+    ]
+    assert sent == stub.preferences[0], "what it reports is what it sent"
+
+
+def test_the_share_limit_action_is_stop_not_remove() -> None:
+    """0 is Stop; 1 is Remove and 3 removes the file the transcode needs."""
+    assert STOP_AT_SHARE_LIMIT == 0
+
+
+async def test_the_upload_cap_is_sent_in_bytes_per_second() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.apply_policy(upload_limit_kib=64)
+
+    assert stub.preferences[0]["up_limit"] == 65536
+
+
+async def test_a_seeding_deployment_only_gets_the_rate_cap() -> None:
+    """Arc does not undo a share limit an operator who seeds set by hand."""
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.apply_policy(seeding=True, upload_limit_kib=1024)
+
+    assert stub.preferences == [{"up_limit": 1048576}]
+
+
+async def test_dht_and_pex_are_never_touched() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.apply_policy()
+
+    assert "dht" not in stub.preferences[0]
+    assert "pex" not in stub.preferences[0]
+
+
+# --- Stopping ---------------------------------------------------------------
+
+
+async def test_stop_sends_the_hashes_folded_and_deduplicated() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.stop(["BBB", "aaa", "bbb"])
+
+    assert stub.stopped == ["aaa", "bbb"]
+    assert stub.calls[-1].endswith("/torrents/stop")
+
+
+async def test_stop_falls_back_to_pause_on_a_four_x_client() -> None:
+    stub = QbitStub(api_version="4")
+
+    async with client(stub) as qbit:
+        await qbit.stop(["aaa"])
+
+    assert stub.stopped == ["aaa"]
+    assert stub.calls[-2:] == [f"{API}/torrents/stop", f"{API}/torrents/pause"]
+
+
+async def test_stopping_nothing_makes_no_request() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.stop([])
+
+    assert stub.calls == []
+
+
+async def test_an_unreachable_client_is_not_mistaken_for_an_old_one() -> None:
+    """``down`` must raise, not be retried as if ``stop`` were unsupported."""
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        stub.down = True
+        with pytest.raises(QbitUnavailable):
+            await qbit.stop(["aaa"])
 
 
 # --- Path mapping -----------------------------------------------------------

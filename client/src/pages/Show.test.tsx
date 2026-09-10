@@ -380,6 +380,21 @@ describe('Show', () => {
     )
   })
 
+  it('offers a retry that asks for the show again', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { status: 500, body: { detail: 'boom' } },
+    })
+
+    renderShow()
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((path) => path === DETAIL_PATH)).toHaveLength(2)
+    })
+  })
+
   describe('marking an episode watched (FR-W3)', () => {
     it('offers a mark for every aired episode that is not watched yet', async () => {
       mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })

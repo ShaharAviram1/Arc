@@ -2,13 +2,61 @@
 #
 # PUBLIC_HOST comes from .env. Use `localhost` for a local production-shaped
 # run (Caddy issues an internal certificate); use the real hostname in
-# production and Caddy obtains a Let's Encrypt certificate automatically.
+# production and Caddy obtains a Let's Encrypt certificate automatically —
+# nothing here configures that, and nothing here should.
+#
+# Validate a change before deploying it:
+#
+#   docker run --rm -e PUBLIC_HOST=arc.example -v "$PWD/deploy/Caddyfile":/c \
+#     caddy:2 caddy validate --config /c --adapter caddyfile
 
 {$PUBLIC_HOST} {
-	encode gzip
+	# zstd first, gzip for anything that cannot take it. This only touches the
+	# content types in Caddy's default encode match list — text/*, JSON,
+	# JavaScript, SVG — so the HLS playlist (application/vnd.apple.mpegurl) and
+	# the fMP4 segments (video/mp4) are passed through byte for byte, which is
+	# what keeps Range requests exact.
+	encode zstd gzip
+
+	# Response headers for everything below, static and proxied alike.
+	header {
+		# Never let a browser guess a content type. Arc serves user-influenced
+		# filenames from /media, and a sniffed text/html is how a video file
+		# becomes a script.
+		X-Content-Type-Options "nosniff"
+		# Referrers leak paths, and Arc's paths carry ids — and, on the invite
+		# route, a live credential. Origin-only when leaving the site.
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Nothing embeds Arc. The player is same-origin, so DENY costs nothing
+		# and removes clickjacking as a category.
+		X-Frame-Options "DENY"
+		# Caddy's own advertisement.
+		-Server
+	}
+
+	# HSTS, and only over HTTPS. A `Strict-Transport-Security` header sent over
+	# plain HTTP is ignored by browsers, but a local or reverse-proxied run on
+	# http:// would still be *sending* a header that pins the browser to a
+	# scheme that host does not serve. Deliberately without `includeSubDomains`
+	# or `preload`: Arc may be one name on a domain that hosts other things,
+	# and those two are difficult to take back.
+	# Matched on the scheme rather than on `{http.request.tls}`: that
+	# placeholder is a struct, and an expression comparing it to "" is true
+	# even on a plain HTTP request, which sends the header exactly where it
+	# must not be sent.
+	@https expression {http.request.scheme} == "https"
+	header @https Strict-Transport-Security "max-age=31536000"
 
 	# The API owns /api and /media. Media is never served statically: paths
 	# are derived from ids and every request needs a session (security §7).
+	#
+	# `reverse_proxy` forwards Range and returns 206 and Content-Range
+	# untouched — it is a byte-for-byte proxy, not a file server — which is
+	# what makes seeking in the player work. Nothing here may add caching
+	# headers to /media either: the API sets `private, …` on playlists and
+	# segments precisely because those responses are per-user authorised
+	# (arc/api/media_stream.py), and overriding that would put one viewer's
+	# episode in a shared cache.
 	handle /api/* {
 		reverse_proxy api:8000
 	}
@@ -17,9 +65,23 @@
 		reverse_proxy api:8000
 	}
 
-	# Everything else is the built React SPA.
+	# Vite writes /assets/<name>-<hash>.<ext>: the hash changes when the
+	# content does, so the URL is safe to cache and a stale one is never
+	# served. A day rather than a year because Arc is deployed by hand and a
+	# mistake should age out over a weekend, not a year.
+	handle /assets/* {
+		root * /srv
+		header Cache-Control "public, max-age=86400, immutable"
+		file_server
+	}
+
+	# Everything else is the built React SPA (baked into this image by
+	# client/Dockerfile). `no-cache` — hold a copy, but revalidate — because
+	# index.html is the one unhashed file and it is what names the current
+	# bundle: a cached index.html is a deployment that never reaches anybody.
 	handle {
 		root * /srv
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}

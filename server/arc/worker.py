@@ -16,18 +16,23 @@ More than one worker may run at once; ``SKIP LOCKED`` is what makes that safe.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
 import signal
 import socket
+import sys
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 
 from arc import __version__
 from arc.config import Settings, get_settings
+from arc.core import config_check
 from arc.core.logging import setup_logging
 from arc.db import SessionFactory, create_engine, create_session_factory
 from arc.models import DEFAULT_PRIORITY, Anime, Job
@@ -37,6 +42,8 @@ from arc.services.acquisition.names import (
     COMPUTE_WANTS_PRIORITY,
     POLL_QBIT,
     POLL_QBIT_PRIORITY,
+    QBIT_POLICY,
+    QBIT_POLICY_PRIORITY,
 )
 from arc.services.acquisition.nyaa import close_shared_client
 from arc.services.auth import purge_expired
@@ -92,6 +99,13 @@ COMPUTE_WANTS_SECONDS = 900
 #: worst-case delay between a torrent finishing and the transcode starting.
 POLL_QBIT_SECONDS = 60
 
+#: How often Arc rewrites qBittorrent's seeding policy (spec §9). Daily, and
+#: also at start-up: a container that has just been recreated comes up with
+#: qBittorrent's own defaults — seed for ever, upload unlimited — and a
+#: long-lived one can be changed by hand in the Web UI. Neither may leave Arc
+#: seeding, and once a day is often enough to catch the second.
+QBIT_POLICY_SECONDS = 86400
+
 #: How long after start-up the first MyAnimeList import sweep runs. Not
 #: immediately: a worker restart is not a reason to re-read everybody's list,
 #: and the sweep's own six-hourly period gets there soon enough. Five minutes
@@ -118,12 +132,67 @@ RETENTION_SWEEP_DELAY_SECONDS = 600
 RECONCILE_SECONDS = 3600
 
 
+#: File under ``DATA_DIR`` whose modification time is the worker's liveness
+#: signal. Written on start-up and re-written by every heartbeat tick.
+HEARTBEAT_FILENAME = "worker.heartbeat"
+
+#: How stale that file may be before ``--check`` calls the worker dead. Three
+#: beats: one missed tick is a busy event loop, three is a process that has
+#: stopped running its scheduler. Deliberately generous, because the cost of a
+#: false negative is Docker killing a healthy worker mid-transcode.
+HEARTBEAT_STALE_AFTER = HEARTBEAT_SECONDS * 3
+
+
 def worker_id() -> str:
     """Identity written to ``jobs.locked_by`` — ``host:pid``, ≤ 64 chars."""
     return f"{socket.gethostname()}:{os.getpid()}"[:64]
 
 
-def _heartbeat() -> None:
+def heartbeat_path(settings: Settings) -> Path:
+    """Where the liveness file lives.
+
+    Under ``DATA_DIR`` rather than ``/tmp`` because that is the one directory
+    the deployment already guarantees is writable by the worker's user, and
+    because ``docker compose exec`` runs the check inside the same container
+    and therefore sees the same path.
+    """
+    return settings.data_dir / HEARTBEAT_FILENAME
+
+
+def touch_heartbeat(settings: Settings) -> None:
+    """Record that the worker is alive, now. Never raises.
+
+    A failure here must not kill the worker: it would turn "the log directory
+    is full" into "no episodes are transcoded". The healthcheck will notice
+    soon enough, which is exactly its job.
+    """
+    path = heartbeat_path(settings)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - depends on the filesystem
+        log.warning(
+            "could not write the heartbeat file", extra={"path": str(path), "error": str(exc)}
+        )
+
+
+def check_heartbeat(settings: Settings, *, now: float | None = None) -> bool:
+    """Whether the heartbeat file is fresh enough to call the worker healthy.
+
+    ``False`` for a missing file too: a worker that has not started has not
+    written one, and "no evidence of life" is the same answer as "last seen an
+    hour ago" as far as a container healthcheck is concerned.
+    """
+    path = heartbeat_path(settings)
+    try:
+        age = (time.time() if now is None else now) - path.stat().st_mtime
+    except OSError:
+        return False
+    return age <= HEARTBEAT_STALE_AFTER
+
+
+def _heartbeat(settings: Settings) -> None:
+    touch_heartbeat(settings)
     log.info("worker heartbeat", extra={"at": datetime.now(UTC).isoformat()})
 
 
@@ -242,7 +311,17 @@ async def run(settings: Settings) -> None:
             # Runs on the main thread, outside the loop: hand the set() back.
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
+    # One ERROR line per production key that is missing or still holds an
+    # example value (arc/core/config_check.py). The worker checks the same
+    # list as the API: a `docker compose logs worker` is as likely to be where
+    # somebody looks first, and the worker is the half that needs QBIT_PASS.
+    config_check.log_warnings(settings, component="worker")
+
     identity = worker_id()
+    # Before anything that can block: the healthcheck's grace period starts
+    # when the container does, and a first beat that waited on a slow database
+    # connection would be a restart loop on a cold host.
+    touch_heartbeat(settings)
     engine = create_engine(settings)
     factory = create_session_factory(engine)
 
@@ -258,6 +337,7 @@ async def run(settings: Settings) -> None:
         "interval",
         seconds=HEARTBEAT_SECONDS,
         id="heartbeat",
+        args=[settings],
         next_run_time=datetime.now(UTC),
     )
     scheduler.add_job(
@@ -330,6 +410,17 @@ async def run(settings: Settings) -> None:
         args=[factory, POLL_QBIT, POLL_QBIT_PRIORITY],
         next_run_time=datetime.now(UTC),
     )
+    # Seeding policy (spec §9): tell the client not to seed and to cap its
+    # upload. Immediately, because a torrent added before the policy is
+    # written is a torrent that seeds until ``poll_qbit`` notices.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=QBIT_POLICY_SECONDS,
+        id=QBIT_POLICY,
+        args=[factory, QBIT_POLICY, QBIT_POLICY_PRIORITY],
+        next_run_time=datetime.now(UTC),
+    )
     # Library ingest (FR-L1): walk the download and manual-drop directories.
     # ``next_run_time`` is now, not one interval from now — a worker that has
     # just started is exactly when a file dropped in while it was down needs
@@ -390,6 +481,9 @@ async def run(settings: Settings) -> None:
             "compute_wants_s": COMPUTE_WANTS_SECONDS,
             "mal_import_interval_h": settings.mal_import_interval_hours,
             "poll_qbit_s": POLL_QBIT_SECONDS,
+            "qbit_policy_s": QBIT_POLICY_SECONDS,
+            "qbit_seeding": settings.qbit_seeding,
+            "qbit_upload_limit_kib": settings.qbit_upload_limit_kib,
             "retention_sweep_s": RETENTION_SWEEP_SECONDS,
             "retention_dry_run": settings.retention_dry_run,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
@@ -412,17 +506,47 @@ async def run(settings: Settings) -> None:
         # this is the only place that closes it (acquisition/nyaa.py).
         await close_shared_client()
         await engine.dispose()
+        # A worker that has stopped on purpose is not "recently alive", and
+        # leaving the file behind would keep ``--check`` green for another
+        # ninety seconds after the process is gone.
+        heartbeat_path(settings).unlink(missing_ok=True)
         log.info("worker stopped")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
+    """``python -m arc.worker`` — run the worker, or ``--check`` its health.
+
+    ``--check`` is what the container healthcheck runs (deploy/docker-compose.yml).
+    It is a *file* check rather than a database or HTTP one on purpose: the
+    worker has no port to probe, and asking it about the queue would report
+    Postgres's health rather than the worker's — a worker wedged with a dead
+    event loop and a healthy database would pass.
+    """
+    parser = argparse.ArgumentParser(prog="arc.worker", description="Arc background worker")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 0 if this container's worker heartbeat is fresh, 1 otherwise",
+    )
+    args = parser.parse_args(argv)
+
     settings = get_settings()
+
+    if args.check:
+        path = heartbeat_path(settings)
+        if check_heartbeat(settings):
+            print(f"worker heartbeat is fresh ({path})")
+            return 0
+        print(f"worker heartbeat missing or stale ({path})", file=sys.stderr)
+        return 1
+
     setup_logging(settings)
     try:
         asyncio.run(run(settings))
     except KeyboardInterrupt:  # pragma: no cover - signal race on some platforms
         log.info("worker interrupted")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-05. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-09-09. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -316,8 +316,8 @@ preparing → failed → (retry) → preparing
 | Topic | Status | Notes |
 |---|---|---|
 | MAL API client id | **Done 2026-09-06** | Reused from the owner's AnimeTrack app. Still needed for M9: the client secret and Arc's redirect URL on the MAL app config. |
-| Hosting provider / budget | **Deferred** | Owner may consolidate with other projects. Constraints: must allow BitTorrent traffic, needs persistent disk (≥ 200 GB suggested), CPU for x264 transcodes (hardware encode optional). See architecture.md §8. |
-| Legal/ToS | Owner's call | Torrenting licensed content on a cloud host may violate the host's ToS; choose a provider accordingly. |
+| Hosting provider / budget | **Decided 2026-09-08**, revised 2026-09-09 | Hetzner Cloud, one account, Arc in its own project: CPX22 (2 vCPU, 4 GB, 80 GB NVMe, Helsinki; the cheaper CX33 was out of stock) + 100 GB volume + IPv4 + backups ≈ $33/mo, plus a WireGuard VPN (~$5/mo) that only the torrent client uses. Public host `arc.atomworks.dev`. Seeding is disabled (stop on completion). Legitimate future products may share the account in separate projects; the VPN keeps torrent traffic off the host's IP. |
+| Legal/ToS | Owner's call, mitigated | Copyright notices reach the host via swarm monitoring; mitigations chosen: no seeding, upload capped, qBittorrent bound to a VPN with a kill switch, Arc isolated in its own project. Notices, if any, are the owner's to answer. |
 | Retention defaults G=7, D=21 | Provisional | Admin-configurable; revisit after use. |
 | Subtitle language default | Provisional: English | Configurable. |
 | Hardware transcoding | Open | Depends on host. Software x264 `veryfast` preset assumed. |
@@ -353,3 +353,12 @@ preparing → failed → (retry) → preparing
   from the user's last action on the show; wants that end because the show
   left watching/planned are dropped (not deleted) so the grace period is
   never skipped; revival needs an Arc-side action.
+- 2026-09-09 — Host revised to CPX22 + 100 GB volume: the CX line is out of
+  stock at Hetzner; CPX32 costs double for headroom Arc does not use.
+- 2026-09-09 — Public host is `arc.atomworks.dev` (owner's umbrella domain on
+  Cloudflare; Sector Watch will get its own domain).
+- 2026-09-08 — Hosting decided: Hetzner CX33 + 250 GB volume in its own
+  project on the owner's account, seeding off, torrent client behind a VPN
+  (~€30/mo all in). AWS rejected on cost (~5× for this workload) and
+  torrent AUP risk; home-tunnel rejected because the Mac would have to
+  stay on.

@@ -1,7 +1,7 @@
 # Arc — Architecture
 
 > Living document. Update whenever the stack, a component boundary, or an
-> integration changes. Last updated: 2026-09-05.
+> integration changes. Last updated: 2026-09-09.
 > Companions: [spec.md](spec.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Stack at a glance
@@ -529,7 +529,7 @@ Mutating requests must carry an allowed `Origin`.
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
 | Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 5 query forms per episode (romaji and english full titles, plus season-stripped base title with `S<k>`, roman numeral, and plain), ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows differently (`Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
-| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
+| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Python SDK `anthropic`; model `claude-opus-5`; structured outputs; streaming. |
 
 ## 7. Security
@@ -560,10 +560,29 @@ Mutating requests must carry an allowed `Origin`.
 
 ## 8. Deployment
 
-`deploy/docker-compose.yml` services:
+`deploy/docker-compose.yml` services (all `restart: unless-stopped`,
+json-file logs 20 MB × 5, healthchecks: api via `/api/health`, worker via
+`python -m arc.worker --check` on a heartbeat file the scheduler rewrites
+every 30 s, qbittorrent via its WebUI, caddy via its admin API, backup via
+dump freshness; `depends_on` uses `service_healthy`):
 
-- `caddy` — TLS (Let's Encrypt), serves `client/dist`, proxies `/api` and
-  `/media` to `api`.
+- `caddy` — image `arc-web` built from `client/Dockerfile` (node build stage
+  → SPA baked into the Caddy image, no host Node needed); TLS via Let's
+  Encrypt; security headers (HSTS only over https, nosniff, referrer
+  policy, frame deny, `Server` stripped); `/assets/*` cached a day,
+  `index.html` no-cache; proxies `/api` and `/media` to `api` with Range
+  passed through.
+- `backup` — `postgres:18` running `deploy/backup.sh`: gzipped `pg_dump`
+  on start and every `BACKUP_INTERVAL_SECONDS` (86400) into the separate
+  `backups` volume, kept `BACKUP_KEEP_DAYS` (14, never the newest);
+  `make backup`, `make backups`, `make restore file=…`.
+- `gluetun` — WireGuard VPN sidecar (`qmcgaw/gluetun:v3`, kill switch by
+  default, exposes the WebUI port on the backend network under the alias
+  `qbittorrent`). Compose profiles select the torrent client:
+  `COMPOSE_PROFILES=vpn` (default via the Makefile) runs `qbittorrent-vpn`
+  with `network_mode: service:gluetun`; `novpn` runs a plain `qbittorrent`
+  on the backend network. `QBIT_URL=http://qbittorrent:8080` is identical in
+  both modes. Dev always uses `novpn`.
 - `api` — `uvicorn arc.main:app`, 2 workers.
 - `worker` — `python -m arc.worker`, 1 instance (raise for more transcode
   parallelism; ffmpeg concurrency capped by `MAX_TRANSCODES`).
@@ -571,13 +590,35 @@ Mutating requests must carry an allowed `Origin`.
 - `qbittorrent` — linuxserver/qbittorrent, `/data/downloads` volume shared
   with api/worker, Web UI on internal network only.
 
-Volumes: `/data/downloads`, `/data/renditions`, `/data/fonts`, `pgdata`.
+Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
+heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
+`caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
+`api` container → up. Ops runbook: `deploy/README.md`; CLI:
+`python -m arc.cli {status,invite,warm-catalogue,demo-list}`.
 
-Host requirements (hosting itself is **deferred**, see spec §9): Linux VPS
-that permits BitTorrent traffic, ≥ 4 vCPU (software x264 at `veryfast`
-transcodes a 24-min 1080p episode in roughly real time on 2 cores),
-≥ 200 GB disk, persistent volumes. Hardware encode (VAAPI/NVENC) can be
-enabled later by changing the ffmpeg encoder flag.
+Host (decided 2026-09-08, revised 2026-09-09 when Hetzner's cost-optimised
+line went out of stock): Hetzner Cloud CPX22 (2 AMD vCPU, 4 GB, 80 GB NVMe;
+Helsinki), Ubuntu 26.04, a 100 GB volume auto-mounted by Hetzner under
+`/mnt/HC_Volume_<id>`; `ARC_DATA_DIR` points at a directory on it and
+`deploy/docker-compose.host.yml` (added by `make` when the key is set) binds
+the `arc_data` volume there. Postgres stays on the NVMe, which Hetzner's
+backups snapshot; the volume holds only re-acquirable media. 2 GB swap,
+`MAX_TRANSCODES=1`. Hetzner firewall: inbound 22/80/443 + ICMP only. A
+primary IPv4, Hetzner backups on. Arc lives in its own Hetzner
+project on the owner's account. Domain (decided 2026-09-09): `atomworks.dev`
+on Cloudflare Registrar, the owner's umbrella for hobby projects; Arc is
+`arc.atomworks.dev` (`PUBLIC_HOST`), an A record with the Cloudflare proxy
+off (DNS only) so Caddy terminates TLS and streams directly. Measured: software x264 `veryfast`
+transcodes a 24-min 1080p episode in ~4 min on an M-series laptop; expect
+5–8 min on the CX33. Hardware encode is not available on CX; not needed.
+
+Torrent isolation: qBittorrent runs with `network_mode: service:gluetun`
+behind a `gluetun` container holding a WireGuard config from the VPN
+provider (kill switch on, so a tunnel drop stops qBittorrent's traffic
+instead of leaking to the host IP); `api`/`worker` reach its WebUI through
+gluetun's exposed port on the backend network. qBittorrent preferences set
+at startup by Arc: stop seeding on completion (ratio limit 0, action
+pause), upload rate capped low during transfer. Nothing else uses the VPN.
 
 Local dev: `make dev` (see `scripts/dev.sh`) starts `db` and `qbittorrent`
 via the dev compose override, then runs `api` and `worker` with hot reload
@@ -603,7 +644,12 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `QBIT_CATEGORY` (arc), `QBIT_DOWNLOADS_PATH` (/data/downloads), `FFMPEG_BIN`,
 `FFPROBE_BIN`, `FFMPEG_VIDEO_ENCODER` (libx264), `FFMPEG_PRESET` (veryfast),
 `FFMPEG_CRF` (20), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
-(10800), `RETENTION_DRY_RUN` (false), `WORKER_CONCURRENCY`
+(10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400),
+`BACKUP_KEEP_DAYS` (14), `QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
+(false), `COMPOSE_PROFILES` (vpn|novpn), `VPN_PROVIDER`, `WIREGUARD_PRIVATE_KEY`,
+`WIREGUARD_ADDRESSES`, `WIREGUARD_PUBLIC_KEY`, `WIREGUARD_ENDPOINT_IP`,
+`WIREGUARD_ENDPOINT_PORT`, `VPN_SERVER_COUNTRIES/CITIES` (deploy-only, read
+by gluetun), `WORKER_CONCURRENCY`
 (default 2), `WORKER_POLL_INTERVAL` (seconds, default 1), `WORKER_DRAIN_TIMEOUT`
 (seconds to wait for in-flight jobs on shutdown, default 30),
 `WORKER_STALE_AFTER` (seconds before a `running` job with a dead worker is
@@ -614,7 +660,9 @@ requeued, default 7200; transcodes heartbeat their lock),
 automatically when `ENV` is not prod), `MAL_OAUTH_URL`
 (https://myanimelist.net, the authorize/token host), `MAL_IMPORT_INTERVAL_HOURS`
 (6). `FERNET_KEY` must be set before anyone links MAL and is not rotatable
-without re-linking every account.
+without re-linking every account. In prod, `arc.main` and `arc.worker` log
+an ERROR per production-required key that is missing or still a
+placeholder, and `/api/health` reports `config_warnings` (a count).
 
 Deploy-only (compose/Caddy, not read by the app): `PUBLIC_HOST`,
 `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PUID`, `PGID`, `TZ`.
@@ -774,3 +822,17 @@ env (it is not in the settings table).
   watching/planned are dropped, not deleted; MAL imports keep `updated_at`
   for undated unchanged rows; stale-drop revival needs an Arc-side action;
   qBittorrent outage skips per episode; no-files episodes reset.
+- 2026-09-09 — Host revised to CPX22 + 100 GB volume (CX line out of stock);
+  `ARC_DATA_DIR` + `deploy/docker-compose.host.yml` bind media to the volume.
+- 2026-09-09 — Domain: `atomworks.dev` (Cloudflare), Arc at
+  `arc.atomworks.dev`, DNS only (no proxy); MAL callback moves to that host.
+- 2026-09-08 — Hosting: Hetzner CX33 + 250 GB volume, own project; gluetun
+  VPN for qBittorrent only; seeding disabled at startup via preferences.
+- 2026-09-08 — M11 readiness: healthchecks incl. worker heartbeat file,
+  backup service + restore targets, client baked into the Caddy image,
+  security headers (HSTS bug over http caught and fixed), startup config
+  check, CLI (`status`, `invite`, `warm-catalogue`, `demo-list`),
+  `deploy/README.md` runbook.
+- 2026-09-08 — gluetun sidecar behind compose profiles (`vpn` default,
+  `novpn`); seeding disabled via qBittorrent preferences + a stop-on-seed
+  poll; dev's 697 torrent now stopped rather than seeding.

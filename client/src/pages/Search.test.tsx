@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -125,6 +125,19 @@ describe('Search', () => {
     renderSearch('/search?q=frieren')
 
     expect(await screen.findByText('Search failed. Try again.')).toBeInTheDocument()
+  })
+
+  it('offers a retry that runs the same search again', async () => {
+    const path = 'GET /api/anime/search?q=frieren&page=1'
+    const fetchMock = mockApi({ [path]: { status: 500, body: { detail: 'boom' } } })
+
+    renderSearch('/search?q=frieren')
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((made) => made === path)).toHaveLength(2)
+    })
   })
 
   it('shows the empty state when nothing matches', async () => {

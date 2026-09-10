@@ -178,6 +178,13 @@ class QbitStub:
         self.logins = 0
         self.added: list[dict[str, str]] = []
         self.deleted: list[dict[str, str]] = []
+        #: Every ``app/setPreferences`` body, already decoded from its ``json``
+        #: form field.
+        self.preferences: list[dict[str, Any]] = []
+        #: Hashes passed to ``torrents/stop`` (or, on ``api_version`` 4, to
+        #: ``torrents/pause`` — which is what that version calls it, and the
+        #: only endpoint of the two it answers).
+        self.stopped: list[str] = []
         self.torrents: list[dict[str, Any]] = []
         self.calls: list[str] = []
         #: Set to make the next non-login call answer 403 once, as an expired
@@ -247,6 +254,21 @@ class QbitStub:
             return httpx.Response(200, text=json.dumps(rows))
         if path.endswith("/torrents/delete"):
             self.deleted.append(self._form(request))
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/stop") or path.endswith("/torrents/pause"):
+            # qBittorrent 4.x has only ``pause`` and answers 404 to ``stop``,
+            # which is the fallback the client is written for.
+            if self.api_version == "4" and path.endswith("/torrents/stop"):
+                return httpx.Response(404, text="Not Found")
+            hashes = self._form(request).get("hashes", "")
+            self.stopped.extend(value for value in hashes.split("|") if value)
+            for torrent in self.torrents:
+                if torrent["hash"].lower() in hashes.lower().split("|"):
+                    torrent["state"] = "stoppedUP" if self.api_version == "5" else "pausedUP"
+            return httpx.Response(200, text="")
+        if path.endswith("/app/setPreferences"):
+            raw = self._form(request).get("json", "{}")
+            self.preferences.append(json.loads(raw))
             return httpx.Response(200, text="")
         return httpx.Response(404, text="not found")
 

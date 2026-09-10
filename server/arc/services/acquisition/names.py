@@ -37,6 +37,13 @@ SEARCH_RELEASE = "search_release"
 #: library (FR-A5). Queue-wide work, deduplicated on the type.
 POLL_QBIT = "poll_qbit"
 
+#: Write Arc's seeding policy to the client (spec §9: no seeding, upload
+#: capped). At worker start-up and daily after that, deduplicated on the type.
+#: A job rather than a line in the worker's start-up because qBittorrent is a
+#: separate container that may not be up yet, and "retry it with backoff until
+#: it is" is what a job row already means.
+QBIT_POLICY = "qbit_apply_policy"
+
 # --- Queue priorities (lower runs first; the default is 100) ----------------
 #
 # Acquisition is the greediest thing Arc does and the least urgent. A single
@@ -60,6 +67,11 @@ COMPUTE_WANTS_PRIORITY = 120
 #: And behind that. One search is up to five paced Nyaa requests plus a
 #: qBittorrent call, so a burst of them is what actually starves the queue.
 SEARCH_RELEASE_PRIORITY = 150
+
+#: Last of all. The policy is written once a day and once at start-up, and the
+#: torrent that would seed in the meantime is stopped by ``poll_qbit`` anyway —
+#: so there is nothing this should be in front of.
+QBIT_POLICY_PRIORITY = 200
 
 
 def search_dedupe_key(episode_id: int) -> str:
@@ -87,6 +99,8 @@ __all__ = [
     "COMPUTE_WANTS_PRIORITY",
     "POLL_QBIT",
     "POLL_QBIT_PRIORITY",
+    "QBIT_POLICY",
+    "QBIT_POLICY_PRIORITY",
     "SEARCH_RELEASE",
     "SEARCH_RELEASE_PRIORITY",
     "enqueue_compute_wants",

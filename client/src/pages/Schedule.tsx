@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { CoverThumb } from '@/components/CoverThumb'
+import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import { catalogErrorMessage } from '@/lib/anime'
 import { authErrorMessage, timezoneOptions, useUpdateTimezone } from '@/lib/auth'
@@ -296,7 +297,7 @@ export function Schedule() {
   const season = parseSeason(searchParams.get('season'))
   // The server takes both or neither; half a pair is treated as neither.
   const pinned = year !== undefined && season !== undefined
-  const { data, error, isError, isFetching } = useSchedule(
+  const { data, error, isError, isFetching, refetch } = useSchedule(
     pinned ? year : undefined,
     pinned ? season : undefined,
   )
@@ -351,9 +352,14 @@ export function Schedule() {
       </div>
 
       {isError ? (
-        <p role="alert" className="mt-8 text-sm text-[var(--arc-error)]">
-          {catalogErrorMessage(error, 'Could not load the schedule.')}
-        </p>
+        <ErrorState
+          className="mt-8"
+          message={catalogErrorMessage(error, 'Could not load the schedule.')}
+          pending={isFetching}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
       ) : data === undefined ? (
         <p role="status" className="mt-8 text-sm text-[var(--arc-text-muted)]">
           Loading…
