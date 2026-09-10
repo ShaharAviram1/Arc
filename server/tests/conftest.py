@@ -32,6 +32,7 @@ from arc.main import create_app
 from arc.models import User, UserRole
 from arc.services.acquisition import nyaa
 from arc.services.auth import create_user
+from arc.services.recs import factory as recs_factory
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = SERVER_DIR / "alembic.ini"
@@ -79,6 +80,25 @@ def _fresh_nyaa_client() -> Iterator[None]:
     """
     yield
     nyaa.reset_shared_client()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_model_chain() -> Iterator[None]:
+    """Give every test its own model chain (arc/services/recs/factory.py).
+
+    Process-wide in production so the daily-quota cooldowns outlive one job,
+    and for exactly that reason something a test must not inherit: a cooldown
+    learned in one test would silently skip an entry in the next, and the SDK
+    clients inside are bound to the event loop that built them.
+
+    Dropped rather than closed, like the Nyaa client above: closing needs an
+    ``await`` and this has to run for synchronous tests too. Nothing in the
+    suite ever *calls* one — every test either has no provider key or replaces
+    the chain with a fake — and the two that build a real object never reach
+    ``build()``, so no SDK client and no socket is created either.
+    """
+    yield
+    recs_factory.reset_shared_model()
 
 
 @pytest.fixture

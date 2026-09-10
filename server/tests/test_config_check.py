@@ -136,11 +136,46 @@ def test_a_local_mal_redirect_uri_is_a_production_problem() -> None:
     assert "MAL application" in warnings[0].message
 
 
-def test_the_anthropic_key_is_only_an_error_when_the_match_feature_is_on() -> None:
-    """A phase 1 deployment with no Anthropic key is finished, not broken."""
-    assert keys(prod(anthropic_api_key=None)) == set()
-    assert keys(prod(anthropic_api_key=None, llm_match_suggestions=True)) == {"ANTHROPIC_API_KEY"}
-    assert keys(prod(anthropic_api_key="sk-ant-real", llm_match_suggestions=True)) == set()
+def test_match_suggestions_are_only_an_error_when_the_flag_is_on() -> None:
+    """A deployment that never asked for them is finished, not broken (M13)."""
+    assert keys(prod(**blank_keys())) == set()
+    assert keys(prod(llm_match_suggestions=True, **blank_keys())) == {"LLM_MATCH_SUGGESTIONS"}
+
+
+def test_match_suggestions_ride_the_recommendations_chain() -> None:
+    """M13: the flag means "the M12 chain", not "an Anthropic key".
+
+    Before M13 this check named ``ANTHROPIC_API_KEY`` specifically. Suggestions
+    now go through the same provider chain the recommendations do, so *any*
+    configured provider satisfies it — and an Anthropic key on a Gemini
+    deployment no longer does.
+    """
+    assert keys(prod(llm_match_suggestions=True)) == set()  # GOOD has the Gemini key
+    assert keys(
+        prod(
+            llm_match_suggestions=True,
+            recs_provider="gemini",
+            **{**blank_keys(), "anthropic_api_key": "sk-ant-real"},
+        )
+    ) == {"LLM_MATCH_SUGGESTIONS"}
+    # …and a fallback provider alone is enough, because the chain would hold it.
+    assert (
+        keys(
+            prod(
+                llm_match_suggestions=True,
+                recs_fallback_provider="openrouter",
+                **{**blank_keys(), "openrouter_api_key": "sk-or-real"},
+            )
+        )
+        == set()
+    )
+
+
+def test_the_suggestions_error_says_which_variable_to_set() -> None:
+    found = [w for w in config_check.errors(prod(llm_match_suggestions=True, **blank_keys()))]
+
+    assert [w.key for w in found] == ["LLM_MATCH_SUGGESTIONS"]
+    assert "GEMINI_API_KEY" in found[0].message
 
 
 # --- The recommendations backend (M12) --------------------------------------
@@ -242,7 +277,12 @@ def test_a_key_for_an_unselected_provider_is_not_itself_a_problem() -> None:
 
 
 def test_the_match_feature_and_the_backend_are_reported_separately() -> None:
-    """Two features, two keys, two levels — an operator can fix either alone."""
+    """Two features, one missing key, two levels.
+
+    They share the chain (M13) but not their severity: an unconfigured
+    recommendations page is a valid deployment, and ``LLM_MATCH_SUGGESTIONS``
+    on with nothing behind it is an operator's intention that cannot be met.
+    """
     settings = prod(
         recs_provider="gemini",
         recs_model=MODELS["gemini"],
@@ -253,10 +293,49 @@ def test_the_match_feature_and_the_backend_are_reported_separately() -> None:
     found = config_check.warnings(settings)
 
     assert [(w.key, w.level) for w in found] == [
-        ("ANTHROPIC_API_KEY", "error"),
+        ("LLM_MATCH_SUGGESTIONS", "error"),
         ("GEMINI_API_KEY", "warning"),
     ]
     assert config_check.count(settings) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        blank_keys(),
+        {**blank_keys(), "gemini_api_key": "AIza-real"},
+        {**blank_keys(), "gemini_api_key": "change-me"},
+        {**blank_keys(), "gemini_api_key": "AIza-real", "recs_model": ""},
+        {**blank_keys(), "anthropic_api_key": "sk-ant-real", "recs_provider": "anthropic"},
+        {
+            **blank_keys(),
+            "openrouter_api_key": "sk-or-real",
+            "recs_fallback_provider": "openrouter",
+        },
+        {**blank_keys(), "recs_fallback_provider": "openrouter"},
+        {
+            **blank_keys(),
+            "openrouter_api_key": "sk-or-real",
+            "recs_fallback_provider": "openrouter",
+            "recs_fallback_model": "",
+        },
+    ],
+)
+def test_configured_agrees_with_the_chain_the_factory_would_build(
+    overrides: dict[str, object],
+) -> None:
+    """The one restatement in this module, pinned.
+
+    :func:`config_check.model_chain_configured` cannot import
+    ``chain_entries`` (the factory imports ``is_placeholder`` from here), so
+    the rule is written twice. This is what stops the two drifting.
+    """
+    from arc.services.recs.factory import chain_entries
+
+    settings = prod(**overrides)
+
+    assert config_check.model_chain_configured(settings) is bool(chain_entries(settings))
 
 
 @pytest.mark.parametrize(

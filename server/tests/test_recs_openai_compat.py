@@ -451,6 +451,77 @@ async def test_closing_closes_the_client() -> None:
     assert client.closed is True
 
 
+# --- Asking it something that is not recommendations (M13) -------------------
+#
+# ``complete`` is the layer the streaming, the refusal handling and the retry
+# actually live on; ``recommend`` is one adapter over it. A second feature
+# (match suggestions) asks the same backend its own question with its own
+# schema, so the schema, its name and the parsed object all have to pass
+# through untouched.
+
+
+OTHER_SCHEMA = {
+    "type": "object",
+    "properties": {"anime_id": {"anyOf": [{"type": "integer"}, {"type": "null"}]}},
+    "required": ["anime_id"],
+    "additionalProperties": False,
+}
+
+
+async def test_complete_sends_the_callers_schema_and_name() -> None:
+    recs, client = model_over(stream_of('{"anime_id": 11}'))
+
+    await recs.complete(system="s", user="u", schema=OTHER_SCHEMA, name="match_suggestion")
+
+    assert client.completions.kwargs["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "match_suggestion", "schema": OTHER_SCHEMA, "strict": True},
+    }
+
+
+async def test_complete_returns_the_object_unvalidated() -> None:
+    """It is not the transport's business what the caller's schema promised."""
+    recs, _ = model_over(stream_of('{"anime_id": 11, "confidence": "high"}'))
+
+    result = await recs.complete(system="s", user="u", schema=OTHER_SCHEMA, name="x")
+
+    assert result.data == {"anime_id": 11, "confidence": "high"}
+    assert result.provider == "gemini"
+
+
+async def test_complete_defaults_to_the_picks_schema_name() -> None:
+    """So ``recommend`` sends what it always did."""
+    recs, client = model_over(stream_of(json.dumps(ANSWER)))
+
+    await recs.complete(system="s", user="u", schema=PICKS_SCHEMA)
+
+    assert client.completions.kwargs["response_format"]["json_schema"]["name"] == SCHEMA_NAME
+
+
+async def test_complete_gets_the_same_refusal_handling() -> None:
+    recs, _ = model_over([chunk(finish_reason="content_filter")])
+
+    with pytest.raises(RecsRefused):
+        await recs.complete(system="s", user="u", schema=OTHER_SCHEMA, name="x")
+
+
+async def test_complete_gets_the_same_retry() -> None:
+    recs, client = model_over([[chunk(finish_reason="length")], stream_of('{"anime_id": 11}')])
+
+    result = await recs.complete(system="s", user="u", schema=OTHER_SCHEMA, name="x")
+
+    assert client.completions.calls == 2
+    assert result.data == {"anime_id": 11}
+
+
+async def test_a_top_level_array_is_a_schema_mismatch() -> None:
+    """Valid JSON, but every schema Arc sends is rooted at an object."""
+    recs, _ = model_over(stream_of("[1, 2, 3]"))
+
+    with pytest.raises(RecsFailed, match="did not match the schema"):
+        await recs.complete(system="s", user="u", schema=OTHER_SCHEMA, name="x")
+
+
 # --- Settings the backend reads ----------------------------------------------
 #
 # The base-URL and key-per-provider rules are exercised in

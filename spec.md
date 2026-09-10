@@ -367,6 +367,10 @@ preparing → failed → (retry) → preparing
   from the user's last action on the show; wants that end because the show
   left watching/planned are dropped (not deleted) so the grace period is
   never skipped; revival needs an Arc-side action.
+- 2026-09-10 — M13 as built: match suggestions (FR-L5) ride the FR-R7 provider
+  chain, can be asked for on demand from the review page, and are stored on
+  the file with model and confidence; a failed re-ask never replaces a good
+  suggestion. Review UI (FR-L6) shipped with pending/ignored/auto-linked tabs.
 - 2026-09-10 — FR-R6 continuations section and FR-R7 provider chain added;
   FR-R2 pool revised (popularity/score ranking, recap and continuation
   exclusions). Owner decisions after the live three-model comparison.

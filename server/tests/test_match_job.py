@@ -648,13 +648,140 @@ class TestTheParse:
         assert parsed == parse(FRIEREN_FILE)
 
 
+class TestSuggestions:
+    """A file that lands in the queue asks for a suggestion (M13, FR-L5).
+
+    The whole of the wiring, through the real handler: the enqueue lives in
+    ``_review``, and every path that reaches the queue goes through it.
+    """
+
+    @pytest.fixture
+    def suggesting(self, library_settings: Settings) -> Settings:
+        return library_settings.model_copy(
+            update={"llm_match_suggestions": True, "gemini_api_key": "AIza-a-real-looking-key"}
+        )
+
+    async def queued(self, session: AsyncSession) -> list[Job]:
+        rows = await session.scalars(select(Job).where(Job.type == "llm_suggest_match"))
+        return list(rows.all())
+
+    async def test_a_review_item_with_a_shortlist_asks_for_one(
+        self,
+        db_session: AsyncSession,
+        suggesting: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        anime = Anime(anilist_id=FRIEREN_ID, title_romaji="Sousou no Frieren", episodes=28)
+        db_session.add(anime)
+        await db_session.flush()
+        media_file = await add_file(db_session, tmp_path, FRIEREN_FILE)
+        force(
+            monkeypatch,
+            MatchResult(candidates=(Scored(anime.id, 5, 0.70, ("title 0.80",)),), confidence=0.70),
+        )
+
+        await run_match(db_session, suggesting, media_file.id)
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert [job.payload["media_file_id"] for job in await self.queued(db_session)] == [
+            media_file.id
+        ]
+
+    async def test_a_review_item_with_nothing_to_choose_between_asks_nothing(
+        self,
+        db_session: AsyncSession,
+        suggesting: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """ "No good candidates" — the job could only store an error."""
+        media_file = await add_file(db_session, tmp_path, UNKNOWN_FILE)
+
+        await run_match(db_session, suggesting, media_file.id)
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.match_candidates == [{"reason": library_jobs.REASON_NO_CANDIDATES}]
+        assert await self.queued(db_session) == []
+
+    async def test_a_batch_asks_nothing(
+        self,
+        db_session: AsyncSession,
+        suggesting: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        media_file = await add_file(db_session, tmp_path, BATCH_FILE)
+
+        await run_match(db_session, suggesting, media_file.id)
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert await self.queued(db_session) == []
+
+    async def test_an_auto_linked_file_asks_for_nothing(
+        self,
+        db_session: AsyncSession,
+        suggesting: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """There is nothing to suggest about a file that is already placed."""
+        media_file = await add_file(db_session, tmp_path, FRIEREN_FILE)
+
+        await run_match(db_session, suggesting, media_file.id)
+
+        assert media_file.review_state is ReviewState.AUTO
+        assert await self.queued(db_session) == []
+
+    async def test_an_ignored_file_asks_for_nothing(
+        self,
+        db_session: AsyncSession,
+        suggesting: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        media_file = await add_file(db_session, tmp_path, NCOP_FILE)
+
+        await run_match(db_session, suggesting, media_file.id)
+
+        assert media_file.review_state is ReviewState.IGNORED
+        assert await self.queued(db_session) == []
+
+    async def test_nothing_is_asked_while_the_feature_is_off(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The default. A deployment with no key must queue no such job."""
+        anime = Anime(anilist_id=FRIEREN_ID, title_romaji="Sousou no Frieren", episodes=28)
+        db_session.add(anime)
+        await db_session.flush()
+        media_file = await add_file(db_session, tmp_path, FRIEREN_FILE)
+        force(
+            monkeypatch,
+            MatchResult(candidates=(Scored(anime.id, 5, 0.70, ("title 0.80",)),), confidence=0.70),
+        )
+
+        await run_match(db_session, library_settings, media_file.id)
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert await self.queued(db_session) == []
+
+
 class TestRegistration:
-    def test_both_handlers_are_registered(self) -> None:
+    def test_every_handler_is_registered(self) -> None:
         from arc.services.jobs import registered_types
 
-        assert {"library_scan", "match_file"} <= registered_types()
+        assert {"library_scan", "match_file", "llm_suggest_match"} <= registered_types()
 
     def test_the_dedupe_key_is_per_file(self) -> None:
-        from arc.services.library.names import match_dedupe_key
+        from arc.services.library.names import match_dedupe_key, suggest_dedupe_key
 
         assert match_dedupe_key(7) != match_dedupe_key(8)
+        assert suggest_dedupe_key(7) != suggest_dedupe_key(8)
+        # …and the two job types never collide on one file.
+        assert match_dedupe_key(7) != suggest_dedupe_key(7)

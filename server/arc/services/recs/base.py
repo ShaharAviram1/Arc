@@ -1,10 +1,20 @@
-"""What every recommendation backend has in common (§5.6).
+"""What every model backend has in common (§5.6).
 
-The protocol, the four exceptions the router branches on, the result type, the
-timing constants, and the one function that turns a model's text into
-:class:`~arc.services.recs.schema.Picks`. Both backends import from here and
-neither imports the other, so "Gemini and Anthropic must agree" is a fact about
-this module rather than a convention two files are trusted to keep.
+The protocols, the four exceptions the router branches on, the result types,
+the timing constants, and the functions that turn a model's text into
+something typed. Both backends import from here and neither imports the other,
+so "Gemini and Anthropic must agree" is a fact about this module rather than a
+convention two files are trusted to keep.
+
+**Two layers, and the split is what lets a second feature use the chain.**
+:class:`JsonModel` is the general one: a system prompt, a user message and a
+JSON schema in, a parsed JSON object out (:class:`JsonResult`). It knows
+nothing about recommendations. :class:`RecsModel` is the recommendation-shaped
+view of the same thing — :func:`recommend_via` is the whole of the adapter,
+and every implementation's ``recommend`` is one line calling it. M13's match
+suggestions (:mod:`arc.services.library.suggest`) ask for ``complete`` with
+their own schema and get the chain's rotation, cooldowns, retries and refusal
+handling for nothing.
 
 The exceptions are the interesting part, because they are the API's error
 codes wearing different hats:
@@ -71,6 +81,12 @@ _FREE_TIER_DAILY = re.compile(
 #: real answer that was wrong, and asking again just spends the budget.
 RETRYABLE_FAILURES = ("truncated", "empty")
 
+#: What the picks schema is registered under in ``response_format``. Arbitrary,
+#: but it is echoed in provider errors, so it should read as what it is. Lives
+#: here rather than in one backend because :func:`recommend_via` is what sends
+#: it and it must reach both.
+PICKS_SCHEMA_NAME = "recs_picks"
+
 
 class RecsError(RuntimeError):
     """Base class for everything that can go wrong producing a run."""
@@ -97,14 +113,28 @@ class RecsFailed(RecsError):
 
 
 @dataclass(frozen=True, slots=True)
-class RecsResult:
-    """What a model returned: the picks, who answered, and the usage.
+class JsonResult:
+    """What a model returned to any schema-constrained question.
+
+    ``data`` is the answer as a JSON object — parsed, but not yet checked
+    against whatever the caller's schema promised, because that is the
+    caller's vocabulary rather than the transport's.
 
     ``model`` is the id the *server* reported, which is not always the one that
-    was asked for — Anthropic's server-side fallbacks substitute one. ``provider``
-    is filled in by the backend that made the call, so a run served by the
-    fallback provider can be recognised after the fact.
+    was asked for — Anthropic's server-side fallbacks substitute one.
+    ``provider`` is filled in by the backend that made the call, so an answer
+    served by the fallback provider can be recognised after the fact.
     """
+
+    data: dict[str, Any]
+    model: str
+    usage: dict[str, Any]
+    provider: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RecsResult:
+    """A :class:`JsonResult` read as recommendations (:func:`recommend_via`)."""
 
     picks: Picks
     model: str
@@ -112,12 +142,38 @@ class RecsResult:
     provider: str = ""
 
 
+class JsonModel(Protocol):
+    """Anything that can answer a prompt in a given JSON schema.
+
+    Deliberately narrow — three strings and a schema in, one parsed object
+    out. It exists so the tests, the eval fixtures and any future backend can
+    stand in for a provider without either side knowing, and so that a feature
+    which is not recommendations (M13's match suggestions) can ask the same
+    chain its own question.
+
+    ``name`` is what the schema is registered under where the provider wants a
+    name for it (``response_format.json_schema.name``); Anthropic's
+    ``output_config.format`` has nowhere to put one and ignores it.
+    """
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        name: str = PICKS_SCHEMA_NAME,
+    ) -> JsonResult:  # pragma: no cover - protocol
+        ...
+
+
 class RecsModel(Protocol):
     """Anything that can turn a prompt into picks.
 
-    Deliberately narrow — three strings in, one result out. It exists so the
-    tests, the eval fixtures and any future backend can stand in for a provider
-    without either side knowing.
+    The recommendation-shaped view of :class:`JsonModel`. Kept as its own
+    protocol because the router, the runs orchestrator and the eval speak
+    picks, not JSON, and because a test fake that only answers
+    recommendations should not have to implement anything else.
     """
 
     async def recommend(
@@ -126,19 +182,62 @@ class RecsModel(Protocol):
         ...
 
 
-def parse_picks(raw: str) -> Picks:
-    """A model's text as validated :class:`Picks`, or :class:`RecsFailed`.
+def parse_json(raw: str) -> dict[str, Any]:
+    """A model's text as a JSON **object**, or :class:`RecsFailed`.
 
     Shared so that "what counts as a well-formed answer" is one decision. Both
     providers constrain the output with a JSON schema, so this should never
     fire; when it does, the message has to say *how* it was wrong, because the
     fix differs — a truncation is a budget, a schema mismatch is a prompt or a
-    model.
+    model. A top-level array or scalar is a schema mismatch like any other:
+    every schema Arc sends has ``"type": "object"`` at its root.
     """
     try:
-        return Picks.model_validate(json.loads(raw))
-    except (json.JSONDecodeError, ValidationError) as exc:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
         raise RecsFailed(f"the model's answer did not match the schema: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise RecsFailed(
+            f"the model's answer did not match the schema: expected an object, "
+            f"got {type(loaded).__name__}"
+        )
+    return loaded
+
+
+def picks_from(data: dict[str, Any]) -> Picks:
+    """A parsed answer as validated :class:`Picks`, or :class:`RecsFailed`."""
+    try:
+        return Picks.model_validate(data)
+    except ValidationError as exc:
+        raise RecsFailed(f"the model's answer did not match the schema: {exc}") from exc
+
+
+def parse_picks(raw: str) -> Picks:
+    """A model's text as validated :class:`Picks`, or :class:`RecsFailed`."""
+    return picks_from(parse_json(raw))
+
+
+async def recommend_via(
+    model: JsonModel, *, system: str, user: str, schema: dict[str, Any]
+) -> RecsResult:
+    """The whole of the adapter from :class:`JsonModel` to :class:`RecsModel`.
+
+    Every ``recommend`` in this package is one line calling this, so the two
+    layers cannot drift: a backend, the chain and a future third thing all
+    turn an answer into picks the same way.
+
+    The validation is deliberately **outside** the retry
+    (:func:`with_retry`, which lives under ``complete``): a well-formed JSON
+    object that is not the picks schema is a real answer that was wrong, and
+    asking again spends quota to be told the same thing.
+    """
+    result = await model.complete(system=system, user=user, schema=schema, name=PICKS_SCHEMA_NAME)
+    return RecsResult(
+        picks=picks_from(result.data),
+        model=result.model,
+        usage=result.usage,
+        provider=result.provider,
+    )
 
 
 def is_daily_quota(exc: Exception) -> bool:
@@ -178,11 +277,14 @@ def is_retryable(exc: Exception) -> bool:
     return False
 
 
-async def with_retry(attempt: Callable[[], Awaitable[RecsResult]], *, provider: str) -> RecsResult:
+async def with_retry[T](attempt: Callable[[], Awaitable[T]], *, provider: str) -> T:
     """Run ``attempt``, once more after a pause if it failed retryably.
 
     The second failure is raised as it is: by then the provider has said the
     same thing twice, and the router's 502 is the honest answer.
+
+    Generic in what an attempt returns because it wraps ``complete`` now, and
+    what that produces depends on the question being asked.
     """
     last: Exception | None = None
     for number in range(ATTEMPTS):
@@ -203,9 +305,12 @@ async def with_retry(attempt: Callable[[], Awaitable[RecsResult]], *, provider: 
 __all__ = [
     "ATTEMPTS",
     "MAX_RETRIES",
+    "PICKS_SCHEMA_NAME",
     "RETRYABLE_FAILURES",
     "RETRY_PAUSE_SECONDS",
     "TIMEOUT_SECONDS",
+    "JsonModel",
+    "JsonResult",
     "RecsError",
     "RecsFailed",
     "RecsModel",
@@ -214,6 +319,9 @@ __all__ = [
     "RecsUnavailable",
     "is_daily_quota",
     "is_retryable",
+    "parse_json",
     "parse_picks",
+    "picks_from",
+    "recommend_via",
     "with_retry",
 ]

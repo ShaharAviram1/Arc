@@ -10,9 +10,12 @@ four small pieces and one orchestrator:
   (FR-R3). A pure function over the rows the caller already loaded.
 * ``prompt`` / ``schema`` — the system prompt, the user message, and the JSON
   schema the answer is constrained to (FR-R4).
-* ``base`` — the protocol, the exception hierarchy, the timing constants, the
-  shared answer parser and the one-retry policy. Both backends import it and
-  neither imports the other.
+* ``base`` — the two protocols, the exception hierarchy, the timing constants,
+  the shared answer parsers and the one-retry policy. Both backends import it
+  and neither imports the other. ``JsonModel``/``complete`` is the general
+  layer (any JSON schema in, a parsed object out) and ``RecsModel``/
+  ``recommend`` is the recommendation-shaped adapter over it, which is what
+  lets M13's match suggestions ride the same chain.
 * ``claude`` / ``openai_compat`` — the two backends (Anthropic, and one for
   every OpenAI-compatible provider). Tests inject fakes and reach neither.
 * ``chain`` — several ``(provider, model)`` entries tried in order, with a
@@ -30,6 +33,8 @@ rather than shown. The model chooses from the pool; it does not extend it.
 from __future__ import annotations
 
 from arc.services.recs.base import (
+    JsonModel,
+    JsonResult,
     RecsError,
     RecsFailed,
     RecsModel,
@@ -39,7 +44,7 @@ from arc.services.recs.base import (
 )
 from arc.services.recs.chain import ChainEntry, RecsChain
 from arc.services.recs.claude import ClaudeRecsModel
-from arc.services.recs.factory import build_recs_model, chain_entries
+from arc.services.recs.factory import build_model, build_recs_model, chain_entries, model_for
 from arc.services.recs.history import History, HistoryItem, summarise
 from arc.services.recs.openai_compat import OpenAICompatRecsModel
 from arc.services.recs.pool import Candidate, build_pool
@@ -67,6 +72,8 @@ __all__ = [
     "ClaudeRecsModel",
     "History",
     "HistoryItem",
+    "JsonModel",
+    "JsonResult",
     "OpenAICompatRecsModel",
     "Pick",
     "Picks",
@@ -79,10 +86,12 @@ __all__ = [
     "RecsRefused",
     "RecsResult",
     "RecsUnavailable",
+    "build_model",
     "build_pool",
     "build_recs_model",
     "chain_entries",
     "build_user_message",
+    "model_for",
     "remaining_today",
     "run_recommendations",
     "summarise",

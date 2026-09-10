@@ -39,12 +39,15 @@ from anthropic.resources.beta.messages.messages import AsyncMessages as AsyncBet
 
 from arc.services.recs.base import (
     MAX_RETRIES,
+    PICKS_SCHEMA_NAME,
     TIMEOUT_SECONDS,
+    JsonResult,
     RecsFailed,
     RecsRefused,
     RecsResult,
     RecsUnavailable,
-    parse_picks,
+    parse_json,
+    recommend_via,
     with_retry,
 )
 
@@ -117,8 +120,8 @@ def _usage(message: Any) -> dict[str, Any]:
     }
 
 
-def parse_message(message: Any) -> RecsResult:
-    """A finished message as a :class:`RecsResult`, or the right exception.
+def parse_message(message: Any) -> JsonResult:
+    """A finished message as a :class:`JsonResult`, or the right exception.
 
     Split out from the request so it can be tested against a hand-built
     message object, which is most of what can go wrong here.
@@ -131,9 +134,9 @@ def parse_message(message: Any) -> RecsResult:
     if stop_reason == "max_tokens":
         raise RecsFailed("truncated")
 
-    picks = parse_picks(_text_block(message))
-    return RecsResult(
-        picks=picks, model=str(getattr(message, "model", "") or ""), usage=_usage(message)
+    data = parse_json(_text_block(message))
+    return JsonResult(
+        data=data, model=str(getattr(message, "model", "") or ""), usage=_usage(message)
     )
 
 
@@ -160,27 +163,42 @@ class ClaudeRecsModel:
             api_key=api_key, timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES
         )
 
-    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
-        """One streamed, schema-constrained call, with one retry (base)."""
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        name: str = PICKS_SCHEMA_NAME,
+    ) -> JsonResult:
+        """One streamed, schema-constrained call, with one retry (base).
 
-        async def attempt() -> RecsResult:
+        ``name`` is accepted and ignored: ``output_config.format`` carries the
+        schema itself and has nowhere to put a name for it.
+        """
+
+        async def attempt() -> JsonResult:
             return await self._attempt(system=system, user=user, schema=schema)
 
         # Stamped here rather than in the parser: the parsers are tested
         # against hand-built payloads and have no idea who sent them.
         result = replace(await with_retry(attempt, provider=self.provider), provider=self.provider)
         log.info(
-            "recommendation model answered",
+            "model answered",
             extra={
                 "provider": self.provider,
                 "model": result.model,
-                "picks": len(result.picks.picks),
+                "schema": name,
                 **result.usage,
             },
         )
         return result
 
-    async def _attempt(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+        """:meth:`complete`, read as picks (:func:`recommend_via`)."""
+        return await recommend_via(self, system=system, user=user, schema=schema)
+
+    async def _attempt(self, *, system: str, user: str, schema: dict[str, Any]) -> JsonResult:
         # Annotated ``Any`` because the SDK types this as a TypedDict and a
         # dict literal mixing a nested mapping with a string infers as
         # ``dict[str, Collection[str]]``, which does not match it.

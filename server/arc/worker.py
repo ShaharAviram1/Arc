@@ -57,6 +57,7 @@ from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers
 from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
 from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
 from arc.services.media.jobs import sweep_transcodes
+from arc.services.recs.factory import close_shared_model
 from arc.services.retention import jobs as retention_jobs  # noqa: F401  (registers handlers)
 from arc.services.retention.names import RETENTION_PRIORITY, RETENTION_SWEEP
 
@@ -505,6 +506,11 @@ async def run(settings: Settings) -> None:
         # The Nyaa client is process-wide and outlives every search job, so
         # this is the only place that closes it (acquisition/nyaa.py).
         await close_shared_client()
+        # Likewise the model chain: it is per process precisely so that the
+        # daily-quota cooldowns outlive one suggestion job (recs/factory.py),
+        # which makes this the only place that can close it. Usually a no-op —
+        # a deployment with no provider never builds one.
+        await close_shared_model()
         await engine.dispose()
         # A worker that has stopped on purpose is not "recently alive", and
         # leaving the file behind would keep ``--check`` green for another

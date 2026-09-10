@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from arc.services.recs.base import (
+    JsonResult,
     RecsFailed,
     RecsRefused,
     RecsResult,
@@ -32,7 +33,6 @@ from arc.services.recs.chain import (
     is_daily_quota,
     next_quota_reset,
 )
-from arc.services.recs.schema import Pick, Picks
 
 #: A Tuesday afternoon, well before the 08:00 UTC reset.
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
@@ -62,11 +62,15 @@ GEMINI_B = ChainEntry(provider="gemini", model="gemini-3.5-flash")
 OPENROUTER = ChainEntry(provider="openrouter", model="google/gemini-2.5-flash", fallback=True)
 
 
-def result_from(model: str, provider: str) -> RecsResult:
-    picks = Picks(
-        picks=[Pick(anime_id=i, title=f"S{i}", case="because Frieren") for i in (1, 2, 3)]
-    )
-    return RecsResult(picks=picks, model=model, usage={}, provider=provider)
+#: The answer a fake backend gives, in the shape the picks schema promises.
+ANSWER = {
+    "picks": [{"anime_id": i, "title": f"S{i}", "case": "because Frieren"} for i in (1, 2, 3)]
+}
+
+
+def result_from(model: str, provider: str) -> JsonResult:
+    """What one entry's ``complete`` returns when it answers."""
+    return JsonResult(data=ANSWER, model=model, usage={}, provider=provider)
 
 
 class FakeBackend:
@@ -76,9 +80,13 @@ class FakeBackend:
         self.entry = entry
         self.outcome = outcome
         self.calls = 0
+        self.name = ""
 
-    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+    async def complete(
+        self, *, system: str, user: str, schema: dict[str, Any], name: str = "recs_picks"
+    ) -> JsonResult:
         self.calls += 1
+        self.name = name
         outcome = self.outcome
         if isinstance(outcome, list):
             outcome = outcome[min(self.calls - 1, len(outcome) - 1)]
@@ -323,7 +331,7 @@ async def test_a_wholly_exhausted_chain_says_so() -> None:
 async def test_an_empty_chain_says_so() -> None:
     chain, _ = chain_of({})
 
-    with pytest.raises(RecsUnavailable, match="no recommendation models are configured"):
+    with pytest.raises(RecsUnavailable, match="no models are configured"):
         await ask(chain)
 
 
@@ -333,3 +341,72 @@ async def test_closing_closes_the_backends() -> None:
     await chain.aclose()
 
     assert backends.closed is True
+
+
+# --- Asking the chain something that is not recommendations (M13) ------------
+#
+# ``complete`` is the general layer the rotation and the cooldowns actually
+# live on; ``recommend`` is one adapter over it. These are the tests that stop
+# a future refactor putting the walk back under ``recommend`` and leaving match
+# suggestions with a single model and no cooldown.
+
+
+OTHER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"anime_id": {"anyOf": [{"type": "integer"}, {"type": "null"}]}},
+    "required": ["anime_id"],
+    "additionalProperties": False,
+}
+
+
+async def test_complete_returns_the_raw_object_rather_than_picks() -> None:
+    chain, _ = chain_of({GEMINI_A: None})
+
+    result = await chain.complete(
+        system="s", user="u", schema=OTHER_SCHEMA, name="match_suggestion"
+    )
+
+    assert result.data == ANSWER
+    assert result.model == "gemini-3.8-flash"
+    assert result.provider == "gemini"
+
+
+async def test_the_schema_name_reaches_the_backend() -> None:
+    chain, backends = chain_of({GEMINI_A: None})
+
+    await chain.complete(system="s", user="u", schema=OTHER_SCHEMA, name="match_suggestion")
+
+    assert backends.built[("gemini", "gemini-3.8-flash")].name == "match_suggestion"
+
+
+async def test_complete_walks_the_chain_like_recommend_does() -> None:
+    chain, backends = chain_of({GEMINI_A: RecsUnavailable("down"), GEMINI_B: None})
+
+    result = await chain.complete(system="s", user="u", schema=OTHER_SCHEMA, name="other")
+
+    assert result.model == "gemini-3.5-flash"
+    assert backends.calls(GEMINI_A) == 1
+
+
+async def test_a_cooldown_earned_by_one_question_applies_to_the_other() -> None:
+    """A Gemini model spent by a suggestion is spent for a recommendation too."""
+    clock = Clock()
+    chain, backends = chain_of(
+        {GEMINI_A: RecsUnavailable(DAILY_QUOTA_BODY), GEMINI_B: None}, clock=clock
+    )
+
+    await chain.complete(system="s", user="u", schema=OTHER_SCHEMA, name="other")
+    await ask(chain)
+
+    # Tried once by the first question and skipped by the second.
+    assert backends.calls(GEMINI_A) == 1
+    assert [row["available"] for row in chain.status()] == [False, True]
+
+
+async def test_a_refusal_stops_complete_too() -> None:
+    chain, backends = chain_of({GEMINI_A: RecsRefused("no"), GEMINI_B: None})
+
+    with pytest.raises(RecsRefused):
+        await chain.complete(system="s", user="u", schema=OTHER_SCHEMA, name="other")
+
+    assert backends.calls(GEMINI_B) == 0

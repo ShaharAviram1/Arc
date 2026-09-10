@@ -14,6 +14,13 @@ admin-wide view (FR-D4) is this same endpoint.
 **What it never returns.** An absolute path. See
 :mod:`arc.api.review_schemas`.
 
+**What a suggestion is** (FR-L5). Each item may carry ``suggestion`` — what a
+model made of it, queued automatically when ``LLM_MATCH_SUGGESTIONS`` is on
+and asked for again by ``POST /{id}/suggest``. It is *shown*, never applied:
+no route in this file reads it, ``confirm`` behaves identically whether or not
+one exists, and the only thing that turns a suggestion into a link is a person
+pressing confirm with the values in front of them.
+
 **What confirming does.** Exactly what an automatic link does, through the same
 function (:func:`arc.services.library.link.link`), with ``review_state`` set to
 ``confirmed`` instead of ``auto``, and with ``match_confidence`` set back to
@@ -55,6 +62,8 @@ from arc.api.review_schemas import (
     ReviewItem,
     ReviewPage,
     ReviewSummary,
+    SuggestionOut,
+    SuggestJobOut,
 )
 from arc.config import Settings
 from arc.models import Anime, MediaFile, ReviewState
@@ -66,6 +75,8 @@ from arc.services.catalog import (
     upsert_summaries,
 )
 from arc.services.library.link import LinkError, link
+from arc.services.library.names import enqueue_suggestion
+from arc.services.library.suggest import suggestions_enabled
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +85,8 @@ router = APIRouter(prefix="/api/review", tags=["review"])
 ITEM_NOT_FOUND = "review item not found"
 ALREADY_LINKED = "this file is already linked to an episode"
 NOT_IGNORED = "only an ignored file can be reopened"
+SUGGESTIONS_DISABLED = "Suggestions are not enabled"
+NOT_PENDING = "only a file waiting for review can be suggested for"
 
 #: How many rows one page of the queue returns. The queue is meant to be
 #: emptied, not paged through; a library that has hundreds pending has a
@@ -105,6 +118,7 @@ async def _shows_for(session: AsyncSession, rows: list[MediaFile]) -> dict[int, 
     wanted: set[int] = set()
     for row in rows:
         wanted |= CandidateOut.anime_ids(row.match_candidates)
+        wanted |= SuggestionOut.anime_ids(row.llm_suggestion)
     if not wanted:
         return {}
     found = await session.scalars(select(Anime).where(Anime.id.in_(wanted)))
@@ -150,6 +164,7 @@ async def list_queue(
     return ReviewPage(
         items=[ReviewItem.build(row, data_dir=settings.data_dir, shows=shows) for row in rows],
         pending=await _pending_count(session),
+        suggestions_enabled=suggestions_enabled(settings),
     )
 
 
@@ -255,6 +270,61 @@ async def confirm(
 
 
 @router.post(
+    "/{media_file_id}/suggest",
+    response_model=SuggestJobOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ask a model which candidate this file is (FR-L5)",
+    responses={
+        404: {"description": ITEM_NOT_FOUND},
+        409: {"description": NOT_PENDING},
+        503: {"description": SUGGESTIONS_DISABLED},
+    },
+)
+async def suggest(
+    media_file_id: MediaFileId,
+    user: CurrentUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> SuggestJobOut:
+    """Queue a suggestion for this file, replacing any it already has.
+
+    202 and a job id, not an answer: the call goes to a third party and takes
+    seconds. The client polls the item for ``suggestion`` to appear.
+
+    ``force``, because this route exists for the person who has read the
+    stored suggestion and wants another look — "ask again" that returned the
+    same stored answer would be a button that does nothing. The enqueue is
+    still deduplicated on the file, so pressing it twice while the first
+    request is in flight gets the first job rather than a second call to the
+    provider.
+
+    **This does not link anything** (FR-L5). The suggestion it produces is
+    shown; confirming stays a separate, deliberate ``POST …/confirm``.
+
+    The 503 is checked before the file is even loaded: "the feature is off" is
+    true whatever id was asked for, and it is what the client's hidden button
+    is already meant to prevent (``ReviewPage.suggestions_enabled``).
+    """
+    if not suggestions_enabled(settings):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=SUGGESTIONS_DISABLED
+        )
+    media_file = await _load(session, media_file_id)
+    # Not merely "unlinked": an ignored file has been answered, and a
+    # confirmed one needs no help. The queue is what suggestions are for.
+    if media_file.review_state is not ReviewState.PENDING:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=NOT_PENDING)
+
+    job = await enqueue_suggestion(session, media_file.id, force=True)
+    await session.commit()
+    log.info(
+        "match suggestion requested",
+        extra={"media_file_id": media_file.id, "user_id": user.id, "job_id": job.id},
+    )
+    return SuggestJobOut(job_id=job.id)
+
+
+@router.post(
     "/{media_file_id}/ignore",
     response_model=ReviewItem,
     summary='Mark a file "not anime / ignore" (FR-L6)',
@@ -326,6 +396,8 @@ __all__ = [
     "ALREADY_LINKED",
     "ITEM_NOT_FOUND",
     "NOT_IGNORED",
+    "NOT_PENDING",
     "PAGE_LIMIT",
+    "SUGGESTIONS_DISABLED",
     "router",
 ]

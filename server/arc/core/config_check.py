@@ -26,7 +26,9 @@ There is a second, quieter level: :attr:`ConfigWarning.level` ``"warning"``.
 It is for configuration that is genuinely optional but whose absence turns a
 whole page off — today, the recommendation chain (M12): the primary provider's
 key, a fallback provider named without one, and a model name that does not look
-like the provider it is listed under. Which variable holds which key depends on
+like the provider it is listed under. ``LLM_MATCH_SUGGESTIONS`` (M13) is the
+other side of that same chain and is an **error**, because there the flag is an
+operator saying the feature should be on. Which variable holds which key depends on
 the provider (:meth:`Settings.recs_key_env`), and every message names both,
 because the failure worth catching is a key set for a provider that is not in
 the chain. A
@@ -111,6 +113,32 @@ def is_placeholder(name: str, value: str) -> bool:
     return lowered in SHIPPED_DEFAULTS.get(name, frozenset())
 
 
+def _has_key(settings: Settings, provider: str) -> bool:
+    """Whether ``provider``'s key is set and is not an example value."""
+    return not is_placeholder(settings.recs_key_field(provider), settings.recs_key(provider))
+
+
+def model_chain_configured(settings: Settings) -> bool:
+    """Whether any ``(provider, model)`` entry could actually be called.
+
+    The same rule as :func:`arc.services.recs.factory.chain_entries` — "an
+    entry needs both a usable key and a model name" — restated rather than
+    imported, because that module imports :func:`is_placeholder` from this one
+    and importing it back would be a cycle. ``test_config_check`` asserts the
+    two agree across a matrix of settings, which is what keeps the restatement
+    honest.
+
+    Two features read it. The recommendations page turns it into
+    ``configured`` (via the factory's ``None``), and M13's match suggestions
+    turn it into ``suggestions_enabled`` — ``LLM_MATCH_SUGGESTIONS`` alone is
+    an intention, and it is only a working feature when something can answer.
+    """
+    if _has_key(settings, settings.recs_provider) and settings.recs_models:
+        return True
+    fallback = settings.recs_fallback_provider
+    return bool(fallback and _has_key(settings, fallback) and settings.recs_fallback_models)
+
+
 def is_local_origin(url: str) -> bool:
     """Whether ``url``'s origin points at the machine the process runs on.
 
@@ -185,16 +213,21 @@ def warnings(settings: Settings) -> list[ConfigWarning]:
             )
         )
 
-    # Match suggestions (M13) need Anthropic specifically, whatever the
-    # recommendations provider is. An ERROR: the flag says the feature is on,
-    # and it cannot work.
-    if settings.llm_match_suggestions and is_placeholder(
-        "anthropic_api_key", _value(settings, "anthropic_api_key")
-    ):
+    # Match suggestions (M13) ride the same provider chain as the
+    # recommendations (§5.2, §5.6), so the question is not "is there an
+    # Anthropic key" — it is "can anything in the chain be called". An ERROR
+    # rather than a warning: the flag says the feature is on, and it cannot
+    # work. Silence it by configuring a provider or by turning the flag off,
+    # both of which leave a finished deployment.
+    if settings.llm_match_suggestions and not model_chain_configured(settings):
         found.append(
             ConfigWarning(
-                key="ANTHROPIC_API_KEY",
-                message="not set while LLM_MATCH_SUGGESTIONS is on; match suggestions will fail",
+                key="LLM_MATCH_SUGGESTIONS",
+                message=(
+                    "is on but no model provider is configured (set RECS_PROVIDER's key, "
+                    f"{settings.recs_key_env(settings.recs_provider)}, or a fallback "
+                    "provider's); match suggestions will never be produced"
+                ),
             )
         )
 
@@ -332,5 +365,6 @@ __all__ = [
     "is_local_origin",
     "is_placeholder",
     "log_warnings",
+    "model_chain_configured",
     "warnings",
 ]

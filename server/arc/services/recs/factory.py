@@ -2,9 +2,10 @@
 
 Two things live here: the thing that knows how to construct a backend for a
 ``(provider, model)`` pair, and the thing that reads the configuration into a
-chain of them. Everything above — the router, the runs orchestrator, the
-tests — holds a :class:`~arc.services.recs.base.RecsModel` and cannot tell a
-chain from a single model, which is the point of the protocol.
+chain of them. Everything above — the router, the runs orchestrator, the match
+suggestions, the tests — holds a :class:`~arc.services.recs.base.RecsModel` or
+a :class:`~arc.services.recs.base.JsonModel` and cannot tell a chain from a
+single model, which is the point of the protocols.
 
 ``None`` rather than an exception when nothing is configured. An unconfigured
 backend is not a failure, it is a state the product has a name for: ``GET
@@ -22,11 +23,13 @@ chain, and it works.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from arc.config import Settings
 from arc.core.config_check import is_placeholder
-from arc.services.recs.base import MAX_RETRIES, TIMEOUT_SECONDS, RecsModel
+from arc.services.recs.base import MAX_RETRIES, TIMEOUT_SECONDS, JsonModel
 from arc.services.recs.chain import ChainEntry, RecsChain
 from arc.services.recs.claude import ClaudeRecsModel
 from arc.services.recs.openai_compat import OpenAICompatRecsModel
@@ -50,7 +53,7 @@ class BackendFactory:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._clients: dict[str, Any] = {}
-        self._backends: dict[tuple[str, str], RecsModel] = {}
+        self._backends: dict[tuple[str, str], JsonModel] = {}
 
     def _client(self, provider: str) -> Any:
         if provider not in self._clients:
@@ -72,13 +75,13 @@ class BackendFactory:
                 )
         return self._clients[provider]
 
-    def build(self, provider: str, model: str) -> RecsModel:
+    def build(self, provider: str, model: str) -> JsonModel:
         """The backend for one entry, built once and reused."""
         cached = self._backends.get((provider, model))
         if cached is not None:
             return cached
         key = key_for(self._settings, provider)
-        built: RecsModel
+        built: JsonModel
         if provider == "anthropic":
             built = ClaudeRecsModel(api_key=key, model=model, client=self._client(provider))
         else:
@@ -142,12 +145,19 @@ def chain_entries(settings: Settings) -> list[ChainEntry]:
     return entries
 
 
-def build_recs_model(settings: Settings) -> RecsModel | None:
-    """The whole chain, or ``None`` when nothing in it can be called."""
+def build_model(settings: Settings) -> RecsChain | None:
+    """The whole chain, or ``None`` when nothing in it can be called.
+
+    The concrete :class:`~arc.services.recs.chain.RecsChain` rather than a
+    protocol, because it satisfies both of them: callers that want picks hold
+    it as a :class:`~arc.services.recs.base.RecsModel`, and callers with their
+    own schema — M13's ``llm_suggest_match`` — hold it as a
+    :class:`~arc.services.recs.base.JsonModel`.
+    """
     entries = chain_entries(settings)
     if not entries:
         log.info(
-            "recommendations are not configured",
+            "no model provider is configured",
             extra={
                 "provider": settings.recs_provider,
                 "expected_env": settings.recs_key_env(settings.recs_provider),
@@ -156,10 +166,94 @@ def build_recs_model(settings: Settings) -> RecsModel | None:
         return None
 
     log.info(
-        "recommendation chain built",
+        "model chain built",
         extra={"entries": [f"{entry.provider}/{entry.model}" for entry in entries]},
     )
     return RecsChain(entries, backends=BackendFactory(settings))
 
 
-__all__ = ["BackendFactory", "build_recs_model", "chain_entries", "key_for"]
+#: The name M12 gave :func:`build_model`, kept so the recommendations router
+#: and the eval read as what they are.
+build_recs_model = build_model
+
+
+@asynccontextmanager
+async def model_for(settings: Settings) -> AsyncIterator[RecsChain | None]:
+    """A chain for the length of one block, closed on the way out.
+
+    For a one-off caller — a script, an eval, anything that asks once and is
+    done. Work that runs repeatedly in a process should use
+    :func:`shared_model` instead, so the cooldowns are remembered between
+    calls; the whole point of the chain is that a spent model is not asked
+    again until tomorrow, and a chain built per call cannot know that.
+    """
+    model = build_model(settings)
+    try:
+        yield model
+    finally:
+        if model is not None:
+            await model.aclose()
+
+
+# --- The worker's chain ------------------------------------------------------
+#
+# One per process, like the Nyaa client (:mod:`arc.services.acquisition.nyaa`)
+# and for the same two reasons: it owns HTTP connection pools, and it holds
+# state that is worth keeping — the daily-quota cooldowns. A handler has no
+# ``app.state`` to hang it off, and building one per job would mean a queue of
+# thirty review files retrying a spent Gemini model thirty times before the
+# chain moved on. The API process keeps its own instance on
+# ``app.state.recs_model`` (:func:`arc.api.recs.recs_model_for`) and the
+# lifespan closes it; the two processes therefore learn cooldowns separately,
+# which costs at most one wasted request each.
+
+_shared: RecsChain | None = None
+#: Distinguishes "not built yet" from "built, and there is nothing to build" —
+#: ``None`` is a valid answer, so it cannot also be the empty state.
+_shared_built = False
+
+
+def shared_model(settings: Settings) -> RecsChain | None:
+    """The process's chain, built on first use. ``None`` when unconfigured.
+
+    Not keyed on ``settings``: a process reads its configuration once at start
+    and keeps it for its life. Tests reset it between cases (``conftest``),
+    the same way they drop the shared Nyaa client, because the SDK clients
+    inside are bound to the event loop that built them.
+    """
+    global _shared, _shared_built
+    if not _shared_built:
+        _shared = build_model(settings)
+        _shared_built = True
+    return _shared
+
+
+def reset_shared_model() -> RecsChain | None:
+    """Forget the process's chain and hand it back, unclosed."""
+    global _shared, _shared_built
+    model, _shared, _shared_built = _shared, None, False
+    return model
+
+
+async def close_shared_model() -> None:
+    """Close the process's chain, if one was ever built.
+
+    Called from the worker's shutdown, beside ``close_shared_client``: this is
+    the only place that owns it, so it is the only place that can close it.
+    """
+    model = reset_shared_model()
+    if model is not None:
+        await model.aclose()
+
+
+__all__ = [
+    "BackendFactory",
+    "build_model",
+    "build_recs_model",
+    "chain_entries",
+    "close_shared_model",
+    "key_for",
+    "model_for",
+    "reset_shared_model",
+    "shared_model",
+]

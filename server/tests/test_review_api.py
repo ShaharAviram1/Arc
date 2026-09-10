@@ -17,10 +17,16 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from arc.api.deps import NOT_AUTHENTICATED
-from arc.api.review import ALREADY_LINKED, ITEM_NOT_FOUND, NOT_IGNORED
+from arc.api.review import (
+    ALREADY_LINKED,
+    ITEM_NOT_FOUND,
+    NOT_IGNORED,
+    NOT_PENDING,
+    SUGGESTIONS_DISABLED,
+)
 from arc.config import Settings
 from arc.db import SessionFactory
-from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState, Torrent
+from arc.models import Anime, Episode, EpisodeState, Job, MediaFile, ReviewState, Torrent
 from arc.services.acquisition.reject import QBIT_REJECTED, WRONG_FILE
 from arc.services.catalog import Breaker, CatalogService
 from tests.anilist_mock import FRIEREN_ID, FakeAniList, frieren_fake
@@ -119,6 +125,7 @@ async def seed_file(
     candidates: list[dict[str, object]] | None = None,
     episode_id: int | None = None,
     size: int = 1024,
+    suggestion: dict[str, object] | None = None,
 ) -> MediaFile:
     from arc.services.library.parser import parse
 
@@ -134,6 +141,7 @@ async def seed_file(
             match_confidence=confidence,
             match_candidates=candidates,
             episode_id=episode_id,
+            llm_suggestion=suggestion,
         )
         session.add(media_file)
         await session.commit()
@@ -156,6 +164,7 @@ class TestAuth:
             ("post", "/api/review/1/confirm"),
             ("post", "/api/review/1/ignore"),
             ("post", "/api/review/1/reopen"),
+            ("post", "/api/review/1/suggest"),
         ],
     )
     async def test_anonymous_is_401(self, anon_client: AsyncClient, method: str, path: str) -> None:
@@ -179,7 +188,11 @@ class TestAuth:
 
 class TestList:
     async def test_an_empty_queue(self, user_client: AsyncClient) -> None:
-        assert (await user_client.get("/api/review")).json() == {"items": [], "pending": 0}
+        assert (await user_client.get("/api/review")).json() == {
+            "items": [],
+            "pending": 0,
+            "suggestions_enabled": False,
+        }
 
     async def test_pending_is_the_default_filter(
         self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
@@ -689,3 +702,325 @@ class TestSearch:
 
     async def test_an_unknown_item_is_404(self, user_client: AsyncClient) -> None:
         assert (await user_client.get("/api/review/999999/search?q=frieren")).status_code == 404
+
+
+# --- Suggestions (M13, FR-L5) ------------------------------------------------
+
+
+SUGGESTION = {
+    "anime_id": None,  # filled in per test with a real row's id
+    "episode_number": 3,
+    "reason": "The filename names this title exactly.",
+    "confidence": "high",
+    "model": "gemini-3.5-flash",
+    "provider": "gemini",
+    "created_at": "2026-09-10T12:00:00+00:00",
+}
+
+
+@pytest.fixture
+def suggesting_settings(review_settings: Settings) -> Settings:
+    """Suggestions on and a provider configured, so the route is live."""
+    return review_settings.model_copy(
+        update={"llm_match_suggestions": True, "gemini_api_key": "AIza-a-real-looking-key"}
+    )
+
+
+@pytest.fixture
+def suggesting_app(
+    suggesting_settings: Settings,
+    pg_engine: object,
+    api_factory: SessionFactory,
+    anilist: FakeAniList,
+    mal: FakeMal,
+) -> FastAPI:
+    from arc.main import create_app
+
+    app = create_app(suggesting_settings)
+    app.state.engine = pg_engine
+    app.state.session_factory = api_factory
+    app.state.catalog = CatalogService(anilist.source(), mal.source(), Breaker(300.0))
+    return app
+
+
+@pytest.fixture
+async def suggesting_client(
+    suggesting_app: FastAPI, api_factory: SessionFactory
+) -> AsyncIterator[AsyncClient]:
+    await add_user(api_factory, "suggester@arc.test", USER_PASSWORD)
+    async with api_transport(suggesting_app) as client:
+        yield await login(client, "suggester@arc.test", USER_PASSWORD)
+
+
+class TestSuggestionInTheItem:
+    async def test_an_item_carries_its_suggestion_with_the_show_resolved(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        anime = await seed_anime(
+            api_factory, anilist_id=1, summary_source="anilist", title_romaji="Sousou no Frieren"
+        )
+        await seed_file(
+            api_factory,
+            data_dir,
+            name=FRIEREN_FILE,
+            suggestion={**SUGGESTION, "anime_id": anime.id},
+        )
+
+        item = (await user_client.get("/api/review")).json()["items"][0]
+
+        assert item["suggestion"]["anime_id"] == anime.id
+        assert item["suggestion"]["anime"]["title"]["romaji"] == "Sousou no Frieren"
+        assert item["suggestion"]["episode_number"] == 3
+        assert item["suggestion"]["confidence"] == "high"
+        assert item["suggestion"]["model"] == "gemini-3.5-flash"
+        assert item["suggestion"]["error"] is None
+
+    async def test_an_unasked_item_has_none(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+
+        assert (await user_client.get("/api/review")).json()["items"][0]["suggestion"] is None
+
+    async def test_the_error_shape_renders(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """ "No suggestion: <error>" needs the error and tolerates the nulls."""
+        await seed_file(
+            api_factory,
+            data_dir,
+            name=UNKNOWN_FILE,
+            suggestion={"error": "not configured", "model": None, "created_at": None},
+        )
+
+        suggestion = (await user_client.get("/api/review")).json()["items"][0]["suggestion"]
+
+        assert suggestion["error"] == "not configured"
+        assert suggestion["anime_id"] is None
+        assert suggestion["anime"] is None
+        assert suggestion["confidence"] is None
+
+    async def test_a_none_of_these_answer_renders(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """A rejected shortlist is a real answer, not an error."""
+        await seed_file(
+            api_factory,
+            data_dir,
+            name=UNKNOWN_FILE,
+            suggestion={**SUGGESTION, "anime_id": None, "episode_number": None},
+        )
+
+        suggestion = (await user_client.get("/api/review")).json()["items"][0]["suggestion"]
+
+        assert suggestion["error"] is None
+        assert suggestion["anime_id"] is None
+        assert suggestion["reason"]
+
+    async def test_a_suggestion_for_a_row_that_has_gone_still_renders(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        await seed_file(
+            api_factory, data_dir, name=UNKNOWN_FILE, suggestion={**SUGGESTION, "anime_id": 424242}
+        )
+
+        suggestion = (await user_client.get("/api/review")).json()["items"][0]["suggestion"]
+
+        assert suggestion["anime_id"] == 424242
+        assert suggestion["anime"] is None
+
+    async def test_a_failed_re_ask_shows_the_answer_not_the_failure(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """The two are never both set: an answer wins over a ``last_error``."""
+        anime = await seed_anime(
+            api_factory, anilist_id=7, summary_source="anilist", title_romaji="Sousou no Frieren"
+        )
+        await seed_file(
+            api_factory,
+            data_dir,
+            name=FRIEREN_FILE,
+            suggestion={
+                **SUGGESTION,
+                "anime_id": anime.id,
+                "last_error": {
+                    "error": "the model declined this request",
+                    "model": "gemini-3.5-flash",
+                    "created_at": "2026-09-10T13:00:00+00:00",
+                },
+            },
+        )
+
+        suggestion = (await user_client.get("/api/review")).json()["items"][0]["suggestion"]
+
+        assert suggestion["error"] is None
+        assert suggestion["anime_id"] == anime.id
+        assert suggestion["confidence"] == "high"
+
+
+class TestSuggestionsEnabled:
+    async def test_it_is_false_by_default(self, user_client: AsyncClient) -> None:
+        assert (await user_client.get("/api/review")).json()["suggestions_enabled"] is False
+
+    async def test_it_is_true_with_the_flag_and_a_provider(
+        self, suggesting_client: AsyncClient
+    ) -> None:
+        assert (await suggesting_client.get("/api/review")).json()["suggestions_enabled"] is True
+
+
+class TestSuggestEndpoint:
+    async def test_it_queues_a_forced_suggestion(
+        self, suggesting_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+
+        response = await suggesting_client.post(f"/api/review/{media_file.id}/suggest")
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "pending"
+        async with api_factory() as session:
+            job = await session.get(Job, body["job_id"])
+            assert job is not None
+            assert job.type == "llm_suggest_match"
+            assert job.payload["media_file_id"] == media_file.id
+            assert job.payload["force"] is True
+
+    async def test_pressing_it_twice_queues_one_job(
+        self, suggesting_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+
+        first = await suggesting_client.post(f"/api/review/{media_file.id}/suggest")
+        second = await suggesting_client.post(f"/api/review/{media_file.id}/suggest")
+
+        assert first.json()["job_id"] == second.json()["job_id"]
+
+    async def test_an_unknown_item_is_404(self, suggesting_client: AsyncClient) -> None:
+        response = await suggesting_client.post("/api/review/999999/suggest")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == ITEM_NOT_FOUND
+
+    @pytest.mark.parametrize("state", [ReviewState.AUTO, ReviewState.IGNORED])
+    async def test_a_file_that_is_not_pending_is_409(
+        self,
+        suggesting_client: AsyncClient,
+        api_factory: SessionFactory,
+        data_dir: Path,
+        state: ReviewState,
+    ) -> None:
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE, review_state=state)
+
+        response = await suggesting_client.post(f"/api/review/{media_file.id}/suggest")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == NOT_PENDING
+
+    async def test_it_is_503_while_the_feature_is_off(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+
+        response = await user_client.post(f"/api/review/{media_file.id}/suggest")
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == SUGGESTIONS_DISABLED
+
+    async def test_it_is_503_with_the_flag_on_but_no_provider(
+        self,
+        review_settings: Settings,
+        pg_engine: object,
+        api_factory: SessionFactory,
+        anilist: FakeAniList,
+        mal: FakeMal,
+        data_dir: Path,
+    ) -> None:
+        from arc.main import create_app
+
+        settings = review_settings.model_copy(
+            update={"llm_match_suggestions": True, "gemini_api_key": None}
+        )
+        app = create_app(settings)
+        app.state.engine = pg_engine
+        app.state.session_factory = api_factory
+        app.state.catalog = CatalogService(anilist.source(), mal.source(), Breaker(300.0))
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+        await add_user(api_factory, "flagonly@arc.test", USER_PASSWORD)
+
+        async with api_transport(app) as raw:
+            client = await login(raw, "flagonly@arc.test", USER_PASSWORD)
+            listing = await client.get("/api/review")
+            response = await client.post(f"/api/review/{media_file.id}/suggest")
+
+        assert listing.json()["suggestions_enabled"] is False
+        assert response.status_code == 503
+
+    async def test_nothing_is_linked(
+        self, suggesting_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """FR-L5, from the API's side: asking never places a file."""
+        media_file = await seed_file(api_factory, data_dir, name=UNKNOWN_FILE)
+
+        await suggesting_client.post(f"/api/review/{media_file.id}/suggest")
+
+        async with api_factory() as session:
+            row = await session.get(MediaFile, media_file.id)
+            assert row is not None
+            assert row.episode_id is None
+            assert row.review_state is ReviewState.PENDING
+
+
+class TestConfirmIsUnaffectedByASuggestion:
+    """A suggestion is evidence on screen; confirm reads only the body."""
+
+    async def test_confirm_works_with_a_suggestion_present(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        anime = await seed_anime(
+            api_factory, anilist_id=2, summary_source="anilist", title_romaji="Sousou no Frieren"
+        )
+        media_file = await seed_file(
+            api_factory,
+            data_dir,
+            name=FRIEREN_FILE,
+            suggestion={**SUGGESTION, "anime_id": anime.id, "episode_number": 3},
+        )
+
+        response = await user_client.post(
+            f"/api/review/{media_file.id}/confirm",
+            json={"anime_id": anime.id, "episode_number": 9},
+        )
+
+        assert response.status_code == 200
+        async with api_factory() as session:
+            row = await session.get(MediaFile, media_file.id)
+            assert row is not None
+            episode = await session.get(Episode, row.episode_id)
+            assert episode is not None
+            # The body's 9, not the suggestion's 3.
+            assert episode.number == 9
+
+    async def test_the_confirmed_item_still_carries_the_suggestion(
+        self, user_client: AsyncClient, api_factory: SessionFactory, data_dir: Path
+    ) -> None:
+        """It is the evidence that was on screen; it is not cleared."""
+        anime = await seed_anime(
+            api_factory, anilist_id=3, summary_source="anilist", title_romaji="Sousou no Frieren"
+        )
+        media_file = await seed_file(
+            api_factory,
+            data_dir,
+            name=FRIEREN_FILE,
+            suggestion={**SUGGESTION, "anime_id": anime.id},
+        )
+
+        body = (
+            await user_client.post(
+                f"/api/review/{media_file.id}/confirm",
+                json={"anime_id": anime.id, "episode_number": 3},
+            )
+        ).json()
+
+        assert body["suggestion"]["anime_id"] == anime.id
+        assert body["review_state"] == "confirmed"

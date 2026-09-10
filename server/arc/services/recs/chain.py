@@ -39,7 +39,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from arc.services.recs.base import RecsModel, RecsResult, RecsUnavailable, is_daily_quota
+from arc.services.recs.base import (
+    PICKS_SCHEMA_NAME,
+    JsonModel,
+    JsonResult,
+    RecsResult,
+    RecsUnavailable,
+    is_daily_quota,
+    recommend_via,
+)
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +86,7 @@ class ChainEntry:
 class BackendBuilder(Protocol):
     """Makes a backend for one entry, reusing one HTTP client per provider."""
 
-    def build(self, provider: str, model: str) -> RecsModel:  # pragma: no cover - protocol
+    def build(self, provider: str, model: str) -> JsonModel:  # pragma: no cover - protocol
         ...
 
     async def aclose(self) -> None:  # pragma: no cover - protocol
@@ -148,12 +156,25 @@ class RecsChain:
 
     # --- the walk ---------------------------------------------------------
 
-    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        name: str = PICKS_SCHEMA_NAME,
+    ) -> JsonResult:
         """The first entry that answers.
 
         Only :class:`RecsUnavailable` advances the chain; a refusal or an
         unusable answer stops it, because neither is about availability and
         the next model would produce the same one.
+
+        The walk is at this level rather than at ``recommend``'s so that every
+        question asked of the chain — recommendations, and M13's match
+        suggestions — gets the same rotation and the same cooldowns. The
+        cooldowns in particular must be shared: a Gemini model spent by a
+        suggestion is spent for a recommendation too.
         """
         last: RecsUnavailable | None = None
         skipped = 0
@@ -164,7 +185,7 @@ class RecsChain:
                 continue
             backend = self._backends.build(entry.provider, entry.model)
             try:
-                result = await backend.recommend(system=system, user=user, schema=schema)
+                result = await backend.complete(system=system, user=user, schema=schema, name=name)
             except RecsUnavailable as exc:
                 last = exc
                 if is_daily_quota(exc):
@@ -182,7 +203,7 @@ class RecsChain:
 
             if entry.fallback:
                 log.info(
-                    "recommendation served by fallback",
+                    "served by fallback provider",
                     extra={"provider": entry.provider, "model": result.model or entry.model},
                 )
             return result
@@ -190,10 +211,14 @@ class RecsChain:
         if last is not None:
             raise last
         raise RecsUnavailable(
-            "every recommendation model is on cooldown until its daily quota resets"
+            "every model is on cooldown until its daily quota resets"
             if skipped
-            else "no recommendation models are configured"
+            else "no models are configured"
         )
+
+    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+        """:meth:`complete`, read as picks (:func:`recommend_via`)."""
+        return await recommend_via(self, system=system, user=user, schema=schema)
 
     async def aclose(self) -> None:
         await self._backends.aclose()
@@ -201,6 +226,7 @@ class RecsChain:
 
 __all__ = [
     "QUOTA_RESET_HOUR_UTC",
+    "JsonResult",
     "BackendBuilder",
     "ChainEntry",
     "RecsChain",

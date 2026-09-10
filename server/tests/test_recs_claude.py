@@ -214,7 +214,7 @@ async def test_a_response_with_no_text_block_fails() -> None:
 def test_the_text_block_is_found_past_the_thinking_block() -> None:
     result = parse_message(message(text=json.dumps(ANSWER), thinking_first=True))
 
-    assert len(result.picks.picks) == 3
+    assert len(result.data["picks"]) == 3
 
 
 # --- Fallbacks --------------------------------------------------------------

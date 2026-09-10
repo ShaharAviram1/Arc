@@ -213,7 +213,7 @@ arc/
    episode plausibility (number ≤ episode count, season alignment), year and
    format agreement, group/prior. Confidence ≥ 0.85 → link, state `matched`,
    enqueue `transcode`. Otherwise `review_state = pending`; optionally enqueue
-   `llm_suggest_match`, which asks Claude for the most likely candidate + one
+   `llm_suggest_match`, which asks a model for the most likely candidate + one
    line reason using structured output; stored for the review UI only.
 3. The parser and scorer are pure functions with a corpus-driven test suite.
 
@@ -248,6 +248,75 @@ arc/
   and (when `ffprobe` exists) probe summary, then a `match_file` job.
   Relative `DATA_DIR` is made absolute by `make`/`scripts/dev.sh` before the
   processes start from `server/`.
+
+### 5.2b Match suggestions as built (M13, FR-L5)
+- **The chain, not a model.** `llm_suggest_match` calls the same M12 provider
+  chain (§5.6) through its general layer: `base.JsonModel.complete(system,
+  user, schema, name) -> JsonResult` is "any JSON schema in, a parsed object
+  out"; `RecsModel.recommend` is now a one-line adapter over it
+  (`base.recommend_via`), so the rotation, the daily-quota cooldowns, the
+  20 s timeouts, the single retry and the refusal handling are shared rather
+  than reimplemented. `factory.build_model` (alias `build_recs_model`) returns
+  the chain. **One per process, on both sides.** The API keeps its instance on
+  `app.state.recs_model` and the lifespan closes it; the worker holds a
+  module-level one (`factory.shared_model`, closed by `close_shared_model()`
+  in the worker's shutdown beside the Nyaa client) because a handler has no
+  `app.state` to hang it off. It has to be shared rather than built per job:
+  the chain is where the daily-quota cooldowns live, and a queue of thirty
+  review files would otherwise rediscover a spent Gemini model thirty times.
+  The two processes learn cooldowns separately, which costs at most one wasted
+  request each. `factory.model_for` remains for one-off callers (a script, an
+  eval) that ask once and close.
+- **The prompt** (`services/library/suggest.py`, pure): the parse (filename,
+  title, episode, season, group, resolution, kind), the expected-episode prior
+  when Arc downloaded the file — derived from the save path
+  (`downloads/<episode id>/`), not from a job payload, so an ask days later
+  still has it — and ≤ 8 numbered candidates taken from the stored
+  `match_candidates` and resolved to `anime` rows (both titles, format,
+  episode count, season/year, the matcher's score and reasons). Candidates
+  carry `anime_id=` on their own line because that is the currency the answer
+  is given in.
+- **The schema**: `{anime_id: integer|null, episode_number: integer|null,
+  reason: string, confidence: high|medium|low}`, `additionalProperties:
+  false`, every field required. Nullables are `anyOf: [{type: …}, {type:
+  "null"}]` — the structured-output subset has no `nullable`. A null
+  `anime_id` is a real answer ("none of these"), which is what a reviewer
+  needs before reaching for the search box.
+- **Validation** (`suggest.validate`): an `anime_id` not among the candidates
+  becomes null — the model chooses from the shortlist, it does not extend it;
+  an `episode_number` below 1, or above the chosen show's episode count where
+  the catalogue knows it, becomes null; the reason is trimmed and cut to 300
+  characters; an unrecognised confidence becomes `low`. Only a payload that is
+  not an object is rejected outright.
+- **The job**: payload `{media_file_id, force?}`, dedupe key per file,
+  priority 150 (behind everything — every job ahead of it has somebody waiting
+  for an episode). Enqueued from `_review()` inside `match_file`, so every one
+  of the paths into the queue asks and no other path does, and only when
+  `LLM_MATCH_SUGGESTIONS` is on, a provider is configured, **and there is a
+  shortlist**: a batch file and a "no good candidates" item reach the queue
+  with nothing to choose between, so the question has no meaning and only a
+  person can ask by hand. Idempotent: it skips a row that is gone or no longer
+  `pending`, and one that already has a suggestion unless the payload says
+  `force`. Since the dedupe key is the file rather than the file and the flag,
+  `enqueue_suggestion(force=True)` writes `force` into a job already **pending**
+  for that file (a running one is left alone — it has read its payload and is
+  producing a fresh answer), or the person's "ask again" would be swallowed by
+  the automatic ask.
+- **Failures are stored, and never destroy an answer.** `RecsUnavailable` is
+  raised so the queue's retry/backoff handles it. A refusal, an unusable
+  answer, an empty shortlist and an unconfigured chain are *stored*: on a row
+  with no answer as `llm_suggestion = {error, model, created_at}`, and on a row
+  that already has one as `last_error` **beside** the answer, which stands.
+  `force` has to be safe to press, and a re-ask that traded a usable
+  suggestion for "the model declined" would make it a gamble. A later success
+  replaces the whole blob, dropping `last_error` with it — it is a note about
+  an attempt, not about the file. `SuggestionOut` therefore never sets both:
+  a row with an answer renders as the answer with `error: null`.
+- **It never links.** There is no call to `link()` in the handler and there
+  must never be one (FR-L5). The only write is `media_files.llm_suggestion =
+  {anime_id, episode_number, reason, confidence, model, provider, created_at}`,
+  a column the review API renders and nothing else reads. Confirming behaves
+  identically whether or not a suggestion exists.
 
 ### 5.3 Transcode
 1. `transcode` (priority = how soon a user will reach it): choose subtitle
@@ -466,8 +535,20 @@ backends), `pool`, `continuations`, `history`, `prompt`, `schema`, `runs`.
    setting. `chain.py` holds `[(provider, model), …]` — the primary provider's
    models in `RECS_MODEL` order, then the fallback provider's — and is itself a
    `RecsModel`, so nothing above it knows there is more than one. `base.py`
-   holds what the backends share (protocol, exceptions, `parse_picks`, timing,
-   the single retry); `factory.py` reads the config into a chain, sharing **one
+   holds what the backends share (the protocols, exceptions, parsers, timing,
+   the single retry). **Two layers since M13:** `JsonModel.complete(system,
+   user, schema, name) -> JsonResult` is the general one — the streaming,
+   refusal, truncation and retry logic all live there, and the chain's walk
+   and its cooldowns are on `complete` rather than on `recommend`, so a second
+   feature shares them (a Gemini model spent by a suggestion is spent for a
+   recommendation too); `RecsModel.recommend -> RecsResult` is a one-line
+   adapter (`base.recommend_via`) that validates the object as `Picks`
+   *outside* the retry, since a well-formed answer that is not the schema is a
+   real answer and asking again spends quota. Match suggestions (§5.2b) are
+   the second caller. `factory.build_model` is the neutral name
+   (`build_recs_model` remains as an alias) and `factory.model_for` is the
+   per-job context manager the worker uses.
+   `factory.py` reads the config into a chain, sharing **one
    HTTP client per provider** and dropping entries whose provider has no key,
    so the chain's length is the honest answer to "is anything configured"
    (empty → `None` → `configured: false` → 503).
@@ -677,8 +758,9 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
 | `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
-| `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute |
-| `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title |
+| `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
+| `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
+| `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
 | `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode, anime, playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
@@ -810,7 +892,9 @@ openrouter), `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`
 (all optional — a model name that does not match its provider, a missing
 primary key, and a fallback named without its key are each a startup WARNING),
 `GEMINI_BASE_URL`, `OPENROUTER_BASE_URL` (blank = the provider's default),
-`LLM_MATCH_SUGGESTIONS` (bool),
+`LLM_MATCH_SUGGESTIONS` (bool, default false — match suggestions ride the same
+provider chain as the recommendations, so it needs no key of its own; on in
+production with nothing in the chain configured is a startup ERROR),
 `QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `DATA_DIR`, `MAX_TRANSCODES`,
 `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `MATCH_AUTO_THRESHOLD` (0.85),
 `MATCH_MIN_CANDIDATE` (0.40), `MATCH_MIN_TITLE_FOR_AUTO` (0.92; above the
@@ -857,9 +941,15 @@ Configuration problems are checked at startup by both the api and the worker
 (`arc/core/config_check.py`) and logged at two levels. **ERROR** means the
 deployment is broken -- a missing `SECRET_KEY`, a localhost `PUBLIC_URL` -- and
 is what `GET /api/health` counts as `config_warnings`; a healthy deploy reports
-0. **WARNING** means an optional feature is off and does *not* count: today,
-the recommendations key being unset, and a `RECS_MODEL` that does not look like
-the selected `RECS_PROVIDER`'s.
+0 — `LLM_MATCH_SUGGESTIONS` on with no provider in the chain is one of these,
+because the flag is an operator saying the feature should be on. **WARNING**
+means an optional feature is off and does *not* count: today, the
+recommendations key being unset, and a `RECS_MODEL` that does not look like
+the selected `RECS_PROVIDER`'s. "Is anything configured" is
+`config_check.model_chain_configured`, a deliberate restatement of
+`recs.factory.chain_entries` (the factory imports `is_placeholder` from
+config_check, so importing it back would be a cycle) with a test pinning the
+two together.
 
 ## 10. Testing strategy
 
@@ -1110,3 +1200,15 @@ the selected `RECS_PROVIDER`'s.
   belongs anyway. Continuations reuse the pool's bounded relation resolution
   and are stored in `rec_runs.picks` beside the picks with a `kind` tag, so
   neither the column nor the API's existing pick shape changed.
+- 2026-09-10 — M13: match suggestions ride the M12 provider chain; shown in the
+  review queue, never applied. `base.py` grew a general layer — `JsonModel`
+  with `complete(system, user, schema, name) -> JsonResult` — and
+  `RecsModel.recommend` became a one-line adapter over it, so the rotation,
+  the daily-quota cooldowns, the retry and the refusal handling are shared
+  rather than reimplemented; `build_recs_model` is now an alias of
+  `build_model`, and the chain is one per process on both sides — the API's on
+  `app.state`, the worker's a module-level `shared_model` closed at shutdown —
+  so the daily-quota cooldowns outlive a single job. `LLM_MATCH_SUGGESTIONS`
+  now means
+  "the M12 chain is configured" rather than "there is an Anthropic key", and
+  the config check names the flag rather than `ANTHROPIC_API_KEY`.

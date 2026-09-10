@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-10 (M0–M12 done; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-10 (M0–M13 done; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -238,12 +238,21 @@ CLAUDE.md).
   continuations, add-to-planned and the admin line.
 
 ### M13 — Match review UI and LLM suggestions
-- [ ] Review page: queue, candidates, search-other-title, manual episode,
-      ignore (FR-L6)
-- [ ] `llm_suggest_match` job with structured output; suggestion shown, never
-      auto-applied (FR-L5); toggle via `LLM_MATCH_SUGGESTIONS`
+- [x] Review page: pending/ignored/auto-linked tabs, parsed chips and
+      confidence, ranked candidates, search-other-title, manual episode
+      number, ignore/reopen (FR-L6)
+- [x] `llm_suggest_match` job on the M12 provider chain (generalised to any
+      JSON-schema answer); suggestion stored on the file, shown with model
+      and confidence, never auto-applied; on-demand ask; toggle via
+      `LLM_MATCH_SUGGESTIONS` (FR-L5)
 - **DoD:** an unsure file can be resolved in the UI in under a minute; the
   LLM suggestion is present when enabled and clearly marked as a suggestion.
+  Verified by the orchestrator 2026-09-10 in dev: an ambiguously named copy
+  of a real episode was ingested, scored 0.84 (< 0.85), queued for review
+  with a Gemini suggestion 13 s later, and confirmed from the page in one
+  click (linked to the right episode). The suggestion itself picked the
+  wrong season with "high" confidence — the reason FR-L5 says shown, never
+  applied.
 
 ### M14 — Admin panel
 - [ ] Users & invites management, deactivate (FR-D1)

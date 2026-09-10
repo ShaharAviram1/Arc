@@ -47,12 +47,15 @@ from openai import AsyncOpenAI
 
 from arc.services.recs.base import (
     MAX_RETRIES,
+    PICKS_SCHEMA_NAME,
     TIMEOUT_SECONDS,
+    JsonResult,
     RecsFailed,
     RecsRefused,
     RecsResult,
     RecsUnavailable,
-    parse_picks,
+    parse_json,
+    recommend_via,
     with_retry,
 )
 
@@ -70,9 +73,10 @@ MAX_TOKENS = 16000
 #: every overload of ``create`` fail to match.
 REASONING_EFFORT: Literal["low"] = "low"
 
-#: The name the schema is registered under in ``response_format``. Arbitrary,
-#: but it is echoed in errors, so it should read as what it is.
-SCHEMA_NAME = "recs_picks"
+#: The default name the schema is registered under in ``response_format``:
+#: the picks one, since that is what :func:`~arc.services.recs.base.recommend_via`
+#: asks for. A caller with another question passes its own ``name``.
+SCHEMA_NAME = PICKS_SCHEMA_NAME
 
 #: OpenRouter's documented attribution headers. Only sent where they mean
 #: something.
@@ -141,8 +145,8 @@ class Accumulated:
         return "".join(self.text).strip()
 
 
-def parse_stream(state: Accumulated) -> RecsResult:
-    """A finished stream as a :class:`RecsResult`, or the right exception.
+def parse_stream(state: Accumulated) -> JsonResult:
+    """A finished stream as a :class:`JsonResult`, or the right exception.
 
     The outcomes, in the order they have to be checked: a gateway that failed
     mid-stream, a refusal (either signal), a budget that ran out, an answer
@@ -163,7 +167,7 @@ def parse_stream(state: Accumulated) -> RecsResult:
         raise RecsFailed("empty")
 
     try:
-        picks = parse_picks(state.content)
+        data = parse_json(state.content)
     except RecsFailed:
         # A stream that never said "stop" and left JSON half-written was cut
         # off, whatever it blamed. Reclassified because the two need different
@@ -175,7 +179,7 @@ def parse_stream(state: Accumulated) -> RecsResult:
             raise RecsFailed("truncated") from None
         raise
 
-    return RecsResult(picks=picks, model=state.model, usage={**state.usage, "fallback": False})
+    return JsonResult(data=data, model=state.model, usage={**state.usage, "fallback": False})
 
 
 class OpenAICompatRecsModel:
@@ -207,27 +211,40 @@ class OpenAICompatRecsModel:
             max_retries=MAX_RETRIES,
         )
 
-    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        name: str = SCHEMA_NAME,
+    ) -> JsonResult:
         """One streamed, schema-constrained completion, with one retry (base)."""
 
-        async def attempt() -> RecsResult:
-            return await self._attempt(system=system, user=user, schema=schema)
+        async def attempt() -> JsonResult:
+            return await self._attempt(system=system, user=user, schema=schema, name=name)
 
         # Stamped here rather than in the parser: the parsers are tested
         # against hand-built payloads and have no idea who sent them.
         result = replace(await with_retry(attempt, provider=self.provider), provider=self.provider)
         log.info(
-            "recommendation model answered",
+            "model answered",
             extra={
                 "provider": self.provider,
                 "model": result.model,
-                "picks": len(result.picks.picks),
+                "schema": name,
                 **result.usage,
             },
         )
         return result
 
-    async def _attempt(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+    async def recommend(self, *, system: str, user: str, schema: dict[str, Any]) -> RecsResult:
+        """:meth:`complete`, read as picks (:func:`recommend_via`)."""
+        return await recommend_via(self, system=system, user=user, schema=schema)
+
+    async def _attempt(
+        self, *, system: str, user: str, schema: dict[str, Any], name: str
+    ) -> JsonResult:
         state = Accumulated()
         try:
             # ``async with`` so the response is released on every path out,
@@ -243,7 +260,7 @@ class OpenAICompatRecsModel:
                 reasoning_effort=REASONING_EFFORT,
                 response_format={
                     "type": "json_schema",
-                    "json_schema": {"name": SCHEMA_NAME, "schema": schema, "strict": True},
+                    "json_schema": {"name": name, "schema": schema, "strict": True},
                 },
                 stream=True,
                 stream_options={"include_usage": True},

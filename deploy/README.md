@@ -61,9 +61,18 @@ arc.example.com.  A  203.0.113.10
 ### 2.2 The repository and `.env`
 
 ```bash
-git clone <repo> arc && cd arc
+git clone https://github.com/ShaharAviram1/Arc.git /opt/arc && cd /opt/arc
 cp .env.example .env
 ```
+
+Later deploys are a pull plus `make up` (build, migrate, restart):
+
+```bash
+cd /opt/arc && git pull --ff-only && make up
+```
+
+`.env` is untracked and survives the pull; a migration in the pulled commit
+is applied by `make up` before the new api starts.
 
 Then edit `.env`. These are the keys that **must** be real before `make up`;
 everything else in the file has a working default.

@@ -12,6 +12,13 @@ import type { MalStatus, MalWrite } from '@/lib/mal'
 import type { PlayInfo } from '@/lib/playback'
 import type { RecContinuation, RecModelStatus, RecPick, RecRun, RecsPage } from '@/lib/recs'
 import type {
+  ReviewCandidate,
+  ReviewItem,
+  ReviewPage,
+  ReviewParsed,
+  ReviewSuggestion,
+} from '@/lib/review'
+import type {
   BehindEntry,
   ContinueWatchingEntry,
   HomePage,
@@ -756,3 +763,187 @@ export const RECS_PAGE_EMPTY: RecsPage = {
 
 /** No Anthropic key on the server: there is nothing to offer. */
 export const RECS_PAGE_UNCONFIGURED: RecsPage = { ...RECS_PAGE_EMPTY, configured: false }
+
+/* --- Match review (spec §4.3, roadmap M13) ---------------------------- */
+
+/** The release name the matcher could not pin down: a title it half knows. */
+export const REVIEW_FILE_NAME = '[SubsPlease] Sousou no Frieren - 05 (1080p) [E5F6A7B8].mkv'
+
+/** A second file in the same queue, so a card is not the only one on screen. */
+export const REVIEW_OTHER_NAME = 'Apothecary.Diaries.S01E02.1080p.WEB-DL.mkv'
+
+export function reviewParsed(overrides: Partial<ReviewParsed> = {}): ReviewParsed {
+  return {
+    title: 'Sousou no Frieren',
+    episode: 5,
+    season: null,
+    group: 'SubsPlease',
+    resolution: '1080p',
+    kind: 'episode',
+    ...overrides,
+  }
+}
+
+/** The matcher's shortlist: a close-ish first guess and a weak second. */
+export const REVIEW_CANDIDATES: ReviewCandidate[] = [
+  {
+    anime: FRIEREN,
+    episode_number: 5,
+    score: 0.62,
+    reasons: ['title similarity 0.62', 'episode 5 exists'],
+    absolute: false,
+    reason: null,
+  },
+  {
+    anime: FRIEREN_SPECIAL,
+    episode_number: null,
+    score: 0.41,
+    reasons: ['synonym match'],
+    absolute: true,
+    reason: null,
+  },
+]
+
+export function reviewItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+  return {
+    id: 501,
+    name: REVIEW_FILE_NAME,
+    directory: 'downloads/Frieren',
+    size: 1_503_238_553,
+    parsed: reviewParsed(),
+    confidence: 0.62,
+    candidates: REVIEW_CANDIDATES,
+    review_state: 'pending',
+    episode_id: null,
+    created_at: '2026-09-10T08:00:00Z',
+    ...overrides,
+  }
+}
+
+/** The model's own words about the file above, and what it proposed. */
+export const REVIEW_SUGGESTION_REASON =
+  'The release group and the half-parsed title both point at the 2023 Madhouse series, and ' +
+  'episode 5 is the next one Arc is missing.'
+
+export const REVIEW_SUGGESTION: ReviewSuggestion = {
+  anime_id: FRIEREN.id,
+  anime: FRIEREN,
+  episode_number: 5,
+  reason: REVIEW_SUGGESTION_REASON,
+  confidence: 'high',
+  model: 'claude-opus-5',
+  created_at: '2026-09-10T08:05:00Z',
+  error: null,
+}
+
+/** Why an ask can come back with nothing: the model declined or broke. */
+export const REVIEW_SUGGESTION_ERROR = 'the model declined to name a show'
+
+export const REVIEW_SUGGESTION_FAILED: ReviewSuggestion = {
+  ...REVIEW_SUGGESTION,
+  anime_id: null,
+  anime: null,
+  episode_number: null,
+  // Null exactly when `error` is set: a failed ask has an explanation, not a
+  // case, and nothing to be confident about.
+  reason: null,
+  confidence: null,
+  error: REVIEW_SUGGESTION_ERROR,
+}
+
+/**
+ * A proposal that names a show but no confidence and no argument. The server
+ * does not send this today — both go null only alongside an `error` — but the
+ * card must render what it is given rather than inventing a chip for it.
+ */
+export const REVIEW_SUGGESTION_BARE: ReviewSuggestion = {
+  ...REVIEW_SUGGESTION,
+  reason: null,
+  confidence: null,
+}
+
+/** One pending file, on a server that will ask a model when told to. */
+export const REVIEW_PAGE: ReviewPage = {
+  items: [reviewItem()],
+  pending: 1,
+  suggestions_enabled: true,
+}
+
+/** The same queue on a server with `LLM_MATCH_SUGGESTIONS` off. */
+export const REVIEW_PAGE_NO_SUGGESTIONS: ReviewPage = {
+  ...REVIEW_PAGE,
+  suggestions_enabled: false,
+}
+
+/** The same file once the job has answered (FR-L5). */
+export const REVIEW_PAGE_SUGGESTED: ReviewPage = {
+  ...REVIEW_PAGE,
+  items: [reviewItem({ suggestion: REVIEW_SUGGESTION })],
+}
+
+/** The ask came back with nothing to propose. */
+export const REVIEW_PAGE_SUGGESTION_FAILED: ReviewPage = {
+  ...REVIEW_PAGE,
+  items: [reviewItem({ suggestion: REVIEW_SUGGESTION_FAILED })],
+}
+
+/** A proposal with neither a confidence nor an argument attached to it. */
+export const REVIEW_PAGE_SUGGESTED_BARE: ReviewPage = {
+  ...REVIEW_PAGE,
+  items: [reviewItem({ suggestion: REVIEW_SUGGESTION_BARE })],
+}
+
+export const EMPTY_REVIEW_PAGE: ReviewPage = { items: [], pending: 0, suggestions_enabled: true }
+
+/** The matcher's own sentence about why a file is in the queue at all. */
+export const REVIEW_REASON_LINE = 'below the auto-link threshold'
+
+/** An entry that carries a sentence instead of a show, as the server sends it. */
+function reasonEntry(reason: string | null): ReviewCandidate {
+  return { anime: null, episode_number: null, score: null, reasons: [], absolute: false, reason }
+}
+
+/** The shortlist with the matcher's parting sentence under it. */
+export const REVIEW_PAGE_WITH_REASON: ReviewPage = {
+  ...REVIEW_PAGE,
+  items: [reviewItem({ candidates: [...REVIEW_CANDIDATES, reasonEntry(REVIEW_REASON_LINE)] })],
+}
+
+/** The same entry with nothing in it: there is no sentence to label. */
+export const REVIEW_PAGE_WITHOUT_REASON: ReviewPage = {
+  ...REVIEW_PAGE,
+  items: [reviewItem({ candidates: [...REVIEW_CANDIDATES, reasonEntry(null)] })],
+}
+
+/** A file somebody marked "not anime", with the one way back. */
+export const REVIEW_PAGE_IGNORED: ReviewPage = {
+  items: [
+    reviewItem({
+      id: 502,
+      name: REVIEW_OTHER_NAME,
+      directory: 'manual',
+      review_state: 'ignored',
+      candidates: [],
+      parsed: reviewParsed({ title: 'Apothecary Diaries', episode: 2, season: 1, group: null }),
+    }),
+  ],
+  pending: 1,
+  suggestions_enabled: true,
+}
+
+/** What the matcher linked on its own, listed for trust and nothing else. */
+export const REVIEW_PAGE_AUTO: ReviewPage = {
+  items: [
+    reviewItem({
+      id: 503,
+      name: '[SubsPlease] Sousou no Frieren - 04 (1080p) [A1B2C3D4].mkv',
+      review_state: 'auto',
+      confidence: null,
+      episode_id: 9004,
+      candidates: [{ ...(REVIEW_CANDIDATES[0] as ReviewCandidate), episode_number: 4 }],
+      parsed: reviewParsed({ episode: 4 }),
+    }),
+  ],
+  pending: 1,
+  suggestions_enabled: true,
+}
