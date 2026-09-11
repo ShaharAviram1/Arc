@@ -60,6 +60,15 @@ query ArcSearch($search: String!, $page: Int!, $perPage: Int!) {
 
 #: Everything a detail fetch asks for beyond the summary.
 #:
+#: ``staff`` and ``streamingEpisodes`` are here and deliberately *not* in the
+#: summary fragment (M15). The first is twelve names and the second is one
+#: object per episode, which is a few kilobytes on a long show — affordable
+#: once per day per title on a detail refresh, and not affordable twenty times
+#: per keystroke-driven search page or two hundred times per season sweep.
+#: ``perPage: 12`` on the staff connection for the same reason: Arc renders six
+#: credits, and twelve relevance-sorted edges is comfortably enough to find
+#: them without paging a crew of ninety.
+#:
 #: The airing schedule is asked for as two aliased connections rather than one
 #: unfiltered page. ``airingSchedule`` has no sort argument and pages at 100,
 #: so a single page of a long-running show (One Piece is past 1100 episodes)
@@ -85,6 +94,10 @@ DETAIL_SELECTION = """
     synonyms
     tags { name rank }
     studios(isMain: true) { nodes { name } }
+    staff(sort: RELEVANCE, perPage: 12) {
+      edges { role node { name { full } } }
+    }
+    streamingEpisodes { title thumbnail }
     nextAiringEpisode { episode airingAt timeUntilAiring }
     relations {
       edges {

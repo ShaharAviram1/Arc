@@ -1,11 +1,18 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
 import { Search } from '@/pages/Search'
-import { EMPTY_SEARCH, FRIEREN, FRIEREN_SPECIAL, SEARCH_PAGE_1 } from '@/test/animeFixtures'
+import {
+  EMPTY_SCHEDULE,
+  EMPTY_SEARCH,
+  FRIEREN,
+  FRIEREN_SPECIAL,
+  SCHEDULE_PAGE,
+  SEARCH_PAGE_1,
+} from '@/test/animeFixtures'
 import { mockApi, requestsMade } from '@/test/apiMock'
 
 function renderSearch(path = '/search') {
@@ -13,6 +20,7 @@ function renderSearch(path = '/search') {
     [
       { path: '/search', element: <Search /> },
       { path: '/anime/:id', element: <p>show page</p> },
+      { path: '/recs', element: <p>recs page</p> },
     ],
     { initialEntries: [path] },
   )
@@ -29,66 +37,97 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('Search', () => {
-  it('shows the idle hint before anything is typed', () => {
-    mockApi({})
+describe('Browse', () => {
+  it('has no search field of its own — the toolbar owns it now', async () => {
+    mockApi({ 'GET /api/schedule': { body: EMPTY_SCHEDULE } })
     renderSearch()
 
-    expect(screen.getByText('Search the catalogue by title')).toBeInTheDocument()
+    expect(await screen.findByText('Search the catalogue by title')).toBeInTheDocument()
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Search anime')).not.toBeInTheDocument()
   })
 
-  it('debounces typing into a single request and mirrors the query in the URL', async () => {
-    vi.useFakeTimers()
-    const fetchMock = mockApi({
-      'GET /api/anime/search?q=frie&page=1': { body: SEARCH_PAGE_1 },
-    })
+  it('offers the current season when nothing has been searched for', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+    renderSearch()
 
-    const router = renderSearch()
-    const input = screen.getByLabelText('Search anime')
-
-    // Four keystrokes, none of them a pause long enough to fire the request.
-    for (const value of ['f', 'fr', 'fri', 'frie']) {
-      fireEvent.change(input, { target: { value } })
-      act(() => {
-        vi.advanceTimersByTime(50)
-      })
-    }
-
-    // The URL follows every keystroke; the request waits for the pause.
-    expect(router.state.location.search).toBe('?q=frie')
-    expect(requestsMade(fetchMock)).toHaveLength(0)
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(300)
-    })
-
-    expect(requestsMade(fetchMock)).toEqual(['GET /api/anime/search?q=frie&page=1'])
-
-    // Let the answer land; still exactly one request.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(100)
-    })
-    expect(screen.getByText(FRIEREN.title.preferred)).toBeInTheDocument()
-    expect(requestsMade(fetchMock)).toHaveLength(1)
+    expect(
+      await screen.findByText('Fall 2026 in Arc’s catalogue. Search by title to look further.'),
+    ).toBeInTheDocument()
+    // Every entry in the season, days first, then what has no slot; once each.
+    expect(screen.getByRole('link', { name: FRIEREN.title.preferred })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'The Apothecary Diaries' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: FRIEREN_SPECIAL.title.preferred })).toBeInTheDocument()
   })
 
-  it('renders results for a query that arrives in the URL', async () => {
-    mockApi({ 'GET /api/anime/search?q=frieren&page=1': { body: SEARCH_PAGE_1 } })
+  it('renders results for a query that arrives in the URL, and counts them', async () => {
+    mockApi({
+      'GET /api/anime/search?q=frieren&page=1': { body: SEARCH_PAGE_1 },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
 
     renderSearch('/search?q=frieren')
 
-    expect(await screen.findByText(FRIEREN.title.preferred)).toBeInTheDocument()
+    expect(await screen.findByText('2 results for “frieren”')).toBeInTheDocument()
     expect(screen.getByText('TV · 28 eps · 2023')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: FRIEREN.title.preferred })).toHaveAttribute(
       'href',
-      `/anime/${FRIEREN.id}`,
+      `/anime/${String(FRIEREN.id)}`,
     )
-    // Each card carries its own status control (spec §4.1 FR-C2).
+    // Each card keeps its own status control (spec §4.1 FR-C2).
     expect(screen.getAllByRole('combobox')).toHaveLength(2)
   })
 
+  it('filters the grid by genre, and drops a chip that no longer applies', async () => {
+    mockApi({
+      'GET /api/anime/search?q=frieren&page=1': { body: SEARCH_PAGE_1 },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
+
+    renderSearch('/search?q=frieren')
+    await screen.findByText(FRIEREN.title.preferred)
+
+    // One chip per genre present in the results, alphabetically, behind "All".
+    const chips = screen.getByRole('group', { name: 'Filter by genre' })
+    expect(
+      within(chips)
+        .getAllByRole('button')
+        .map((chip) => chip.textContent),
+    ).toEqual(['All', 'Adventure', 'Drama', 'Fantasy'])
+    expect(within(chips).getByRole('button', { name: 'All' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+
+    await userEvent.click(within(chips).getByRole('button', { name: 'Adventure' }))
+
+    expect(screen.getByRole('button', { name: 'Adventure' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(screen.getByText(FRIEREN.title.preferred)).toBeInTheDocument()
+    // The MAL-sourced result carries no genres, so no genre chip matches it.
+    expect(screen.queryByText(FRIEREN_SPECIAL.title.preferred)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'All' }))
+    expect(screen.getByText(FRIEREN_SPECIAL.title.preferred)).toBeInTheDocument()
+  })
+
+  it('sends people to the recommendations page from the chip row', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+    renderSearch()
+
+    expect(await screen.findByRole('link', { name: 'Recommendations' })).toHaveAttribute(
+      'href',
+      '/recs',
+    )
+  })
+
   it('tags only the results that came from MAL (FR-C6)', async () => {
-    mockApi({ 'GET /api/anime/search?q=frieren&page=1': { body: SEARCH_PAGE_1 } })
+    mockApi({
+      'GET /api/anime/search?q=frieren&page=1': { body: SEARCH_PAGE_1 },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
 
     renderSearch('/search?q=frieren')
     await screen.findByText(FRIEREN.title.preferred)
@@ -106,6 +145,7 @@ describe('Search', () => {
         status: 502,
         body: { detail: 'catalogue is unavailable' },
       },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
     })
 
     renderSearch('/search?q=frieren')
@@ -120,6 +160,7 @@ describe('Search', () => {
   it('keeps the generic message for a failure that is not an outage', async () => {
     mockApi({
       'GET /api/anime/search?q=frieren&page=1': { status: 500, body: { detail: 'boom' } },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
     })
 
     renderSearch('/search?q=frieren')
@@ -127,9 +168,22 @@ describe('Search', () => {
     expect(await screen.findByText('Search failed. Try again.')).toBeInTheDocument()
   })
 
+  it('says so when the season itself cannot be loaded', async () => {
+    mockApi({ 'GET /api/schedule': { status: 500, body: { detail: 'boom' } } })
+
+    renderSearch()
+
+    expect(
+      await screen.findByText('Could not load this season. Search by title instead.'),
+    ).toBeInTheDocument()
+  })
+
   it('offers a retry that runs the same search again', async () => {
     const path = 'GET /api/anime/search?q=frieren&page=1'
-    const fetchMock = mockApi({ [path]: { status: 500, body: { detail: 'boom' } } })
+    const fetchMock = mockApi({
+      [path]: { status: 500, body: { detail: 'boom' } },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
 
     renderSearch('/search?q=frieren')
     await screen.findByRole('alert')
@@ -141,7 +195,10 @@ describe('Search', () => {
   })
 
   it('shows the empty state when nothing matches', async () => {
-    mockApi({ 'GET /api/anime/search?q=zzzzz&page=1': { body: EMPTY_SEARCH } })
+    mockApi({
+      'GET /api/anime/search?q=zzzzz&page=1': { body: EMPTY_SEARCH },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
 
     renderSearch('/search?q=zzzzz')
 
@@ -154,6 +211,7 @@ describe('Search', () => {
       'GET /api/anime/search?q=frieren&page=2': {
         body: { results: [], page: 2, has_next: false },
       },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
     })
 
     renderSearch('/search?q=frieren')

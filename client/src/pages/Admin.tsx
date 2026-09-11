@@ -24,6 +24,7 @@ import { JobsTab } from '@/components/admin/JobsTab'
 import { RulesTab } from '@/components/admin/RulesTab'
 import { StorageTab } from '@/components/admin/StorageTab'
 import { UsersTab } from '@/components/admin/UsersTab'
+import { Chip, cx, FOCUS_RING } from '@/components/ui'
 import { ADMIN_TABS, ADMIN_TAB_LABELS, adminTabFrom, type AdminTab } from '@/lib/admin'
 import { useReviewSummary } from '@/lib/review'
 
@@ -37,11 +38,14 @@ function ReviewLink() {
   const pending = data?.pending ?? 0
 
   return (
-    <p className="mt-3 text-sm text-[var(--arc-text-muted)]">
+    <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
       {pending === 0
         ? 'Nothing is waiting in the match-review queue.'
         : `${pending === 1 ? '1 file is' : `${String(pending)} files are`} waiting in the match-review queue.`}{' '}
-      <Link to="/review" className="text-[var(--arc-accent)] hover:underline">
+      <Link
+        to="/review"
+        className={cx('text-[var(--arc-focus)] underline underline-offset-2', FOCUS_RING)}
+      >
         Open the review queue
       </Link>
     </p>
@@ -65,36 +69,32 @@ export function Admin() {
 
   return (
     <section className="mx-auto max-w-6xl">
-      <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">Admin</h1>
-      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--arc-text-muted)]">
+      <h1 className="text-[40px] leading-[1.08] font-semibold tracking-[-0.028em] text-[var(--arc-text)]">
+        Admin
+      </h1>
+      <p className="mt-3 max-w-[66ch] text-[16px] leading-[1.6] text-[var(--arc-text-muted)]">
         {EXPLANATION}
       </p>
       <ReviewLink />
 
-      <div className="mt-5 flex flex-wrap gap-2">
+      <div className="mt-7 flex flex-wrap gap-2.5">
         {ADMIN_TABS.map((value) => (
-          <button
+          <Chip
             key={value}
-            type="button"
-            aria-pressed={value === tab}
-            className={`rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] ${
-              value === tab
-                ? 'border-[var(--arc-accent)] bg-[var(--arc-surface-raised)] text-[var(--arc-text)]'
-                : 'border-[var(--arc-border)] bg-[var(--arc-surface)] text-[var(--arc-text-muted)] hover:border-[var(--arc-accent)]'
-            }`}
+            active={value === tab}
             onClick={() => {
               select(value)
             }}
           >
             {ADMIN_TAB_LABELS[value]}
-          </button>
+          </Chip>
         ))}
       </div>
 
       {/* One tab at a time, so the tabs that poll stop polling when they are
           left and a half-edited form does not survive a detour through another
           tab and come back looking authoritative. */}
-      <div className="mt-6">
+      <div className="mt-9">
         {tab === 'users' ? (
           <UsersTab />
         ) : tab === 'rules' ? (

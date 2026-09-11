@@ -2,6 +2,16 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import {
+  buttonClass,
+  cx,
+  EmptyState,
+  Eyebrow,
+  FIELD_ERROR_CLASS,
+  FOCUS_RING,
+  inputClass,
+  Skeleton,
+} from '@/components/ui'
+import {
   formatMalDate,
   formatMalValue,
   MAL_CAUSE_LABELS,
@@ -40,14 +50,14 @@ const LINKED_MESSAGE = 'MyAnimeList connected.'
 
 const EMPTY_LOG = 'Nothing written to MyAnimeList yet.'
 
-const buttonClass =
-  'rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-3 py-1.5 text-sm text-[var(--arc-text)] transition-colors hover:border-[var(--arc-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
+/** The glass secondary every control on this page wears. */
+const glassButtonClass = buttonClass('chip')
 
-const primaryButtonClass =
-  'rounded-md bg-[var(--arc-accent)] px-3 py-1.5 text-sm font-medium text-[var(--arc-accent-contrast)] transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
+/** The one white action: connecting the account. */
+const connectButtonClass = buttonClass('primary')
 
-const linkButtonClass =
-  'text-xs text-[var(--arc-accent)] underline-offset-2 hover:underline disabled:opacity-60'
+/** Revert is a chip — small, reversible, and never the loudest thing in a row. */
+const revertChipClass = buttonClass('chip', 'h-9 px-3.5 text-[13px]')
 
 /** The three sets of rows the log offers; `all` sends no `status` filter. */
 const LOG_FILTERS = ['all', 'failed', 'pending'] as const
@@ -104,13 +114,13 @@ function useLinkOutcome(): Notice | null {
 function NoticeBanner({ notice }: { notice: Notice }) {
   const isError = notice.kind === 'error'
   const tone = isError
-    ? 'border-[var(--arc-error)]/40 bg-[var(--arc-error)]/10 text-[var(--arc-error)]'
-    : 'border-[var(--arc-ok)]/40 bg-[var(--arc-ok)]/10 text-[var(--arc-ok)]'
+    ? 'border-[color-mix(in_srgb,var(--arc-error)_32%,transparent)] bg-[color-mix(in_srgb,var(--arc-error)_8%,transparent)] text-[var(--arc-error)]'
+    : 'border-[color-mix(in_srgb,var(--arc-ok)_32%,transparent)] bg-[color-mix(in_srgb,var(--arc-ok)_8%,transparent)] text-[var(--arc-ok)]'
 
   return (
     <p
       role={isError ? 'alert' : 'status'}
-      className={`mt-4 rounded-md border px-3 py-2 text-sm ${tone}`}
+      className={`mt-6 rounded-card border-[0.5px] px-4 py-3 text-[14px] ${tone}`}
     >
       {notice.text}
     </p>
@@ -134,7 +144,7 @@ function ConnectButton({ label, className }: { label: string; className: string 
         {startLink.isPending ? 'Opening MyAnimeList…' : label}
       </button>
       {startLink.isError ? (
-        <p role="alert" className="mt-2 text-sm text-[var(--arc-error)]">
+        <p role="alert" className={`mt-3 ${FIELD_ERROR_CLASS}`}>
           {malErrorMessage(startLink.error)}
         </p>
       ) : null}
@@ -144,12 +154,12 @@ function ConnectButton({ label, className }: { label: string; className: string 
 
 function NotLinked() {
   return (
-    <div className="mt-4 rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] p-4">
-      <p className="max-w-2xl text-sm leading-relaxed text-[var(--arc-text-muted)]">
+    <div className="mt-6 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-[18px]">
+      <p className="max-w-[66ch] text-[16px] leading-[1.6] text-[var(--arc-text-muted)]">
         {LINK_EXPLANATION}
       </p>
-      <div className="mt-4">
-        <ConnectButton label="Connect MyAnimeList" className={primaryButtonClass} />
+      <div className="mt-6">
+        <ConnectButton label="Connect MyAnimeList" className={connectButtonClass} />
       </div>
     </div>
   )
@@ -168,7 +178,7 @@ function DisconnectControl() {
     return (
       <button
         type="button"
-        className={buttonClass}
+        className={glassButtonClass}
         onClick={() => {
           setConfirming(true)
         }}
@@ -179,11 +189,11 @@ function DisconnectControl() {
   }
 
   return (
-    <span className="flex flex-wrap items-center gap-2">
-      <span className="text-sm text-[var(--arc-text)]">Really disconnect?</span>
+    <span className="flex flex-wrap items-center gap-2.5">
+      <span className="text-[14px] text-[var(--arc-text)]">Really disconnect?</span>
       <button
         type="button"
-        className={buttonClass}
+        className={buttonClass('danger')}
         disabled={unlink.isPending}
         onClick={() => {
           unlink.mutate()
@@ -193,7 +203,7 @@ function DisconnectControl() {
       </button>
       <button
         type="button"
-        className={buttonClass}
+        className={glassButtonClass}
         disabled={unlink.isPending}
         onClick={() => {
           setConfirming(false)
@@ -202,7 +212,7 @@ function DisconnectControl() {
         No
       </button>
       {unlink.isError ? (
-        <span role="alert" className="text-sm text-[var(--arc-error)]">
+        <span role="alert" className={FIELD_ERROR_CLASS}>
           {malErrorMessage(unlink.error)}
         </span>
       ) : null}
@@ -230,31 +240,32 @@ function LinkedPanel({ status }: { status: MalStatus }) {
   const push = useMalPush()
 
   return (
-    <div className="mt-4 rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] p-4">
+    <div className="mt-6 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-[18px]">
       {status.needs_relink ? (
         <div
           role="alert"
-          className="mb-4 rounded-md border border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10 px-3 py-2"
+          className="mb-5 rounded-card border-[0.5px] border-[color-mix(in_srgb,var(--arc-warn)_36%,transparent)] bg-[color-mix(in_srgb,var(--arc-warn)_9%,transparent)] p-4"
         >
-          <p className="text-sm text-[var(--arc-warn)]">{NEEDS_RELINK}</p>
-          <div className="mt-2">
-            <ConnectButton label="Reconnect" className={buttonClass} />
+          <p className="text-[14px] text-[var(--arc-warn)]">{NEEDS_RELINK}</p>
+          <div className="mt-3">
+            <ConnectButton label="Reconnect" className={glassButtonClass} />
           </div>
         </div>
       ) : null}
 
-      <p className="text-sm text-[var(--arc-text)]">
+      <Eyebrow>Connection</Eyebrow>
+      <p className="mt-2 text-[16px] text-[var(--arc-text)]">
         Connected as{' '}
         <span className="font-medium">{status.mal_username ?? 'your MyAnimeList account'}</span>
       </p>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <span className="text-sm text-[var(--arc-text-muted)]">
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <span className="text-[14px] text-[var(--arc-text-muted)]">
           Last import: {formatMalDate(status.last_import_at)}
         </span>
         <button
           type="button"
-          className={buttonClass}
+          className={glassButtonClass}
           disabled={runImport.isPending}
           onClick={() => {
             runImport.mutate()
@@ -265,7 +276,7 @@ function LinkedPanel({ status }: { status: MalStatus }) {
         {status.pending_writes > 0 ? (
           <button
             type="button"
-            className={buttonClass}
+            className={glassButtonClass}
             disabled={push.isPending}
             onClick={() => {
               push.mutate()
@@ -278,7 +289,7 @@ function LinkedPanel({ status }: { status: MalStatus }) {
       </div>
 
       {status.failed_writes > 0 ? (
-        <p className="mt-3 text-sm text-[var(--arc-error)]">
+        <p className="mt-4 text-[14px] text-[var(--arc-error)]">
           {status.failed_writes === 1
             ? '1 write failed and was not applied.'
             : `${String(status.failed_writes)} writes failed and were not applied.`}
@@ -286,12 +297,12 @@ function LinkedPanel({ status }: { status: MalStatus }) {
       ) : null}
 
       {runImport.isError ? (
-        <p role="alert" className="mt-3 text-sm text-[var(--arc-error)]">
+        <p role="alert" className={`mt-4 ${FIELD_ERROR_CLASS}`}>
           {malErrorMessage(runImport.error)}
         </p>
       ) : null}
       {push.isError ? (
-        <p role="alert" className="mt-3 text-sm text-[var(--arc-error)]">
+        <p role="alert" className={`mt-4 ${FIELD_ERROR_CLASS}`}>
           {malErrorMessage(push.error)}
         </p>
       ) : null}
@@ -311,7 +322,7 @@ function RevertButton({ write }: { write: MalWrite }) {
     <>
       <button
         type="button"
-        className={linkButtonClass}
+        className={revertChipClass}
         disabled={revert.isPending}
         onClick={() => {
           revert.mutate(write.id)
@@ -320,7 +331,7 @@ function RevertButton({ write }: { write: MalWrite }) {
         Revert
       </button>
       {revert.isError ? (
-        <span role="alert" className="mt-1 block text-xs text-[var(--arc-error)]">
+        <span role="alert" className={`mt-1.5 block ${FIELD_ERROR_CLASS}`}>
           {malErrorMessage(revert.error)}
         </span>
       ) : null}
@@ -340,38 +351,40 @@ function WriteRow({ write }: { write: MalWrite }) {
     write.status === 'failed' ? 'text-[var(--arc-error)]' : 'text-[var(--arc-text-muted)]'
 
   return (
-    <tr className="border-t border-[var(--arc-border)]">
-      <td className="px-3 py-2 whitespace-nowrap text-[var(--arc-text-muted)]">
+    <tr className="border-t-[0.5px] border-[var(--arc-border)]">
+      <td className="px-3.5 py-3 whitespace-nowrap tabular-nums text-[var(--arc-text-muted)]">
         {formatMalDate(write.created_at)}
       </td>
-      <td className="px-3 py-2 text-[var(--arc-text)]">
+      <td className="px-3.5 py-3 text-[var(--arc-text)]">
         {write.anime === null ? (
           <span className="text-[var(--arc-text-muted)]">{title}</span>
         ) : (
           <Link
             to={`/anime/${String(write.anime.id)}`}
-            className="text-[var(--arc-accent)] hover:underline"
+            className={cx('hover:underline', FOCUS_RING)}
           >
             {title}
           </Link>
         )}
       </td>
-      <td className="px-3 py-2 text-[var(--arc-text-muted)]">{MAL_FIELD_LABELS[write.field]}</td>
-      <td className="px-3 py-2 whitespace-nowrap text-[var(--arc-text)]">
+      <td className="px-3.5 py-3 text-[var(--arc-text-muted)]">{MAL_FIELD_LABELS[write.field]}</td>
+      <td className="px-3.5 py-3 whitespace-nowrap tabular-nums text-[var(--arc-text)]">
         {formatMalValue(write.field, write.old_value)} →{' '}
         {formatMalValue(write.field, write.new_value)}
       </td>
-      <td className="px-3 py-2 text-[var(--arc-text-muted)]">{MAL_CAUSE_LABELS[write.cause]}</td>
-      <td className="px-3 py-2">
+      <td className="px-3.5 py-3 text-[var(--arc-text-muted)]">{MAL_CAUSE_LABELS[write.cause]}</td>
+      <td className="px-3.5 py-3">
         <span
           title={note ?? undefined}
-          className={`inline-block rounded-full border px-2 py-0.5 text-xs ${MAL_WRITE_STATUS_CLASSES[write.status]}`}
+          className={`inline-block rounded-full border-[0.5px] px-2.5 py-0.5 text-[12px] ${MAL_WRITE_STATUS_CLASSES[write.status]}`}
         >
           {MAL_WRITE_STATUS_LABELS[write.status]}
         </span>
-        {note === null ? null : <span className={`mt-1 block text-xs ${noteClass}`}>{note}</span>}
+        {note === null ? null : (
+          <span className={`mt-1.5 block text-[13px] ${noteClass}`}>{note}</span>
+        )}
       </td>
-      <td className="px-3 py-2 text-right">
+      <td className="px-3.5 py-3 text-right">
         {write.revertible ? <RevertButton write={write} /> : null}
       </td>
     </tr>
@@ -385,9 +398,11 @@ function WriteLog() {
   })
 
   return (
-    <section className="mt-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold tracking-tight text-[var(--arc-text)]">Write log</h2>
+    <section className="mt-14">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
+          Write log
+        </h2>
         <select
           aria-label="Filter writes"
           value={filter}
@@ -395,7 +410,7 @@ function WriteLog() {
             const next = event.target.value
             if (isLogFilter(next)) setFilter(next)
           }}
-          className="rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-2 py-1.5 text-sm text-[var(--arc-text)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--arc-accent)]"
+          className={inputClass()}
         >
           {LOG_FILTERS.map((value) => (
             <option key={value} value={value}>
@@ -406,39 +421,37 @@ function WriteLog() {
       </div>
 
       {isPending ? (
-        <p role="status" className="mt-3 text-sm text-[var(--arc-text-muted)]">
-          Loading…
-        </p>
+        <Skeleton shape="row" count={3} className="mt-5" label={null} />
       ) : isError ? (
-        <p role="alert" className="mt-3 text-sm text-[var(--arc-error)]">
+        <p role="alert" className={`mt-5 ${FIELD_ERROR_CLASS}`}>
           {malErrorMessage(error)}
         </p>
       ) : data.length === 0 ? (
-        <p className="mt-3 text-sm text-[var(--arc-text-muted)]">{EMPTY_LOG}</p>
+        <EmptyState className="mt-5" message={EMPTY_LOG} />
       ) : (
-        <div className="mt-3 overflow-x-auto rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)]">
-          <table className="w-full min-w-[48rem] text-left text-sm">
-            <thead className="text-xs tracking-wide text-[var(--arc-text-muted)] uppercase">
+        <div className="mt-5 overflow-x-auto rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)]">
+          <table className="w-full min-w-[48rem] text-left text-[14px]">
+            <thead className="text-[12px] font-semibold tracking-[0.08em] text-[var(--arc-text-muted)] uppercase">
               <tr>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   When
                 </th>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   Show
                 </th>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   Field
                 </th>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   Change
                 </th>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   Cause
                 </th>
-                <th scope="col" className="px-3 py-2 font-medium">
+                <th scope="col" className="px-3.5 py-3 font-semibold">
                   Status
                 </th>
-                <th scope="col" className="px-3 py-2 text-right font-medium">
+                <th scope="col" className="px-3.5 py-3 text-right font-semibold">
                   Revert
                 </th>
               </tr>
@@ -466,17 +479,17 @@ export function Mal() {
 
   return (
     <section className="mx-auto max-w-5xl">
-      <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">MyAnimeList</h1>
+      <h1 className="text-[40px] leading-[1.08] font-semibold tracking-[-0.028em] text-[var(--arc-text)]">
+        MyAnimeList
+      </h1>
 
       {notice === null ? null : <NoticeBanner notice={notice} />}
 
       {isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
-          Loading…
-        </p>
+        <Skeleton shape="row" count={2} className="mt-8 max-w-3xl" />
       ) : isError ? (
         <ErrorState
-          className="mt-4"
+          className="mt-8"
           message={malErrorMessage(error)}
           pending={isFetching}
           onRetry={() => {
@@ -484,9 +497,7 @@ export function Mal() {
           }}
         />
       ) : !status.configured ? (
-        <p className="mt-4 max-w-2xl rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-2 text-sm text-[var(--arc-text-muted)]">
-          {NOT_CONFIGURED}
-        </p>
+        <EmptyState className="mt-8 max-w-[66ch]" message={NOT_CONFIGURED} />
       ) : (
         <>
           {status.linked ? <LinkedPanel status={status} /> : <NotLinked />}

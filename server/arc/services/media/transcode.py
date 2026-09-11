@@ -49,7 +49,7 @@ import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Final
@@ -630,17 +630,14 @@ async def transcode(
 
     if on_progress is not None:
         await on_progress(STAGE_ENCODE, 0.0)
+    # ``replace`` rather than a fresh ``EncodeOptions(...)`` listing every
+    # field: the two the caller could not know — where the subtitle landed and
+    # whether there are fonts to point libass at — are the only ones this layer
+    # decides, and a hand-written copy is how a new knob (``tune``, the VBV
+    # ceiling) silently stops reaching ffmpeg.
     args = encode_args(
         plan,
-        EncodeOptions(
-            video_encoder=options.video_encoder,
-            preset=options.preset,
-            crf=options.crf,
-            segment_seconds=options.segment_seconds,
-            audio_bitrate=options.audio_bitrate,
-            subtitle_file=subtitle_file,
-            fonts_dir=FONTS_DIR if fonts else None,
-        ),
+        replace(options, subtitle_file=subtitle_file, fonts_dir=FONTS_DIR if fonts else None),
     )
     log.info(
         "transcode starting",

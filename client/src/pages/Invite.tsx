@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
-import { AuthShell, FormError, fieldClass, labelClass, submitClass } from '@/components/AuthShell'
+import { AuthShell, FormError } from '@/components/AuthShell'
 import { AuthPending } from '@/components/RequireAuth'
+import { buttonClass, inputClass, LABEL_CLASS } from '@/components/ui'
 import {
   authErrorMessage,
   browserTimezone,
@@ -48,7 +49,7 @@ export function Invite() {
             : authErrorMessage(invite.error)
         }
       >
-        <Link className="text-sm text-[var(--arc-accent)] hover:underline" to="/login">
+        <Link className={buttonClass('secondary')} to="/login">
           Go to sign in
         </Link>
       </AuthShell>
@@ -98,7 +99,7 @@ export function Invite() {
     >
       <form onSubmit={handleSubmit} noValidate>
         <div>
-          <label className={labelClass} htmlFor="invite-email">
+          <label className={LABEL_CLASS} htmlFor="invite-email">
             Email
           </label>
           <input
@@ -112,17 +113,17 @@ export function Invite() {
             onChange={(event) => {
               setTypedEmail(event.target.value)
             }}
-            className={fieldClass}
+            className={inputClass('mt-2 w-full')}
           />
           {fixedEmail !== null ? (
-            <p className="mt-1 text-xs text-[var(--arc-text-muted)]">
+            <p className="mt-1.5 text-[13px] text-[var(--arc-text-muted)]">
               This invite is tied to this address.
             </p>
           ) : null}
         </div>
 
         <div className="mt-4">
-          <label className={labelClass} htmlFor="invite-password">
+          <label className={LABEL_CLASS} htmlFor="invite-password">
             Password
           </label>
           <input
@@ -137,16 +138,16 @@ export function Invite() {
               // The complaint was about what was typed; typing answers it.
               setClientError(null)
             }}
-            className={fieldClass}
+            className={inputClass('mt-2 w-full')}
             aria-describedby="invite-password-hint"
           />
-          <p id="invite-password-hint" className="mt-1 text-xs text-[var(--arc-text-muted)]">
+          <p id="invite-password-hint" className="mt-1.5 text-[13px] text-[var(--arc-text-muted)]">
             At least {MIN_PASSWORD_LENGTH} characters.
           </p>
         </div>
 
         <div className="mt-4">
-          <label className={labelClass} htmlFor="invite-confirm">
+          <label className={LABEL_CLASS} htmlFor="invite-confirm">
             Confirm password
           </label>
           <input
@@ -160,7 +161,7 @@ export function Invite() {
               setConfirm(event.target.value)
               setClientError(null)
             }}
-            className={fieldClass}
+            className={inputClass('mt-2 w-full')}
           />
         </div>
 
@@ -171,7 +172,7 @@ export function Invite() {
             {conflict ? (
               <>
                 {' '}
-                <Link className="text-[var(--arc-accent)] underline" to="/login">
+                <Link className="text-[var(--arc-focus)] underline" to="/login">
                   Sign in instead.
                 </Link>
               </>
@@ -179,7 +180,11 @@ export function Invite() {
           </FormError>
         ) : null}
 
-        <button type="submit" className={submitClass} disabled={accept.isPending}>
+        <button
+          type="submit"
+          className={buttonClass('primary', 'mt-7 w-full')}
+          disabled={accept.isPending}
+        >
           {accept.isPending ? 'Creating account…' : 'Create account'}
         </button>
       </form>

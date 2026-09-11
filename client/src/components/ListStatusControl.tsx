@@ -1,3 +1,4 @@
+import { FIELD_ERROR_CLASS, inputClass } from '@/components/ui'
 import {
   isListStatus,
   LIST_STATUSES,
@@ -54,7 +55,7 @@ export function ListStatusControl({
         onChange={(event) => {
           handleChange(event.target.value)
         }}
-        className="w-full rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-2 py-1.5 text-sm text-[var(--arc-text)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--arc-accent)] disabled:opacity-60"
+        className={inputClass('w-full px-2.5 text-[13px]')}
       >
         <option value={OFF_LIST}>Not on list</option>
         {LIST_STATUSES.map((value) => (
@@ -64,7 +65,7 @@ export function ListStatusControl({
         ))}
       </select>
       {error ? (
-        <p role="alert" className="mt-1 text-xs text-[var(--arc-error)]">
+        <p role="alert" className={`mt-1 ${FIELD_ERROR_CLASS}`}>
           {listErrorMessage(error)}
         </p>
       ) : null}

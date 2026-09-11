@@ -1,19 +1,96 @@
 @import 'tailwindcss';
 
-/* Arc is dark-first: the tokens below are the dark palette, and the
-   prefers-color-scheme: light block below is the (optional) light override. */
+/*
+ * Arc's design tokens (M15, `design/arc-design/design_handoff_arc_apple_tv/README.md`).
+ *
+ * Dark only, deliberately: the palette is a blue-black window (`--arc-bg`,
+ * read off the logo's cold end) with every surface expressed as translucent
+ * white on top of it. That is why the surfaces are `rgba(255,255,255,…)`
+ * rather than hex — artwork sits under them, and a solid grey card would
+ * knock a hole in the page. The names are kept so a light variant stays
+ * possible later without renaming anything.
+ *
+ * Two rules in here are load-bearing rather than cosmetic:
+ *
+ * 1. `--arc-progress`, the arc gradient, marks exactly one thing — progress
+ *    through a season in My List. Playback progress everywhere else is plain
+ *    white on a 20% white track. If the gradient marks everything it marks
+ *    nothing.
+ * 2. Borders are `0.5px`, never `1px`. They are hairlines that separate
+ *    surfaces, not outlines that draw boxes.
+ */
 :root {
-  --arc-bg: #0b0d10;
-  --arc-surface: #14171c;
-  --arc-surface-raised: #1c2027;
-  --arc-border: #262b33;
-  --arc-text: #e7eaef;
-  --arc-text-muted: #98a1b0;
-  --arc-accent: #7c8cff;
-  --arc-accent-contrast: #0b0d10;
-  --arc-ok: #4ade80;
-  --arc-warn: #fbbf24;
-  --arc-error: #f87171;
+  /* Ground and surfaces */
+  --arc-bg: #080b11;
+  --arc-surface: rgba(255, 255, 255, 0.055);
+  --arc-surface-raised: rgba(255, 255, 255, 0.09);
+  --arc-surface-hover: rgba(255, 255, 255, 0.055);
+  --arc-surface-input: rgba(255, 255, 255, 0.06);
+  --arc-nav-active: rgba(255, 255, 255, 0.1);
+
+  /* Hairlines */
+  --arc-border: rgba(255, 255, 255, 0.1);
+  --arc-border-strong: rgba(255, 255, 255, 0.18);
+  --arc-hairline: rgba(255, 255, 255, 0.12);
+
+  /* Text. Contrast against --arc-bg: 17.9:1, 9.8:1, 4.6:1. */
+  --arc-text: #f2f4f8;
+  --arc-text-muted: rgba(235, 239, 245, 0.8);
+  /* Placeholder labels inside artwork only — never informational text. */
+  --arc-text-faint: rgba(235, 239, 245, 0.45);
+
+  /* The warm end of the logo. Ember is "tonight's broadcast", not an accent. */
+  --arc-ember: #ff9d4d;
+  --arc-spark: #ff7a29;
+  --arc-arc-cold: #2e7ddb;
+
+  /* The primary action is white, and its ink is black. */
+  --arc-action: #ffffff;
+  --arc-action-ink: #000000;
+
+  /*
+   * The logo read as a bar: cold at the start, hot at the end, ending in a
+   * spark. Season progress in My List, and nothing else.
+   */
+  --arc-progress: linear-gradient(90deg, #2e7ddb 0%, #9fd0ff 38%, #ffb679 72%, #ff7a29 100%);
+
+  /* Playback progress, everywhere it appears. */
+  --arc-progress-track: rgba(255, 255, 255, 0.2);
+  --arc-progress-fill: #ffffff;
+
+  /* The wash over framed key art, so the title stays legible on any still. */
+  --arc-scrim: linear-gradient(
+    0deg,
+    rgba(6, 9, 14, 0.9) 0%,
+    rgba(6, 9, 14, 0.34) 44%,
+    rgba(6, 9, 14, 0) 78%
+  );
+  /* Dialog and sheet backdrop. */
+  --arc-scrim-flat: rgba(6, 9, 14, 0.72);
+
+  /*
+   * Status. The design pass names no status hues, so these are the previous
+   * ones re-tuned for the blue-black ground; all three clear 4.5:1 on it
+   * (10.6:1, 12.6:1, 8.6:1). Status never borrows the primary action's white
+   * and never borrows ember.
+   */
+  --arc-ok: #5fd39a;
+  --arc-warn: #ffc65c;
+  --arc-error: #ff8a80;
+
+  /* Focus ring: the cold-light stop of the arc gradient. 12.1:1 on bg. */
+  --arc-focus: #9fd0ff;
+
+  /*
+   * Transitional aliases. Pages written before this pass colour their primary
+   * actions with `--arc-accent`; they are being restyled one at a time, and
+   * until they are, an indigo left over from the old palette would be the one
+   * thing on screen from another design. Pointed at ember so those pages read
+   * as part of this palette. Nothing new should use them: a primary action is
+   * `--arc-action`, and a link or focus ring is `--arc-focus`.
+   */
+  --arc-accent: var(--arc-ember);
+  --arc-accent-contrast: #1a0f06;
 
   color-scheme: dark;
 }
@@ -22,14 +99,120 @@
   --color-bg: var(--arc-bg);
   --color-surface: var(--arc-surface);
   --color-surface-raised: var(--arc-surface-raised);
+  --color-surface-hover: var(--arc-surface-hover);
+  --color-surface-input: var(--arc-surface-input);
+  --color-nav-active: var(--arc-nav-active);
   --color-border-subtle: var(--arc-border);
+  --color-border-strong: var(--arc-border-strong);
+  --color-hairline: var(--arc-hairline);
   --color-text: var(--arc-text);
   --color-text-muted: var(--arc-text-muted);
+  --color-text-faint: var(--arc-text-faint);
+  --color-ember: var(--arc-ember);
+  --color-spark: var(--arc-spark);
+  --color-arc-cold: var(--arc-arc-cold);
+  --color-action: var(--arc-action);
+  --color-action-ink: var(--arc-action-ink);
+  --color-focus: var(--arc-focus);
   --color-accent: var(--arc-accent);
   --color-accent-contrast: var(--arc-accent-contrast);
   --color-ok: var(--arc-ok);
   --color-warn: var(--arc-warn);
   --color-error: var(--arc-error);
+
+  /*
+   * System stack only — no webfont, so OS text-size settings keep working.
+   * The consequence is a rule, not a preference: no text container may have a
+   * fixed height.
+   */
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
+  /* CJK glyphs need air that Latin does not; `font-jp` pairs with tracking-[0.02em]. */
+  --font-jp: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', system-ui;
+  --font-mono: ui-monospace, 'SF Mono', monospace;
+
+  /* Radii carry meaning: each one names the thing it belongs to. */
+  --radius-hero: 20px;
+  --radius-card: 16px;
+  --radius-row: 14px;
+  --radius-art: 12px;
+  --radius-still: 9px;
+  --radius-thumb: 6px;
+  --radius-nav: 10px;
+  --radius-segmented: 10px;
+  --radius-segment: 8px;
+
+  --shadow-hero: 0 30px 70px rgba(0, 0, 0, 0.66);
+  --shadow-tile: 0 14px 34px rgba(0, 0, 0, 0.5);
+  --shadow-grid: 0 14px 30px rgba(0, 0, 0, 0.46);
+  --shadow-bar: 0 20px 48px rgba(0, 0, 0, 0.55);
+
+  --blur-toolbar: 24px;
+  --blur-bar: 28px;
+  --blur-glass: 20px;
+  --blur-chip: 14px;
+
+  --ease-arc: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --animate-rise: rise 360ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-arcpulse: arcpulse 1.6s ease-in-out infinite;
+}
+
+/* Screen enter. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Skeletons: an opacity pulse on a placeholder block, never a spinner. */
+@keyframes arcpulse {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/** A scroller with no visible scrollbar; shelves scroll by drag, wheel or key. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+/** Stands in for artwork the catalogue has no image for. */
+@utility art-placeholder {
+  background-image: repeating-linear-gradient(45deg, #161d2b 0 9px, #101725 9px 18px);
+}
+
+/** The wash under a hero's title block. */
+@utility art-scrim {
+  background-image: var(--arc-scrim);
+}
+
+/** Season progress in My List. The one use of the arc gradient. */
+@utility progress-arc {
+  background-image: var(--arc-progress);
 }
 
 html,
@@ -43,18 +226,21 @@ body {
   background-color: var(--arc-bg);
   color: var(--arc-text);
   font-family:
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    'Helvetica Neue',
-    Arial,
-    sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+/*
+ * In `base` deliberately, not at the top level: an unlayered rule beats every
+ * layered one whatever its specificity, so a bare `a { color: inherit }`
+ * outside a layer silently wins over the utility classes on a link — which is
+ * how a `<Link>` wearing the white primary pill ends up with pale text on
+ * white. Inside `base` it does what it is for (a link is not blue) and loses
+ * to anything a caller asks for.
+ */
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
 }

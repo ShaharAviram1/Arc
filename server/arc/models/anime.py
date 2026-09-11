@@ -100,6 +100,13 @@ class Anime(Base):
     description: Mapped[str | None] = mapped_column(Text)
 
     cover_url: Mapped[str | None] = mapped_column(Text)
+    #: The key visual at AniList's largest size (``coverImage.extraLarge``).
+    #: ``cover_url`` already prefers it when AniList answered, but a row filled
+    #: from MAL carries ``main_picture.large`` there — 230 px wide, visibly
+    #: soft on a 172 px card and unusable as the 2:3 artwork the redesigned
+    #: shelves render (M15). So the big one gets a column of its own, null on
+    #: anything MAL wrote, and the client falls back to ``cover_url``.
+    cover_large_url: Mapped[str | None] = mapped_column(Text)
     banner_url: Mapped[str | None] = mapped_column(Text)
     #: How many people have the show on a list (AniList ``popularity``, MAL
     #: ``num_list_users``), and the average score on AniList's 0–100 scale
@@ -121,6 +128,14 @@ class Anime(Base):
     #: [{name, rank}] — shape belongs to AniList, so JSONB. MAL has no tags.
     tags: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     studio: Mapped[str | None] = mapped_column(Text)
+    #: ``[{role, name}]`` — the "Made by" block on the show page (M15). The
+    #: first row is always the studio, so ``studio`` above stays the single
+    #: source of that fact and this column is the ordered list the page
+    #: renders; the rest are AniList staff whose role maps onto one of the six
+    #: credits the design names (Director, Series Composition, Character
+    #: Design, Music, Original Creator). JSONB because the list is read whole
+    #: and never queried, and null on a row MAL filled beyond its studio.
+    credits: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     #: Sequels/prequels/side stories, used by the recommender (§5.6). Each
     #: entry carries whichever external ids the source knew.
     relations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
@@ -152,6 +167,12 @@ class Episode(Base):
     )
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
+    #: The episode thumbnail AniList publishes with its streaming links
+    #: (``streamingEpisodes.thumbnail``), 16:9. What the redesigned episode
+    #: rows and the Up Next shelf render instead of a placeholder (M15). Only
+    #: ever written where it is null, like ``title``: a confirmed manual value
+    #: outranks anything a refresh brings back.
+    still_url: Mapped[str | None] = mapped_column(Text)
     #: From the AniList airing schedule, or synthesised from a MAL broadcast
     #: slot; null for shows that have finished and for which neither source
     #: keeps dates.

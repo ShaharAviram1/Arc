@@ -50,6 +50,15 @@ function renderProbe(client = createQueryClient()) {
   return client
 }
 
+/**
+ * Opens the avatar menu. The account — email, Admin, Log out — moved off the
+ * sidebar and behind the toolbar avatar in the M15 shell, so a test that wants
+ * any of it has to open the menu first.
+ */
+async function openAccountMenu() {
+  await userEvent.setup().click(await screen.findByRole('button', { name: 'Account' }))
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -69,11 +78,13 @@ describe('RequireAuth', () => {
 
     renderApp('/')
 
-    expect(await screen.findByRole('heading', { name: 'Home' })).toBeInTheDocument()
+    // The home route is Watch Now since M15; its <h1> is the hero's title, or
+    // this visually hidden one when there is no hero to show.
+    expect(await screen.findByRole('heading', { name: 'Watch Now' })).toBeInTheDocument()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
   })
 
-  it('shows the signed-in email and a logout button in the sidebar', async () => {
+  it('shows the signed-in email and a logout button in the account menu', async () => {
     const fetchMock = mockApi({
       'GET /api/auth/me': { body: TEST_USER },
       'GET /api/health': HEALTH,
@@ -82,7 +93,8 @@ describe('RequireAuth', () => {
 
     renderApp('/')
 
-    expect(await screen.findByText(TEST_USER.email)).toBeInTheDocument()
+    await openAccountMenu()
+    expect(screen.getByText(TEST_USER.email)).toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Log out' }))
 
     expect(requestsMade(fetchMock)).toContain('POST /api/auth/logout')
@@ -120,7 +132,7 @@ describe('logout', () => {
     client.setQueryData(['probe'], 'belongs to the previous session')
     renderApp('/', client)
 
-    await screen.findByText(TEST_USER.email)
+    await openAccountMenu()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Log out' }))
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
@@ -138,7 +150,7 @@ describe('logout', () => {
     const client = createQueryClient()
     renderApp('/', client)
 
-    await screen.findByText(TEST_USER.email)
+    await openAccountMenu()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Log out' }))
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
@@ -158,21 +170,23 @@ describe('RequireAdmin', () => {
     expect(screen.getByRole('navigation')).toBeInTheDocument()
   })
 
-  it('hides the Admin nav entry from a non-admin', async () => {
+  it('hides the Admin entry in the account menu from a non-admin', async () => {
     mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/health': HEALTH })
 
     renderApp('/')
 
-    await screen.findByRole('heading', { name: 'Home' })
+    await screen.findByRole('heading', { name: 'Watch Now' })
+    await openAccountMenu()
     expect(screen.queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument()
   })
 
-  it('lets an admin through and shows the Admin nav entry', async () => {
+  it('lets an admin through and shows the Admin entry in the account menu', async () => {
     mockApi({ 'GET /api/auth/me': { body: TEST_ADMIN } })
 
     renderApp('/admin')
 
     expect(await screen.findByRole('heading', { name: 'Admin' })).toBeInTheDocument()
+    await openAccountMenu()
     expect(screen.getByRole('link', { name: 'Admin' })).toBeInTheDocument()
   })
 })

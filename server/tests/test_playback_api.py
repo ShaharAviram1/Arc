@@ -234,6 +234,46 @@ async def test_play_carries_the_playlist_url_the_duration_and_the_neighbours(
     assert body["next"] == {"id": ids[12], "number": 12, "state": "ready", "ready": True}
 
 
+async def test_play_carries_the_episode_title_and_still(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The player's card renders the same shape the show page does (M15).
+
+    ``PlayInfo.episode`` is an ``EpisodeOut``, so the still and the title come
+    with it rather than needing a second call, and the show's key art rides
+    along on the ``AnimeSummary``.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950009, ready=(11,))
+    async with api_factory() as session:
+        episode = await session.get(Episode, ids[11])
+        assert episode is not None
+        episode.title = "The Land Where Souls Rest"
+        episode.still_url = "https://img.test/e11.jpg"
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.cover_large_url = "https://img.test/cover-xl.jpg"
+        await session.commit()
+
+    body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+
+    assert body["episode"]["title"] == "The Land Where Souls Rest"
+    assert body["episode"]["still_url"] == "https://img.test/e11.jpg"
+    assert body["anime"]["cover_large_url"] == "https://img.test/cover-xl.jpg"
+
+
+async def test_play_of_an_episode_with_no_artwork_sends_nulls(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """A row that predates M15, or a MAL-sourced show: nulls, not omissions."""
+    _anime_id, ids = await add_show(api_factory, anilist_id=950010, ready=(11,))
+
+    body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+
+    assert body["episode"]["title"] is None
+    assert body["episode"]["still_url"] is None
+    assert body["anime"]["cover_large_url"] is None
+
+
 async def test_the_first_and_last_episodes_have_no_neighbour_on_one_side(
     client: AsyncClient, api_factory: SessionFactory
 ) -> None:
@@ -276,12 +316,31 @@ async def test_the_resume_position_follows_the_ten_second_and_ninety_five_rules(
         assert body["resume_position"] == pytest.approx(expected)
 
 
-async def test_a_completed_episode_never_resumes(
+async def test_a_completed_episode_resumes_where_the_rewatch_stopped(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:
-    """Reopening something finished starts it again, not at 21 minutes."""
+    """A rewatch left half-way is a saved position, flag or no flag (FR-S2).
+
+    The flag says the user finished this episode once; it does not say they
+    are not eleven minutes into it right now. Opening the player at zero would
+    throw away the only record of where they were.
+    """
     _anime_id, ids = await add_show(api_factory, anilist_id=950005)
     await set_progress(api_factory, user, ids[11], position_s=700.0, completed=True)
+
+    body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+
+    assert body["resume_position"] == pytest.approx(700.0)
+    # Unchanged, and the point: the mark is still on the episode.
+    assert body["episode"]["watched"] is True
+
+
+async def test_a_completed_episode_watched_to_the_end_resumes_nowhere(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The 95 % ceiling is what stops a finished episode resuming, not the flag."""
+    _anime_id, ids = await add_show(api_factory, anilist_id=950017)
+    await set_progress(api_factory, user, ids[11], position_s=DURATION, completed=True)
 
     body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
 

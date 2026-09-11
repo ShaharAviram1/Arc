@@ -87,6 +87,49 @@ export interface AnimeSummary {
   season: string | null
   season_year: number | null
   cover_url: string | null
+  /**
+   * The key visual at AniList's largest size (M15). Optional on the wire: a
+   * record filled from MAL has only the small cover, and fixtures written
+   * before this pass omit it — so every reader goes through `keyVisual`,
+   * which falls back to `cover_url` rather than rendering a missing image.
+   */
+  cover_large_url?: string | null
+  /**
+   * The 21:9 banner (M15), or null — the ordinary case for a record filled
+   * from MAL, which publishes none. Optional on the wire like the two fields
+   * below it; a hero falls back to the key visual rather than to nothing.
+   */
+  banner_url?: string | null
+  /**
+   * AniList's genres for this show (M15), in its order. Optional and possibly
+   * empty: it is what Browse's chips are built from, and a result that
+   * carries none simply matches no chip.
+   */
+  genres?: string[]
+  /**
+   * The animation studio (M15), or null. Optional on the wire; a row without
+   * one falls back to format and year, never to a blank after a separator.
+   */
+  studio?: string | null
+  /**
+   * How many people have the show on a list (AniList `popularity`, MAL
+   * `num_list_users`), or null. Unlike the three fields above it is a real
+   * summary column — it is in AniList's search fragment — so a card carries it
+   * as soon as a search returns it.
+   *
+   * It is a ranking key, never a number to render: "47,318 people" is a
+   * different claim from "popular", and Arc makes neither. Watch Now's hero
+   * sorts the season by it (`rankSeason`).
+   */
+  popularity?: number | null
+  /**
+   * The mean score on AniList's 0–100 scale — MAL's 0–10 is scaled on the way
+   * in, so one number means one thing whichever source answered — or null.
+   *
+   * Null on a source that publishes none and on an unaired show nobody has
+   * rated, which is why it is never rendered as "0 %".
+   */
+  average_score?: number | null
   /** AniList's id, once the show has been seen there. */
   anilist_id: number | null
   /** MyAnimeList's id, once the show has been seen there. */
@@ -136,6 +179,12 @@ export interface EpisodeOut {
   id: number
   number: number
   title: string | null
+  /**
+   * The 16:9 episode thumbnail (M15), or null — the ordinary case for an
+   * episode that has not aired and for any show whose detail came from MAL.
+   * Optional on the wire for the same reason `cover_large_url` is.
+   */
+  still_url?: string | null
   air_at: string | null
   /**
    * True when `air_at` was synthesised from a MAL broadcast slot because
@@ -180,6 +229,23 @@ export interface AnimeRelation {
   relation_type: string
   title: AnimeTitle
   format: string | null
+  /**
+   * Arc's own id for the related show, when the catalogue has it cached
+   * (M15). The same thing `id` names, under the name the server settled on;
+   * both are null for a title nothing has pulled in yet, and either one being
+   * present is what makes the card a link.
+   */
+  anime_id?: number | null
+  /**
+   * Enough of the related show to draw a card with (M15): its artwork and the
+   * three facts under it. All optional and all null when the show is not
+   * cached locally — a franchise rail of placeholders is the honest answer,
+   * not a reason to hide the rail.
+   */
+  cover_url?: string | null
+  cover_large_url?: string | null
+  episodes?: number | null
+  season_year?: number | null
 }
 
 export interface NextAiring {
@@ -214,12 +280,24 @@ export interface MyListItem {
  * show page it is the per-episode rows, and the count comes back as
  * `episode_count`.
  */
+/** One row of the show page's "Made by" block (M15), studio first. */
+export interface AnimeCredit {
+  role: string
+  name: string
+}
+
 export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   episodes: EpisodeOut[]
   episode_count: number | null
   synopsis: string | null
   genres: string[]
   studio: string | null
+  /**
+   * Studio, director, composer and the rest, in the order the server sends
+   * them. Optional and often short — MAL publishes no staff — so a reader
+   * renders what arrives rather than expecting six rows.
+   */
+  credits?: AnimeCredit[]
   banner_url: string | null
   next_airing: NextAiring | null
   relations: AnimeRelation[]
@@ -262,6 +340,53 @@ export function summaryLine(anime: AnimeSummary): string {
   if (anime.episodes !== null) parts.push(`${String(anime.episodes)} eps`)
   if (anime.season_year !== null) parts.push(String(anime.season_year))
   return parts.join(' · ')
+}
+
+/**
+ * The biggest key visual the catalogue has for a show (M15).
+ *
+ * AniList's large cover where there is one, the small one otherwise: a row
+ * filled from MAL carries only a 230 px picture, which is soft at card size
+ * but is still the show's own artwork, and the placeholder is worse.
+ */
+export function keyVisual(
+  anime: Pick<AnimeSummary, 'cover_url' | 'cover_large_url'>,
+): string | null {
+  return anime.cover_large_url ?? anime.cover_url
+}
+
+/**
+ * AniList's 21:9 banner, or null — never a poster in its place.
+ *
+ * The one piece of art wide enough to fill a hero frame at its own size: the
+ * banner is around 1900 px across, where `cover_url` is a 230–425 px picture
+ * that only looks like artwork until something stretches it. A record filled
+ * from MAL publishes no banner at all, which is what the poster hero in
+ * `HeroFrame` exists for (owner, 2026-09-11).
+ */
+export function bannerArt(anime: Pick<AnimeSummary, 'banner_url'>): string | null {
+  const banner = anime.banner_url
+  return banner === null || banner === undefined || banner === '' ? null : banner
+}
+
+/** True when a show has art a 21:9 frame can be filled with honestly. */
+export function hasBanner(anime: Pick<AnimeSummary, 'banner_url'>): boolean {
+  return bannerArt(anime) !== null
+}
+
+/**
+ * The widest art a show has, for a frame that is wider than it is tall but is
+ * not a hero: the banner where AniList has one, then the key visual, which is
+ * 2:3 and will crop.
+ *
+ * Used for an episode still that has none of its own, where a cropped cover is
+ * still the show's own artwork and beats the striped placeholder on a shelf
+ * people press play from. Not for a hero: see `HeroFrame`.
+ */
+export function heroArt(
+  anime: Pick<AnimeSummary, 'cover_url' | 'cover_large_url' | 'banner_url'>,
+): string | null {
+  return bannerArt(anime) ?? keyVisual(anime)
 }
 
 /** Below this a title match is meaningless and the server answers 422. */
@@ -331,7 +456,7 @@ export function episodeStateLabel(state: string): string {
 }
 
 const READY = 'text-[var(--arc-ok)] border-[var(--arc-ok)]/40 bg-[var(--arc-ok)]/10'
-const BUSY = 'text-[var(--arc-accent)] border-[var(--arc-accent)]/40 bg-[var(--arc-accent)]/10'
+const BUSY = 'text-[var(--arc-focus)] border-[var(--arc-focus)]/40 bg-[var(--arc-focus)]/10'
 const BAD = 'text-[var(--arc-error)] border-[var(--arc-error)]/40 bg-[var(--arc-error)]/10'
 const ATTENTION = 'text-[var(--arc-warn)] border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10'
 const MUTED =

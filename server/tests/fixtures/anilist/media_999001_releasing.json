@@ -103,7 +103,73 @@
             "airingAt": 1774785600
           }
         ]
-      }
+      },
+      "staff": {
+        "edges": [
+          {
+            "role": "Director",
+            "node": {
+              "name": {
+                "full": "Ayaka Fixture"
+              }
+            }
+          },
+          {
+            "role": "Music",
+            "node": {
+              "name": {
+                "full": "Test Tone Orchestra"
+              }
+            }
+          },
+          {
+            "role": "Animation Director",
+            "node": {
+              "name": {
+                "full": "Dropped Entirely"
+              }
+            }
+          },
+          {
+            "role": "Unknown Role",
+            "node": {
+              "name": {
+                "full": "Also Dropped"
+              }
+            }
+          },
+          {
+            "role": "Character Design",
+            "node": {}
+          }
+        ]
+      },
+      "streamingEpisodes": [
+        {
+          "title": "Episode 1 - A Beginning",
+          "thumbnail": "https://img.test/arc-e01.jpg"
+        },
+        {
+          "title": "Episode 2 - A Middle",
+          "thumbnail": "https://img.test/arc-e02.jpg"
+        },
+        {
+          "title": "Episode 2 - A Middle (dub)",
+          "thumbnail": "https://img.test/arc-e02-dub.jpg"
+        },
+        {
+          "title": "Episode 3",
+          "thumbnail": "https://img.test/arc-e03.jpg"
+        },
+        {
+          "title": "Trailer",
+          "thumbnail": "https://img.test/arc-trailer.jpg"
+        },
+        {
+          "title": "Episode 99 - Not This Show",
+          "thumbnail": "https://img.test/arc-e99.jpg"
+        }
+      ]
     }
   }
 }

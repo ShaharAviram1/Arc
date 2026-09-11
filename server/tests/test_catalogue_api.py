@@ -207,8 +207,13 @@ async def test_search_caches_the_whole_page_in_one_insert(
     """Twenty results used to be twenty sequential round trips.
 
     A search is on the keystroke path, so the upserts are one multi-row
-    ``INSERT … ON CONFLICT DO UPDATE … RETURNING`` — with the same rule as
-    before, that a summary never touches a detail column.
+    ``INSERT … ON CONFLICT DO UPDATE … RETURNING``.
+
+    The ``DO UPDATE`` writes nothing at all — it assigns the conflict target
+    the value it conflicted on — because every precedence rule lives in
+    ``_apply`` and a second copy of them in SQL is how two paths come to
+    disagree. ``DO UPDATE`` rather than ``DO NOTHING`` because the statement
+    still has to return the row it did not write.
     """
     statements.clear()
     response = await user_client.get("/api/anime/search", params={"q": "frieren"})
@@ -217,23 +222,29 @@ async def test_search_caches_the_whole_page_in_one_insert(
     assert len(response.json()["results"]) == len(SEARCH_IDS)
     inserts = [sql for sql in statements if "INSERT INTO anime" in sql]
     assert len(inserts) == 1, inserts
-    # One statement, every row, and only the summary columns updated: the
-    # SET clause (between DO UPDATE SET and RETURNING) names no detail column.
     assert "ON CONFLICT" in inserts[0]
     assignments = inserts[0].split("DO UPDATE SET")[1].split("RETURNING")[0]
-    assert "refreshed_at" not in assignments
-    assert "description" not in assignments
-    assert "title_english" in assignments
+    # The arbiter column, and nothing else — no summary column and no detail
+    # one, so neither half of the row can be written behind ``_apply``'s back.
+    assert assignments.strip() == "anilist_id = excluded.anilist_id"
 
 
 async def test_a_repeated_search_reuses_the_same_internal_ids(
     user_client: AsyncClient,
 ) -> None:
-    """An id the client has bookmarked must not change under it."""
+    """An id the client has bookmarked must not change under it.
+
+    The *order* may, and since M15 it does: the second search finds the rows
+    the first one cached, so they come back as local hits ranked by title match
+    and popularity rather than in the source's own order (§5.0). What must not
+    move is the id on each card.
+    """
     first = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()
     second = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()
 
-    assert [row["id"] for row in first["results"]] == [row["id"] for row in second["results"]]
+    assert {row["id"] for row in first["results"]} == {row["id"] for row in second["results"]}
+    by_anilist = {row["anilist_id"]: row["id"] for row in first["results"]}
+    assert {row["anilist_id"]: row["id"] for row in second["results"]} == by_anilist
 
 
 async def test_search_shows_the_callers_own_list_status(user_client: AsyncClient) -> None:
@@ -265,6 +276,184 @@ async def test_search_needs_a_session(anon_client: AsyncClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["detail"] == NOT_AUTHENTICATED
+
+
+# --- Search: the local half (M15) -------------------------------------------
+#
+# What the owner hit: AniList disabled upstream, MAL answering, and "jobless
+# reincarnation" finding nothing for a show that was cached, on their list and
+# downloading — because MAL matches whole words from the start of a title.
+
+
+async def seed_anime(factory: SessionFactory, **columns: Any) -> int:
+    """Put one cached row in ``anime`` and return its internal id.
+
+    Straight to the table rather than through a search, because the point of
+    these tests is what happens when no source will answer.
+    """
+    async with factory() as session:
+        anime = Anime(**columns)
+        session.add(anime)
+        await session.commit()
+        return int(anime.id)
+
+
+@pytest.fixture
+def catalogue_down(catalogue_app: FastAPI, anilist: FakeAniList) -> None:
+    """Neither source will answer: AniList disabled, MAL failing."""
+    anilist.disabled = True
+    catalogue_app.state.catalog = CatalogService(
+        anilist.source(), FakeMal(fail_with=503).source(), Breaker(300.0)
+    )
+
+
+async def test_a_cached_show_is_found_by_words_from_its_title(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    """The remark, verbatim: the catalogue is down and Arc still knows this."""
+    anime_id = await seed_anime(
+        api_factory,
+        mal_id=48316,
+        summary_source="mal",
+        title_romaji="Mushoku Tensei II: Isekai Ittara Honki Dasu",
+        title_english="Mushoku Tensei: Jobless Reincarnation Season 2",
+    )
+
+    response = await user_client.get("/api/anime/search", params={"q": "jobless reincarnation"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [row["id"] for row in body["results"]] == [anime_id]
+    assert body == {"results": body["results"], "page": 1, "has_next": False}
+
+
+async def test_every_word_must_match_but_not_the_same_field(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    anime_id = await seed_anime(
+        api_factory,
+        mal_id=39535,
+        title_romaji="Mushoku Tensei",
+        title_english="Jobless Reincarnation",
+    )
+
+    both = await user_client.get("/api/anime/search", params={"q": "mushoku jobless"})
+    assert [row["id"] for row in both.json()["results"]] == [anime_id]
+
+    # One word that matches nothing takes the whole row out. (Both breakers
+    # are open by now, so the catalogue answers an empty page rather than
+    # failing again — which is why this is a 200 with nothing in it.)
+    neither = await user_client.get("/api/anime/search", params={"q": "mushoku frieren"})
+    assert neither.status_code == 200, neither.text
+    assert neither.json()["results"] == []
+
+
+async def test_a_synonym_matches_too(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    anime_id = await seed_anime(
+        api_factory,
+        mal_id=39535,
+        title_romaji="Mushoku Tensei",
+        title_english="Mushoku Tensei",
+        synonyms=["Jobless Reincarnation", "MT"],
+    )
+
+    response = await user_client.get("/api/anime/search", params={"q": "jobless"})
+
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["results"]] == [anime_id]
+
+
+async def test_an_unknown_query_with_the_catalogue_down_is_still_a_502(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    """ "Nothing cached" and "the catalogue is down" must not look the same."""
+    await seed_anime(api_factory, mal_id=39535, title_romaji="Mushoku Tensei")
+
+    response = await user_client.get("/api/anime/search", params={"q": "zzzznothing"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "catalogue is unavailable"
+
+
+async def test_local_hits_lead_and_are_ordered(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    """Exact title, then prefix, then what the caller follows, then popularity."""
+    exact = await seed_anime(api_factory, mal_id=1001, title_english="Journey", popularity=10)
+    prefix = await seed_anime(
+        api_factory, mal_id=1002, title_english="Journey to the West", popularity=5000
+    )
+    followed = await seed_anime(
+        api_factory, mal_id=1003, title_english="A Long Journey", popularity=9000
+    )
+    popular = await seed_anime(
+        api_factory, mal_id=1004, title_english="Another Journey Home", popularity=8000
+    )
+    assert (await user_client.put(f"/api/list/{followed}", json={"status": "watching"})).is_success
+
+    response = await user_client.get("/api/anime/search", params={"q": "journey"})
+
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["results"]] == [exact, prefix, followed, popular]
+
+
+async def test_the_live_page_is_de_duplicated_against_the_local_hits(
+    user_client: AsyncClient,
+) -> None:
+    """The second search caches nothing new, so every row is now a local hit."""
+    first = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()
+    assert len(first["results"]) == len(SEARCH_IDS)
+
+    second = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()
+
+    ids = [row["id"] for row in second["results"]]
+    assert len(ids) == len(set(ids)), ids
+    assert set(ids) == {row["id"] for row in first["results"]}
+
+
+async def test_a_local_hit_carries_the_callers_list_status(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    anime_id = await seed_anime(api_factory, mal_id=39535, title_english="Jobless Reincarnation")
+    await user_client.put(f"/api/list/{anime_id}", json={"status": "watching"})
+
+    body = (await user_client.get("/api/anime/search", params={"q": "jobless"})).json()
+
+    assert body["results"][0]["list_status"] == "watching"
+
+
+async def test_local_hits_are_not_repeated_on_the_second_page(
+    user_client: AsyncClient,
+    api_factory: SessionFactory,
+    catalogue_down: None,
+    slept: list[float],
+) -> None:
+    """They are not paginated, so page 2 would show the same cards again."""
+    await seed_anime(api_factory, mal_id=39535, title_english="Jobless Reincarnation")
+
+    response = await user_client.get("/api/anime/search", params={"q": "jobless", "page": 2})
+
+    assert response.status_code == 502
 
 
 # --- Show detail ------------------------------------------------------------
@@ -320,6 +509,117 @@ async def test_detail_fetches_caches_and_renders_frieren(
     assert len(stored) == 28
 
 
+async def test_detail_carries_the_key_art_the_credits_and_the_episode_stills(
+    user_client: AsyncClient,
+) -> None:
+    """What the redesigned Show page renders instead of placeholders (M15)."""
+    anime_id = await frieren_id(user_client)
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+
+    # On an AniList row this is the same URL ``cover_url`` already carried —
+    # ``_cover`` prefers ``extraLarge`` too. The column earns its keep on the
+    # MAL-sourced row below, where ``cover_url`` is the 230 px picture and this
+    # one is null rather than quietly small.
+    assert body["cover_large_url"] == body["cover_url"]
+    assert "/cover/large/" in body["cover_large_url"]
+    # Studio first, then the crew, in the order the "Made by" block lists them.
+    assert body["credits"][0] == {"role": "Studio", "name": "MADHOUSE"}
+    assert [row["role"] for row in body["credits"]] == [
+        "Studio",
+        "Director",
+        "Series Composition",
+        "Character Design",
+        "Music",
+        "Original Creator",
+        "Original Creator",
+    ]
+
+    episodes = body["episodes"]
+    assert episodes[0]["title"] == "The Journey's End"
+    assert episodes[0]["still_url"].startswith("https://")
+    # The fixture has links for the first eight episodes only, which is the
+    # ordinary state of a show mid-season; the rest render a placeholder.
+    assert episodes[8]["title"] is None
+    assert episodes[8]["still_url"] is None
+
+
+async def test_a_search_result_carries_the_key_art(user_client: AsyncClient) -> None:
+    """Cards prefer ``cover_large_url``; it costs the search nothing (M15)."""
+    body = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()
+
+    first = body["results"][0]
+    assert "/cover/large/" in first["cover_large_url"]
+
+
+async def test_a_search_card_gains_its_genres_when_the_show_is_opened(
+    user_client: AsyncClient,
+) -> None:
+    """``genres``/``banner_url``/``studio`` are detail columns on a summary (M15).
+
+    A search page cannot carry them — AniList's search fragment does not ask
+    for them, and asking would be twenty extra field sets per keystroke — so a
+    card for a show nobody has opened shows an empty list and two nulls, and
+    the same card carries all three once a detail fetch has happened. The
+    fields are read off the stored row, which is what makes that work.
+    """
+    first = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()["results"][
+        0
+    ]
+    assert first["genres"] == []
+    assert first["banner_url"] is None
+    assert first["studio"] is None
+
+    # Opening the show is a detail fetch; it fills the columns behind the card.
+    await user_client.get(f"/api/anime/{first['id']}")
+
+    again = (await user_client.get("/api/anime/search", params={"q": "frieren"})).json()["results"][
+        0
+    ]
+    assert again["id"] == first["id"]
+    assert again["genres"] == ["Adventure", "Drama", "Fantasy"]
+    assert again["banner_url"].startswith("https://")
+    assert again["studio"] == "MADHOUSE"
+
+
+async def test_a_search_never_blanks_the_detail_columns_a_card_now_shows(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The reason these three stay out of the summary *write* path.
+
+    A search payload has no genres, no banner and no studio. If the summary
+    upsert wrote them, every search that passed over a show somebody had opened
+    would blank exactly the columns the new card fields read (cache rule 2).
+    """
+    anime_id = await frieren_id(user_client)
+    await user_client.get(f"/api/anime/{anime_id}")
+
+    await user_client.get("/api/anime/search", params={"q": "frieren"})
+
+    async with api_factory() as session:
+        row = await session.get(Anime, anime_id)
+    assert row is not None
+    assert row.genres == ["Adventure", "Drama", "Fantasy"]
+    assert row.banner_url is not None
+    assert row.studio == "MADHOUSE"
+
+
+async def test_a_mal_sourced_show_has_no_key_art_and_one_credit(
+    user_client: AsyncClient, anilist: FakeAniList
+) -> None:
+    """The fallback carries the studio and nothing else (FR-C6, M15)."""
+    anilist.disabled = True
+    found = await user_client.get("/api/anime/search", params={"q": "frieren"})
+    anime_id = found.json()["results"][0]["id"]
+
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["source"] == "mal"
+    assert body["cover_large_url"] is None
+    assert body["cover_url"].startswith("https://")
+    assert body["credits"] == [{"role": "Studio", "name": "Madhouse"}]
+    assert all(episode["still_url"] is None for episode in body["episodes"])
+
+
 async def test_relations_link_only_to_shows_arc_has_a_row_for(
     user_client: AsyncClient,
 ) -> None:
@@ -337,6 +637,52 @@ async def test_relations_link_only_to_shows_arc_has_a_row_for(
     assert sequel["id"] is not None  # cached by the search, so it is linkable
     assert sequel["id"] != sequel["anilist_id"]
     assert sequel["title"]["preferred"] == "Frieren: Beyond Journey’s End Season 2"
+
+
+async def test_a_cached_relation_carries_what_the_franchise_rail_renders(
+    user_client: AsyncClient,
+) -> None:
+    """ "The franchise, in order" needs artwork and a kind line (M15).
+
+    The search cached the sequel as a *summary*, which is where a 2:3 card's
+    cover, format and year come from — so a relation is renderable as soon as
+    anything has seen the show, without the rail costing a fetch per card.
+    """
+    anime_id = await frieren_id(user_client)
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+
+    sequel = next(r for r in body["relations"] if r["relation_type"] == "SEQUEL")
+    assert sequel["id"] is not None
+    assert sequel["cover_url"].startswith("https://")
+    assert sequel["cover_large_url"].startswith("https://")
+    assert sequel["format"] == "TV"
+    assert sequel["season_year"] == 2026
+
+
+async def test_an_uncached_relation_carries_nulls_and_costs_no_fetch(
+    user_client: AsyncClient, anilist: FakeAniList
+) -> None:
+    """A relation nobody has seen is a title, not a card — and stays one.
+
+    Fetching the dozen relations of a show page would be a dozen upstream
+    requests against a 30/min budget to fill a rail nobody may scroll to, so
+    the columns are null and the client renders its placeholder.
+    """
+    anime_id = await frieren_id(user_client)
+    anilist.calls.clear()
+
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+
+    # The CHARACTER relation is not in the captured search page, so no row.
+    orphan = next(r for r in body["relations"] if r["id"] is None)
+    assert orphan["cover_url"] is None
+    assert orphan["cover_large_url"] is None
+    assert orphan["episodes"] is None
+    assert orphan["season_year"] is None
+    # …but the source still said what kind of thing it is.
+    assert orphan["title"]["preferred"]
+    # One fetch for the show itself, and not one per relation.
+    assert [name for name, _ in anilist.calls] == ["media"]
 
 
 async def test_detail_marks_unaired_episodes_correctly(
@@ -592,6 +938,26 @@ async def test_get_list_returns_the_show_and_the_entry(user_client: AsyncClient)
         # here would be a query per card, and the list does not render it.
         "mal_sync": None,
     }
+
+
+async def test_a_list_row_carries_the_studio_the_genres_and_the_banner(
+    user_client: AsyncClient,
+) -> None:
+    """My List credits the studio on every row (M15).
+
+    ``PUT /api/list`` caches the show with a *detail* fetch, so by the time a
+    row exists the three columns are filled — which is why the redesigned rows
+    can render them without a second request per show.
+    """
+    anime_id = await frieren_id(user_client)
+    await user_client.put(f"/api/list/{anime_id}", json={"status": "watching"})
+
+    [row] = (await user_client.get("/api/list")).json()
+
+    assert row["anime"]["studio"] == "MADHOUSE"
+    assert row["anime"]["genres"] == ["Adventure", "Drama", "Fantasy"]
+    assert row["anime"]["banner_url"].startswith("https://")
+    assert row["anime"]["cover_large_url"].startswith("https://")
 
 
 async def test_get_list_is_newest_change_first_and_filterable(

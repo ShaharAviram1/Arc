@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from arc.config import Settings
+from arc.services.catalog.credits import credits_from
 from arc.services.catalog.source import (
     AiringEntry,
     CatalogMedia,
@@ -330,6 +331,7 @@ def parse_anime(raw: dict[str, Any], *, full: bool, now: datetime | None = None)
 
     synopsis = raw.get("synopsis")
     studios = raw.get("studios") or []
+    studio = studios[0].get("name") if studios else None
     return CatalogMedia(
         **summary,  # type: ignore[arg-type]
         # MAL's synopsis is plain text with real newlines — no HTML to strip,
@@ -337,7 +339,13 @@ def parse_anime(raw: dict[str, Any], *, full: bool, now: datetime | None = None)
         description=(str(synopsis).strip() or None) if synopsis else None,
         synonyms=_synonyms(raw),
         genres=[str(genre.get("name")) for genre in (raw.get("genres") or []) if genre.get("name")],
-        studio=(studios[0].get("name") if studios else None),
+        studio=studio,
+        # MAL publishes no staff at all through the official API — no director,
+        # no composer, nothing (M15). So a MAL-filled row's credits block is
+        # the studio row on its own, which is honest and still renders; the
+        # rest arrives the first time AniList answers for this show, because
+        # ``_apply``'s fill-only rule lets AniList overwrite what MAL wrote.
+        credits=credits_from(studio),
         relations=_relations(raw),
         airing=synthesise_airing(start_date=start_date, broadcast=broadcast, episodes=episodes),
         full=True,

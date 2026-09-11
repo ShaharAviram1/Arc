@@ -41,6 +41,12 @@ export const FRIEREN: AnimeSummary = {
   season: 'FALL',
   season_year: 2023,
   cover_url: 'https://example.test/frieren.jpg',
+  cover_large_url: 'https://example.test/frieren-large.jpg',
+  banner_url: 'https://example.test/frieren-banner.jpg',
+  genres: ['Adventure', 'Drama', 'Fantasy'],
+  studio: 'Madhouse',
+  popularity: 480_000,
+  average_score: 92,
   anilist_id: 154587,
   mal_id: 52991,
   source: 'anilist',
@@ -65,6 +71,14 @@ export const FRIEREN_SPECIAL: AnimeSummary = {
   season: null,
   season_year: null,
   cover_url: null,
+  // Nothing AniList-only: no large cover, no banner, no genres, no studio.
+  cover_large_url: null,
+  banner_url: null,
+  genres: [],
+  studio: null,
+  // Null rather than 0: nothing has rated it and nobody is listed as watching.
+  popularity: null,
+  average_score: null,
   anilist_id: null,
   mal_id: 58592,
   source: 'mal',
@@ -74,11 +88,17 @@ export const FRIEREN_SPECIAL: AnimeSummary = {
 /** A relation Arc already has a row for: `id` is set, so the show page links it. */
 export const LINKED_RELATION: AnimeRelation = {
   id: FRIEREN_SPECIAL.id,
+  anime_id: FRIEREN_SPECIAL.id,
   anilist_id: FRIEREN_SPECIAL.anilist_id,
   mal_id: FRIEREN_SPECIAL.mal_id,
   relation_type: 'SIDE_STORY',
   title: FRIEREN_SPECIAL.title,
   format: 'SPECIAL',
+  // Cached locally, so the card has artwork and the facts under it.
+  cover_url: 'https://example.test/frieren-special.jpg',
+  cover_large_url: 'https://example.test/frieren-special-large.jpg',
+  episodes: 4,
+  season_year: 2024,
 }
 
 /**
@@ -340,6 +360,12 @@ export const APOTHECARY: AnimeSummary = {
   season_year: 2026,
   // No cover: the compact row has to fall back to the placeholder.
   cover_url: null,
+  cover_large_url: null,
+  banner_url: null,
+  genres: ['Drama', 'Mystery'],
+  studio: 'OLM',
+  popularity: 210_000,
+  average_score: 85,
   anilist_id: 161645,
   mal_id: 54492,
   source: 'anilist',

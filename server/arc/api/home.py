@@ -62,9 +62,10 @@ async def home(user: CurrentUser, session: SessionDep) -> HomePage:
     # badge says.
     statuses = await list_status_for(session, user_id=user.id, anime_ids=anime_ids)
     extras = await episode_extras(session, episode_ids)
-    # Only "new this week" needs this: a continue-watching row is unfinished by
-    # definition, and asking about it would be asking a question with a known
-    # answer.
+    # Only "new this week" needs this: a continue-watching row carries its own
+    # ``completed`` out of the query that found it (a rewatch left half-way is
+    # on that shelf and is watched), so asking again would be a second query
+    # for an answer already in hand.
     watched = await completed_episode_ids(
         session, user_id=user.id, episode_ids=[row.episode.id for row in fresh]
     )

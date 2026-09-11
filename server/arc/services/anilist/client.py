@@ -41,6 +41,7 @@ from typing import Any, Self
 import httpx
 
 from arc.config import Settings
+from arc.services.anilist.extras import parse_streaming_episodes, staff_credits
 from arc.services.anilist.queries import (
     AIRED_SCHEDULE_PAGE,
     MEDIA_BY_ID,
@@ -48,6 +49,7 @@ from arc.services.anilist.queries import (
     SEARCH,
     SEASON,
 )
+from arc.services.catalog.credits import credits_from
 from arc.services.catalog.source import (
     AiringEntry,
     CatalogMedia,
@@ -170,6 +172,19 @@ def _cover(raw: dict[str, Any] | None) -> str | None:
     return str(value) if value else None
 
 
+def _large_cover(raw: dict[str, Any] | None) -> str | None:
+    """``coverImage.extraLarge`` alone, with no fall back to ``large``.
+
+    ``cover_large_url`` is a promise about the *size* of the image — the
+    redesigned shelves render 2:3 artwork at 172 px and the browse grid wider
+    still — so falling back to the 230 px ``large`` here would put the soft
+    image behind the column whose whole purpose is to be the sharp one. A null
+    is the honest answer, and the client falls back to ``cover_url`` itself.
+    """
+    value = (raw or {}).get("extraLarge")
+    return str(value) if value else None
+
+
 def _airing(nodes: list[dict[str, Any]]) -> list[AiringEntry]:
     """AniList's schedule nodes. Never estimated: these are published times."""
     out: list[AiringEntry] = []
@@ -235,6 +250,7 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
             season=raw.get("season"),
             season_year=raw.get("seasonYear"),
             cover_url=_cover(raw.get("coverImage")),
+            cover_large_url=_large_cover(raw.get("coverImage")),
             popularity=raw.get("popularity"),
             average_score=raw.get("averageScore"),
             # Only the season query asks for this; a search result leaves it
@@ -244,6 +260,7 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
         )
 
     studios = ((raw.get("studios") or {}).get("nodes")) or []
+    studio = studios[0].get("name") if studios else None
     schedule = _airing(((raw.get("aired") or {}).get("nodes")) or []) + _airing(
         ((raw.get("upcoming") or {}).get("nodes")) or []
     )
@@ -259,6 +276,7 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
         season=raw.get("season"),
         season_year=raw.get("seasonYear"),
         cover_url=_cover(raw.get("coverImage")),
+        cover_large_url=_large_cover(raw.get("coverImage")),
         popularity=raw.get("popularity"),
         average_score=raw.get("averageScore"),
         banner_url=raw.get("bannerImage"),
@@ -268,10 +286,19 @@ def parse_media(raw: dict[str, Any], *, full: bool) -> CatalogMedia:
         tags=[
             {"name": tag.get("name"), "rank": tag.get("rank")} for tag in (raw.get("tags") or [])
         ],
-        studio=(studios[0].get("name") if studios else None),
+        studio=studio,
+        credits=credits_from(studio, staff_credits(raw.get("staff"))),
         relations=_relations(raw.get("relations")),
         next_airing=raw.get("nextAiringEpisode"),
         airing=schedule,
+        # Placed against the *source's* episode count rather than the schedule,
+        # because the positional fallback is only safe when the list is known
+        # to be the whole show, and the schedule can be longer (a split cour
+        # counted as one entry) or shorter (a premiere with no per-episode
+        # slot) than the count AniList publishes.
+        episode_extras=parse_streaming_episodes(
+            raw.get("streamingEpisodes"), episodes=raw.get("episodes")
+        ),
         start_date=(schedule[0].at.date() if schedule else None),
         full=True,
     )

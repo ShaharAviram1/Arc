@@ -12,11 +12,18 @@ Arc reads the tables. Five rules shape the code here.
    carries the summary fields only, so an upsert from one writes only those
    columns and leaves ``refreshed_at`` alone — otherwise a search for
    "Frieren" would blank its relations and then claim the row was fresh.
-3. **Weaker data never overwrites stronger data.** MAL fills detail columns
-   that are null on an AniList-sourced row and touches nothing else; AniList
-   always overwrites MAL's. The same rule one level down: an estimated air time
-   never replaces a published one, and a published one always replaces an
-   estimate and clears the flag.
+3. **Weaker data never overwrites stronger data.** A source is as strong as its
+   position in :data:`~arc.services.catalog.source.SOURCE_NAMES` — the order
+   :class:`CatalogService` tries them, AniList before MAL. A weaker source
+   fills columns that are null and touches nothing else; a stronger one
+   overwrites; a source always gets to correct its own earlier answer. That
+   applies to the *summary* columns as much as the detail ones, judged against
+   ``summary_source`` and ``detail_source`` respectively: MAL's 230 px cover
+   replacing AniList's key art is the same mistake as MAL's synopsis replacing
+   AniList's, and it is the more visible one. The same rule one level down: an
+   estimated air time never replaces a published one, and a published one
+   always replaces an estimate and clears the flag; an episode title or still
+   is only ever written where there is none at all.
 4. **Episodes are Arc's, not a source's.** ``episodes`` rows carry the local
    state machine (spec §6) and, from M5 on, links to files. So a sync creates
    and back-fills rows, and never deletes one or touches its ``state``.
@@ -33,11 +40,12 @@ than a day later.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,8 +54,11 @@ from arc.models import Anime, Episode
 from arc.services.catalog.airing import next_airing_estimated
 from arc.services.catalog.service import CatalogService
 from arc.services.catalog.source import (
+    SOURCE_NAMES,
     AiringEntry,
     CatalogMedia,
+    EpisodeArt,
+    SourceName,
     SourceNotFound,
     SourceUnavailable,
 )
@@ -64,6 +75,12 @@ WEEKLY = timedelta(days=7)
 
 #: Columns a *search* result is allowed to write. Everything outside this set
 #: is only ever written by a detail fetch.
+#:
+#: Documentation of the split rather than the thing that enforces it: the two
+#: ``_*_values`` functions below are what the writes iterate, and since the
+#: racing insert stopped writing from ``excluded`` nothing reads this tuple.
+#: It stays because "which half of the row is this column in" is a question
+#: asked of this module often enough to be worth an answer in one place.
 SUMMARY_COLUMNS = (
     "title_romaji",
     "title_english",
@@ -74,6 +91,9 @@ SUMMARY_COLUMNS = (
     "season",
     "season_year",
     "cover_url",
+    "cover_large_url",
+    "popularity",
+    "average_score",
     "summary_source",
 )
 
@@ -88,9 +108,47 @@ DETAIL_COLUMNS = (
     "genres",
     "tags",
     "studio",
+    "credits",
     "relations",
     "next_airing",
 )
+
+
+def _rank(source: str | None) -> int:
+    """How much a source's word is worth: lower is stronger.
+
+    :data:`SOURCE_NAMES` is the order :class:`CatalogService` tries its sources
+    in, which is the same order as "who is believed": AniList is asked first
+    because it is the better answer, and MAL is the fallback. Reading the rank
+    off that tuple rather than off two ``== "mal"`` comparisons means a third
+    source would slot in without a branch here.
+
+    A source name nothing recognises — including ``None``, which is a row no
+    source has filled in yet — ranks below every real one, so anything may
+    write over it.
+    """
+    if source is None:
+        return len(SOURCE_NAMES)
+    try:
+        return SOURCE_NAMES.index(source)
+    except ValueError:
+        return len(SOURCE_NAMES)
+
+
+def _outranked(incoming: SourceName, wrote_it: str | None) -> bool:
+    """Whether the source that wrote these columns beats the one offering new ones.
+
+    When it does, the incoming payload may fill nulls and nothing else (rule
+    3). MAL's cover is 230 px where AniList's is 1900, its synopsis is a
+    different translation, and it has no banner or tags at all — so letting a
+    five-minute outage rewrite a good row would cost a day of worse artwork on
+    every page that shows it, which on the redesigned Show and Watch Now pages
+    is the whole point of the row.
+
+    Equal ranks are *not* outranked: a source always gets to correct its own
+    earlier answer, so a MAL row refreshed from MAL updates in full.
+    """
+    return _rank(incoming) > _rank(wrote_it)
 
 
 def preferred_title(anime: Anime) -> str:
@@ -137,6 +195,7 @@ def _summary_values(media: CatalogMedia) -> dict[str, Any]:
         "season": media.season,
         "season_year": media.season_year,
         "cover_url": media.cover_url,
+        "cover_large_url": media.cover_large_url,
         "popularity": media.popularity,
         "average_score": media.average_score,
         "summary_source": media.source,
@@ -151,6 +210,7 @@ def _detail_values(media: CatalogMedia) -> dict[str, Any]:
         "genres": media.genres,
         "tags": media.tags,
         "studio": media.studio,
+        "credits": media.credits,
         "relations": _relation_rows(media),
         "next_airing": media.next_airing,
     }
@@ -252,6 +312,11 @@ def _may_write_next_airing(row: Anime, media: CatalogMedia, *, summary_source: s
     — no slot at all, or a slot MAL itself estimated. ``summary_source`` is
     passed in rather than read here because :func:`_apply` has already
     overwritten it by the time this matters.
+
+    Deliberately not expressed through :func:`_outranked`, which asks about one
+    source column at a time: this is the stricter rule, because the column is
+    written from both halves of a payload and a published slot must survive a
+    weaker write whichever half last touched the row.
     """
     if media.source != "mal":
         return True
@@ -263,22 +328,37 @@ def _may_write_next_airing(row: Anime, media: CatalogMedia, *, summary_source: s
 
 
 def _apply(row: Anime, media: CatalogMedia, *, now: datetime) -> None:
-    """Write ``media`` onto ``row`` under the precedence rules (rules 2 and 3)."""
-    # MAL is allowed to complete an AniList-sourced row, never to rewrite it:
-    # its synopsis is a different translation, it has no tags or banner, and
-    # overwriting would make a five-minute outage cost a day of worse data.
-    fill_only = media.source == "mal" and row.detail_source == "anilist"
-    # Decided before the summary loop below, which overwrites the very column
-    # the decision is read from.
+    """Write ``media`` onto ``row`` under the precedence rules (rules 2 and 3).
+
+    The two halves of the row are governed separately, because two different
+    columns record who wrote them: ``summary_source`` for the card fields and
+    ``detail_source`` for the rest. A search page and a detail fetch can come
+    from different sources — that is the ordinary state of a row during an
+    outage — and one shared decision would let a MAL search rewrite an
+    AniList synopsis, or stop a MAL detail fetch from filling a row whose only
+    previous contact was an AniList search.
+    """
+    # A fallback source completes a row the primary wrote; it never rewrites
+    # it. Both are decided before the loops below, which overwrite the very
+    # columns the decisions are read from.
+    summary_fill_only = _outranked(media.source, row.summary_source)
+    detail_fill_only = _outranked(media.source, row.detail_source)
     may_write_next_airing = _may_write_next_airing(row, media, summary_source=row.summary_source)
 
     for name, value in _summary_values(media).items():
-        # The summary columns are overwritten rather than filled, because a
-        # renamed show or a corrected episode count has to land. But a *null*
-        # from the weaker source is not a correction: MAL leaving
-        # ``num_episodes`` at 0 must not blank the 28 AniList published, and a
-        # blanked count means 28 missing episode rows on the next sync.
-        if fill_only and value is None:
+        # Within one source the summary columns are overwritten rather than
+        # filled, because a renamed show or a corrected episode count has to
+        # land. From a weaker one they are filled only where there is nothing:
+        # MAL's 230 px cover must not replace the key art the redesigned cards
+        # render, and MAL leaving ``num_episodes`` at 0 must not blank the 28
+        # AniList published — a blanked count is 28 missing episode rows on
+        # the next sync.
+        #
+        # ``summary_source`` is in this loop and is therefore skipped along
+        # with the rest, which is what keeps the rule stable: a fill-only pass
+        # does not make MAL the author of columns AniList still owns, so the
+        # *next* MAL refresh is held to the same rule.
+        if summary_fill_only and getattr(row, name) is not None:
             continue
         setattr(row, name, value)
 
@@ -295,7 +375,7 @@ def _apply(row: Anime, media: CatalogMedia, *, now: datetime) -> None:
         return
 
     for name, value in _detail_values(media).items():
-        if fill_only and getattr(row, name) is not None:
+        if detail_fill_only and getattr(row, name) is not None:
             continue
         # A *full* fetch is also allowed to clear the slot — a show that has
         # finished airing has no next episode, and leaving the last one there
@@ -304,8 +384,14 @@ def _apply(row: Anime, media: CatalogMedia, *, now: datetime) -> None:
         if name == "next_airing" and not may_write_next_airing:
             continue
         setattr(row, name, value)
+    # ``refreshed_at`` records the last successful detail fill from *any*
+    # source, fill-only ones included: the row was asked about and answered,
+    # which is what "fresh" means here. ``detail_source`` is the other half of
+    # that bookkeeping and records who the columns actually belong to, so a
+    # fill-only pass leaves it alone — otherwise ``ensure_anime`` would stop
+    # treating the row as one AniList could improve on.
     row.refreshed_at = now
-    if not fill_only:
+    if not detail_fill_only:
         row.detail_source = media.source
 
 
@@ -319,12 +405,23 @@ async def _insert_new(
     and without it the loser of that race gets an integrity error instead of a
     row.
 
-    The conflict clause updates the **summary columns only**, even for a detail
-    payload. On the ordinary path there is no conflict and the insert carries
-    everything; on the racing path the row that already exists may hold better
-    detail than this payload does, and the caller re-applies
-    :func:`_apply` afterwards, which knows the precedence rules. Doing it in
-    ``DO UPDATE`` instead would need those rules written a second time, in SQL.
+    The conflict clause writes **nothing**: it assigns the arbiter column to
+    the value it already has, which is a no-op that still makes the statement a
+    ``DO UPDATE`` and therefore still ``RETURNING`` the row (``DO NOTHING``
+    returns no row for a conflict, and the caller needs one). On the ordinary
+    path there is no conflict and the insert carries everything; on the racing
+    path the row that already exists may hold better data than this payload
+    does, and the caller re-applies :func:`_apply` afterwards, which knows the
+    precedence rules.
+
+    It used to write the summary columns from ``excluded``, on the argument
+    that the summary half was overwritten by the next ``_apply`` anyway. That
+    stopped being true when the fallback source was barred from overwriting the
+    primary's columns (rule 3): a MAL search racing an AniList row would have
+    clobbered its key art here, and ``_apply`` would then have found MAL's
+    values in place and left them, having no way to tell them from AniList's.
+    Expressing the rules a second time in SQL is the alternative, and one rule
+    written twice is how two paths come to disagree.
 
     Rows are grouped by conflict target (whichever unique id the payload
     carries) and by whether they are a detail fetch, because every row of one
@@ -354,7 +451,9 @@ async def _insert_new(
         insert = pg_insert(Anime).values(rows)
         statement = insert.on_conflict_do_update(
             index_elements=[getattr(Anime, column)],
-            set_={name: insert.excluded[name] for name in SUMMARY_COLUMNS},
+            # The conflict target, assigned the value it conflicted on: a
+            # write that changes nothing, which is the point.
+            set_={column: insert.excluded[column]},
         ).returning(Anime)
         result = await session.execute(statement, execution_options={"populate_existing": True})
         by_id = {getattr(row, column): row for row in result.scalars().all()}
@@ -504,13 +603,16 @@ async def sync_episodes(
     session: AsyncSession,
     anime: Anime,
     airing: list[AiringEntry],
+    *,
+    extras: Sequence[EpisodeArt] = (),
 ) -> int:
     """Create/refresh ``episodes`` 1..N for ``anime``; return how many rows exist.
 
-    Rows are only ever added or given an ``air_at``. Nothing is deleted (a row
-    may already own a media file or somebody's watch progress) and ``state``
-    is never written here, so re-running this over a show whose episode 3 is
-    ``ready`` leaves it ``ready``.
+    Rows are only ever added or given an ``air_at``, a ``title`` or a
+    ``still_url``. Nothing is deleted (a row may already own a media file or
+    somebody's watch progress) and ``state`` is never written here, so
+    re-running this over a show whose episode 3 is ``ready`` leaves it
+    ``ready``.
 
     The air-time rule is the interesting half. A published time (AniList) is
     written over anything; a synthesised one (MAL, FR-C6) is written only where
@@ -520,6 +622,13 @@ async def sync_episodes(
 
     Episodes numbered *below* the published schedule are then estimated from
     it; see :func:`_backfill_before_the_schedule`.
+
+    ``extras`` carries the per-episode titles and stills a detail fetch found
+    (M15). They are written by :func:`_fill_episode_art`, which is a separate
+    statement rather than more columns on the upsert below precisely because
+    the two obey opposite rules: an air time is corrected on every refresh,
+    while a title that is already there was either confirmed by hand in the
+    match queue or written by an earlier fetch, and is never overwritten.
     """
     count = _episode_count(anime, airing)
     if count <= 0:
@@ -557,8 +666,59 @@ async def sync_episodes(
         )
     )
     await session.flush()
+    await _fill_episode_art(session, anime, extras, count=count)
     await _backfill_before_the_schedule(session, anime, airing)
     return count
+
+
+async def _fill_episode_art(
+    session: AsyncSession,
+    anime: Anime,
+    extras: Sequence[EpisodeArt],
+    *,
+    count: int,
+) -> int:
+    """Write episode titles and stills, but only where there are none (M15).
+
+    ``coalesce(episodes.<column>, excluded.<column>)`` rather than a plain
+    assignment, in both directions: the existing value wins when there is one,
+    so a title somebody confirmed in the match queue survives every future
+    refresh, and a null in *this* payload cannot blank a title an earlier one
+    found. That is the whole rule, expressed once per column in SQL so the
+    whole list is one statement instead of one per episode.
+
+    Entries numbered outside 1..``count`` are dropped: ``streamingEpisodes``
+    occasionally lists a recap or a "season 2 episode 1" under a number this
+    show does not have, and an ON CONFLICT insert would otherwise *create* that
+    episode row — inventing an episode out of a thumbnail.
+    """
+    rows = [
+        {
+            "anime_id": anime.id,
+            "number": art.number,
+            "title": art.title,
+            "still_url": art.still_url,
+        }
+        for art in extras
+        if 1 <= art.number <= count and (art.title or art.still_url)
+    ]
+    if not rows:
+        return 0
+
+    statement = pg_insert(Episode).values(rows)
+    excluded = statement.excluded
+    columns = Episode.__table__.c
+    await session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[Episode.anime_id, Episode.number],
+            set_={
+                "title": func.coalesce(columns.title, excluded.title),
+                "still_url": func.coalesce(columns.still_url, excluded.still_url),
+            },
+        )
+    )
+    await session.flush()
+    return len(rows)
 
 
 async def _backfill_before_the_schedule(
@@ -749,7 +909,7 @@ async def ensure_anime(
         raise
 
     anime = await upsert_detail(session, media)
-    await sync_episodes(session, anime, media.airing)
+    await sync_episodes(session, anime, media.airing, extras=media.episode_extras)
     return anime
 
 

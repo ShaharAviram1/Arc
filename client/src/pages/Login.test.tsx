@@ -75,6 +75,17 @@ describe('Login', () => {
     expect(screen.queryByRole('link', { name: /sign up|register/i })).not.toBeInTheDocument()
   })
 
+  it('puts the Arc mark above the card (M15: the only screens with no toolbar)', async () => {
+    mockApi({ 'GET /api/auth/me': { status: 401, body: { detail: 'not authenticated' } } })
+
+    renderLogin()
+
+    const logo = await screen.findByRole('img', { name: 'Arc' })
+    expect(logo).toHaveAttribute('src', '/arc-logo.png')
+    // 48px is the README's minimum: below it the discharge sinters into a line.
+    expect(logo).toHaveClass('h-12')
+  })
+
   it('shows "Wrong email or password" when the server rejects the credentials', async () => {
     mockApi({
       'GET /api/auth/me': { status: 401, body: { detail: 'not authenticated' } },

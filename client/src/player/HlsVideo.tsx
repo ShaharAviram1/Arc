@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type HlsJs from 'hls.js'
 import type { ErrorData } from 'hls.js'
+import { buttonClass } from '@/components/ui/styles'
 
 /**
  * A `<video>` fed by HLS (spec §4.5 FR-S1, §5.4).
@@ -53,6 +54,22 @@ export interface HlsVideoProps {
   onPause?: (position: number, duration: number) => void
   onSeeked?: (position: number, duration: number) => void
   onEnded?: (position: number, duration: number) => void
+  /**
+   * Mute and rate changes, for a page that draws its own controls: the element
+   * is the source of truth for both, and either can be moved by a keyboard
+   * shortcut as easily as by a button, so anything drawing that state has to
+   * hear about it from here rather than from whoever pressed something.
+   */
+  onVolumeChange?: (muted: boolean) => void
+  onRateChange?: (rate: number) => void
+  /**
+   * A click on the picture itself — not on the chrome the page floats over it.
+   * It is on the element rather than on the page's container so that a press
+   * on a button, a notice or the retry strip is never mistaken for a gesture
+   * aimed at the video. Counting clicks (single vs double) is the caller's
+   * business; this only says that one happened.
+   */
+  onVideoClick?: () => void
 }
 
 export function HlsVideo({
@@ -66,6 +83,9 @@ export function HlsVideo({
   onPause,
   onSeeked,
   onEnded,
+  onVolumeChange,
+  onRateChange,
+  onVideoClick,
 }: HlsVideoProps) {
   const [mode, setMode] = useState<Loading>('loading')
   const [fatal, setFatal] = useState<string | null>(null)
@@ -144,13 +164,21 @@ export function HlsVideo({
   )
 
   return (
-    <div className={`relative bg-black ${className}`}>
+    // Fills the positioned parent the page gives it, rather than taking a
+    // height from the element: the video *is* the page (M15), and a `<video>`
+    // left to itself is 300×150.
+    <div className={`absolute inset-0 bg-black ${className}`}>
+      {/*
+        No `controls`: the page draws its own (M15). The element keeps every
+        media event it ever emitted, so the reporter and the shortcuts are
+        untouched — only the chrome the browser would have painted is gone.
+      */}
       <video
         ref={videoRef}
-        controls
         playsInline
         aria-label={label}
-        className="max-h-[80vh] w-full bg-black"
+        className="h-full w-full bg-black object-contain"
+        onClick={onVideoClick}
         onLoadedMetadata={() => {
           onReady?.(videoRef.current?.duration ?? Number.NaN)
         }}
@@ -159,19 +187,31 @@ export function HlsVideo({
         onPause={emit(onPause)}
         onSeeked={emit(onSeeked)}
         onEnded={emit(onEnded)}
+        onVolumeChange={() => {
+          onVolumeChange?.(videoRef.current?.muted ?? false)
+        }}
+        onRateChange={() => {
+          onRateChange?.(videoRef.current?.playbackRate ?? 1)
+        }}
       />
 
       {mode === 'unsupported' ? (
         <p
           role="alert"
-          className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-[var(--arc-text-muted)]"
+          className="absolute inset-0 flex items-center justify-center p-6 text-center text-[14px] text-[var(--arc-text-muted)]"
         >
           {NO_HLS_MESSAGE}
         </p>
       ) : null}
 
+      {/*
+        Above the control bar rather than flush to the bottom edge, which the
+        bar now occupies. Glass, like everything else floating over the video.
+        108px clears the shortened bar (12px inset, under 84px tall) with a
+        little air; it does not have to track the bar exactly, only stay off it.
+      */}
       {fatal === null ? null : (
-        <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-3 bg-[var(--arc-surface)]/95 p-3 text-sm">
+        <div className="absolute inset-x-0 bottom-[108px] mx-auto flex w-fit max-w-[80%] flex-wrap items-center justify-center gap-4 rounded-card border-[0.5px] border-[rgba(255,255,255,0.16)] bg-[rgba(18,23,34,0.72)] px-5 py-3.5 text-[14px] shadow-bar backdrop-blur-bar">
           <span role="alert" className="text-[var(--arc-error)]">
             {fatal}
           </span>
@@ -180,7 +220,7 @@ export function HlsVideo({
             onClick={() => {
               setAttempt((value) => value + 1)
             }}
-            className="rounded-md bg-[var(--arc-accent)] px-3 py-1 text-xs font-medium text-[var(--arc-accent-contrast)] hover:opacity-90"
+            className={buttonClass('chip', 'text-[14px] text-[var(--arc-text)]')}
           >
             Retry
           </button>

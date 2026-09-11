@@ -1,7 +1,7 @@
 # Arc — Architecture
 
 > Living document. Update whenever the stack, a component boundary, or an
-> integration changes. Last updated: 2026-09-09.
+> integration changes. Last updated: 2026-09-11.
 > Companions: [spec.md](spec.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Stack at a glance
@@ -135,9 +135,13 @@ arc/
       api/                       typed client (generated from OpenAPI)
       pages/                     Home, Schedule, Search, Show, Player, Mal,
                                  Recs, Review, Admin, Login, Invite
-      components/
+      components/                Layout (the app shell), route guards, shared
+                                 pieces (CoverThumb, ListStatusControl, …)
+        ui/                      design primitives (M15): Artwork, Button,
+                                 Chip, Row, Shelf, Segmented, Eyebrow,
+                                 HeroFrame, Skeleton, EmptyState + styles.ts
       player/                    hls.js wrapper, progress reporter
-      lib/                       auth context, query hooks
+      lib/                       auth context, query hooks, media queries
   deploy/
     docker-compose.yml         production stack
     docker-compose.dev.yml     override: db + qbittorrent on localhost for local dev
@@ -151,6 +155,46 @@ arc/
   README.md
 ```
 
+### Client shell and design tokens (M15)
+
+The chrome is a **68px top toolbar**, not the 240px left sidebar it replaces:
+the logo, `Watch Now` (`/`), `Browse` (`/search`) and `Schedule`
+(`/schedule`) in the centre, then the search field and a 36px avatar.
+Everything that is a destination but not a daily one — My List (`/list`),
+MyAnimeList, Review (with its pending count), Admin for admins, the account
+email, "Acquisition paused" for an admin, and Log out — lives behind the
+avatar, as a disclosure rather than an ARIA menu so its links keep the link
+role. `/recs` keeps working and is reached from Browse and from Home's
+"Picked for you" shelf.
+
+Below 768px (`useIsPhone`, `client/src/lib/media.ts`) the same set becomes a
+bottom tab bar — Watch Now · Browse · My List · More — with Schedule at the
+top of the "More" sheet above the account items, and the toolbar collapsed to
+the mark plus a search control that expands inline. The tab bar stays at four
+tabs: a fifth crowds them at phone widths, and the sheet is the design's own
+"one more tap" answer. That branch is JavaScript rather than `hidden md:flex`
+because the two are different elements, and rendering both would put a second
+`<nav>`, a second search field and a duplicate set of account links into the
+accessibility tree on every page. The player renders outside the shell and has
+no chrome at all.
+
+Tokens live in `client/src/index.css` (`:root` for the `--arc-*` values,
+`@theme inline` for the Tailwind namespaces) per the design handoff in
+`design/arc-design/design_handoff_arc_apple_tv/README.md`: a blue-black
+window with translucent-white surfaces, 0.5px hairlines, radii named for what
+they belong to, the `rise` and `arcpulse` keyframes and a reduced-motion rule.
+Two rules are load-bearing: the arc gradient (`--arc-progress`) marks season
+progress in My List and nothing else — playback progress is plain white — and
+`--arc-accent` / `--arc-accent-contrast` survive only as transitional aliases
+for pages not yet restyled. A primary action is `--arc-action` (white), a
+focus ring is `--arc-focus`.
+
+The reduced-motion rule in `index.css` turns off every CSS animation and
+transition, but it cannot reach movement driven by a timer. Anything that
+advances itself — today only Watch Now's hero — asks
+`usePrefersReducedMotion` (`client/src/lib/media.ts`, alongside `useIsPhone`)
+and simply never starts the timer.
+
 ## 4. Data model (tables)
 
 | Table | Key columns |
@@ -158,8 +202,8 @@ arc/
 | `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
-| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, banner_url, genres (array), tags (JSONB), studio, relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
-| `episodes` | id, anime_id, number, title, air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason |
+| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url, genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
+| `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty |
@@ -338,8 +382,8 @@ arc/
    track (configured language, prefer ASS over SRT), choose audio track
    (Japanese default). Run
    `ffmpeg -i src -map v:0 -map a:<idx> -vf subtitles=src:si=<sub idx>
-   -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 160k -f hls
-   -hls_segment_type fmp4 -hls_time 6 -hls_playlist_type vod …`
+   -c:v libx264 -preset fast -crf 19 -tune animation -c:a aac -b:a 160k
+   -f hls -hls_segment_type fmp4 -hls_time 6 -hls_playlist_type vod …`
    into `/data/renditions/<episode id>/`. Parse ffmpeg progress for %.
 2. Success → `renditions` row, episode `ready`. Failure → `failed` with
    stderr tail; up to 2 automatic retries, then manual.
@@ -360,7 +404,8 @@ arc/
 - Run: attachments dumped to a temp `fonts/` dir, chosen subtitle track
   extracted to a temp file, then one ffmpeg pass with
   `subtitles=<tmp>:fontsdir=<tmp>/fonts` (no filter-path escaping of the
-  release name), `libx264 veryfast crf 20 yuv420p high@4.1`, AAC 160k
+  release name), `libx264 fast crf 19 -tune animation yuv420p high@4.1`,
+  AAC 160k
   stereo, keyframes forced every `HLS_SEGMENT_SECONDS` (6), fMP4 HLS VOD
   with independent segments → `DATA_DIR/renditions/<id>/{index.m3u8,
   init.mp4, seg_%05d.m4s}`. Playlist URIs are bare filenames (no rewrite
@@ -389,6 +434,36 @@ arc/
   Docker image's Debian ffmpeg has libass. The runner fails fast with a
   named error when libass is missing.
 
+**Encoder settings and the CPU trade-off (M15).** `TRANSCODE_PRESET` (fast),
+`TRANSCODE_CRF` (19), `TRANSCODE_TUNE` (animation, empty for none) and the
+optional `TRANSCODE_MAXRATE_KBPS`/`TRANSCODE_BUFSIZE_KBPS` are settings, not
+constants: `Settings` → `media/jobs.encode_options` → `plan.EncodeOptions` →
+`plan.encode_args`. `-tune` is passed only when set (an empty `-tune` is an
+unknown tune, and ffmpeg exits on it); the VBV pair is passed only when a
+maxrate is set, and a maxrate with no bufsize gets twice the maxrate.
+`-profile:v high -level 4.1 -pix_fmt yuv420p` are unconditional.
+
+The cost is CPU, as a multiple of real time on the 2-vCPU production budget
+for a 1080p episode: `veryfast` ≈ 1×, `fast` ≈ 1.5–2×, `medium` ≈ 2.5–3×.
+Measured locally on a 60 s excerpt (M1, `-threads 2`, subtitles burned in),
+`fast` + `-tune animation` cost 2.6× the CPU of `veryfast`/CRF 20 for 3% more
+bitrate, so budget nearer the top of the `fast` range: a 24-minute episode
+moves from roughly 25 to roughly 60 minutes, well inside the three-hour
+`TRANSCODE_TIMEOUT_SECONDS`. Episodes are prepared ahead of being watched
+(acquisition fetches the next N unwatched), so the preset is a queue-depth
+question, not a playback one; a host that cannot keep up sets `veryfast` back.
+
+**The burn-in path is not what made playback look soft.** Nothing in the graph
+scales: Arc serves one rendition at the source's own resolution, the only
+filter is `ass=`/`subtitles=`, and the dev source is already 8-bit `yuv420p`,
+so swscale is never asked to resample or convert. There is therefore no
+`-sws_flags`: the flag would describe a resize that does not happen. The ASS
+scripts Arc sees declare `PlayResX/Y` of 640×360 against a 1920×1080 picture,
+but libass rasterises glyphs at the final frame size rather than upscaling a
+360p render, so the typesetting is not the softness either. The softness was
+`veryfast`, which gives up most of x264's analysis and shows it on flat cels
+and gradients.
+
 ### 5.4 Streaming
 - `GET /media/{episode_id}/index.m3u8` and `/media/{episode_id}/{segment}`
   are served by the API with session auth; playlists are rewritten so segment
@@ -405,7 +480,7 @@ arc/
 - Client: hls.js is a lazily loaded chunk, used whenever MediaSource exists
   (Chrome answers "maybe" to the HLS mime check yet cannot play a playlist
   natively, so `canPlayType` alone is not a signal); only a browser with no
-  MediaSource (iOS Safari) gets the native `src` path; the player page renders outside the sidebar layout; resume is
+  MediaSource (iOS Safari) gets the native `src` path; the player page renders outside the app shell; resume is
   automatic with a dismissible "Resumed from m:ss" notice; a framework-free
   `ProgressReporter` posts every 10 s while playing, on pause, on seek
   (debounced), and on `pagehide` via `sendBeacon`, with a 2 s floor between
@@ -417,6 +492,16 @@ arc/
   inside the rendition directory or that is a symlink. All path ids are
   bounded to int64 (422 beyond). A partial index on in-progress watch rows
   backs continue-watching (migration 3).
+- Continue watching is decided by the saved position alone and ignores
+  `completed`: a row is listed when its position is ≥ 30 s and short of the
+  tighter of 95 % of the duration and duration − 60 s, newest `updated_at`
+  first, so a rewatch stopped half-way is offered and resumes where it
+  stopped (`/play` carries `resume_position` for completed rows too), while an
+  episode watched to the end falls off by the ceiling rather than by the flag.
+  Nothing else reads the shelf's rule: completion still drives the MAL push,
+  the once-only list advance, and the watched marks. The query no longer
+  matches migration 3's `completed = false` predicate, so it is served by the
+  full `(user_id, updated_at)` index instead.
 
 ### 5.5 Progress and MAL writes
 1. `POST /progress` {episode_id, position, duration} every 10 s and on
@@ -703,6 +788,20 @@ outage skips that episode for this sweep only. Admin:
   breaker opens after a failure and skips AniList for 5 minutes (probing on
   the next call after that), so an outage never costs a timeout per request.
   If both fail: 502 `catalogue is unavailable`.
+- **Search is local first, then live** (`catalog/local.py`, M15). The cached
+  `anime` rows are matched before the upstream call and put in front of the
+  live page: the query is split on whitespace and every word must appear, as a
+  case-insensitive `ILIKE` substring, in `title_romaji`, `title_english` or the
+  `synonyms` JSONB cast to text — not necessarily the same field for each word.
+  `%` and `_` in the query are escaped. Ordering: exact title match, then
+  prefix, then the shows the caller follows, then `popularity DESC NULLS LAST`,
+  then id; capped at 20. The merge is by internal id, local hit winning, and
+  happens on `page=1` only — the local hits are not paginated, so repeating
+  them under `page=2` would show the same cards twice. An upstream failure with
+  local hits is a 200, not a 502; only an empty local result on a failed
+  upstream is a 502. Why: with AniList disabled, MAL's search matches whole
+  words from the start of a title, so "jobless reincarnation" found nothing
+  while the show sat cached, on the owner's list, with an episode downloading.
 - Breakers are per API process (on `app.state`) and per job run (a fresh
   breaker per scheduled job, so each sweep re-probes a source that was down).
 - A cached row is served when a source reports the id as not found, so a
@@ -766,21 +865,21 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/jobs/summary` | admin | `{by_status: {pending, running, done, failed, cancelled}, by_type_pending: {type: count}, worker: {heartbeat_at, alive}}` — `alive` is the heartbeat file younger than 90 s, the same decision the container healthcheck makes |
 | `POST /api/jobs/{id}/retry`, `POST /api/jobs/{id}/cancel` | admin | 200 `JobOut`. Retry: `failed`/`cancelled` → `pending`, `attempts` 0, `run_after` now, lock and finish timestamps cleared, `last_error` kept. Cancel: `pending` → `cancelled`. 409 for any other status (a `running` job cannot be stopped safely), 404 unknown |
 | `GET /api/settings`, `PUT /api/settings` | admin | the rules editor (FR-D2, FR-T5): `{values, defaults, overrides[{anime_id, title, preferred_groups, resolution}]}` for every `DEFAULT_SETTINGS` key. PUT takes a partial object of those keys and writes only what it names; 422 `{detail: [{loc: ["body", key], msg, type}]}` for an unknown key or a refused value (resolutions ∈ 2160p/1080p/720p/480p and fallback ≠ preferred — enforced only when the patch names one of the two, so a hand-edited collision does not block unrelated edits — N 0..10, G and D 0..365, ≤ 20 groups of ≤ 64 chars de-duplicated case-insensitively, languages 2–8 lowercase letters/dashes). Writing `acquisition_paused` goes through the same `set_paused` the pause button uses, and clearing it enqueues `compute_wants` in the same transaction, so unpausing from the editor and from the button do the same thing. Overrides are read-only here; editing them is M16 |
-| `GET /api/anime/search?q=&page=` | any | live AniList search, results cached |
+| `GET /api/anime/search?q=&page=` | any | **local hits first, then the live search** (§5.0): cached rows matching every word of `q` in a title or synonym, ordered exact/prefix title → followed → popularity, capped at 20 and merged on `page=1` only; the live results follow, de-duplicated by internal id, and are cached. `page`/`has_next` describe the live half. Local hits with the catalogue down is a 200; 502 only when the local half is empty *and* upstream failed. Each `AnimeSummary` carries `cover_large_url` (nullable) beside `cover_url`, so a card prefers the sharp key art and falls back, plus `popularity` and `average_score` (both nullable; real summary columns, straight off the search — `average_score` is 0–100 whichever source answered, MAL's 0–10 scaled on the way in), plus `genres[]`, `banner_url` and `studio` — **read off the cached row, not the search payload**: AniList's search fragment does not carry them, so they are empty/null on a show no detail fetch has reached and fill in the moment one does. They are deliberately *not* in the summary write path; a search payload's empty genres would otherwise blank them (cache rule 2) |
 | `GET /api/catalog/status` | admin | source health and breaker state |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, air_at, aired, state, watched) |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, watched) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
-| `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears |
+| `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url` and `studio` (M15: My List credits the studio per row) |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
-| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50) |
+| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode, anime, playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title` and `still_url` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
@@ -794,13 +893,15 @@ Mutating requests must carry an allowed `Origin`.
 
 | Service | Auth | Rate/limits | Notes |
 |---|---|---|---|
-| AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
+| AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
 | Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 5 query forms per episode (romaji and english full titles, plus season-stripped base title with `S<k>`, roman numeral, and plain), ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows differently (`Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
 | qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
+| Offline catalogue (M15.5, planned): manami `anime-offline-database` weekly release (`anime-offline-database.jsonl.zst`, ≈ 62 MB / 6 MB) + Fribb `anime-lists` (`anime-list-full.json`, ≈ 7.5 MB) | none | one download each per week (GitHub releases / raw) | Loaded by a weekly job into `offline_anime` and `offline_ids` (replace-on-import, release tag stored). First stop for search, filename matching and cross-id mapping (AniList ↔ MAL ↔ Kitsu ↔ AniDB ↔ TMDB series+season). Seeds season lists when live sources are unavailable. |
+| TMDB `https://api.themoviedb.org/3` (M15.5, planned) | `TMDB_API_KEY` (free) | ~50 req/s; enrichment job paces at 4 req/s | Nightly enrichment of followed shows via the id map: backdrop → `banner_url`, poster → `cover_large_url`, episode stills/titles → `episodes.still_url`/`title`, credits. Fills only what AniList has not provided (cache rule 3). UI footer carries TMDB attribution. |
 
 ## 7. Security
 
@@ -923,8 +1024,10 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `LIBRARY_SETTLE_SECONDS` (60), `LIBRARY_SCAN_BATCH` (200),
 `LIBRARY_SCAN_COMMIT_EVERY` (25), `VIDEO_EXTENSIONS`, `NYAA_URL`,
 `QBIT_CATEGORY` (arc), `QBIT_DOWNLOADS_PATH` (/data/downloads), `FFMPEG_BIN`,
-`FFPROBE_BIN`, `FFMPEG_VIDEO_ENCODER` (libx264), `FFMPEG_PRESET` (veryfast),
-`FFMPEG_CRF` (20), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
+`FFPROBE_BIN`, `FFMPEG_VIDEO_ENCODER` (libx264), `TRANSCODE_PRESET` (fast),
+`TRANSCODE_CRF` (19), `TRANSCODE_TUNE` (animation; empty means no `-tune`),
+`TRANSCODE_MAXRATE_KBPS` / `TRANSCODE_BUFSIZE_KBPS` (both unset; a maxrate
+with no bufsize gets twice the maxrate), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
 (10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400),
 `BACKUP_KEEP_DAYS` (14), `QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
 (false), `COMPOSE_PROFILES` (vpn|novpn), `VPN_PROVIDER`, `WIREGUARD_PRIVATE_KEY`,
@@ -1101,7 +1204,7 @@ two together.
 - 2026-09-07 — M8 streaming/player: session-gated HLS with native Range,
   ETag/304 and immutable segment caching; 90 % completion raises list
   progress only (status untouched) and creates a Watching entry when
-  missing; un-mark never rolls back; player outside the sidebar; hls.js
+  missing; un-mark never rolls back; player outside the app shell; hls.js
   lazy chunk; beacon reporting.
 - 2026-09-07 — M9 MAL sync: stateless encrypted OAuth state; `conflict`
   cause and `skipped` status added to the write log (never writes);
@@ -1237,3 +1340,141 @@ two together.
   the config check names the flag rather than `ANTHROPIC_API_KEY`.
 - 2026-09-10 — M14: settings API (validated), job retry/cancel + summary,
   qBittorrent status, disk usage; overrides editor deferred to M16.
+- 2026-09-11 — M15 sign-off (owner): Schedule joins the toolbar nav (and the
+  top of the phone "More" sheet; the four tabs are unchanged). Watch Now's
+  hero becomes a cycling set of season recommendations built client-side —
+  **at most two** slides for the latest run's picks whose show airs this
+  season or next (banner-first among them), then the rest of the six from
+  unfollowed shows of the cached season, *ranked* by overlap with the viewer's
+  top-3 genres (weighted by list score, dropped entries excluded) rather than
+  filtered by it, then by `popularity` (nulls last), then by having a banner,
+  then by the grid's own order — hidden only when there is genuinely nothing.
+  Revised the same day after the owner saw a hero of nothing but last night's
+  picks: season rows cached through the MAL fallback carry no genres until a
+  detail fetch reaches them, so a ≥ 2-genre *filter* excluded the whole season
+  while the "list has no genres" escape hatch stayed shut. The hero ranks on
+  the `popularity` that `AnimeSummary` gained the same day (see the entry
+  below) rather than on the order the grid was built in — the same key the
+  recommendation pool has always used; the client ranks by `popularity` and
+  `average_score` and renders neither. It otherwise reads four caches that
+  already exist
+  (`/api/home`, `/api/schedule`, `/api/recs`, `/api/list`). Continue watching
+  becomes its own shelf and "Up Next" narrows to ready-but-unstarted episodes,
+  renamed "Ready to watch".
+- 2026-09-12 — M15 hero framing (owner: "too zoomed in"): a banner hero sizes
+  its *frame* to the banner instead of cropping every banner to 21:9. AniList
+  banners are ~1900 × 400 (≈4.75:1) and `object-fit: cover` in a 2.33:1 frame
+  showed only the middle half of one. `HeroFrame` reads the image's intrinsic
+  size on load and sets `aspect-ratio` inline, clamped to [21/9, 3.6], with a
+  200 ms transition; 21:9 stays the class-level default until the image loads,
+  and a 16:9 backdrop from any later source still lands on 21:9. Poster heroes
+  stay 21:9 — the wash fills the frame, it does not shape it. `Artwork` gained
+  `aspect` (measured ratio, inline) and `onNaturalSize` (intrinsic size on
+  load, reported from both the ref and `onLoad` so a cached image still
+  counts).
+- 2026-09-11 — M15 hero art (owner: "hero art is extremely low quality"): a
+  hero never scales a poster up to fill its 21:9 frame. `components/ui/
+  HeroFrame` picks between two frames — AniList's ~1900 px `banner_url`
+  cropped to the frame, or, when there is none (the ordinary MAL case), a
+  *poster hero*: the cover blurred (40 px, scale 1.15, brightness 0.5,
+  saturate 1.2) as a colour wash behind the scrim, with the crisp 2:3 poster
+  laid beside the title (sized from the frame's height, ≈180 px on a laptop).
+  Both Watch Now's carousel and the show page use it, and hero images are
+  `loading="eager" decoding="async"` (`Artwork` gained an `eager` prop).
+  Watch Now's hero set now also prefers shows that *have* a banner: candidates
+  are partitioned banner-first, and banner-less ones are only admitted when
+  fewer than three banners qualified. `anime.ts` gains `bannerArt`/`hasBanner`;
+  `heroArt` (banner → key visual) stays, for episode stills with none of their
+  own. The toolbar mark is now a `<Link to="/">` labelled "Arc — Watch Now"
+  with a decorative `<img>` (owner).
+- 2026-09-11 — M15.5 approved (owner): offline catalogue import (manami DB +
+  Fribb id map) as the first stop for search/matching/ids; TMDB enrichment for
+  art, stills and credits behind AniList. Kitsu not adopted.
+- 2026-09-11 — M15 shell: the left sidebar becomes a top toolbar with an avatar
+  menu, and phones get a bottom tab bar with a "More" sheet (owner decisions,
+  2026-09-11). The palette in `client/src/index.css` is replaced wholesale by
+  the design handoff's tokens; `--arc-accent`/`--arc-accent-contrast` stay as
+  aliases of ember until every page is restyled, and `--arc-ok/warn/error` are
+  re-tuned for the new ground (all ≥ 4.5:1). Shared primitives land in
+  `client/src/components/ui/`; `CoverThumb` becomes a thin wrapper over
+  `Artwork` so untouched pages keep rendering. `Search.tsx` now follows `?q=`
+  rather than only seeding from it, because the toolbar owns the search field.
+- 2026-09-11 — M15 data: key art (extraLarge cover), staff credits and episode
+  stills/titles from AniList for the redesigned Show and Home; MAL fallback
+  carries studio only. Three nullable columns (`anime.cover_large_url`,
+  `anime.credits`, `episodes.still_url`), one revision, no backfill: every row
+  fills in on its next catalogue refresh. `staff` and `streamingEpisodes` go in
+  `DETAIL_SELECTION` and not in the summary fragment, so search and the season
+  sweep stay as cheap as they were; `coverImage.extraLarge` was already in the
+  fragment, so `cover_large_url` is a summary column and a card gets it free.
+  Episode titles and stills are written **only where null**
+  (`coalesce(episodes.<col>, excluded.<col>)`), so a title confirmed in the
+  match queue outranks every later refresh, and an entry whose
+  "Episode N - Title" does not parse is ignored rather than placed by guess —
+  the one exception being a list exactly as long as the show, where AniList's
+  order is the episode order.
+- 2026-09-11 — Cache rule 3 generalised: the *fallback* source may fill nulls
+  but never overwrite a non-null value the *primary* wrote, and that now covers
+  the **summary** columns as well as the detail ones, judged against
+  `summary_source` and `detail_source` respectively. Strength is read off
+  `SOURCE_NAMES` (the order `CatalogService` tries them), so equal ranks are
+  not outranked — a source always corrects its own earlier answer — and a third
+  source would need no new branch. A fill-only pass leaves the source column
+  alone, so it does not quietly become the author of columns it did not write.
+  Found because a MAL-fallback refresh was replacing AniList's 1900 px cover
+  with MAL's 230 px one, which the M15 redesign renders at card and hero size.
+  The racing `INSERT … ON CONFLICT` in `_insert_new` stopped writing summary
+  columns from `excluded` at the same time — it now assigns the arbiter column
+  to itself, a no-op that still returns the row — so `_apply` is the only place
+  precedence is expressed.
+- 2026-09-11 — `AnimeSummary` gains `genres[]`, `banner_url` and `studio`
+  (existing columns, no migration) for Home's hero, Browse's chips and My
+  List's rows. They are *detail* columns served on a summary, read off the
+  cached row: empty/null on a show only a search has touched, filled on its
+  next detail fetch. Adding them to the AniList summary fragment was rejected —
+  twenty extra field sets per keystroke and two hundred per season sweep for a
+  chip — and adding them to the summary *write* path would blank them on every
+  search that passed over a detailed row.
+- 2026-09-11 — `AnimeDetail.relations[]` gained `cover_url`, `cover_large_url`,
+  `episodes` and `season_year` for the Show page's "The franchise, in order"
+  rail, read from the cached `anime` row in the same single query that already
+  resolved the internal id (now selecting named columns into a `RelatedAnime`
+  record rather than loading whole rows). Null on a relation Arc has no row
+  for, and deliberately so: fetching a dozen relations per show page would be a
+  dozen upstream requests against a 30/min budget to fill a rail nobody may
+  scroll to. They fill in when somebody opens the related show or a sweep
+  reaches it. The internal id stays `id` — the field that has always carried
+  it — rather than gaining a second name.
+- 2026-09-11 — `GET /api/anime/search` merges local catalogue hits in front of
+  the live results (`catalog/local.py`): every word of the query must appear as
+  a case-insensitive substring of `title_romaji`, `title_english` or the
+  synonyms, ordered exact/prefix title → followed → popularity, capped at 20,
+  page 1 only, de-duplicated with the live page by internal id. An upstream
+  failure with local hits is now a 200 rather than a 502. The owner searched
+  "jobless reincarnation" during the AniList outage and got nothing back for a
+  show that was cached, on their list and downloading, because the MAL fallback
+  matches whole words from the start of a title.
+- 2026-09-11 — Transcode defaults raised to preset fast / CRF 19 / tune
+  animation after the owner judged veryfast/CRF 20 too soft; configurable
+  (`TRANSCODE_PRESET`, `TRANSCODE_CRF`, `TRANSCODE_TUNE`, and an optional
+  `TRANSCODE_MAXRATE_KBPS`/`TRANSCODE_BUFSIZE_KBPS` VBV ceiling, replacing
+  `FFMPEG_PRESET`/`FFMPEG_CRF`). The subtitle burn-in was ruled out as the
+  cause: nothing in the filter graph scales or converts, so there is no
+  `-sws_flags` to add. Measured cost on a 60 s 1080p excerpt with subtitles
+  burned in: 2.6x the CPU of the old settings for 3% more bitrate.
+- 2026-09-11 — Continue watching lists any episode with an in-progress
+  position, completed or not (rewatches). The shelf's rule is the saved
+  position alone: ≥ 30 s in and short of the tighter of 95 % and the last
+  minute, ordered by `updated_at` desc, and `/api/episodes/{id}/play` now
+  returns `resume_position` for a completed row as well. The owner rewatched a
+  watched episode, stopped at the midpoint, and Home had nothing to offer.
+  Completion's other meanings — the MAL push, the once-only list advance, the
+  watched marks — are untouched.
+- 2026-09-11 — `AnimeSummary` also gained `popularity` and `average_score`
+  (existing columns, no migration). Unlike `genres`/`banner_url`/`studio` these
+  are real summary columns — both are in AniList's search fragment — so a card
+  carries them straight off a search. Noted while doing it: the three captured
+  AniList fixtures predate the 2026-09-10 fragment change and carry neither, so
+  they read as null in every AniList-driven test until
+  `scripts/capture_anilist.py` can run again (AniList has been 403
+  "temporarily disabled" all day).

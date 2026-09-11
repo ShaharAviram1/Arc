@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  body { margin: 0; background: #080b11; color: #f2f4f8; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  * { box-sizing: border-box; }
+  a { color: #f2f4f8; text-decoration: none; }
+  a:hover { color: #fff; text-decoration: underline; }
+  button, input { font: inherit; }
+  ::-webkit-scrollbar { height: 0; width: 0; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#080b11;position:relative">
+
+  <sc-if value="{{ chromeVisible }}" hint-placeholder-val="{{ true }}">
+    <header style="position:sticky;top:0;z-index:30;background:rgba(8,11,17,0.8);backdrop-filter:saturate(180%) blur(24px);-webkit-backdrop-filter:saturate(180%) blur(24px)">
+      <div style="display:flex;align-items:center;gap:22px;height:68px;padding:0 40px">
+        <img src="assets/arc-logo.png" alt="Arc" style="height:48px;width:auto;flex-shrink:0" />
+        <nav style="display:flex;align-items:center;gap:2px;margin:0 auto">
+          <sc-for list="{{ nav }}" as="item" hint-placeholder-count="4">
+            <button type="button" onClick="{{ item.go }}" style="{{ item.style }}">{{ item.label }}</button>
+          </sc-for>
+        </nav>
+        <span style="display:flex;align-items:center;gap:12px">
+          <input type="search" value="{{ query }}" onChange="{{ onQuery }}" placeholder="Search" style="width:240px;height:44px;padding:0 18px;border:0.5px solid rgba(255,255,255,0.14);border-radius:999px;background:rgba(255,255,255,0.06);color:#f2f4f8;font-size:14px" />
+          <span aria-label="Account" style="width:36px;height:36px;border-radius:999px;border:0.5px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.05);display:flex;align-items:center;justify-content:center;font-size:13px;color:rgba(235,239,245,0.8)">O</span>
+        </span>
+      </div>
+      <div style="height:0.5px;background:rgba(255,255,255,0.12)"></div>
+    </header>
+  </sc-if>
+
+  <sc-if value="{{ onHome }}" hint-placeholder-val="{{ true }}">
+    <div style="padding:44px 40px 96px;animation:rise 360ms cubic-bezier(0.2,0.8,0.2,1)">
+
+      <section style="max-width:1180px">
+        <div style="position:relative;border-radius:20px;overflow:hidden;background:repeating-linear-gradient(45deg,#141c2c 0 18px,#0e1522 18px 36px);box-shadow:0 30px 70px rgba(0,0,0,0.66)">
+          <div style="aspect-ratio:21/9;display:flex;align-items:flex-end;padding:40px">
+            <div style="position:absolute;inset:0;background:linear-gradient(0deg,rgba(6,9,14,0.9) 0%,rgba(6,9,14,0.34) 44%,rgba(6,9,14,0) 78%)"></div>
+            <div style="position:absolute;right:24px;top:20px;font-family:ui-monospace,'SF Mono',monospace;font-size:10px;letter-spacing:0.08em;color:rgba(235,239,245,0.45)">key visual 21:9 — drop here</div>
+            <div style="position:relative;max-width:620px">
+              <p style="margin:0;font-size:12px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:rgba(235,239,245,0.8)">Continue watching</p>
+              <h1 style="margin:12px 0 0;font-size:46px;line-height:1.04;font-weight:600;letter-spacing:-0.03em;color:#fff;text-wrap:pretty">Frieren: Beyond Journey’s End</h1>
+              <p style="margin:8px 0 0;font-family:'Hiragino Sans','Hiragino Kaku Gothic ProN','Yu Gothic','Noto Sans JP',system-ui;font-size:17px;letter-spacing:0.02em;color:rgba(235,239,245,0.78)">葬送のフリーレン</p>
+              <p style="margin:16px 0 0;font-size:16px;line-height:1.5;color:rgba(235,239,245,0.85)">Episode 12 · The Land Where Souls Rest · 9 minutes left</p>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:22px;display:flex;flex-wrap:wrap;align-items:center;gap:14px">
+          <button type="button" onClick="{{ goPlayer }}" style="display:inline-flex;align-items:center;gap:10px;height:48px;padding:0 26px;border:0;border-radius:999px;background:#fff;color:#000;font-size:16px;font-weight:600;white-space:nowrap;cursor:pointer;transition:transform 220ms cubic-bezier(0.2,0.8,0.2,1)" style-hover="transform:scale(1.02)">
+            <span style="width:0;height:0;border-left:9px solid #000;border-top:6px solid transparent;border-bottom:6px solid transparent"></span>
+            Resume episode 12
+          </button>
+          <button type="button" onClick="{{ goShow }}" style="height:48px;padding:0 24px;border:0.5px solid rgba(255,255,255,0.18);border-radius:999px;background:rgba(255,255,255,0.09);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);color:#f2f4f8;font-size:16px;white-space:nowrap;cursor:pointer">Episodes</button>
+          <span style="display:flex;align-items:center;gap:12px;min-width:240px;flex:1;max-width:360px">
+            <span style="flex:1;height:4px;border-radius:999px;background:rgba(255,255,255,0.16);display:block;overflow:hidden">
+              <span style="display:block;height:100%;border-radius:999px;background:#fff;width:59%"></span>
+            </span>
+            <span style="font-size:14px;font-variant-numeric:tabular-nums;color:rgba(235,239,245,0.8)">14:02 / 23:40</span>
+          </span>
+        </div>
+      </section>
+
+      <section style="margin-top:72px">
+        <h2 style="margin:0 0 4px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">Up Next</h2>
+        <p style="margin:0 0 20px;font-size:14px;color:rgba(235,239,245,0.8)">Where you stopped, and the first episode you haven’t seen.</p>
+        <div style="display:flex;gap:24px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x mandatory">
+          <sc-for list="{{ continueRow }}" as="item" hint-placeholder-count="4">
+            <article style="width:280px;flex-shrink:0;scroll-snap-align:start">
+              <button type="button" onClick="{{ goPlayer }}" style="display:block;width:100%;padding:0;border:0;background:transparent;cursor:pointer;transition:transform 240ms cubic-bezier(0.2,0.8,0.2,1)" style-hover="transform:translateY(-5px)">
+                <span style="position:relative;display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:repeating-linear-gradient(45deg,#161d2b 0 9px,#101725 9px 18px);border:0.5px solid rgba(255,255,255,0.1);box-shadow:0 14px 34px rgba(0,0,0,0.5)">
+                  <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:9px;color:rgba(235,239,245,0.45)">still 16:9</span>
+                  <sc-if value="{{ item.pct }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,0.2);display:block">
+                      <span style="display:block;height:100%;background:#fff;width:{{ item.pct }}"></span>
+                    </span>
+                  </sc-if>
+                </span>
+              </button>
+              <p style="margin:12px 0 0;font-size:16px;font-weight:500;line-height:1.3;color:#f2f4f8;text-wrap:pretty">{{ item.title }}</p>
+              <div style="margin-top:4px;display:flex;align-items:baseline;gap:12px">
+                <span style="font-size:14px;color:rgba(235,239,245,0.8)">{{ item.slug }}</span>
+                <span style="margin-left:auto;font-size:14px;color:rgba(235,239,245,0.8);white-space:nowrap">{{ item.left }}</span>
+              </div>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:72px">
+        <h2 style="margin:0 0 4px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">This week in Japan</h2>
+        <p style="margin:0 0 20px;font-size:14px;color:rgba(235,239,245,0.8)">Seasonal anime keeps appointments. Times are Europe/Berlin.</p>
+        <div style="display:flex;gap:16px;overflow-x:auto;padding-bottom:8px">
+          <sc-for list="{{ week }}" as="slot" hint-placeholder-count="6">
+            <article style="width:210px;flex-shrink:0;padding:18px;border-radius:16px;background:{{ slot.bg }};border:0.5px solid {{ slot.border }}">
+              <p style="margin:0;display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:{{ slot.dayColor }}">
+                <sc-if value="{{ slot.live }}" hint-placeholder-val="{{ false }}">
+                  <span style="width:6px;height:6px;border-radius:999px;background:#ff7a29;display:inline-block"></span>
+                </sc-if>
+                {{ slot.day }}
+              </p>
+              <p style="margin:8px 0 0;font-size:28px;font-weight:600;letter-spacing:-0.02em;font-variant-numeric:tabular-nums;color:#f2f4f8">{{ slot.time }}</p>
+              <div style="margin-top:16px;display:flex;gap:11px;align-items:flex-start">
+                <span style="width:38px;flex-shrink:0;aspect-ratio:2/3;border-radius:5px;background:repeating-linear-gradient(45deg,#1a2233 0 6px,#131a28 6px 12px);border:0.5px solid rgba(255,255,255,0.08)"></span>
+                <span style="min-width:0">
+                  <span style="display:block;font-size:14px;line-height:1.35;color:#f2f4f8">{{ slot.title }}</span>
+                  <span style="display:block;margin-top:3px;font-size:13px;color:rgba(235,239,245,0.8)">{{ slot.ep }}</span>
+                </span>
+              </div>
+              <p style="margin:14px 0 0;font-size:13px;color:{{ slot.stateColor }}">{{ slot.state }}</p>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:72px">
+        <h2 style="margin:0 0 4px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">Catch up</h2>
+        <p style="margin:0 0 20px;font-size:14px;color:rgba(235,239,245,0.8)">Falling a cour behind is normal. Arc keeps them ready.</p>
+        <div style="display:flex;gap:24px;overflow-x:auto;padding-bottom:8px">
+          <sc-for list="{{ behind }}" as="item" hint-placeholder-count="6">
+            <article style="width:172px;flex-shrink:0">
+              <button type="button" onClick="{{ goShow }}" style="display:block;width:100%;padding:0;border:0;background:transparent;cursor:pointer;transition:transform 240ms cubic-bezier(0.2,0.8,0.2,1)" style-hover="transform:translateY(-5px)">
+                <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;aspect-ratio:2/3;border-radius:12px;background:repeating-linear-gradient(45deg,#161d2b 0 9px,#101725 9px 18px);border:0.5px solid rgba(255,255,255,0.1);box-shadow:0 14px 34px rgba(0,0,0,0.5)">
+                  <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:9px;color:rgba(235,239,245,0.45)">key visual 2:3</span>
+                </span>
+              </button>
+              <p style="margin:12px 0 0;font-size:15px;font-weight:500;line-height:1.3;color:#f2f4f8;text-wrap:pretty">{{ item.title }}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:rgba(235,239,245,0.8)">{{ item.meta }}</p>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:72px">
+        <h2 style="margin:0 0 4px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">Because you finished Frieren</h2>
+        <p style="margin:0 0 20px;font-size:14px;color:rgba(235,239,245,0.8)">Madhouse, and four others with the same unhurried register.</p>
+        <div style="display:flex;gap:24px;overflow-x:auto;padding-bottom:8px">
+          <sc-for list="{{ becauseOf }}" as="item" hint-placeholder-count="5">
+            <article style="width:172px;flex-shrink:0">
+              <button type="button" onClick="{{ goShow }}" style="display:block;width:100%;padding:0;border:0;background:transparent;cursor:pointer;transition:transform 240ms cubic-bezier(0.2,0.8,0.2,1)" style-hover="transform:translateY(-5px)">
+                <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;aspect-ratio:2/3;border-radius:12px;background:repeating-linear-gradient(45deg,#161d2b 0 9px,#101725 9px 18px);border:0.5px solid rgba(255,255,255,0.1);box-shadow:0 14px 34px rgba(0,0,0,0.5)">
+                  <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:9px;color:rgba(235,239,245,0.45)">key visual 2:3</span>
+                </span>
+              </button>
+              <p style="margin:12px 0 0;font-size:15px;font-weight:500;line-height:1.3;color:#f2f4f8;text-wrap:pretty">{{ item.title }}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:rgba(235,239,245,0.8)">{{ item.meta }}</p>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onBrowse }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:44px 40px 96px;animation:rise 360ms cubic-bezier(0.2,0.8,0.2,1)">
+      <h1 style="margin:0;font-size:40px;font-weight:600;letter-spacing:-0.028em;color:#f2f4f8">Browse</h1>
+      <p style="margin:12px 0 0;max-width:66ch;font-size:16px;line-height:1.55;color:rgba(235,239,245,0.85)">{{ searchNote }}</p>
+      <div style="margin-top:22px;display:flex;flex-wrap:wrap;gap:10px">
+        <sc-for list="{{ genres }}" as="g" hint-placeholder-count="7">
+          <button type="button" onClick="{{ g.go }}" style="{{ g.style }}">{{ g.label }}</button>
+        </sc-for>
+      </div>
+      <div style="margin-top:32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:26px;max-width:1180px">
+        <sc-for list="{{ results }}" as="item" hint-placeholder-count="12">
+          <article>
+            <button type="button" onClick="{{ goShow }}" style="display:block;width:100%;padding:0;border:0;background:transparent;cursor:pointer;transition:transform 240ms cubic-bezier(0.2,0.8,0.2,1)" style-hover="transform:translateY(-5px)">
+              <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;aspect-ratio:2/3;border-radius:12px;background:repeating-linear-gradient(45deg,#161d2b 0 9px,#101725 9px 18px);border:0.5px solid rgba(255,255,255,0.1);box-shadow:0 14px 30px rgba(0,0,0,0.46)">
+                <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:9px;color:rgba(235,239,245,0.45)">key visual 2:3</span>
+              </span>
+            </button>
+            <p style="margin:12px 0 0;font-size:15px;font-weight:500;line-height:1.3;color:#f2f4f8">{{ item.title }}</p>
+            <p style="margin:4px 0 0;font-size:13px;color:rgba(235,239,245,0.8)">{{ item.meta }}</p>
+          </article>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onList }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:44px 40px 96px;animation:rise 360ms cubic-bezier(0.2,0.8,0.2,1)">
+      <h1 style="margin:0;font-size:40px;font-weight:600;letter-spacing:-0.028em;color:#f2f4f8">My List</h1>
+      <p style="margin:12px 0 0;max-width:68ch;font-size:16px;line-height:1.55;color:rgba(235,239,245,0.85)">Anything set to Watching is what Arc fetches episodes for. The list stays in step with MyAnimeList.</p>
+      <div style="margin-top:24px;display:flex;flex-wrap:wrap;gap:10px">
+        <sc-for list="{{ listFilters }}" as="f" hint-placeholder-count="5">
+          <button type="button" onClick="{{ f.go }}" style="{{ f.style }}">{{ f.label }}</button>
+        </sc-for>
+      </div>
+      <div style="margin-top:26px;display:flex;flex-direction:column;gap:2px;max-width:1080px">
+        <sc-for list="{{ listRows }}" as="row" hint-placeholder-count="7">
+          <button type="button" onClick="{{ goShow }}" style="display:flex;align-items:center;gap:18px;width:100%;padding:12px 14px;border:0;border-radius:14px;background:transparent;text-align:left;cursor:pointer;transition:background 200ms ease" style-hover="background:rgba(255,255,255,0.055)">
+            <span style="width:46px;flex-shrink:0;aspect-ratio:2/3;border-radius:6px;background:repeating-linear-gradient(45deg,#1a2233 0 6px,#131a28 6px 12px);border:0.5px solid rgba(255,255,255,0.09)"></span>
+            <span style="min-width:0;flex:1">
+              <span style="display:block;font-size:16px;font-weight:500;color:#f2f4f8">{{ row.title }}</span>
+              <span style="display:block;margin-top:3px;font-size:13px;color:rgba(235,239,245,0.8)">{{ row.meta }}</span>
+            </span>
+            <span style="width:160px;flex-shrink:0;display:flex;align-items:center;gap:10px">
+              <span style="flex:1;height:4px;border-radius:999px;background:rgba(255,255,255,0.16);display:block;overflow:hidden">
+                <span style="display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#2e7ddb 0%,#9fd0ff 38%,#ffb679 72%,#ff7a29 100%);width:{{ row.pct }}"></span>
+              </span>
+              <span style="width:42px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;color:rgba(235,239,245,0.8)">{{ row.pct }}</span>
+            </span>
+            <span style="width:124px;flex-shrink:0;text-align:right;font-size:14px;color:{{ row.stateColor }}">{{ row.state }}</span>
+          </button>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onShow }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:44px 40px 96px;animation:rise 360ms cubic-bezier(0.2,0.8,0.2,1)">
+      <section style="max-width:1180px">
+        <div style="position:relative;border-radius:20px;overflow:hidden;background:repeating-linear-gradient(45deg,#141c2c 0 18px,#0e1522 18px 36px);box-shadow:0 30px 70px rgba(0,0,0,0.66)">
+          <div style="aspect-ratio:21/9;display:flex;align-items:flex-end;padding:40px">
+            <div style="position:absolute;inset:0;background:linear-gradient(0deg,rgba(6,9,14,0.9) 0%,rgba(6,9,14,0.32) 46%,rgba(6,9,14,0) 80%)"></div>
+            <div style="position:relative;max-width:660px">
+              <h1 style="margin:0;font-size:44px;line-height:1.06;font-weight:600;letter-spacing:-0.03em;color:#fff;text-wrap:pretty">Mushoku Tensei: Jobless Reincarnation</h1>
+              <p style="margin:8px 0 0;font-family:'Hiragino Sans','Hiragino Kaku Gothic ProN','Yu Gothic','Noto Sans JP',system-ui;font-size:17px;letter-spacing:0.02em;color:rgba(235,239,245,0.78)">無職転生 III 〜異世界行ったら本気だす〜</p>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:22px;display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+          <button type="button" onClick="{{ goPlayer }}" style="display:inline-flex;align-items:center;gap:10px;height:48px;padding:0 26px;border:0;border-radius:999px;background:#fff;color:#000;font-size:16px;font-weight:600;white-space:nowrap;cursor:pointer">
+            <span style="width:0;height:0;border-left:9px solid #000;border-top:6px solid transparent;border-bottom:6px solid transparent"></span>
+            Play episode 9
+          </button>
+          <button type="button" style="height:48px;padding:0 22px;border:0.5px solid rgba(255,255,255,0.18);border-radius:999px;background:rgba(255,255,255,0.09);color:#f2f4f8;font-size:16px;white-space:nowrap;cursor:pointer">Watching ⌄</button>
+          <button type="button" style="height:48px;padding:0 22px;border:0.5px solid rgba(255,255,255,0.18);border-radius:999px;background:rgba(255,255,255,0.09);color:#f2f4f8;font-size:16px;white-space:nowrap;cursor:pointer">Rated 9 ⌄</button>
+        </div>
+
+        <p style="margin:22px 0 0;max-width:74ch;font-size:16px;line-height:1.6;color:rgba(235,239,245,0.85)">The third season of Mushoku Tensei: Isekai Ittara Honki Dasu. Rudeus travels north with Sylphiette, and the debt he owes his family comes due.</p>
+        <p style="margin:12px 0 0;font-size:14px;color:rgba(235,239,245,0.8)">Studio Bind · Summer 2026 · 14 episodes · 8 watched · subtitled, Japanese audio</p>
+      </section>
+
+      <section style="margin-top:56px;max-width:1180px">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:16px">
+          <h2 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">Episodes</h2>
+          <div style="display:inline-flex;padding:2px;border-radius:10px;background:rgba(255,255,255,0.1)">
+            <sc-for list="{{ cours }}" as="cour" hint-placeholder-count="3">
+              <button type="button" onClick="{{ cour.go }}" style="{{ cour.style }}">{{ cour.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="margin-top:20px;display:flex;flex-direction:column;gap:2px">
+          <sc-for list="{{ episodes }}" as="ep" hint-placeholder-count="7">
+            <button type="button" onClick="{{ ep.go }}" style="display:flex;align-items:center;gap:20px;width:100%;padding:14px;border:0;border-radius:14px;background:transparent;text-align:left;cursor:pointer;transition:background 200ms ease" style-hover="background:rgba(255,255,255,0.055)">
+              <span style="position:relative;width:152px;flex-shrink:0;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:repeating-linear-gradient(45deg,#161d2b 0 8px,#101725 8px 16px);border:0.5px solid rgba(255,255,255,0.09)">
+                <sc-if value="{{ ep.pct }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,0.2);display:block">
+                    <span style="display:block;height:100%;background:#fff;width:{{ ep.pct }}"></span>
+                  </span>
+                </sc-if>
+              </span>
+              <span style="min-width:0;flex:1">
+                <span style="display:block;font-size:16px;font-weight:500;color:#f2f4f8">{{ ep.number }}. {{ ep.title }}</span>
+                <span style="display:block;margin-top:4px;font-size:14px;line-height:1.5;color:rgba(235,239,245,0.85);text-wrap:pretty">{{ ep.synopsis }}</span>
+                <span style="display:block;margin-top:6px;font-size:13px;color:rgba(235,239,245,0.8)">{{ ep.meta }}</span>
+              </span>
+              <span style="width:132px;flex-shrink:0;text-align:right;font-size:14px;color:{{ ep.stateColor }}">{{ ep.state }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:64px;max-width:1180px">
+        <h2 style="margin:0 0 4px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">The franchise, in order</h2>
+        <p style="margin:0 0 20px;font-size:14px;color:rgba(235,239,245,0.8)">Seasons, specials, the recap film and one side story — watch order, not release order.</p>
+        <div style="display:flex;gap:20px;overflow-x:auto;padding-bottom:8px">
+          <sc-for list="{{ franchise }}" as="entry" hint-placeholder-count="6">
+            <article style="width:160px;flex-shrink:0">
+              <span style="display:block;position:relative;aspect-ratio:2/3;border-radius:12px;background:repeating-linear-gradient(45deg,#161d2b 0 9px,#101725 9px 18px);border:0.5px solid rgba(255,255,255,0.1)">
+                <span style="position:absolute;left:10px;top:10px;height:22px;display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;background:rgba(6,9,14,0.66);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:0.5px solid rgba(255,255,255,0.18);font-size:11px;font-variant-numeric:tabular-nums;color:#fff">{{ entry.order }}</span>
+              </span>
+              <p style="margin:12px 0 0;font-size:15px;font-weight:500;line-height:1.3;color:#f2f4f8;text-wrap:pretty">{{ entry.title }}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:rgba(235,239,245,0.8)">{{ entry.kind }}</p>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:64px;max-width:720px">
+        <h2 style="margin:0 0 20px;font-size:24px;font-weight:600;letter-spacing:-0.02em;color:#f2f4f8">Made by</h2>
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ credits }}" as="credit" hint-placeholder-count="6">
+            <div style="display:flex;align-items:baseline;gap:20px;padding:14px 0;border-top:0.5px solid rgba(255,255,255,0.1)">
+              <span style="width:190px;flex-shrink:0;font-size:15px;color:rgba(235,239,245,0.85)">{{ credit.role }}</span>
+              <span style="min-width:0;flex:1;font-size:16px;color:#f2f4f8">{{ credit.name }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onBrand }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:44px 40px 96px;max-width:1180px;animation:rise 360ms cubic-bezier(0.2,0.8,0.2,1)">
+      <h1 style="margin:0;max-width:26ch;font-size:40px;line-height:1.08;font-weight:600;letter-spacing:-0.028em;color:#f2f4f8">The logo decides the colour system</h1>
+      <p style="margin:16px 0 0;max-width:72ch;font-size:17px;line-height:1.6;color:rgba(235,239,245,0.85)">The mark is an electric arc that travels from cold blue to hot orange and ends in a spark. That is a trajectory, not a swoosh, so it earns exactly one job in the product: progress through a season, in My List, cold at episode one and hot at the finale. Playback progress stays plain white the way Apple TV does it, because a gradient that marks everything marks nothing.</p>
+
+      <div style="margin-top:32px;padding:40px;border-radius:20px;background:radial-gradient(120% 140% at 50% 0%,#0f1725 0%,#080b11 70%);border:0.5px solid rgba(255,255,255,0.1);display:flex;justify-content:center">
+        <img src="assets/arc-logo.png" alt="Arc" style="width:100%;max-width:560px;height:auto" />
+      </div>
+
+      <div style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:16px">
+        <sc-for list="{{ rules }}" as="rule" hint-placeholder-count="8">
+          <section style="padding:22px;border-radius:16px;background:rgba(255,255,255,0.055);border:0.5px solid rgba(255,255,255,0.1)">
+            <p style="margin:0;font-size:11px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#ff9d4d">{{ rule.tag }}</p>
+            <h2 style="margin:10px 0 0;font-size:20px;font-weight:600;letter-spacing:-0.015em;color:#f2f4f8">{{ rule.title }}</h2>
+            <p style="margin:8px 0 0;font-size:15px;line-height:1.55;color:rgba(235,239,245,0.85)">{{ rule.rule }}</p>
+            <p style="margin:12px 0 0;font-size:15px;line-height:1.55;color:#f2f4f8">{{ rule.applied }}</p>
+          </section>
+        </sc-for>
+      </div>
+
+      <h2 style="margin:52px 0 0;font-size:28px;font-weight:600;letter-spacing:-0.022em;color:#f2f4f8">Palette</h2>
+      <div style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px">
+        <sc-for list="{{ palette }}" as="p" hint-placeholder-count="8">
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 15px;border-radius:12px;background:rgba(255,255,255,0.055);border:0.5px solid rgba(255,255,255,0.1)">
+            <span style="width:32px;height:32px;flex-shrink:0;border-radius:8px;border:0.5px solid rgba(255,255,255,0.18);background:{{ p.value }}"></span>
+            <span style="min-width:0">
+              <span style="display:block;font-size:13px;color:#f2f4f8">{{ p.name }}</span>
+              <span style="display:block;margin-top:2px;font-family:ui-monospace,'SF Mono',monospace;font-size:11px;color:rgba(235,239,245,0.8)">{{ p.note }}</span>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+
+      <h2 style="margin:52px 0 0;font-size:28px;font-weight:600;letter-spacing:-0.022em;color:#f2f4f8">Type scale</h2>
+      <div style="margin-top:16px;border-radius:16px;background:rgba(255,255,255,0.055);border:0.5px solid rgba(255,255,255,0.1);overflow:hidden">
+        <sc-for list="{{ typeScale }}" as="t" hint-placeholder-count="7">
+          <div style="display:flex;align-items:baseline;gap:20px;padding:16px 20px;border-top:0.5px solid rgba(255,255,255,0.1)">
+            <span style="width:130px;flex-shrink:0;font-size:13px;color:rgba(235,239,245,0.8)">{{ t.name }}</span>
+            <span style="min-width:0;flex:1;font-size:{{ t.size }};font-weight:{{ t.weight }};letter-spacing:{{ t.tracking }};font-family:{{ t.family }};color:#f2f4f8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.sample }}</span>
+            <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:12px;color:rgba(235,239,245,0.8);white-space:nowrap">{{ t.spec }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onPlayer }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:#000;display:flex;flex-direction:column">
+      <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;background:repeating-linear-gradient(45deg,#0b0f16 0 14px,#070a0f 14px 28px)">
+        <span style="font-family:ui-monospace,'SF Mono',monospace;font-size:11px;letter-spacing:0.08em;color:rgba(235,239,245,0.45)">video 16:9 · HLS, subtitles burned in</span>
+
+        <div style="position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:14px;padding:24px 28px;background:linear-gradient(180deg,rgba(0,0,0,0.66),rgba(0,0,0,0))">
+          <button type="button" onClick="{{ goShow }}" aria-label="Back to show" style="width:44px;height:44px;border:0.5px solid rgba(255,255,255,0.2);border-radius:999px;background:rgba(18,23,34,0.6);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);color:#fff;font-size:17px;cursor:pointer">‹</button>
+          <span>
+            <span style="display:block;font-size:16px;font-weight:600;color:#fff">Mushoku Tensei · Season 3</span>
+            <span style="display:block;margin-top:2px;font-size:14px;color:rgba(235,239,245,0.82)">Episode 9 · The Sword Saint · subs en, audio ja</span>
+          </span>
+        </div>
+
+        <div style="position:absolute;left:28px;right:28px;bottom:28px;padding:16px 18px;border-radius:20px;background:rgba(18,23,34,0.64);backdrop-filter:saturate(180%) blur(28px);-webkit-backdrop-filter:saturate(180%) blur(28px);border:0.5px solid rgba(255,255,255,0.16);box-shadow:0 20px 48px rgba(0,0,0,0.55)">
+          <div style="display:flex;align-items:center;gap:16px">
+            <span style="width:46px;font-size:13px;font-variant-numeric:tabular-nums;color:rgba(235,239,245,0.9)">14:02</span>
+            <span style="flex:1;height:6px;border-radius:999px;background:rgba(235,239,245,0.25);position:relative;display:block;cursor:pointer">
+              <span style="position:absolute;left:0;top:0;bottom:0;width:78%;border-radius:999px;background:rgba(235,239,245,0.42)"></span>
+              <span style="position:absolute;left:0;top:0;bottom:0;width:59%;border-radius:999px;background:#fff"></span>
+              <span style="position:absolute;top:-5px;left:59%;width:16px;height:16px;border-radius:999px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.6);transform:translateX(-8px)"></span>
+            </span>
+            <span style="width:46px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;color:rgba(235,239,245,0.82)">-09:38</span>
+          </div>
+          <div style="margin-top:14px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+            <button type="button" onClick="{{ togglePlay }}" aria-label="Play or pause" style="width:48px;height:48px;border:0;border-radius:999px;background:#fff;color:#000;font-size:15px;font-weight:700;cursor:pointer">{{ glyph }}</button>
+            <sc-for list="{{ playerControls }}" as="c" hint-placeholder-count="5">
+              <button type="button" style="height:44px;min-width:44px;padding:0 16px;border:0.5px solid rgba(255,255,255,0.18);border-radius:999px;background:rgba(255,255,255,0.12);color:#fff;font-size:14px;white-space:nowrap;cursor:pointer">{{ c }}</button>
+            </sc-for>
+            <span style="margin-left:auto;display:flex;gap:10px">
+              <button type="button" style="height:44px;padding:0 18px;border:0.5px solid rgba(255,255,255,0.18);border-radius:999px;background:rgba(255,255,255,0.12);color:#fff;font-size:14px;white-space:nowrap;cursor:pointer">Mark watched</button>
+              <button type="button" style="height:44px;padding:0 18px;border:0;border-radius:999px;background:#fff;color:#000;font-size:14px;font-weight:600;white-space:nowrap;cursor:pointer">Next episode</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;home&quot;,&quot;browse&quot;,&quot;list&quot;,&quot;show&quot;,&quot;brand&quot;,&quot;player&quot;],&quot;default&quot;:&quot;home&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const ARC = 'linear-gradient(90deg,#2e7ddb 0%,#9fd0ff 40%,#ffb679 74%,#ff7a29 100%)'
+
+const RULES = [
+  {
+    tag: 'Brand', title: 'Playback is white, the season is the arc',
+    rule: 'If the brand gradient marks everything, it marks nothing. It has to mean one specific thing.',
+    applied: 'Playback progress — hero, Up Next tiles, episode stills, the player scrubber — is plain white, the way Apple TV does it. The blue-to-orange arc is reserved for progress through a season in My List, which is the thing the mark actually depicts: a long trajectory, cold at the start, hot at the end.',
+  },
+  {
+    tag: 'Brand', title: 'The lightning comes with the arc',
+    rule: 'The mark is not a smooth swoosh. The arc strikes the A and forks — a branching discharge that throws sparks down and to the left — and a brand expression that smooths that out is a different logo.',
+    applied: 'The discharge is in the artwork itself, so the only job left is placing the mark where it reads: 48px tall in a 68px toolbar, which is as small as it goes. Below that the forks sinter into one line and the logo becomes a tamer mark — 48px is the minimum size. The chrome draws no brand line of its own; the toolbar rule is a neutral hairline, and the mark is the only place the arc appears.',
+  },
+  {
+    tag: 'Apple TV', title: 'The Play button stays white',
+    rule: 'Apple TV spends no colour on its primary action: a white pill, the brightest object on a dark page.',
+    applied: 'Resume and Play are white with black text. The mockup’s glowing orange gradient button was tried and dropped — with an orange gradient competing, the artwork stops being the brightest thing on screen.',
+  },
+  {
+    tag: 'Apple TV', title: 'Artwork is framed, not bled',
+    rule: 'Art sits inside a rounded rectangle with real margin. Bleeding it to the viewport edge under a wash is the streaming-service move.',
+    applied: 'A 20px-radius 21:9 card inset 40px from the window on a soft shadow, on Home and on Show alike.',
+  },
+  {
+    tag: 'Apple TV', title: 'Titles below the tile',
+    rule: 'Apple TV labels artwork underneath it and leaves the image alone.',
+    applied: 'No uppercase title burned over the still, no scrim on the tile — just the progress line at the bottom edge, then title, episode and time left underneath, left and right aligned.',
+  },
+  {
+    tag: 'Apple TV', title: 'Few things, much air',
+    rule: 'Four or five items per shelf, 72px between sections. Density is what Apple spends to buy calm.',
+    applied: 'Four Up Next tiles at 280px, six catch-up visuals at 172px. Weights top out at 600 — the 700s from the mockup made every heading shout at the same volume.',
+  },
+  {
+    tag: 'Anime', title: 'The weekly appointment',
+    rule: 'Streaming design assumes a library that is simply there. Seasonal anime arrives on a schedule, in Japan, at a time.',
+    applied: 'Appointment cards with the broadcast time at 28px and whether Arc has the file yet. Tonight carries the one orange dot on the page.',
+  },
+  {
+    tag: 'Anime', title: 'Cours, sprawl, and Japanese titles',
+    rule: 'A season is not a season, a franchise is not a line, and the original title is not decoration.',
+    applied: 'A cour selector above the episodes, a numbered watch order for the franchise, and 葬送のフリーレン set in the Hiragino stack at 17px with +0.02em, because CJK needs air Latin does not.',
+  },
+]
+
+class Component extends DCLogic {
+  state = { screen: 'home', cour: 's3c2', genre: 'All', filter: 'Watching', playing: true, query: '' }
+
+  go(key) { return () => this.setState({ screen: key }) }
+
+  navStyle(active) {
+    const base = 'height:44px;padding:0 16px;border:0;border-radius:10px;font-size:15px;cursor:pointer;transition:background 200ms ease,color 200ms ease;'
+    return active
+      ? base + 'background:rgba(255,255,255,0.1);color:#f2f4f8;font-weight:600'
+      : base + 'background:transparent;color:rgba(235,239,245,0.78)'
+  }
+
+  chipStyle(active) {
+    const base = 'height:44px;padding:0 18px;border-radius:999px;font-size:14px;white-space:nowrap;cursor:pointer;transition:background 200ms ease;border:0.5px solid;'
+    return active
+      ? base + 'border-color:rgba(255,255,255,0.24);background:rgba(255,255,255,0.14);color:#f2f4f8;font-weight:600'
+      : base + 'border-color:rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:rgba(235,239,245,0.82)'
+  }
+
+  courStyle(active) {
+    const base = 'height:44px;padding:0 18px;border:0;border-radius:8px;font-size:14px;white-space:nowrap;cursor:pointer;transition:background 200ms ease;'
+    return active
+      ? base + 'background:rgba(255,255,255,0.18);color:#f2f4f8;font-weight:600'
+      : base + 'background:transparent;color:rgba(235,239,245,0.8)'
+  }
+
+  renderVals() {
+    const s = this.state
+    const QUIET = 'rgba(235,239,245,0.8)'
+    const BRIGHT = '#f2f4f8'
+    const EMBER = '#ff9d4d'
+
+    const slot = (day, time, title, ep, state, opts) => ({
+      day, time, title, ep, state,
+      live: (opts && opts.live) || false,
+      bg: opts && opts.live ? 'rgba(255,122,41,0.07)' : 'rgba(255,255,255,0.055)',
+      border: opts && opts.live ? 'rgba(255,122,41,0.3)' : 'rgba(255,255,255,0.1)',
+      dayColor: opts && opts.live ? EMBER : QUIET,
+      stateColor: opts && opts.ready ? BRIGHT : QUIET,
+    })
+
+    return {
+      chromeVisible: s.screen !== 'player',
+      onHome: s.screen === 'home', onBrowse: s.screen === 'browse', onList: s.screen === 'list',
+      onShow: s.screen === 'show', onBrand: s.screen === 'brand', onPlayer: s.screen === 'player',
+      goShow: this.go('show'), goPlayer: this.go('player'),
+      nav: [
+        { key: 'home', label: 'Watch Now' },
+        { key: 'browse', label: 'Browse' },
+        { key: 'list', label: 'My List' },
+        { key: 'brand', label: 'Brand' },
+      ].map((item) => ({ label: item.label, style: this.navStyle(item.key === s.screen), go: this.go(item.key) })),
+
+      query: s.query,
+      onQuery: (e) => this.setState({ query: e.target.value, screen: 'browse' }),
+      searchNote: s.query.trim() === ''
+        ? 'Everything in the catalogue Arc has cached, newest first.'
+        : '12 results for “' + s.query.trim() + '”',
+
+      continueRow: [
+        { title: 'Frieren: Beyond Journey’s End', slug: 'S1 E12', left: '9 min left', pct: '59%' },
+        { title: 'Vinland Saga', slug: 'S2 E4', left: '16 min left', pct: '35%' },
+        { title: 'Mushoku Tensei', slug: 'S3 E9', left: 'Ready', pct: false },
+        { title: 'Witch Hat Atelier', slug: 'S1 E7', left: 'Ready', pct: false },
+      ],
+
+      week: [
+        slot('Tonight', '18:00', 'Mushoku Tensei', 'Episode 12', 'Arc will search at 20:00', { live: true }),
+        slot('Tonight', '23:00', 'Frieren: Beyond Journey’s End', 'Episode 29', 'Arc will search at 01:00', { live: true }),
+        slot('Monday', '19:00', 'Kunon the Sorcerer Can See', 'Episode 13', 'Ready · downloaded early', { ready: true }),
+        slot('Monday', '21:30', 'Witch Hat Atelier', 'Episode 14', 'Waiting for a release'),
+        slot('Wednesday', '22:00', 'Re:ZERO', 'Season 4 · Episode 20', 'Waiting for a release'),
+        slot('Thursday', '21:00', 'Dr. Stone: Science Future', 'Part 3 · Episode 14', 'Ready', { ready: true }),
+      ],
+
+      behind: [
+        { title: 'That Time I Got Reincarnated as a Slime', meta: 'Season 4 · 17 episodes behind' },
+        { title: 'Re:ZERO', meta: 'Season 4 · 18 episodes behind' },
+        { title: 'Witch Hat Atelier', meta: '6 episodes behind' },
+        { title: 'Dr. Stone: Science Future', meta: 'Part 3 · 6 episodes behind' },
+        { title: 'Fire Force', meta: 'Season 3 Part 2 · 12 behind' },
+        { title: 'Kunon the Sorcerer Can See', meta: '2 episodes behind' },
+      ],
+
+      becauseOf: [
+        { title: 'Sonny Boy', meta: 'Madhouse · 12 episodes' },
+        { title: 'Mushishi', meta: 'Artland · 26 episodes' },
+        { title: 'Kakuriyo: Bed & Breakfast for Spirits', meta: 'Gonzo · 26 episodes' },
+        { title: 'Natsume’s Book of Friends', meta: 'Brain’s Base · 13 episodes' },
+        { title: 'Silver Spoon', meta: 'A-1 Pictures · 11 episodes' },
+      ],
+
+      genres: ['All', 'Action', 'Slice of life', 'Fantasy', 'Isekai', 'Drama', 'Sports'].map((g) => ({
+        label: g, style: this.chipStyle(g === s.genre), go: () => this.setState({ genre: g }),
+      })),
+      results: [
+        { title: 'Frieren: Beyond Journey’s End', meta: 'TV · 24 eps · 2026' },
+        { title: 'Sousou no Frieren', meta: 'TV · 28 eps · 2023' },
+        { title: 'Mushoku Tensei', meta: 'TV · 14 eps · 2026' },
+        { title: 'Vinland Saga', meta: 'TV · 24 eps · 2019' },
+        { title: 'Witch Hat Atelier', meta: 'TV · 13 eps · 2026' },
+        { title: 'Dandadan', meta: 'TV · 12 eps · 2024' },
+        { title: 'Kunon the Sorcerer Can See', meta: 'TV · 13 eps · 2026' },
+        { title: 'Dr. Stone: Science Future', meta: 'TV · 13 eps · 2026' },
+        { title: 'Sonny Boy', meta: 'TV · 12 eps · 2021' },
+        { title: 'Mushishi', meta: 'TV · 26 eps · 2005' },
+        { title: 'Silver Spoon', meta: 'TV · 11 eps · 2013' },
+        { title: 'Restaurant to Another World', meta: 'TV · 12 eps · 2017' },
+      ],
+
+      listFilters: ['Watching', 'Plan to watch', 'On hold', 'Completed', 'Dropped'].map((f) => ({
+        label: f, style: this.chipStyle(f === s.filter), go: () => this.setState({ filter: f }),
+      })),
+      listRows: [
+        { title: 'Frieren: Beyond Journey’s End', meta: 'Episode 12 of 24 · Madhouse', pct: '50%', state: 'Airing', stateColor: BRIGHT },
+        { title: 'Mushoku Tensei', meta: 'Episode 8 of 14 · Studio Bind', pct: '57%', state: 'Airing', stateColor: BRIGHT },
+        { title: 'Vinland Saga', meta: 'Season 2 · Episode 4 of 24 · MAPPA', pct: '17%', state: 'Finished', stateColor: QUIET },
+        { title: 'Witch Hat Atelier', meta: 'Episode 7 of 13 · Bug Films', pct: '54%', state: 'Finished', stateColor: QUIET },
+        { title: 'Dandadan', meta: 'Season 3 · Episode 9 of 12 · Science SARU', pct: '75%', state: 'Airing', stateColor: BRIGHT },
+        { title: 'Re:ZERO', meta: 'Season 4 · Episode 1 of 19 · White Fox', pct: '5%', state: 'Finished', stateColor: QUIET },
+        { title: 'Dr. Stone: Science Future', meta: 'Part 3 · Episode 7 of 13 · TMS', pct: '54%', state: 'Finished', stateColor: QUIET },
+      ],
+
+      cours: [
+        { key: 's3c1', label: 'Season 3 · Cour 1' },
+        { key: 's3c2', label: 'Season 3 · Cour 2' },
+        { key: 'extras', label: 'Specials' },
+      ].map((c) => ({ label: c.label, style: this.courStyle(c.key === s.cour), go: () => this.setState({ cour: c.key }) })),
+
+      episodes: [
+        { number: 7, title: 'Home', synopsis: 'Rudeus returns to a house that has learned to live without him, and finds the welcome harder than the journey.', meta: 'Aug 16 · 24 min · 1080p · SubsPlease', state: 'Watched', stateColor: QUIET, pct: false },
+        { number: 8, title: 'What Was Lost', synopsis: 'Paul’s decision divides the party, and Sylphiette makes a promise she has no way to keep.', meta: 'Aug 23 · 23 min · 1080p · Erai-raws', state: 'Watched', stateColor: QUIET, pct: false },
+        { number: 9, title: 'The Sword Saint', synopsis: 'The northern road ends at a duel neither of them wanted, watched by someone who remembers Rudeus as a child.', meta: 'Aug 30 · 24 min · 1080p · SubsPlease', state: 'Ready to play', stateColor: BRIGHT, pct: '59%' },
+        { number: 10, title: 'Episode 10', synopsis: 'Not yet described by the catalogue.', meta: 'Sep 6 · 1080p · downloading from 214 seeders', state: 'Downloading 18%', stateColor: QUIET, pct: false },
+        { number: 11, title: 'Episode 11', synopsis: 'Not yet described by the catalogue.', meta: 'Sep 13 · Arc has been searching for 2 hours', state: 'Searching', stateColor: QUIET, pct: false },
+        { number: 12, title: 'Episode 12', synopsis: 'Not yet described by the catalogue.', meta: 'Sep 20 · airs 18:00 in Japan', state: 'Airs tonight', stateColor: EMBER, pct: false },
+        { number: 13, title: 'Episode 13', synopsis: 'Not yet described by the catalogue.', meta: 'Sep 27 · estimated', state: 'Not yet aired', stateColor: QUIET, pct: false },
+      ].map((ep) => ({ ...ep, go: this.go('player') })),
+
+      franchise: [
+        { order: '1', title: 'Mushoku Tensei Season 1', kind: 'TV · 23 episodes · 2021' },
+        { order: '2', title: 'Redundant Reincarnation', kind: 'Special · 4 episodes' },
+        { order: '3', title: 'Mushoku Tensei Season 2', kind: 'TV · 24 episodes · 2023' },
+        { order: '4', title: 'Jobless Reincarnation: Recap', kind: 'Film · 98 minutes' },
+        { order: '5', title: 'Mushoku Tensei Season 3', kind: 'TV · 14 episodes · airing' },
+        { order: '—', title: 'Shokan Sareta Kenja', kind: 'Side story · 12 episodes' },
+      ],
+
+      credits: [
+        { role: 'Studio', name: 'Studio Bind' },
+        { role: 'Director', name: 'Hiroyuki Furukawa' },
+        { role: 'Series composition', name: 'Kazuyuki Fudeyasu' },
+        { role: 'Character design', name: 'Kai Ishikawa' },
+        { role: 'Music', name: 'Yoshiaki Fujisawa' },
+        { role: 'Original work', name: 'Rifujin na Magonote' },
+      ],
+
+      playing: s.playing,
+      glyph: s.playing ? '❙❙' : '▶',
+      playerControls: ['− 10s', '+ 10s', 'Volume', 'Subtitles', '1.0×'],
+      togglePlay: () => this.setState({ playing: !s.playing }),
+
+      rules: RULES,
+      palette: [
+        { name: 'Window', value: '#080b11', note: 'blue-black, from the mark' },
+        { name: 'Card', value: 'rgba(255,255,255,0.055)', note: 'grouped content' },
+        { name: 'Label', value: '#f2f4f8', note: '15.9:1' },
+        { name: 'Secondary label', value: 'rgba(235,239,245,0.8)', note: '9.8:1' },
+        { name: 'Arc cold', value: '#2e7ddb', note: 'season start · lightning' },
+        { name: 'Arc warm', value: '#ff7a29', note: 'season end · the spark' },
+        { name: 'Ember', value: '#ff9d4d', note: '9.4:1 · tonight, airing' },
+        { name: 'Primary action', value: '#ffffff', note: 'Play and Resume only' },
+      ],
+      typeScale: [
+        { name: 'Hero title', size: '46px', weight: '600', tracking: '-0.03em', family: 'inherit', sample: 'Frieren: Beyond Journey’s End', spec: '46 / 48 · 600' },
+        { name: 'Hero title, JP', size: '17px', weight: '400', tracking: '0.02em', family: "'Hiragino Sans','Yu Gothic','Noto Sans JP',system-ui", sample: '葬送のフリーレン', spec: '17 / 26 · Hiragino' },
+        { name: 'Section', size: '24px', weight: '600', tracking: '-0.02em', family: 'inherit', sample: 'This week in Japan', spec: '24 / 29 · 600' },
+        { name: 'Broadcast time', size: '28px', weight: '600', tracking: '-0.02em', family: 'inherit', sample: '18:00', spec: '28 · tabular' },
+        { name: 'Tile title', size: '16px', weight: '500', tracking: '0', family: 'inherit', sample: 'The Sword Saint', spec: '16 / 21 · 500' },
+        { name: 'Body', size: '16px', weight: '400', tracking: '0', family: 'inherit', sample: 'The northern road ends at a duel neither of them wanted.', spec: '16 / 26 · 400' },
+        { name: 'Footnote', size: '13px', weight: '400', tracking: '0', family: 'inherit', sample: 'Aug 30 · 24 min · 1080p · SubsPlease', spec: '13 / 18 · 400' },
+      ],
+    }
+  }
+}
+
+</script>
+</body>
+</html>

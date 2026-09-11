@@ -204,9 +204,14 @@ def encode_options(settings: Settings) -> EncodeOptions:
     """The ffmpeg knobs from ``arc/config.py``, in the plan's shape."""
     return EncodeOptions(
         video_encoder=settings.ffmpeg_video_encoder,
-        preset=settings.ffmpeg_preset,
-        crf=settings.ffmpeg_crf,
+        preset=settings.transcode_preset,
+        crf=settings.transcode_crf,
+        # An empty ``TRANSCODE_TUNE`` is how an operator turns tuning off, and
+        # the dataclass says so with ``None`` rather than with "".
+        tune=settings.transcode_tune or None,
         segment_seconds=settings.hls_segment_seconds,
+        maxrate_kbps=settings.transcode_maxrate_kbps,
+        bufsize_kbps=settings.transcode_bufsize_kbps,
     )
 
 

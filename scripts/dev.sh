@@ -66,6 +66,19 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# A previous `make dev` can leave uvicorn's reload child (a plain python
+# process, not matched by `pkill -f uvicorn`) holding :8000 and hung, in which
+# case the new api dies with "address already in use" while the client keeps
+# serving — the page then spins forever. Refuse to start rather than hide it.
+for port in 8000 5173; do
+	holder="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+	if [ -n "$holder" ]; then
+		echo "==> port $port is already in use by pid $holder ($(ps -o comm= -p "$holder" 2>/dev/null))" >&2
+		echo "    stop it first:  kill $holder    (or: lsof -nP -iTCP:$port -sTCP:LISTEN)" >&2
+		exit 1
+	fi
+done
+
 echo "==> api      http://localhost:8000  (docs at /docs)"
 (cd server && exec uv run uvicorn arc.main:app --reload --port 8000) &
 pids+=($!)

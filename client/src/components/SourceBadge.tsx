@@ -12,14 +12,16 @@ import type { CatalogSource } from '@/lib/anime'
 export function SourceBadge({ source }: { source: CatalogSource | null }) {
   if (source !== 'mal') return null
 
+  // A line of quiet text rather than a pill (M15): the design puts no badge on
+  // or beside artwork, and a warning-coloured chip made a routine fallback
+  // look like a fault. The caveat still travels with the card; it just stops
+  // shouting.
   return (
-    <p>
-      <span
-        title="AniList is unavailable; this result came from MyAnimeList"
-        className="inline-block rounded-full border border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10 px-1.5 py-0.5 text-[0.625rem] text-[var(--arc-warn)]"
-      >
-        via MAL
-      </span>
+    <p
+      title="AniList is unavailable; this result came from MyAnimeList"
+      className="mt-1 text-[11px] text-[var(--arc-text-muted)]"
+    >
+      via MAL
     </p>
   )
 }

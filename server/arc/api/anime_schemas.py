@@ -16,6 +16,7 @@ constructor makes each of those decisions visible in one place.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -101,15 +102,58 @@ class AnimeCore(BaseModel):
     season: str | None = None
     season_year: int | None = None
     cover_url: str | None = None
+    #: The key visual at AniList's largest size, or null (M15). The client
+    #: prefers it and falls back to ``cover_url``: a row filled from MAL has
+    #: only the 230 px ``main_picture.large``, which is soft at card size, and
+    #: sending the small one under the big one's name would hide that.
+    cover_large_url: str | None = None
     #: The caller's own list state for this show, or null if it is not on it.
     list_status: ListStatus | None = None
 
 
 class AnimeSummary(AnimeCore):
-    """A search result or a list row: enough for a card."""
+    """A search result or a list row: enough for a card.
+
+    Three of these fields — ``genres``, ``banner_url`` and ``studio`` — are
+    filled from **detail** columns, and are the one place this schema is not a
+    straight reading of "what a search returned" (M15: Home's hero needs the
+    banner, Browse's chips need the genres, My List's rows credit the studio).
+
+    They are read off the stored row, which is the only reason it is safe: the
+    API renders ``anime`` rows, not payloads, so a row that has ever been
+    detail-fetched carries them however the caller arrived at it. A row that
+    has only ever been seen in a search page carries none — an empty list and
+    two nulls — until somebody opens it or a refresh sweep reaches it. That is
+    the honest answer and the client renders the card without them; the
+    alternative, asking AniList for genres and studios on every keystroke, is
+    twenty extra fields per search page and two hundred per season sweep for a
+    chip.
+
+    What must *not* happen is these moving into the summary write path: a
+    search payload carries no genres, no banner and no studio, so writing them
+    as summary values would blank the detail columns of every row a search
+    result passes over (rule 2 in :mod:`arc.services.catalog.cache`).
+    """
 
     #: AniList's total episode count; null while a show airs without one.
     episodes: int | None = None
+    #: How many people have the show on a list (AniList ``popularity``, MAL
+    #: ``num_list_users``), and the mean score on AniList's 0–100 scale — MAL's
+    #: 0–10 is scaled on the way in, so one number means one thing whichever
+    #: source answered. Unlike the three fields above these really are summary
+    #: columns: both are in AniList's search fragment, so a card carries them
+    #: the moment a search returns it.
+    #:
+    #: Null on a source that publishes neither and on an unaired show with no
+    #: rating yet, so a client must not render "0 %" for an absent score.
+    popularity: int | None = None
+    average_score: int | None = None
+    #: From ``anime.genres``; empty on a row no detail fetch has reached.
+    genres: list[str] = Field(default_factory=list)
+    #: The 21:9 key visual behind Home's and the show page's hero, or null.
+    banner_url: str | None = None
+    #: The main studio, credited on a card like an auteur (M15), or null.
+    studio: str | None = None
 
     @classmethod
     def from_anime(cls, anime: Anime, list_status: ListStatus | None = None) -> AnimeSummary:
@@ -128,6 +172,12 @@ class AnimeSummary(AnimeCore):
             season=anime.season,
             season_year=anime.season_year,
             cover_url=anime.cover_url,
+            cover_large_url=anime.cover_large_url,
+            popularity=anime.popularity,
+            average_score=anime.average_score,
+            genres=list(anime.genres or []),
+            banner_url=anime.banner_url,
+            studio=anime.studio,
             list_status=list_status,
         )
 
@@ -168,6 +218,52 @@ class NextAiringOut(BaseModel):
         return cls(episode=episode, at=at)
 
 
+class CreditOut(BaseModel):
+    """One row of the show page's "Made by" block (M15).
+
+    ``role`` is one of the six labels in
+    :data:`arc.services.catalog.credits.CREDIT_ORDER` and the list arrives in
+    that order, studio first, so the client renders it as it comes rather than
+    grouping or sorting it itself. Rows with an unmapped role never reach the
+    column, so nothing here has to be filtered out.
+    """
+
+    role: str
+    name: str
+
+    @classmethod
+    def from_blob(cls, raw: dict[str, Any]) -> CreditOut | None:
+        """One stored ``anime.credits`` entry, or ``None`` if it is not one.
+
+        JSONB written by a past version of Arc, or by hand, must not be able
+        to put a null or an object where the client expects two strings.
+        """
+        role = raw.get("role")
+        name = raw.get("name")
+        if not isinstance(role, str) or not isinstance(name, str) or not role or not name:
+            return None
+        return cls(role=role, name=name)
+
+
+@dataclass(frozen=True, slots=True)
+class RelatedAnime:
+    """The columns a franchise-rail card needs, for a relation Arc has cached.
+
+    Not a response shape — it is what the detail route's one lookup hands to
+    :meth:`RelationOut.from_blob`. A plain record of six columns rather than
+    the ``Anime`` row itself, because a show page can name a dozen relations
+    and loading a dozen full rows would drag a dozen synopses and relation
+    blobs through the session to render six fields.
+    """
+
+    id: int
+    cover_url: str | None = None
+    cover_large_url: str | None = None
+    format: str | None = None
+    episodes: int | None = None
+    season_year: int | None = None
+
+
 class RelationOut(BaseModel):
     """A sequel/prequel/side story, as the show page links to it.
 
@@ -176,6 +272,18 @@ class RelationOut(BaseModel):
     has necessarily opened yet. The client links only the ones that have one
     and renders the rest as plain text; the external ids are there so a future
     "add this" can resolve them.
+
+    The artwork and the counts (M15's "The franchise, in order" rail) come from
+    that local row and are therefore **null on exactly the relations ``id`` is
+    null on**. Nothing is fetched to fill them: a relation is a title nobody
+    has necessarily asked for, and a show page that fetched a dozen of them
+    would cost twelve upstream requests against a 30/min budget to render a
+    rail nobody may scroll to. They fill in when somebody opens the related
+    show, or when a sweep reaches it.
+
+    ``format`` is the exception: it is a fact the *source* stated about the
+    relation, so it is in the stored blob and is present whether or not Arc has
+    a row. The local row only fills it in when the blob did not carry one.
     """
 
     id: int | None = None
@@ -184,28 +292,39 @@ class RelationOut(BaseModel):
     relation_type: str
     title: TitleOut
     format: str | None = None
+    #: From the cached row, or null when there is none. The rail renders a
+    #: 2:3 card, so it prefers ``cover_large_url`` and falls back.
+    cover_url: str | None = None
+    cover_large_url: str | None = None
+    #: "TV · 23 episodes · 2021" — the kind line under a franchise card.
+    episodes: int | None = None
+    season_year: int | None = None
 
     @classmethod
     def from_blob(
-        cls, raw: dict[str, Any], internal_ids: dict[tuple[str, int], int] | None = None
+        cls, raw: dict[str, Any], related: dict[tuple[str, int], RelatedAnime] | None = None
     ) -> RelationOut | None:
         anilist_id = raw.get("anilist_id")
         mal_id = raw.get("mal_id")
         if anilist_id is None and mal_id is None:
             return None
-        found = internal_ids or {}
-        internal = None
+        found = related or {}
+        row: RelatedAnime | None = None
         if anilist_id is not None:
-            internal = found.get(("anilist", int(anilist_id)))
-        if internal is None and mal_id is not None:
-            internal = found.get(("mal", int(mal_id)))
+            row = found.get(("anilist", int(anilist_id)))
+        if row is None and mal_id is not None:
+            row = found.get(("mal", int(mal_id)))
         return cls(
-            id=internal,
+            id=row.id if row is not None else None,
             anilist_id=anilist_id,
             mal_id=mal_id,
             relation_type=str(raw.get("relation_type") or "OTHER"),
             title=TitleOut.from_blob(raw.get("title")),
-            format=raw.get("format"),
+            format=raw.get("format") or (row.format if row is not None else None),
+            cover_url=row.cover_url if row is not None else None,
+            cover_large_url=row.cover_large_url if row is not None else None,
+            episodes=row.episodes if row is not None else None,
+            season_year=row.season_year if row is not None else None,
         )
 
     @staticmethod
@@ -367,6 +486,10 @@ class EpisodeOut(BaseModel):
     id: int
     number: int
     title: str | None = None
+    #: The 16:9 episode thumbnail, or null (M15). Null is the ordinary case for
+    #: an episode that has not aired and for any show whose detail came from
+    #: MAL, so the client always has a placeholder for it.
+    still_url: str | None = None
     air_at: datetime | None = None
     #: True when ``air_at`` was worked out from a MAL broadcast slot rather
     #: than published per episode (FR-C6). The client badges these as
@@ -419,6 +542,7 @@ class EpisodeOut(BaseModel):
             id=episode.id,
             number=episode.number,
             title=episode.title,
+            still_url=episode.still_url,
             air_at=episode.air_at,
             air_at_estimated=episode.air_at_estimated,
             aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
@@ -531,6 +655,11 @@ class AnimeDetail(AnimeCore):
     synopsis: str | None = None
     genres: list[str] = Field(default_factory=list)
     studio: str | None = None
+    #: The "Made by" block, studio first (M15). Empty when nothing is known,
+    #: and one row long on a show whose detail came from MAL — which publishes
+    #: no staff — so the client renders whatever arrives rather than expecting
+    #: six rows. ``studio`` above is the same fact and stays for the meta line.
+    credits: list[CreditOut] = Field(default_factory=list)
     banner_url: str | None = None
     next_airing: NextAiringOut | None = None
     relations: list[RelationOut] = Field(default_factory=list)
@@ -546,7 +675,7 @@ class AnimeDetail(AnimeCore):
         list_entry: ListEntry | None = None,
         mal_sync: MalSyncOut | None = None,
         watched: frozenset[int] = frozenset(),
-        relation_ids: dict[tuple[str, int], int] | None = None,
+        related: dict[tuple[str, int], RelatedAnime] | None = None,
         torrents: dict[int, Torrent] | None = None,
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
@@ -560,8 +689,15 @@ class AnimeDetail(AnimeCore):
         )
         relations = [
             relation
-            for relation in (RelationOut.from_blob(raw, relation_ids) for raw in raw_relations)
+            for relation in (RelationOut.from_blob(raw, related) for raw in raw_relations)
             if relation is not None
+        ]
+        credits = [
+            credit
+            for credit in (
+                CreditOut.from_blob(raw) for raw in (anime.credits or []) if isinstance(raw, dict)
+            )
+            if credit is not None
         ]
         return cls(
             id=anime.id,
@@ -574,11 +710,13 @@ class AnimeDetail(AnimeCore):
             season=anime.season,
             season_year=anime.season_year,
             cover_url=anime.cover_url,
+            cover_large_url=anime.cover_large_url,
             list_status=list_entry.status if list_entry is not None else None,
             episode_count=anime.episodes,
             synopsis=anime.description,
             genres=list(anime.genres or []),
             studio=anime.studio,
+            credits=credits,
             banner_url=anime.banner_url,
             next_airing=NextAiringOut.from_blob(anime.next_airing),
             relations=relations,
@@ -610,6 +748,7 @@ __all__ = [
     "AnimeCore",
     "AnimeDetail",
     "AnimeSummary",
+    "CreditOut",
     "EpisodeOut",
     "ListEntryOut",
     "ListEntryPatch",
@@ -619,6 +758,7 @@ __all__ = [
     "PROGRESS_STATES",
     "NextAiringOut",
     "PrepareState",
+    "RelatedAnime",
     "RelationOut",
     "ReleaseOut",
     "RenditionOut",

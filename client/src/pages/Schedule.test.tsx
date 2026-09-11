@@ -174,12 +174,61 @@ describe('Schedule', () => {
 
     const followed = document.body.querySelectorAll('[data-following="true"]')
     expect(followed).toHaveLength(1)
-    expect(followed[0]?.className).toContain('border-l-[var(--arc-accent)]')
+    // M15: the grouped surface arrives under a followed row instead of the old
+    // accent edge — colour in this design means state, not membership.
+    expect(followed[0]?.className).toContain('bg-[var(--arc-surface)]')
     expect(followed[0]?.textContent).toContain(FRIEREN.title.preferred)
 
     // The Apothecary is not followed, so it gets no accent edge.
     const thursdayRow = within(dayColumn('Thursday')).getByRole('listitem')
     expect(thursdayRow).not.toHaveAttribute('data-following')
+  })
+
+  it('carries the “via MAL” caveat as a tooltip and lights today in ember', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    // The caveat still travels with the row (FR-C6), but a seven-column week
+    // is ~168px per column and a bordered warning pill was the loudest thing
+    // on the page for the smallest piece of information on it. It is the
+    // link's `title` now, and nothing on an AniList row.
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Show Movies, OVAs and unscheduled (1)' }),
+    )
+    expect(screen.queryByText('via MAL')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: FRIEREN_SPECIAL.title.preferred })).toHaveAttribute(
+      'title',
+      'AniList is unavailable; this row came from MyAnimeList',
+    )
+    expect(
+      within(dayColumn('Tuesday')).getByRole('link', { name: FRIEREN.title.preferred }),
+    ).not.toHaveAttribute('title')
+
+    // Ember means "this is happening now"; today's column is the one place on
+    // this page it appears.
+    expect(dayColumn('Wednesday').querySelector('h2')?.innerHTML).toContain('--arc-ember')
+  })
+
+  it('keeps the week readable: no status control in the grid, 38px thumbs', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    // The whole row is the link, named by the title alone — the slot inside it
+    // is detail, not part of what the link is called.
+    const row = within(dayColumn('Tuesday')).getByRole('listitem')
+    const link = within(row).getByRole('link', { name: FRIEREN.title.preferred })
+    expect(link).toHaveAttribute('href', `/anime/${String(FRIEREN.id)}`)
+    expect(link.querySelector('.w-\\[38px\\]')).not.toBeNull()
+    expect(link.textContent).toContain('18:30 · Ep 5')
+
+    // The control is out of the seven-column grid from `lg` up; it is one tap
+    // away on the show page, and it stays put on the stacked phone layout.
+    const control = within(row).getByRole('combobox')
+    expect(control.closest('.lg\\:hidden')).not.toBeNull()
   })
 
   it('steps to the previous season, updating the URL and refetching', async () => {

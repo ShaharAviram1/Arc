@@ -138,6 +138,46 @@ async def test_media_parses_the_airing_schedule() -> None:
     assert not any(entry.estimated for entry in media.airing)
 
 
+async def test_media_parses_the_credits_and_the_episode_art() -> None:
+    """The two M15 fields, from the query through to :class:`CatalogMedia`."""
+    fake = frieren_fake()
+    async with fake.client() as client:
+        media = await client.media(FRIEREN_ID)
+
+    assert media.cover_large_url is not None
+    assert "/cover/large/" in media.cover_large_url
+    assert media.credits[0] == {"role": "Studio", "name": "MADHOUSE"}
+    assert [row["role"] for row in media.credits[1:]] == [
+        "Director",
+        "Series Composition",
+        "Character Design",
+        "Music",
+        "Original Creator",
+        "Original Creator",
+    ]
+
+    assert [art.number for art in media.episode_extras] == list(range(1, 9))
+    assert media.episode_extras[0].title == "The Journey's End"
+    assert media.episode_extras[0].still_url is not None
+
+
+async def test_a_search_result_carries_the_key_art_and_nothing_else_new() -> None:
+    """``coverImage.extraLarge`` is in the summary fragment; staff is not.
+
+    Which is the point of putting the two new fields in ``DETAIL_SELECTION``:
+    a card gets the sharp artwork for free, and a season sweep does not pay for
+    two hundred staff connections.
+    """
+    fake = frieren_fake()
+    async with fake.client() as client:
+        page = await client.search("frieren")
+
+    first = page.results[0]
+    assert first.cover_large_url is not None
+    assert first.credits == []
+    assert first.episode_extras == []
+
+
 async def test_media_parses_relations_and_drops_non_anime() -> None:
     fake = frieren_fake()
     async with fake.client() as client:

@@ -92,6 +92,20 @@ describe('Recs', () => {
     expect(screen.getAllByRole('button')).toHaveLength(1)
   })
 
+  it('gives each pick the 2:3 key visual and the case as body type', async () => {
+    renderRecs({ [RECS_PATH]: { body: RECS_PAGE } })
+
+    const case_ = await screen.findByText(REC_CASE_FRIEREN)
+    // The case is the point of the card, so it gets body type, not a caption.
+    expect(case_.className).toContain('text-[16px]')
+
+    const cover = screen
+      .getByRole('link', { name: FRIEREN.title.preferred })
+      .closest('article')
+      ?.querySelector('.aspect-\\[2\\/3\\]')
+    expect(cover).not.toBeNull()
+  })
+
   it('prefills the box from the newest run, so pressing Get picks refreshes it', async () => {
     const fetchMock = renderRecs({
       [RECS_PATH]: { body: RECS_PAGE },

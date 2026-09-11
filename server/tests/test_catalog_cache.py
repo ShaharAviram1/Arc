@@ -505,7 +505,17 @@ async def test_a_mal_summary_page_attaches_to_the_anilist_rows(
     rows = await upsert_summaries(db_session, mal_page)
 
     assert frieren_id in {row.id for row in rows}
-    assert all(row.summary_source == "mal" for row in rows)
+    # Landing on the row is the point; owning it is not. The rows that already
+    # carried AniList summaries keep ``summary_source = "anilist"``, because
+    # the fallback only filled whatever was null (rule 3) and a row whose
+    # columns AniList still owns must not be re-labelled — that label is what
+    # holds the *next* MAL page to the same rule.
+    by_id = {row.id: row for row in rows}
+    assert by_id[frieren_id].summary_source == "anilist"
+    # …and a title the AniList page never returned is a new row, which MAL
+    # does own.
+    fresh = [row for row in rows if row.anilist_id is None]
+    assert fresh and all(row.summary_source == "mal" for row in fresh)
 
 
 # --- The next broadcast (FR-C3, FR-C6, FR-C7) -------------------------------
@@ -563,8 +573,10 @@ async def test_a_mal_slot_does_not_replace_an_anilist_one_on_a_summary_row(
 
     assert after.id == row.id
     assert after.next_airing == PUBLISHED_SLOT
-    # The rest of the summary is MAL's now; only the slot was protected.
-    assert after.summary_source == "mal"
+    # Since M15 the rest of the summary is protected too, not just the slot:
+    # the fallback fills nulls and leaves ``summary_source`` naming the source
+    # whose columns these still are.
+    assert after.summary_source == "anilist"
 
 
 async def test_an_anilist_slot_replaces_a_mal_estimate_on_a_summary_row(
@@ -693,6 +705,363 @@ async def test_sync_backfills_an_air_time_and_never_blanks_one(
 
     await sync_episodes(db_session, anime, [])  # and back to nothing
     assert all(e.air_at is not None for e in await episodes_for(db_session, anime.id))
+
+
+# --- Episode titles and stills (M15) ----------------------------------------
+
+
+async def test_a_detail_fetch_fills_episode_titles_and_stills(
+    db_session: AsyncSession,
+) -> None:
+    """The fixture's ``streamingEpisodes``, placed on the right rows.
+
+    Six entries: three that parse, a duplicate of one of them, a trailer, and
+    an episode 99 this twelve-episode show does not have.
+    """
+    media = parse_media(media_payload("media_999001_releasing"), full=True)
+    anime = await upsert_detail(db_session, media)
+
+    assert await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras) == 12
+
+    by_number = {episode.number: episode for episode in await episodes_for(db_session, anime.id)}
+    assert by_number[1].title == "A Beginning"
+    assert by_number[1].still_url == "https://img.test/arc-e01.jpg"
+    # The dub link is the same episode with a worse thumbnail, not a new one.
+    assert by_number[2].title == "A Middle"
+    assert by_number[2].still_url == "https://img.test/arc-e02.jpg"
+    # "Episode 3" carries no title of its own; the still still lands.
+    assert by_number[3].title is None
+    assert by_number[3].still_url == "https://img.test/arc-e03.jpg"
+    # The trailer named no episode, so nothing was placed from it.
+    assert by_number[4].title is None
+    assert by_number[4].still_url is None
+
+
+async def test_an_episode_the_show_does_not_have_is_not_invented(
+    db_session: AsyncSession,
+) -> None:
+    """A thumbnail must never create an episode row.
+
+    The fixture lists "Episode 99 - Not This Show", which is what a recap or a
+    sequel's link looks like when it lands on the wrong entry.
+    """
+    media = parse_media(media_payload("media_999001_releasing"), full=True)
+    anime = await upsert_detail(db_session, media)
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+
+    episodes = await episodes_for(db_session, anime.id)
+    assert [episode.number for episode in episodes] == list(range(1, 13))
+
+
+async def test_a_title_that_is_already_there_is_never_overwritten(
+    db_session: AsyncSession,
+) -> None:
+    """A title confirmed by hand outranks anything a refresh brings back."""
+    media = parse_media(media_payload("media_999001_releasing"), full=True)
+    anime = await upsert_detail(db_session, media)
+    await sync_episodes(db_session, anime, media.airing)
+
+    episodes = await episodes_for(db_session, anime.id)
+    episodes[0].title = "What the admin called it"
+    episodes[0].still_url = "https://img.test/chosen-by-hand.jpg"
+    await db_session.flush()
+
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+
+    by_number = {episode.number: episode for episode in await episodes_for(db_session, anime.id)}
+    assert by_number[1].title == "What the admin called it"
+    assert by_number[1].still_url == "https://img.test/chosen-by-hand.jpg"
+    # The episodes that had nothing still filled in.
+    assert by_number[2].title == "A Middle"
+
+
+async def test_a_later_fetch_with_no_art_does_not_blank_it(db_session: AsyncSession) -> None:
+    """A MAL refresh during an outage must not cost the stills AniList found."""
+    media = parse_media(media_payload("media_999001_releasing"), full=True)
+    anime = await upsert_detail(db_session, media)
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+
+    await sync_episodes(db_session, anime, media.airing)
+
+    by_number = {episode.number: episode for episode in await episodes_for(db_session, anime.id)}
+    assert by_number[1].title == "A Beginning"
+    assert by_number[1].still_url == "https://img.test/arc-e01.jpg"
+
+
+async def test_filling_the_art_is_idempotent(db_session: AsyncSession) -> None:
+    media = parse_media(media_payload("media_999001_releasing"), full=True)
+    anime = await upsert_detail(db_session, media)
+
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+    first = [
+        (e.id, e.number, e.title, e.still_url) for e in await episodes_for(db_session, anime.id)
+    ]
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+    second = [
+        (e.id, e.number, e.title, e.still_url) for e in await episodes_for(db_session, anime.id)
+    ]
+
+    assert first == second
+
+
+async def test_a_mal_detail_fetch_leaves_the_episode_art_alone(
+    db_session: AsyncSession,
+) -> None:
+    """MAL publishes no per-episode anything, so nothing is written (FR-C6)."""
+    media = mal_detail()
+    assert media.episode_extras == []
+
+    anime = await upsert_detail(db_session, media)
+    await sync_episodes(db_session, anime, media.airing, extras=media.episode_extras)
+
+    episodes = await episodes_for(db_session, anime.id)
+    assert episodes
+    assert all(episode.title is None for episode in episodes)
+    assert all(episode.still_url is None for episode in episodes)
+
+
+async def test_a_refresh_fills_the_art_of_a_row_that_predates_the_columns(
+    db_session: AsyncSession,
+) -> None:
+    """The whole migration story: existing rows fill in on their next refresh.
+
+    A row written before M15 has null artwork columns, which is exactly the
+    state a fresh row is in, so the test blanks them and runs the refresh job's
+    own path (``ensure_anime`` with ``max_age=0``).
+    """
+    fake = FakeAniList(media={RELEASING_ID: load("media_999001_releasing")})
+    catalog = catalog_over(fake)
+    anime = await ensure_anime(db_session, catalog, anilist_id=RELEASING_ID)
+
+    anime.cover_large_url = None
+    anime.credits = None
+    for episode in await episodes_for(db_session, anime.id):
+        episode.title = None
+        episode.still_url = None
+    await db_session.flush()
+
+    refreshed = await ensure_anime(db_session, catalog, anime_id=anime.id, max_age=timedelta(0))
+    assert refreshed.cover_large_url == (
+        "https://s4.anilist.co/file/anilistcdn/media/anime/cover/xl/bx999001.jpg"
+    )
+    assert refreshed.credits is not None
+    by_number = {e.number: e for e in await episodes_for(db_session, anime.id)}
+    assert by_number[1].still_url == "https://img.test/arc-e01.jpg"
+
+
+# --- Key art and credits (M15) ----------------------------------------------
+
+
+async def test_an_anilist_detail_fetch_stores_the_key_art_and_the_credits(
+    db_session: AsyncSession,
+) -> None:
+    anime = await frieren(db_session)
+
+    assert anime.cover_large_url == (
+        "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-qQTzQnEJJ3oB.jpg"
+    )
+    assert anime.credits is not None
+    assert anime.credits[0] == {"role": "Studio", "name": "MADHOUSE"}
+    assert [row["role"] for row in anime.credits] == [
+        "Studio",
+        "Director",
+        "Series Composition",
+        "Character Design",
+        "Music",
+        "Original Creator",
+        "Original Creator",
+    ]
+    # The sound director, the art director and the theme song performer are in
+    # the fixture's twelve staff edges and in none of these rows.
+    assert "Satoki Iida" not in [row["name"] for row in anime.credits]
+
+
+async def test_a_search_result_carries_the_key_art_but_no_credits(
+    db_session: AsyncSession,
+) -> None:
+    """``coverImage.extraLarge`` is already in the summary fragment (M15).
+
+    So a card gets the sharp artwork for nothing, while the credits stay a
+    detail column — the staff connection is only asked for by the by-id query.
+    """
+    page = load("search_frieren")["data"]["Page"]["media"]
+    rows = await upsert_summaries(db_session, [parse_media(raw, full=False) for raw in page[:1]])
+
+    assert rows[0].cover_large_url is not None
+    assert rows[0].cover_large_url.endswith(".jpg")
+    assert rows[0].credits is None
+
+
+async def test_a_mal_row_has_no_key_art_and_a_credits_block_of_one(
+    db_session: AsyncSession,
+) -> None:
+    """MAL's biggest picture is 230 px and it publishes no staff at all."""
+    media = mal_detail()
+    assert media.cover_large_url is None
+
+    anime = await upsert_detail(db_session, media)
+    assert anime.cover_large_url is None
+    assert anime.credits == [{"role": "Studio", "name": "Madhouse"}]
+
+
+async def test_anilist_overwrites_a_mal_credits_block(db_session: AsyncSession) -> None:
+    """The fill-only rule runs the right way round for the new columns too."""
+    anime = await upsert_detail(db_session, mal_detail())
+    assert anime.credits == [{"role": "Studio", "name": "Madhouse"}]
+
+    anime = await upsert_detail(db_session, anilist_detail())
+    assert anime.credits is not None
+    assert len(anime.credits) > 1
+    assert anime.cover_large_url is not None
+
+
+async def test_mal_does_not_overwrite_an_anilist_credits_block(
+    db_session: AsyncSession,
+) -> None:
+    anime = await upsert_detail(db_session, anilist_detail())
+    before = list(anime.credits or [])
+    cover = anime.cover_large_url
+
+    anime = await upsert_detail(db_session, mal_detail())
+
+    assert anime.credits == before
+    # A null from the weaker source is not a correction (rule 3).
+    assert anime.cover_large_url == cover
+
+
+# --- The fallback never overwrites the primary (rule 3) ---------------------
+#
+# Judged per half of the row: ``summary_source`` for the card columns,
+# ``detail_source`` for the rest. The artwork columns are the visible half of
+# this — MAL's cover is 230 px where AniList's is 1900 — which is what made it
+# worth tightening for the M15 redesign.
+
+
+async def test_a_mal_refresh_keeps_anilists_art_and_prose_but_fills_the_nulls(
+    db_session: AsyncSession,
+) -> None:
+    """An outage must not cost a good row its cover, banner or synopsis."""
+    anime = await upsert_detail(db_session, anilist_detail())
+    cover, banner = anime.cover_url, anime.banner_url
+    description, key_art = anime.description, anime.cover_large_url
+    assert cover and banner and description and key_art
+    # A column AniList left empty, so there is something for MAL to fill.
+    anime.season_year = None
+    await db_session.flush()
+
+    after = await upsert_detail(db_session, mal_detail())
+
+    assert after.id == anime.id
+    assert after.cover_url == cover
+    assert after.banner_url == banner
+    assert after.description == description
+    assert after.cover_large_url == key_art
+    assert after.title_romaji == "Sousou no Frieren"
+    # …and the null was filled, which is the half of the rule that is not "no".
+    assert after.season_year == 2023
+    # Neither source column changed hands: the columns are still AniList's.
+    assert (after.summary_source, after.detail_source) == ("anilist", "anilist")
+    # The row was still asked about and answered, so it is still fresh (FR-C5).
+    assert after.refreshed_at is not None
+
+
+async def test_an_anilist_refresh_replaces_everything_on_a_mal_row(
+    db_session: AsyncSession,
+) -> None:
+    """The other direction: the primary's return upgrades the whole row."""
+    anime = await upsert_detail(db_session, mal_detail())
+    assert anime.cover_url is not None and "myanimelist" in anime.cover_url
+    assert anime.cover_large_url is None
+    mal_description = anime.description
+
+    after = await upsert_detail(db_session, anilist_detail())
+
+    assert after.id == anime.id
+    assert after.cover_url is not None and "anilist" in after.cover_url
+    assert after.cover_large_url is not None
+    assert after.banner_url is not None
+    assert after.description != mal_description
+    assert after.tags  # MAL publishes none at all
+    assert (after.summary_source, after.detail_source) == ("anilist", "anilist")
+
+
+async def test_mal_updates_its_own_row_in_full(db_session: AsyncSession) -> None:
+    """A source always gets to correct itself; the rule is about *other* ones.
+
+    Equal ranks are not outranked — otherwise a MAL-only deployment, or a show
+    AniList has never heard of, would freeze at whatever the first fetch said.
+    """
+    anime = await upsert_detail(db_session, mal_detail())
+    assert anime.description is not None
+
+    corrected = replace(
+        mal_detail(),
+        title=MediaTitle(romaji="Sousou no Frieren", english="Frieren, renamed"),
+        episodes=29,
+        cover_url="https://cdn.myanimelist.net/images/anime/1015/corrected.jpg",
+        description="A corrected synopsis.",
+    )
+    after = await upsert_detail(db_session, corrected)
+
+    assert after.id == anime.id
+    assert after.title_english == "Frieren, renamed"
+    assert after.episodes == 29
+    assert after.cover_url is not None and after.cover_url.endswith("corrected.jpg")
+    assert after.description == "A corrected synopsis."
+    assert (after.summary_source, after.detail_source) == ("mal", "mal")
+
+
+async def test_a_mal_search_does_not_rewrite_an_anilist_card(
+    db_session: AsyncSession,
+) -> None:
+    """The summary half on its own, with no detail fetch anywhere in sight.
+
+    A season sweep or a search during an outage leaves ``detail_source`` null,
+    so this case is decided entirely by ``summary_source`` — which is why the
+    two halves are judged separately rather than by one shared flag.
+    """
+    page = load("search_frieren")["data"]["Page"]["media"]
+    [row] = await upsert_summaries(db_session, [parse_media(page[0], full=False)])
+    assert row.detail_source is None
+    cover, key_art = row.cover_url, row.cover_large_url
+
+    mal_page = [
+        parse_anime(entry["node"], full=False) for entry in mal_load("search_frieren")["data"]
+    ]
+    mal_frieren = next(item for item in mal_page if item.mal_id == FRIEREN_MAL_ID)
+    [after] = await upsert_summaries(db_session, [mal_frieren])
+
+    assert after.id == row.id
+    assert after.cover_url == cover
+    assert after.cover_large_url == key_art
+    assert after.summary_source == "anilist"
+
+
+async def test_a_mal_detail_fetch_still_fills_a_row_only_a_search_had_touched(
+    db_session: AsyncSession,
+) -> None:
+    """The rule must not become "MAL may never write to an AniList row".
+
+    A row from an AniList *search* has ``summary_source = "anilist"`` and no
+    detail at all. MAL is barred from its card columns and must still be free
+    to fill the synopsis, genres and relations — during an outage that is the
+    only way the show page gets a synopsis at all.
+    """
+    page = load("search_frieren")["data"]["Page"]["media"]
+    [row] = await upsert_summaries(db_session, [parse_media(page[0], full=False)])
+    assert row.description is None
+    cover = row.cover_url
+
+    after = await upsert_detail(db_session, mal_detail())
+
+    assert after.id == row.id
+    assert after.description is not None
+    assert after.genres
+    assert after.credits == [{"role": "Studio", "name": "Madhouse"}]
+    assert after.detail_source == "mal"
+    # The card columns are still AniList's, and still say so.
+    assert after.cover_url == cover
+    assert after.summary_source == "anilist"
 
 
 # --- Estimated air times (FR-C6) --------------------------------------------

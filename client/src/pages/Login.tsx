@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
-import { AuthShell, FormError, fieldClass, labelClass, submitClass } from '@/components/AuthShell'
+import { AuthShell, FormError } from '@/components/AuthShell'
+import { buttonClass, inputClass, LABEL_CLASS } from '@/components/ui'
 import { authErrorMessage, useLogin, useMe } from '@/lib/auth'
 
 /** A string field of an untyped router-state object, or '' when it is absent. */
@@ -64,7 +65,7 @@ export function Login() {
     >
       <form onSubmit={handleSubmit} noValidate>
         <div>
-          <label className={labelClass} htmlFor="login-email">
+          <label className={LABEL_CLASS} htmlFor="login-email">
             Email
           </label>
           <input
@@ -78,12 +79,12 @@ export function Login() {
             onChange={(event) => {
               setEmail(event.target.value)
             }}
-            className={fieldClass}
+            className={inputClass('mt-2 w-full')}
           />
         </div>
 
         <div className="mt-4">
-          <label className={labelClass} htmlFor="login-password">
+          <label className={LABEL_CLASS} htmlFor="login-password">
             Password
           </label>
           <input
@@ -96,13 +97,17 @@ export function Login() {
             onChange={(event) => {
               setPassword(event.target.value)
             }}
-            className={fieldClass}
+            className={inputClass('mt-2 w-full')}
           />
         </div>
 
         {login.isError ? <FormError>{authErrorMessage(login.error)}</FormError> : null}
 
-        <button type="submit" className={submitClass} disabled={login.isPending}>
+        <button
+          type="submit"
+          className={buttonClass('primary', 'mt-7 w-full')}
+          disabled={login.isPending}
+        >
           {login.isPending ? 'Signing in…' : 'Sign in'}
         </button>
       </form>

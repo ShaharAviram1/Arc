@@ -318,6 +318,9 @@ describe('Mal', () => {
       // skipped ones are not — neither has a value on MAL to put back.
       const buttons = await screen.findAllByRole('button', { name: 'Revert' })
       expect(buttons).toHaveLength(2)
+      // M15: Revert is a chip, not a bare text link — small and reversible,
+      // never the loudest thing in the row.
+      expect(buttons[0]).toHaveClass('rounded-full')
 
       await userEvent.click(buttons[0] as HTMLElement)
       await waitFor(() => {

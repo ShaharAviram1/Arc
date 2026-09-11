@@ -357,7 +357,141 @@
       },
       "upcoming": {
         "nodes": []
-      }
+      },
+      "staff": {
+        "edges": [
+          {
+            "role": "Original Creator",
+            "node": {
+              "name": {
+                "full": "Kanehito Yamada"
+              }
+            }
+          },
+          {
+            "role": "Director",
+            "node": {
+              "name": {
+                "full": "Keiichirou Saitou"
+              }
+            }
+          },
+          {
+            "role": "Series Composition",
+            "node": {
+              "name": {
+                "full": "Tomohiro Suzuki"
+              }
+            }
+          },
+          {
+            "role": "Character Design",
+            "node": {
+              "name": {
+                "full": "Reiko Nagasawa"
+              }
+            }
+          },
+          {
+            "role": "Music",
+            "node": {
+              "name": {
+                "full": "Evan Call"
+              }
+            }
+          },
+          {
+            "role": "Original Creator",
+            "node": {
+              "name": {
+                "full": "Tsukasa Abe"
+              }
+            }
+          },
+          {
+            "role": "Chief Animation Director",
+            "node": {
+              "name": {
+                "full": "Chikashi Kubota"
+              }
+            }
+          },
+          {
+            "role": "Art Director",
+            "node": {
+              "name": {
+                "full": "Atsushi Morikawa"
+              }
+            }
+          },
+          {
+            "role": "Sound Director",
+            "node": {
+              "name": {
+                "full": "Satoki Iida"
+              }
+            }
+          },
+          {
+            "role": "Director of Photography",
+            "node": {
+              "name": {
+                "full": "Yohei Igarashi"
+              }
+            }
+          },
+          {
+            "role": "Theme Song Performance",
+            "node": {
+              "name": {
+                "full": "YOASOBI"
+              }
+            }
+          },
+          {
+            "role": "Episode Director",
+            "node": {
+              "name": {
+                "full": "Naoyuki Onda"
+              }
+            }
+          }
+        ]
+      },
+      "streamingEpisodes": [
+        {
+          "title": "Episode 1 - The Journey's End",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e01.jpg"
+        },
+        {
+          "title": "Episode 2 - It Didn't Have to Be Magic",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e02.jpg"
+        },
+        {
+          "title": "Episode 3 - Killing Magic",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e03.jpg"
+        },
+        {
+          "title": "Episode 4 - The Land Where Souls Rest",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e04.jpg"
+        },
+        {
+          "title": "Episode 5 - Like a Fairy Tale",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e05.jpg"
+        },
+        {
+          "title": "Episode 6 - The Hero of the Village",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e06.jpg"
+        },
+        {
+          "title": "Episode 7 - Sole Heir",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e07.jpg"
+        },
+        {
+          "title": "Episode 8 - Frieren the Slayer",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e08.jpg"
+        }
+      ]
     }
   }
 }

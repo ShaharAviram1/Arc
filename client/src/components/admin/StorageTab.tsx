@@ -21,15 +21,14 @@ import {
   ConfirmButton,
   InlineError,
   Notice,
+  panelClass,
   Pill,
   SectionHeading,
-  panelClass,
-  primaryButtonClass,
-  subtleButtonClass,
   TableScroll,
   tdClass,
   thClass,
 } from '@/components/admin/ui'
+import { primaryButtonClass, subtleButtonClass } from '@/components/admin/styles'
 import {
   adminErrorMessage,
   formatBytes,
@@ -60,8 +59,8 @@ function DiskPanel({ disk }: { disk: RetentionDisk }) {
   return (
     <div className={`mt-4 ${panelClass}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-sm font-medium text-[var(--arc-text)]">Data directory</h3>
-        <p className="text-sm text-[var(--arc-text-muted)]">
+        <h3 className="text-[16px] font-medium text-[var(--arc-text)]">Data directory</h3>
+        <p className="text-[14px] tabular-nums text-[var(--arc-text-muted)]">
           {formatBytes(disk.data_dir.used)} used of {formatBytes(disk.data_dir.total)} ·{' '}
           {formatBytes(disk.data_dir.free)} free
         </p>
@@ -73,11 +72,14 @@ function DiskPanel({ disk }: { disk: RetentionDisk }) {
         aria-valuemax={100}
         aria-valuenow={Math.round(fraction * 100)}
         aria-valuetext={`${formatPercent(fraction)} used`}
-        className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-[var(--arc-surface-raised)]"
+        className="mt-3 h-1 w-full overflow-hidden rounded-full bg-[var(--arc-progress-track)]"
       >
+        {/* White, like every other progress bar in Arc; the arc gradient marks
+            season progress in My List and nothing else. Only a disk about to
+            fill up earns a colour of its own. */}
         <div
           className={`h-full rounded-full ${
-            fraction > 0.9 ? 'bg-[var(--arc-error)]' : 'bg-[var(--arc-accent)]'
+            fraction > 0.9 ? 'bg-[var(--arc-error)]' : 'bg-[var(--arc-progress-fill)]'
           }`}
           style={{ width: `${String(Math.round(fraction * 100))}%` }}
         />
@@ -90,9 +92,14 @@ function DiskPanel({ disk }: { disk: RetentionDisk }) {
           ['Retained total', formatBytes(disk.retained.total)],
           ['Episodes retained', String(disk.episodes_retained)],
         ].map(([label, value]) => (
-          <div key={label}>
-            <dt className="text-xs text-[var(--arc-text-muted)]">{label}</dt>
-            <dd className="text-sm text-[var(--arc-text)]">{value}</dd>
+          <div
+            key={label}
+            className="rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3"
+          >
+            <dt className="text-[12px] font-semibold tracking-[0.08em] text-[var(--arc-text-muted)] uppercase">
+              {label}
+            </dt>
+            <dd className="mt-1 text-[16px] tabular-nums text-[var(--arc-text)]">{value}</dd>
           </div>
         ))}
       </dl>
@@ -115,17 +122,14 @@ function PreviewRow({ item }: { item: RetentionItem }) {
   return (
     <tr className="border-t border-[var(--arc-border)]">
       <td className={tdClass}>
-        <Link
-          to={`/anime/${String(item.anime_id)}`}
-          className="font-medium hover:text-[var(--arc-accent)]"
-        >
+        <Link to={`/anime/${String(item.anime_id)}`} className="font-medium hover:underline">
           {item.anime_title}
         </Link>
         <span className="text-[var(--arc-text-muted)]"> · episode {item.number}</span>
       </td>
       <td className={tdClass}>
         <span
-          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs whitespace-nowrap ${episodeStateClass(item.state)}`}
+          className={`inline-flex items-center rounded-full border-[0.5px] px-2.5 py-0.5 text-[12px] whitespace-nowrap ${episodeStateClass(item.state)}`}
         >
           {episodeStateLabel(item.state)}
         </span>
@@ -169,10 +173,12 @@ export function StorageTab() {
   return (
     <div>
       <SectionHeading>Storage</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">{EXPLANATION}</p>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {EXPLANATION}
+      </p>
 
       {disk.isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Loading disk usage…
         </p>
       ) : disk.isError ? (
@@ -214,7 +220,7 @@ export function StorageTab() {
         ) : null}
 
         {preview.isPending ? (
-          <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+          <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
             Loading the preview…
           </p>
         ) : preview.isError ? (
@@ -235,13 +241,13 @@ export function StorageTab() {
             ) : null}
 
             {preview.data.episodes.length === 0 ? (
-              <p className="text-sm text-[var(--arc-text-muted)]">
+              <p className="text-[14px] text-[var(--arc-text-muted)]">
                 Nothing is due for deletion. Files are removed, and only removed, once the grace
                 period has run out.
               </p>
             ) : (
               <>
-                <p className="mb-3 text-sm text-[var(--arc-text-muted)]">
+                <p className="mb-4 text-[14px] text-[var(--arc-text-muted)]">
                   {preview.data.episodes.length === 1
                     ? '1 episode'
                     : `${String(preview.data.episodes.length)} episodes`}{' '}

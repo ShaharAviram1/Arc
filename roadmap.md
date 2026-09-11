@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-10 (M0–M14 done; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-12 (M0–M15 done; M15.5 next; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -272,6 +272,38 @@ CLAUDE.md).
   a failed job put it back through the worker.
 
 ### M15 — UI overhaul
+- [x] Design brief written 2026-09-10 (`design/m15-brief.md`): owner
+      decisions (quiet cinema, dark only, phone bottom tab bar, designer
+      proposes accent and mark), tokens, components, every screen and state,
+      accessibility, deliverables; before-screenshots in `notes/design/before/`.
+      The design pass itself runs in Claude Design; implementation follows
+      from its output.
+- [x] Design received 2026-09-11 (`design/arc-design/`, Apple TV grammar) and
+      implemented the same day: tokens + toolbar/avatar-menu/phone tab bar
+      shell + `components/ui` primitives; catalogue key art, credits and
+      episode stills (server); Watch Now, Browse (with the Recommendations
+      button), new My List, Show (hero, episode rows, franchise rail, credits)
+      and the custom Player; Schedule, Recs, Review, MAL, Admin, Login, Invite
+      restyled from the earlier prototype's structure. Favicon from the new
+      mark. Before/after screenshots in `notes/design/{before,after}/`.
+- [x] Owner remark rounds 2026-09-11: Schedule in the toolbar; Home hero =
+      season recommendations (banner-first, poster-hero fallback, no upscaled
+      posters); Continue watching shelf incl. rewatches (server rule); player
+      controls regrouped (⟲10 · play · ⟳10 | prev · next · watched | fullscreen),
+      translucent low bar so burned subtitles stay visible, 1.5 s auto-hide,
+      double-tap fullscreen; local-first catalogue search; encoder defaults
+      fast/CRF 19/tune animation (owner: keep and monitor); logo links home.
+- [ ] Owner sign-off remarks on navigation and Watch Now (2026-09-11),
+      implemented and awaiting the orchestrator's own validation: Schedule
+      joins the toolbar nav and the top of the phone "More" sheet (four tabs
+      unchanged); Watch Now's hero becomes a cycling set of season
+      recommendations (at most two of the latest run's in-season picks, then
+      unfollowed season shows ranked by overlap with the viewer's top-3
+      genres and then by popularity — never filtered by genre, so a season
+      cached without genres is still offered — cap 6, hidden when empty,
+      "Add to list" → planned and "Details"); Continue watching
+      becomes the first shelf and "Up Next" narrows to ready-but-unstarted
+      episodes as "Ready to watch". No server or API change.
 - [ ] Design pass over every page once all of them exist (after M14):
       visual language (type scale, spacing, colour tokens, cover/poster
       treatment, badges, empty and loading states), consistent components
@@ -285,9 +317,42 @@ CLAUDE.md).
       `notes/` or a design canvas.
 - [ ] Keep every behaviour and test green; no API changes; component
       changes covered by the existing RTL tests.
+- [x] Owner sign-off 2026-09-12 after three remark rounds (all pages checked
+      in Chrome by the owner and the orchestrator; full suite green: 2567
+      server / 523 client). Encoder stays faithful: no denoise (owner).
 - **DoD:** the owner signs off on each page in the browser; no functional
   regressions (full suite green); phone layout usable for Home and Player
   (spec §5).
+
+### M15.5 — Catalogue resilience: offline database + TMDB (approved 2026-09-11)
+Why: AniList suspends its third-party API during instability (this week: three
+days of 403 "temporarily disabled"), which broke search, drifted fixtures,
+degraded art through the MAL fallback and starved the redesign of key art.
+- [ ] Weekly import job of the manami `anime-offline-database` (≈ 40k shows;
+      titles, synonyms, type, season, episodes, picture, cross-ids for
+      AniList/MAL/Kitsu/AniDB) and Fribb's `anime-lists` id map (adds TMDB
+      series + season, TVDB, IMDb) into two tables; replace-on-import,
+      versioned by release tag; `arc.cli import-catalogue` for a manual run
+- [ ] Search and filename matching consult the offline tables first
+      (titles + synonyms, all sources), then live AniList, then MAL; internal
+      ids attached via the cross-id map so the same show never gets two rows
+- [ ] Season lists and "what airs this season" seeded from the offline
+      database when both live sources are unavailable (air times still come
+      from MAL broadcast slots)
+- [ ] TMDB enrichment (`TMDB_API_KEY`): nightly job fills missing
+      `banner_url` (backdrop), `cover_large_url` (poster), episode
+      `still_url`/`title`, and `credits` for followed shows via the id map;
+      never overwrites AniList-provided values (cache rule 3); attribution in
+      the UI footer as TMDB's terms require
+- [ ] Config check warnings for a missing key / stale import (> 14 days);
+      admin Storage tab shows the import version and age
+- [ ] Re-capture AniList fixtures when the API is back; `capture_anilist.py`
+      also refreshes the offline-db fixture slice used in tests
+- **DoD:** with AniList and MAL both blocked in a test, search for a known
+  title, adding it to a list, the season page and the Show page (with art
+  from TMDB) all work; the weekly import runs in production and the Show
+  page of a followed show without AniList art shows a TMDB backdrop and
+  stills.
 
 ### M16 — Quality and finish
 - [ ] Per-show overrides UI for group/resolution
@@ -326,7 +391,7 @@ closer to the date; candidates:
 
 ```
 M0 → M1 → M2 → M3 → M3b → M4
-              M3b → M5 → M6 → M7 → M8 → M9 → M10 → M11
+              M3b → M5 → M6 → M7 → M8 → M9 → M10 → M11 → … → M15 → M15.5 → M16
                                      M8 → M12
                                      M5 → M13
                                      M11 → M14 → M15 → M16

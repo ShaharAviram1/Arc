@@ -93,6 +93,27 @@ class AiringEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodeArt:
+    """What a source knows about one episode beyond when it aired (M15).
+
+    A separate record from :class:`AiringEntry` because the two come from
+    different places and arrive for different episodes: the schedule is every
+    episode a broadcaster has a slot for, while the title and the still come
+    from AniList's ``streamingEpisodes``, which lists only the episodes some
+    streaming service has published a page for. Merging them into one type
+    would mean every schedule entry carrying two nulls and every art entry
+    pretending to know an air time.
+
+    Both fields are optional: an entry that parsed as "Episode 12" with no
+    title still carries a usable thumbnail.
+    """
+
+    number: int
+    title: str | None = None
+    still_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MediaRelation:
     """A sequel/prequel/side story edge, as stored in ``anime.relations``.
 
@@ -129,6 +150,11 @@ class CatalogMedia:
     season: str | None = None
     season_year: int | None = None
     cover_url: str | None = None
+    #: The key visual at its largest published size (M15). A *summary* field:
+    #: AniList's search fragment already asks for ``coverImage.extraLarge``,
+    #: so a card gets it for free and nothing extra is fetched for it. Null
+    #: from MAL, which publishes nothing bigger than ``main_picture.large``.
+    cover_large_url: str | None = None
     #: How many people have the show on a list, and the average score out of
     #: 100. Summary fields, because the recommendation pool ranks by them and
     #: only ever sees summaries for a season (§5.6). Both are null from a
@@ -142,11 +168,21 @@ class CatalogMedia:
     synonyms: list[str] = field(default_factory=list)
     tags: list[dict[str, Any]] = field(default_factory=list)
     studio: str | None = None
+    #: ``[{role, name}]``, studio first, as stored in ``anime.credits`` (M15).
+    #: Built by :func:`arc.services.catalog.credits.credits_from` so that both
+    #: sources agree on the order and on what a role is called; MAL's has the
+    #: studio row and nothing else.
+    credits: list[dict[str, Any]] = field(default_factory=list)
     relations: list[MediaRelation] = field(default_factory=list)
     #: AniList's ``nextAiringEpisode`` blob, stored verbatim in JSONB. MAL has
     #: no equivalent and always leaves this null.
     next_airing: dict[str, Any] | None = None
     airing: list[AiringEntry] = field(default_factory=list)
+    #: Per-episode titles and stills, for whichever episodes the source has
+    #: them (M15). Sparse and unordered by contract — ``sync_episodes`` looks
+    #: entries up by number and ignores any that name an episode the show does
+    #: not have.
+    episode_extras: list[EpisodeArt] = field(default_factory=list)
     #: ``(weekday, local time)`` of the broadcast slot, in Asia/Tokyo — MAL's
     #: only statement about when episodes air. Monday is 0.
     broadcast: tuple[int, time] | None = None
@@ -204,6 +240,7 @@ __all__ = [
     "CatalogError",
     "CatalogMedia",
     "CatalogSource",
+    "EpisodeArt",
     "MediaRelation",
     "MediaTitle",
     "SearchPage",

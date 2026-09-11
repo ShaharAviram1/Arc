@@ -216,14 +216,15 @@ class NewEpisodeEntry(BaseModel):
 
 
 class ContinueWatchingEntry(BaseModel):
-    """An episode started but not finished, most recent first (FR-W1).
+    """An episode with somewhere left to get to, most recent first (FR-W1).
 
     ``position_s`` is what the player seeks to, and it is the *stored*
     position rather than the resume rule's answer: the row is only here at all
     because it is past :data:`~arc.services.playback.progress.
-    CONTINUE_MIN_POSITION_S` and not completed, so the two agree except at the
-    95 % ceiling — and a card that says "6 minutes left" while the player would
-    start from zero is the sort of disagreement worth not having.
+    CONTINUE_MIN_POSITION_S` and short of the shelf's ceiling, which is no
+    looser than the resume rule's — and a card that says "6 minutes left"
+    while the player would start from zero is the sort of disagreement worth
+    not having.
     """
 
     anime: AnimeSummary
@@ -250,10 +251,12 @@ class ContinueWatchingEntry(BaseModel):
                 row.episode,
                 now=now,
                 anime_status=row.anime.status,
-                # Never true here by construction: the query that produced this
-                # row filters completed rows out. Passed explicitly all the same,
-                # so the flag has one source rather than a default.
-                watched=False,
+                # A rewatch left half-way is on this shelf (FR-W1), so this is
+                # sometimes true. It comes off the row's own ``watch_progress``
+                # rather than a second lookup, and it is the same flag the show
+                # page's mark reads: the shelf changed which rows it lists, not
+                # what "watched" means.
+                watched=row.completed,
                 torrent=torrent,
                 rendition=rendition,
                 transcode_job=transcode_job,

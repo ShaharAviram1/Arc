@@ -26,6 +26,25 @@ would be six hundred lines that say the same thing less clearly.
 
 Regenerate the two captured ones against the live API with
 ``scripts/capture_anilist.py`` whenever the shape of a query changes.
+
+**One caveat on ``media_154587.json`` (2026-09-11).** Its ``staff`` and
+``streamingEpisodes`` blocks — the two fields M15 added to the detail query —
+are *hand-written stand-ins*, not captured: AniList answered every request that
+day with its 403 "temporarily disabled", which is the same outage the MAL
+fallback exists for. They carry Frieren's real crew and the shape AniList
+publishes, so the parsers are exercised against something realistic, but the
+episode titles and thumbnail URLs are not upstream's own. Running
+``scripts/capture_anilist.py`` once the API is back replaces them with the real
+thing and nothing here has to change.
+
+**And one drift, in all three captured fixtures (2026-09-11).** None of them
+carries ``popularity`` or ``averageScore``: both were added to
+``SUMMARY_FRAGMENT`` on 2026-09-10 and the fixtures have not been re-captured
+since, so every AniList-driven test sees them as null. Nothing is wrong with
+the parser — ``tests/test_mal_source.py`` covers the equivalent MAL fields, and
+``tests/test_home_api.py`` covers the API shape off a seeded row — but a test
+that wants a real ranking number out of an AniList payload cannot have one
+until the capture script runs again.
 """
 
 from __future__ import annotations

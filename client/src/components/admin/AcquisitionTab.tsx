@@ -24,14 +24,14 @@ import { Link } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import {
   InlineError,
+  panelClass,
   Pill,
   SectionHeading,
-  panelClass,
-  primaryButtonClass,
   TableScroll,
   tdClass,
   thClass,
 } from '@/components/admin/ui'
+import { primaryButtonClass } from '@/components/admin/styles'
 import {
   adminErrorMessage,
   formatBytes,
@@ -59,7 +59,7 @@ function PausePanel() {
 
   if (status.isPending) {
     return (
-      <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+      <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
         Loading acquisition status…
       </p>
     )
@@ -85,7 +85,7 @@ function PausePanel() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Pill tone={paused ? 'warn' : 'ok'}>{paused ? 'paused' : 'running'}</Pill>
-          <span className="text-sm text-[var(--arc-text)]">
+          <span className="text-[16px] text-[var(--arc-text)]">
             {paused ? 'Acquisition is paused.' : 'Acquisition is running.'}
           </span>
         </div>
@@ -102,7 +102,9 @@ function PausePanel() {
         </button>
       </div>
 
-      <p className="mt-2 max-w-3xl text-sm text-[var(--arc-text-muted)]">{PAUSE_EXPLANATION}</p>
+      <p className="mt-3 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {PAUSE_EXPLANATION}
+      </p>
 
       {setPaused.isError ? (
         <InlineError className="mt-2" message={adminErrorMessage(setPaused.error)} />
@@ -115,9 +117,14 @@ function PausePanel() {
           ['Downloading', String(status.data.downloading)],
           ['Retained', formatBytes(status.data.retained_bytes ?? 0)],
         ].map(([label, value]) => (
-          <div key={label}>
-            <dt className="text-xs text-[var(--arc-text-muted)]">{label}</dt>
-            <dd className="text-sm text-[var(--arc-text)]">{value}</dd>
+          <div
+            key={label}
+            className="rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3"
+          >
+            <dt className="text-[12px] font-semibold tracking-[0.08em] text-[var(--arc-text-muted)] uppercase">
+              {label}
+            </dt>
+            <dd className="mt-1 text-[16px] tabular-nums text-[var(--arc-text)]">{value}</dd>
           </div>
         ))}
       </dl>
@@ -131,10 +138,12 @@ function WantsPanel() {
   return (
     <section className="mt-10">
       <SectionHeading>Active wants</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">{WANTS_EXPLANATION}</p>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {WANTS_EXPLANATION}
+      </p>
 
       {wants.isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Loading wants…
         </p>
       ) : wants.isError ? (
@@ -147,7 +156,7 @@ function WantsPanel() {
           }}
         />
       ) : wants.data.length === 0 ? (
-        <p className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Nothing is wanted right now. Wants appear as episodes air for shows people are watching.
         </p>
       ) : (
@@ -173,22 +182,19 @@ function WantsPanel() {
                       {want.user_email ?? `user ${String(want.user_id)}`}
                     </td>
                     <td className={tdClass}>
-                      <Link
-                        to={`/anime/${String(want.anime_id)}`}
-                        className="hover:text-[var(--arc-accent)]"
-                      >
+                      <Link to={`/anime/${String(want.anime_id)}`} className="hover:underline">
                         {want.anime_title}
                       </Link>
                     </td>
                     <td className={`${tdClass} whitespace-nowrap`}>{want.episode_number}</td>
                     <td className={tdClass}>
                       <span
-                        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs whitespace-nowrap ${episodeStateClass(want.state)}`}
+                        className={`inline-flex items-center rounded-full border-[0.5px] px-2.5 py-0.5 text-[12px] whitespace-nowrap ${episodeStateClass(want.state)}`}
                       >
                         {episodeStateLabel(want.state)}
                       </span>
                       {want.unavailable_reason === null ? null : (
-                        <p className="mt-1 text-xs text-[var(--arc-text-muted)]">
+                        <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
                           {want.unavailable_reason}
                         </p>
                       )}
@@ -208,7 +214,7 @@ function WantsPanel() {
 function TorrentsTable({ status }: { status: QbitStatus }) {
   if (status.torrents.length === 0) {
     return (
-      <p className="mt-4 text-sm text-[var(--arc-text-muted)]">
+      <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
         qBittorrent is holding no torrents.
       </p>
     )
@@ -245,7 +251,7 @@ function TorrentsTable({ status }: { status: QbitStatus }) {
                 <td className={`${tdClass} whitespace-nowrap`}>{formatBytes(torrent.upspeed)}/s</td>
                 <td className={tdClass}>
                   {torrent.episode_id === null ? (
-                    <span className="text-xs text-[var(--arc-text-muted)]">not linked</span>
+                    <span className="text-[13px] text-[var(--arc-text-muted)]">not linked</span>
                   ) : (
                     <span className="whitespace-nowrap">#{torrent.episode_id}</span>
                   )}
@@ -267,7 +273,7 @@ function QbitPanel() {
       <SectionHeading>qBittorrent</SectionHeading>
 
       {qbit.isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Loading qBittorrent status…
         </p>
       ) : qbit.isError ? (
@@ -286,7 +292,7 @@ function QbitPanel() {
               {qbit.data.reachable ? 'reachable' : 'unreachable'}
             </Pill>
             {qbit.data.version === null ? null : (
-              <span className="text-sm text-[var(--arc-text-muted)]">
+              <span className="text-[14px] text-[var(--arc-text-muted)]">
                 version {qbit.data.version}
               </span>
             )}

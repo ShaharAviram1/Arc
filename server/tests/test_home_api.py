@@ -21,6 +21,7 @@ from sqlalchemy import event, select
 
 from arc.db import SessionFactory
 from arc.models import (
+    Anime,
     Episode,
     EpisodeState,
     Job,
@@ -606,9 +607,10 @@ async def test_continue_watching_is_capped(
     assert rows[0]["episode"]["number"] == 1
 
 
-async def test_a_finished_episode_leaves_continue_watching(
+async def test_an_episode_watched_to_the_end_leaves_continue_watching(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
+    """Past the ceiling there is nothing left to continue, completed or not."""
     anime_id = await airing_show(api_factory, title="Show A", anilist_id=910032)
     await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
     episode = await episode_number(api_factory, anime_id, 2)
@@ -617,16 +619,102 @@ async def test_a_finished_episode_leaves_continue_watching(
     assert (await home(client))["continue_watching"] == []
 
 
-async def test_an_episode_barely_started_is_not_continue_watching(
+async def test_a_rewatch_left_half_way_is_on_continue_watching(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
-    """A player that was open for four seconds started nothing."""
+    """FR-W1: the position decides, not ``completed``.
+
+    The owner's case: reopen an episode already marked watched, stop at the
+    midpoint, and the home page had nothing to offer — the shelf was the only
+    way back to that position and the flag was hiding it.
+    """
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910037)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=2)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode, position_s=700.0, completed=True)
+
+    rows = (await home(client))["continue_watching"]
+
+    assert len(rows) == 1
+    assert rows[0]["episode"]["id"] == episode.id
+    assert rows[0]["position_s"] == pytest.approx(700.0)
+    # The shelf changed which rows it lists, not what "watched" means: the card
+    # still carries the mark the show page and the player draw.
+    assert rows[0]["episode"]["watched"] is True
+
+
+async def test_continue_watching_orders_rewatches_with_everything_else(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """One order, ``updated_at`` descending, with the flag playing no part."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910038)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+    for number, minutes, completed in ((1, 90, True), (2, 5, False), (3, 30, True)):
+        episode = await episode_number(api_factory, anime_id, number)
+        await start_watching(
+            api_factory,
+            user,
+            episode,
+            position_s=700.0,
+            completed=completed,
+            at=NOW - timedelta(minutes=minutes),
+        )
+
+    rows = (await home(client))["continue_watching"]
+
+    assert [row["episode"]["number"] for row in rows] == [2, 3, 1]
+    assert [row["episode"]["watched"] for row in rows] == [False, True, True]
+
+
+@pytest.mark.parametrize(
+    ("position", "listed"),
+    [
+        (4.0, False),  # a player open for four seconds started nothing
+        (29.0, False),  # short of the floor
+        (30.0, True),  # the floor itself counts
+    ],
+)
+async def test_an_episode_barely_started_is_not_continue_watching(
+    client: AsyncClient,
+    user: User,
+    api_factory: SessionFactory,
+    position: float,
+    listed: bool,
+) -> None:
+    """Half a minute is where sampling becomes watching (FR-W1)."""
     anime_id = await airing_show(api_factory, title="Show A", anilist_id=910033)
     await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
     episode = await episode_number(api_factory, anime_id, 2)
-    await start_watching(api_factory, user, episode, position_s=4.0)
+    await start_watching(api_factory, user, episode, position_s=position)
 
-    assert (await home(client))["continue_watching"] == []
+    assert len((await home(client))["continue_watching"]) == (1 if listed else 0)
+
+
+@pytest.mark.parametrize(
+    ("position", "duration", "listed"),
+    [
+        (1340.0, 1420.0, True),  # 94 %, and eighty seconds left
+        (1349.0, 1420.0, False),  # the 95 % ceiling on a 24-minute episode
+        (200.0, 300.0, True),  # a five-minute short with a hundred left
+        (250.0, 300.0, False),  # 83 %, but under a minute left: it is over
+        (700.0, None, True),  # nothing to measure against, so only the floor
+    ],
+)
+async def test_an_episode_near_its_end_is_not_continue_watching(
+    client: AsyncClient,
+    user: User,
+    api_factory: SessionFactory,
+    position: float,
+    duration: float | None,
+    listed: bool,
+) -> None:
+    """The tighter of 95 % and the last minute, so shorts behave like episodes."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910039)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode, position_s=position, duration_s=duration)
+
+    assert len((await home(client))["continue_watching"]) == (1 if listed else 0)
 
 
 async def test_an_episode_whose_rendition_is_gone_is_not_offered(
@@ -664,3 +752,104 @@ async def test_a_watched_episode_is_marked_on_the_new_this_week_card(
     cards = (await home(client))["new_this_week"]
 
     assert [row["episode"]["watched"] for row in cards] == [True]
+
+
+# --- What a card carries about the show (M15) ---------------------------------
+
+
+async def test_a_home_card_carries_the_banner_the_genres_and_the_studio(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Every row on this page embeds an ``AnimeSummary`` (M15).
+
+    Home's hero is a 21:9 banner and its shelves credit the studio, so the
+    three detail columns ride along on the summary rather than costing the
+    page a second request per show.
+    """
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910040)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+    async with api_factory() as session:
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.banner_url = "https://img.test/banner.jpg"
+        anime.cover_large_url = "https://img.test/cover-xl.jpg"
+        anime.genres = ["Adventure", "Drama"]
+        anime.studio = "MADHOUSE"
+        await session.commit()
+
+    body = await home(client)
+
+    for row in body["behind"] + body["new_this_week"]:
+        anime_out = row["anime"]
+        assert anime_out["banner_url"] == "https://img.test/banner.jpg"
+        assert anime_out["cover_large_url"] == "https://img.test/cover-xl.jpg"
+        assert anime_out["genres"] == ["Adventure", "Drama"]
+        assert anime_out["studio"] == "MADHOUSE"
+
+
+async def test_a_home_card_for_a_show_nothing_has_detailed_sends_empties(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A row a search created and nobody opened: an empty list and nulls.
+
+    Not an error and not an omission — the three fields come from *detail*
+    columns, and a row only a search page has touched has none of them until
+    somebody opens it or the daily sweep reaches it.
+    """
+    anime_id = await airing_show(api_factory, title="Show B", anilist_id=910041)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    body = await home(client)
+
+    assert body["behind"]
+    for row in body["behind"]:
+        assert row["anime"]["genres"] == []
+        assert row["anime"]["banner_url"] is None
+        assert row["anime"]["studio"] is None
+
+
+async def test_a_home_card_carries_the_two_ranking_numbers(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """``popularity`` and ``average_score`` ride on every ``AnimeSummary``.
+
+    Both are genuine summary columns — they are in AniList's search fragment —
+    so unlike ``genres``/``studio``/``banner_url`` they do not wait on a detail
+    fetch. ``average_score`` is 0–100 whichever source answered: MAL's 0–10
+    ``mean`` is scaled on the way in, so one column means one thing.
+
+    Seeded on the row rather than driven through a search, because the captured
+    AniList fixtures predate these two fields and carry neither (see the note
+    in :mod:`tests.anilist_mock`); this asserts the plumbing, which is what the
+    schema change actually added.
+    """
+    anime_id = await airing_show(api_factory, title="Show C", anilist_id=910042)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+    async with api_factory() as session:
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.popularity = 384_512
+        anime.average_score = 89
+        await session.commit()
+
+    body = await home(client)
+
+    assert body["behind"]
+    for row in body["behind"]:
+        assert row["anime"]["popularity"] == 384_512
+        assert row["anime"]["average_score"] == 89
+
+
+async def test_a_home_card_for_an_unrated_show_sends_nulls(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """An unaired show has no score yet, and a client must not render "0 %"."""
+    anime_id = await airing_show(api_factory, title="Show D", anilist_id=910043)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    body = await home(client)
+
+    assert body["behind"]
+    for row in body["behind"]:
+        assert row["anime"]["popularity"] is None
+        assert row["anime"]["average_score"] is None

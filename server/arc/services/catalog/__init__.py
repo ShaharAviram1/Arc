@@ -13,6 +13,8 @@
 * ``cache`` — ``anime`` / ``episodes`` upserts and :func:`ensure_anime`
 * ``seasons`` — which season a date is in (FR-C7)
 * ``lists`` — the list states (FR-C2, FR-W2)
+* ``local`` — searching the cached rows, which a live search merges in front
+  of its own page (FR-C1)
 * ``jobs`` — the five ``catalog_*`` handlers
 * ``names`` — the job type strings, importable without the handlers
 
@@ -44,6 +46,7 @@ from arc.services.catalog.lists import (
     remove_list_entry,
     set_list_entry,
 )
+from arc.services.catalog.local import LOCAL_SEARCH_LIMIT, local_search
 from arc.services.catalog.seasons import current_season, next_season, season_of
 from arc.services.catalog.service import CATALOGUE_UNAVAILABLE, CatalogService
 from arc.services.catalog.source import (
@@ -60,6 +63,7 @@ from arc.services.catalog.source import (
 __all__ = [
     "CATALOGUE_UNAVAILABLE",
     "DEFAULT_MAX_AGE",
+    "LOCAL_SEARCH_LIMIT",
     "MAX_SCORE",
     "MIN_SCORE",
     "AiringEntry",
@@ -80,6 +84,7 @@ __all__ = [
     "episodes_for",
     "get_my_list",
     "list_status_for",
+    "local_search",
     "next_season",
     "preferred_title",
     "remove_list_entry",

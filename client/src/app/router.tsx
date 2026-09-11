@@ -6,6 +6,7 @@ import { RouteError } from '@/components/RouteError'
 import { Admin } from '@/pages/Admin'
 import { Home } from '@/pages/Home'
 import { Invite } from '@/pages/Invite'
+import { List } from '@/pages/List'
 import { Login } from '@/pages/Login'
 import { Mal } from '@/pages/Mal'
 import { NotFound } from '@/pages/NotFound'
@@ -39,6 +40,7 @@ export const routes = [
           { path: '/', element: <Home /> },
           { path: '/schedule', element: <Schedule /> },
           { path: '/search', element: <Search /> },
+          { path: '/list', element: <List /> },
           { path: '/anime/:id', element: <Show /> },
           { path: '/mal', element: <Mal /> },
           { path: '/recs', element: <Recs /> },

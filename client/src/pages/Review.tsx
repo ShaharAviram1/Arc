@@ -1,7 +1,20 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { CoverThumb } from '@/components/CoverThumb'
 import { ErrorState } from '@/components/ErrorState'
+import {
+  Artwork,
+  Button,
+  buttonClass,
+  Chip as FilterChip,
+  cx,
+  EmptyState,
+  Eyebrow,
+  FIELD_ERROR_CLASS,
+  FOCUS_RING,
+  inputClass,
+  rowClass,
+  Skeleton,
+} from '@/components/ui'
 import { isSearchable, summaryLine, type AnimeSummary } from '@/lib/anime'
 import { formatRelativeTime } from '@/lib/recs'
 import {
@@ -61,24 +74,16 @@ const CONFIDENCE_LABELS: Record<string, string> = {
   low: 'low confidence',
 }
 
-const primaryButtonClass =
-  'rounded-md bg-[var(--arc-accent)] px-3 py-1.5 text-sm font-medium text-[var(--arc-accent-contrast)] transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
-
-const buttonClass =
-  'rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-3 py-1.5 text-sm text-[var(--arc-text)] transition-colors hover:border-[var(--arc-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
-
-const smallButtonClass =
-  'shrink-0 rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-2 py-1 text-xs text-[var(--arc-text)] transition-colors hover:border-[var(--arc-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
-
-const inputClass =
-  'rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-3 py-2 text-sm text-[var(--arc-text)] placeholder:text-[var(--arc-text-muted)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--arc-accent)]'
+/** A quiet in-card button — "Choose", "Use this", "Ask for a suggestion". */
+const smallButtonClass = buttonClass('chip', 'shrink-0 px-3.5 text-[13px]')
 
 const cardClass =
-  'rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] p-4 text-[var(--arc-text)]'
+  'rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-[18px] text-[var(--arc-text)]'
 
-function Chip({ children }: { children: ReactNode }) {
+/** A parsed fact read off the release name: a tag, not a control. */
+function Tag({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-1.5 py-0.5 text-xs text-[var(--arc-text-muted)]">
+    <span className="rounded-thumb border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-2 py-0.5 text-[12px] text-[var(--arc-text-muted)]">
       {children}
     </span>
   )
@@ -95,8 +100,8 @@ function Chip({ children }: { children: ReactNode }) {
 function FileHeading({ item }: { item: ReviewItem }) {
   return (
     <div className="min-w-0 flex-1">
-      <p className="font-mono text-sm break-all text-[var(--arc-text)]">{item.name}</p>
-      <p className="mt-1 text-xs break-all text-[var(--arc-text-muted)]">
+      <p className="font-mono text-[14px] break-all text-[var(--arc-text)]">{item.name}</p>
+      <p className="mt-1.5 text-[13px] break-all text-[var(--arc-text-muted)]">
         {directoryLabel(item.directory)} · {formatSize(item.size)} ·{' '}
         {formatRelativeTime(item.created_at)}
       </p>
@@ -117,7 +122,7 @@ function FileHeading({ item }: { item: ReviewItem }) {
  */
 function ShowLine({
   anime,
-  width = 'w-10',
+  width = 'w-[46px]',
   children,
 }: {
   anime: AnimeSummary
@@ -128,18 +133,21 @@ function ShowLine({
 
   return (
     <>
-      <Link to={`/anime/${String(anime.id)}`} className={`block shrink-0 ${width}`}>
-        <CoverThumb url={anime.cover_url} className="aspect-[2/3] w-full rounded" />
+      <Link to={`/anime/${String(anime.id)}`} className={cx('block shrink-0', width, FOCUS_RING)}>
+        <Artwork url={anime.cover_url} shape="thumb" />
       </Link>
       <div className="min-w-0 flex-1">
         <Link
           to={`/anime/${String(anime.id)}`}
-          className="text-sm leading-snug font-medium break-words text-[var(--arc-text)] hover:text-[var(--arc-accent)]"
+          className={cx(
+            'text-[16px] leading-snug font-medium break-words text-[var(--arc-text)]',
+            FOCUS_RING,
+          )}
         >
           {anime.title.preferred}
         </Link>
         {secondary === '' ? null : (
-          <p className="mt-0.5 text-xs text-[var(--arc-text-muted)]">{secondary}</p>
+          <p className="mt-0.5 text-[13px] text-[var(--arc-text-muted)]">{secondary}</p>
         )}
         {children}
       </div>
@@ -166,24 +174,26 @@ function SuggestionBox({
   const note = `from ${model ?? 'a language model'}${SUGGESTION_NOTE_SUFFIX}`
 
   return (
-    <section className="mt-4 rounded-lg border border-dashed border-[var(--arc-accent)] bg-[var(--arc-surface-raised)] p-3">
-      <div className="flex flex-wrap items-baseline gap-x-2">
-        <h3 className="text-sm font-semibold text-[var(--arc-text)]">Suggestion</h3>
-        <span className="text-xs text-[var(--arc-text-muted)]">{note}</span>
+    <section className="mt-4 rounded-card border-[0.5px] border-dashed border-[color-mix(in_srgb,var(--arc-ember)_45%,transparent)] bg-[var(--arc-surface-raised)] p-4">
+      <div className="flex flex-wrap items-baseline gap-x-2.5">
+        <h3 className="text-[12px] font-semibold tracking-[0.1em] uppercase text-[var(--arc-ember)]">
+          Suggestion
+        </h3>
+        <span className="text-[13px] text-[var(--arc-text-muted)]">{note}</span>
       </div>
 
       {suggestion.error !== null && suggestion.error !== '' ? (
-        <p className="mt-2 text-sm text-[var(--arc-text-muted)]">
+        <p className="mt-2.5 text-[14px] text-[var(--arc-text-muted)]">
           No suggestion: {suggestion.error}
         </p>
       ) : suggestion.anime === null ? (
-        <p className="mt-2 text-sm text-[var(--arc-text-muted)]">
+        <p className="mt-2.5 text-[14px] text-[var(--arc-text-muted)]">
           No suggestion: the model named no show.
         </p>
       ) : (
         <>
-          <div className="mt-2 flex items-start gap-3">
-            <ShowLine anime={suggestion.anime} width="w-12" />
+          <div className="mt-3 flex items-start gap-3">
+            <ShowLine anime={suggestion.anime} width="w-[52px]" />
             <button
               type="button"
               className={smallButtonClass}
@@ -196,15 +206,15 @@ function SuggestionBox({
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {suggestion.episode_number === null ? null : (
-              <Chip>Episode {String(suggestion.episode_number)}</Chip>
+              <Tag>Episode {String(suggestion.episode_number)}</Tag>
             )}
             {/* A model that named no confidence gets no chip invented for it. */}
             {suggestion.confidence === null ? null : (
-              <Chip>{CONFIDENCE_LABELS[suggestion.confidence] ?? suggestion.confidence}</Chip>
+              <Tag>{CONFIDENCE_LABELS[suggestion.confidence] ?? suggestion.confidence}</Tag>
             )}
           </div>
           {suggestion.reason === null || suggestion.reason === '' ? null : (
-            <p className="mt-2 text-sm leading-relaxed text-[var(--arc-text)]">
+            <p className="mt-3 text-[16px] leading-[1.6] text-[var(--arc-text)]">
               {suggestion.reason}
             </p>
           )}
@@ -231,7 +241,7 @@ function CandidateRow({
     const reason = (candidate.reason ?? '').trim()
     if (reason === '') return null
     return (
-      <li className="text-sm text-[var(--arc-text-muted)]">
+      <li className="px-[14px] py-1 text-[14px] text-[var(--arc-text-muted)]">
         {WHY_LABEL} {reason}
       </li>
     )
@@ -248,10 +258,10 @@ function CandidateRow({
   // *inside* the column — as siblings of it they each claim width of their
   // own, and the title is left a few pixels to wrap in.
   return (
-    <li className="flex items-start gap-3 rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] p-2">
+    <li className={rowClass()}>
       <ShowLine anime={anime}>
         {score === '' && reasons === '' ? null : (
-          <p className="mt-0.5 text-xs text-[var(--arc-text-muted)]">
+          <p className="mt-0.5 text-[13px] text-[var(--arc-text-muted)]">
             {score === '' ? null : <span className="text-[var(--arc-text)]">{score}</span>}
             {score !== '' && reasons !== '' ? ' · ' : null}
             {reasons}
@@ -261,7 +271,7 @@ function CandidateRow({
       <button
         type="button"
         aria-label={`Choose ${anime.title.preferred}`}
-        className={`self-start ${smallButtonClass}`}
+        className={cx('self-start', smallButtonClass)}
         onClick={() => {
           onChoose(anime, candidate.episode_number)
         }}
@@ -337,11 +347,11 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
     <article aria-label={item.name} className={cardClass}>
       <FileHeading item={item} />
 
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {chips.map((chip, index) => (
-          <Chip key={`${chip}-${String(index)}`}>{chip}</Chip>
+          <Tag key={`${chip}-${String(index)}`}>{chip}</Tag>
         ))}
-        <span className="text-xs text-[var(--arc-text-muted)]">
+        <span className="text-[13px] text-[var(--arc-text-muted)]">
           {formatConfidence(item.confidence)}
         </span>
       </div>
@@ -350,7 +360,7 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
         canSuggest ? (
           <div className="mt-3">
             {waiting || suggest.isSuccess ? (
-              <p role="status" className="text-xs text-[var(--arc-text-muted)]">
+              <p role="status" className="text-[13px] text-[var(--arc-text-muted)]">
                 {SUGGESTION_REQUESTED}
               </p>
             ) : (
@@ -370,7 +380,7 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
               </button>
             )}
             {suggest.isError ? (
-              <p role="alert" className="mt-1 text-xs text-[var(--arc-error)]">
+              <p role="alert" className={`mt-2 ${FIELD_ERROR_CLASS}`}>
                 {reviewErrorMessage(suggest.error)}
               </p>
             ) : null}
@@ -380,14 +390,14 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
         <SuggestionBox suggestion={suggestion} onUse={choose} />
       )}
 
-      <section className="mt-4">
-        <h3 className="text-sm font-semibold text-[var(--arc-text)]">Candidates</h3>
+      <section className="mt-6">
+        <Eyebrow>Candidates</Eyebrow>
         {item.candidates.length === 0 ? (
-          <p className="mt-1 text-sm text-[var(--arc-text-muted)]">
+          <p className="mt-2 text-[14px] text-[var(--arc-text-muted)]">
             The matcher proposed nothing. Search for the title below.
           </p>
         ) : (
-          <ul className="mt-2 flex flex-col gap-2">
+          <ul className="mt-2 flex flex-col gap-0.5">
             {item.candidates.map((candidate, index) => (
               <CandidateRow
                 key={candidate.anime === null ? `reason-${String(index)}` : candidate.anime.id}
@@ -399,10 +409,10 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
         )}
       </section>
 
-      <section className="mt-4">
+      <section className="mt-6">
         <label
           htmlFor={`review-search-${String(item.id)}`}
-          className="block text-sm font-semibold text-[var(--arc-text)]"
+          className="block text-[12px] font-semibold tracking-[0.1em] text-[var(--arc-text-muted)] uppercase"
         >
           Search another title
         </label>
@@ -416,24 +426,21 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
           onChange={(event) => {
             setSearch(event.target.value)
           }}
-          className={`mt-1 w-full max-w-md ${inputClass}`}
+          className={inputClass('mt-2 w-full max-w-md')}
         />
         {results.isError ? (
-          <p role="alert" className="mt-1 text-xs text-[var(--arc-error)]">
+          <p role="alert" className={`mt-2 ${FIELD_ERROR_CLASS}`}>
             {reviewErrorMessage(results.error)}
           </p>
         ) : null}
         {searchResults.length === 0 ? null : (
-          <ul className="mt-2 flex flex-col gap-1">
+          <ul className="mt-2 flex flex-col gap-0.5">
             {searchResults.map((anime) => (
-              <li
-                key={anime.id}
-                className="flex items-center gap-2 rounded-md border border-[var(--arc-border)] px-2 py-1"
-              >
-                <span className="min-w-0 flex-1 truncate text-sm text-[var(--arc-text)]">
+              <li key={anime.id} className={rowClass('gap-3')}>
+                <span className="min-w-0 flex-1 truncate text-[14px] text-[var(--arc-text)]">
                   {anime.title.preferred}
                 </span>
-                <span className="shrink-0 text-xs text-[var(--arc-text-muted)]">
+                <span className="shrink-0 text-[13px] text-[var(--arc-text-muted)]">
                   {summaryLine(anime)}
                 </span>
                 <button
@@ -452,8 +459,8 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
         )}
       </section>
 
-      <form className="mt-4 border-t border-[var(--arc-border)] pt-3" onSubmit={submit}>
-        <p className="text-sm text-[var(--arc-text-muted)]">
+      <form className="mt-6 border-t-[0.5px] border-[var(--arc-border)] pt-5" onSubmit={submit}>
+        <p className="text-[14px] text-[var(--arc-text-muted)]">
           {chosen === null ? (
             NOTHING_CHOSEN
           ) : (
@@ -464,11 +471,11 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
           )}
         </p>
 
-        <div className="mt-2 flex flex-wrap items-end gap-3">
+        <div className="mt-4 flex flex-wrap items-end gap-3">
           <div>
             <label
               htmlFor={`review-episode-${String(item.id)}`}
-              className="block text-xs text-[var(--arc-text-muted)]"
+              className="block text-[13px] text-[var(--arc-text-muted)]"
             >
               Episode number
             </label>
@@ -482,21 +489,17 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
               onChange={(event) => {
                 setEpisode(event.target.value)
               }}
-              className={`mt-1 w-24 ${inputClass}`}
+              className={inputClass('mt-1.5 w-24 tabular-nums')}
             />
           </div>
 
-          <button
-            type="submit"
-            className={primaryButtonClass}
-            disabled={!canConfirm || confirm.isPending}
-          >
+          <Button type="submit" variant="primary" disabled={!canConfirm || confirm.isPending}>
             Confirm
-          </button>
+          </Button>
 
           <button
             type="button"
-            className={buttonClass}
+            className={buttonClass('secondary')}
             disabled={ignore.isPending}
             onClick={() => {
               ignore.mutate(item.id, {
@@ -511,12 +514,12 @@ function PendingCard({ item, canSuggest, waiting, onRequested, onDone }: Pending
         </div>
 
         {confirm.isError ? (
-          <p role="alert" className="mt-2 text-sm text-[var(--arc-error)]">
+          <p role="alert" className={`mt-3 ${FIELD_ERROR_CLASS}`}>
             {reviewErrorMessage(confirm.error)}
           </p>
         ) : null}
         {ignore.isError ? (
-          <p role="alert" className="mt-2 text-sm text-[var(--arc-error)]">
+          <p role="alert" className={`mt-3 ${FIELD_ERROR_CLASS}`}>
             {reviewErrorMessage(ignore.error)}
           </p>
         ) : null}
@@ -538,7 +541,7 @@ function IgnoredCard({ item, onDone }: { item: ReviewItem; onDone: (message: str
         <FileHeading item={item} />
         <button
           type="button"
-          className={`shrink-0 ${buttonClass}`}
+          className={buttonClass('secondary', 'shrink-0')}
           disabled={reopen.isPending}
           onClick={() => {
             reopen.mutate(item.id, {
@@ -552,14 +555,14 @@ function IgnoredCard({ item, onDone }: { item: ReviewItem; onDone: (message: str
         </button>
       </div>
       {chips.length === 0 ? null : (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           {chips.map((chip, index) => (
-            <Chip key={`${chip}-${String(index)}`}>{chip}</Chip>
+            <Tag key={`${chip}-${String(index)}`}>{chip}</Tag>
           ))}
         </div>
       )}
       {reopen.isError ? (
-        <p role="alert" className="mt-2 text-sm text-[var(--arc-error)]">
+        <p role="alert" className={`mt-3 ${FIELD_ERROR_CLASS}`}>
           {reviewErrorMessage(reopen.error)}
         </p>
       ) : null}
@@ -581,13 +584,16 @@ function AutoRow({ item }: { item: ReviewItem }) {
   const number = linked?.episode_number ?? item.parsed.episode
 
   return (
-    <li aria-label={item.name} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 py-2">
+    <li
+      aria-label={item.name}
+      className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t-[0.5px] border-[var(--arc-border)] px-3.5 py-3 first:border-t-0"
+    >
       {/* `break-all` belongs to the filename and stops there. The show beside
           it keeps its own width — the row wraps rather than squeezing it. */}
-      <span className="min-w-0 flex-1 basis-64 font-mono text-xs break-all text-[var(--arc-text-muted)]">
+      <span className="min-w-0 flex-1 basis-64 font-mono text-[13px] break-all text-[var(--arc-text-muted)]">
         {item.name}
       </span>
-      <span className="shrink-0 text-sm break-words text-[var(--arc-text)]">
+      <span className="shrink-0 text-[14px] break-words text-[var(--arc-text)]">
         {anime === null ? (
           // Nothing in the row names the show: the candidate list was cleared,
           // or the file predates it. Saying which episode it went to is still
@@ -598,7 +604,7 @@ function AutoRow({ item }: { item: ReviewItem }) {
             `Linked to episode #${String(item.episode_id)}`
           )
         ) : (
-          <Link to={`/anime/${String(anime.id)}`} className="hover:text-[var(--arc-accent)]">
+          <Link to={`/anime/${String(anime.id)}`} className={cx('hover:underline', FOCUS_RING)}>
             {anime.title.preferred}
           </Link>
         )}
@@ -659,45 +665,39 @@ export function Review() {
 
   return (
     <section className="mx-auto max-w-4xl">
-      <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">Match review</h1>
-      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--arc-text-muted)]">
+      <h1 className="text-[40px] leading-[1.08] font-semibold tracking-[-0.028em] text-[var(--arc-text)]">
+        Match review
+      </h1>
+      <p className="mt-3 max-w-[66ch] text-[16px] leading-[1.6] text-[var(--arc-text-muted)]">
         {EXPLANATION}
       </p>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="no-scrollbar mt-6 flex flex-wrap gap-2.5">
         {REVIEW_TABS.map((value) => (
-          <button
+          <FilterChip
             key={value}
-            type="button"
-            aria-pressed={value === tab}
-            className={`rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] ${
-              value === tab
-                ? 'border-[var(--arc-accent)] bg-[var(--arc-surface-raised)] text-[var(--arc-text)]'
-                : 'border-[var(--arc-border)] bg-[var(--arc-surface)] text-[var(--arc-text-muted)] hover:border-[var(--arc-accent)]'
-            }`}
+            active={value === tab}
             onClick={() => {
               setNotice(null)
               setTab(value)
             }}
           >
             {tabLabel(value)}
-          </button>
+          </FilterChip>
         ))}
       </div>
 
       {notice === null ? null : (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-ok)]">
+        <p role="status" className="mt-5 text-[14px] text-[var(--arc-ok)]">
           {notice}
         </p>
       )}
 
       {isPending ? (
-        <p role="status" className="mt-6 text-sm text-[var(--arc-text-muted)]">
-          Loading…
-        </p>
+        <Skeleton shape="row" count={3} className="mt-8" />
       ) : isError ? (
         <ErrorState
-          className="mt-6"
+          className="mt-8"
           message={reviewErrorMessage(error)}
           pending={isFetching}
           onRetry={() => {
@@ -705,17 +705,20 @@ export function Review() {
           }}
         />
       ) : items.length === 0 ? (
-        <p className="mt-6 max-w-3xl text-sm text-[var(--arc-text-muted)]">
-          {tab === 'pending' ? EMPTY_PENDING : tab === 'ignored' ? EMPTY_IGNORED : EMPTY_AUTO}
-        </p>
+        <EmptyState
+          className="mt-8"
+          message={
+            tab === 'pending' ? EMPTY_PENDING : tab === 'ignored' ? EMPTY_IGNORED : EMPTY_AUTO
+          }
+        />
       ) : tab === 'auto' ? (
-        <ul className="mt-6 divide-y divide-[var(--arc-border)] rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-1">
+        <ul className="mt-8 overflow-hidden rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)]">
           {items.map((item) => (
             <AutoRow key={item.id} item={item} />
           ))}
         </ul>
       ) : (
-        <div className="mt-6 flex flex-col gap-4">
+        <div className="mt-8 flex flex-col gap-4">
           {items.map((item) =>
             tab === 'ignored' ? (
               <IgnoredCard key={item.id} item={item} onDone={setNotice} />

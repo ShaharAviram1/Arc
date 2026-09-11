@@ -29,16 +29,15 @@ import { ErrorState } from '@/components/ErrorState'
 import {
   InlineError,
   Notice,
+  panelClass,
   Pill,
   SectionHeading,
-  inputClass,
-  panelClass,
-  primaryButtonClass,
-  subtleButtonClass,
   TableScroll,
   tdClass,
   thClass,
 } from '@/components/admin/ui'
+import { inputClass, primaryButtonClass, subtleButtonClass } from '@/components/admin/styles'
+import { LABEL_CLASS } from '@/components/ui'
 import {
   NUMBER_BOUNDS,
   RESOLUTIONS,
@@ -118,20 +117,20 @@ function Field({
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-baseline gap-2">
-        <label htmlFor={id} className="text-sm font-medium text-[var(--arc-text)]">
+        <label htmlFor={id} className={LABEL_CLASS}>
           {label}
         </label>
-        <span className="text-xs text-[var(--arc-text-muted)]">Default: {fallback}</span>
+        <span className="text-[13px] text-[var(--arc-text-muted)]">Default: {fallback}</span>
         <button
           type="button"
-          className="text-xs text-[var(--arc-accent)] hover:underline"
+          className="text-[13px] text-[var(--arc-focus)] underline-offset-2 hover:underline"
           onClick={onReset}
         >
           Reset to default
         </button>
       </div>
       {children}
-      <p className="text-xs text-[var(--arc-text-muted)]">{help}</p>
+      <p className="text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">{help}</p>
       {error === undefined ? null : <InlineError message={error} />}
     </div>
   )
@@ -174,12 +173,12 @@ function GroupsField({
     >
       <div className="flex flex-wrap items-center gap-2">
         {groups.length === 0 ? (
-          <span className="text-xs text-[var(--arc-text-muted)]">No preferred groups.</span>
+          <span className="text-[13px] text-[var(--arc-text-muted)]">No preferred groups.</span>
         ) : (
           groups.map((group, index) => (
             <span
               key={group}
-              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-2.5 py-0.5 text-xs text-[var(--arc-text)]"
+              className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface-raised)] px-3 py-1 text-[13px] text-[var(--arc-text)]"
             >
               <span className="text-[var(--arc-text-muted)]">{index + 1}.</span>
               {group}
@@ -258,12 +257,12 @@ function OverridesPanel({ payload }: { payload: SettingsPayload }) {
   return (
     <section className="mt-10">
       <SectionHeading>Per-show overrides</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
         Shows with their own group or resolution rule, which win over the values above. Editing them
         from here arrives with M16; until then they are set on the show itself.
       </p>
       {payload.overrides.length === 0 ? (
-        <p className="mt-4 text-sm text-[var(--arc-text-muted)]">No per-show overrides.</p>
+        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">No per-show overrides.</p>
       ) : (
         <div className="mt-4">
           <TableScroll>
@@ -523,7 +522,7 @@ export function RulesTab() {
 
   if (settings.isPending) {
     return (
-      <p role="status" className="text-sm text-[var(--arc-text-muted)]">
+      <p role="status" className="text-[14px] text-[var(--arc-text-muted)]">
         Loading rules…
       </p>
     )
@@ -544,7 +543,9 @@ export function RulesTab() {
   return (
     <div>
       <SectionHeading>Rules</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">{EXPLANATION}</p>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {EXPLANATION}
+      </p>
       <RulesForm payload={settings.data} />
       <OverridesPanel payload={settings.data} />
     </div>

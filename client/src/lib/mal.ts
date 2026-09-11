@@ -144,8 +144,9 @@ export const MAL_WRITE_STATUS_LABELS: Record<MalWriteStatus, string> = {
 }
 
 const OK_BADGE = 'text-[var(--arc-ok)] border-[var(--arc-ok)]/40 bg-[var(--arc-ok)]/10'
-const BUSY_BADGE =
-  'text-[var(--arc-accent)] border-[var(--arc-accent)]/40 bg-[var(--arc-accent)]/10'
+// Cold light rather than ember: ember means "tonight's broadcast" in this
+// design, and a queued write is not a broadcast.
+const BUSY_BADGE = 'text-[var(--arc-focus)] border-[var(--arc-focus)]/40 bg-[var(--arc-focus)]/10'
 const BAD_BADGE = 'text-[var(--arc-error)] border-[var(--arc-error)]/40 bg-[var(--arc-error)]/10'
 const MUTED_BADGE =
   'text-[var(--arc-text-muted)] border-[var(--arc-border)] bg-[var(--arc-surface-raised)]'

@@ -91,6 +91,20 @@ describe('Review', () => {
     expect(screen.getByRole('button', { name: 'Pending (1)' })).toBeInTheDocument()
   })
 
+  it('renders the tabs as M15 chips, the pending one carrying its count', async () => {
+    renderReview({ [PENDING]: { body: REVIEW_PAGE } })
+    await card()
+
+    const pending = screen.getByRole('button', { name: 'Pending (1)' })
+    // A 44px pill, brighter when it is the one that is on — the chip spec.
+    expect(pending).toHaveClass('h-11', 'rounded-full')
+    expect(pending).toHaveAttribute('aria-pressed', 'true')
+
+    const ignored = screen.getByRole('button', { name: 'Ignored' })
+    expect(ignored).toHaveClass('h-11', 'rounded-full')
+    expect(ignored).toHaveAttribute('aria-pressed', 'false')
+  })
+
   it('shows the matcher’s candidates with their scores and reasons', async () => {
     renderReview({ [PENDING]: { body: REVIEW_PAGE } })
     const article = await card()

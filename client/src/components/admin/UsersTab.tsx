@@ -26,16 +26,15 @@ import {
   ConfirmButton,
   InlineError,
   Notice,
+  panelClass,
   Pill,
   SectionHeading,
-  inputClass,
-  panelClass,
-  primaryButtonClass,
-  subtleButtonClass,
+  TableScroll,
   tdClass,
   thClass,
-  TableScroll,
 } from '@/components/admin/ui'
+import { inputClass, primaryButtonClass, subtleButtonClass } from '@/components/admin/styles'
+import { LABEL_CLASS } from '@/components/ui'
 import {
   DEFAULT_EXPIRY_HOURS,
   MAX_EXPIRY_HOURS,
@@ -87,7 +86,9 @@ function UserRow({
     <tr className="border-t border-[var(--arc-border)]">
       <td className={tdClass}>
         <span className="font-medium">{user.email}</span>
-        {isSelf ? <span className="ml-2 text-xs text-[var(--arc-text-muted)]">(you)</span> : null}
+        {isSelf ? (
+          <span className="ml-2 text-[13px] text-[var(--arc-text-muted)]">(you)</span>
+        ) : null}
       </td>
       <td className={tdClass}>
         <Pill tone={user.role === 'admin' ? 'busy' : 'muted'}>{user.role}</Pill>
@@ -101,7 +102,7 @@ function UserRow({
       <td className={tdClass}>
         <div className="flex flex-wrap items-center gap-2">
           {isSelf ? (
-            <span className="text-xs text-[var(--arc-text-muted)]">
+            <span className="text-[13px] text-[var(--arc-text-muted)]">
               Your own account; another admin can change it
             </span>
           ) : (
@@ -154,7 +155,7 @@ function AccountsPanel() {
 
   if (users.isPending) {
     return (
-      <p role="status" className="mt-3 text-sm text-[var(--arc-text-muted)]">
+      <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
         Loading accounts…
       </p>
     )
@@ -225,9 +226,9 @@ function CreatedInvite({ invite, onDismiss }: { invite: InviteCreated; onDismiss
   return (
     <div className={`mt-4 ${panelClass}`}>
       <Notice>Invite created{invite.email === null ? '' : ` for ${invite.email}`}.</Notice>
-      <p className="mt-2 text-sm font-medium text-[var(--arc-text-muted)]">{LINK_WARNING}</p>
+      <p className="mt-2 text-[14px] font-medium text-[var(--arc-text-muted)]">{LINK_WARNING}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <code className="min-w-0 flex-1 overflow-x-auto rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-3 py-1.5 text-xs whitespace-nowrap text-[var(--arc-text)]">
+        <code className="min-w-0 flex-1 overflow-x-auto rounded-[12px] border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface-input)] px-3.5 py-3 font-mono text-[13px] whitespace-nowrap text-[var(--arc-text)]">
           {invite.url}
         </code>
         <button
@@ -280,7 +281,9 @@ function InvitesPanel() {
   return (
     <section className="mt-10">
       <SectionHeading>Invites</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">{INVITE_EXPLANATION}</p>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {INVITE_EXPLANATION}
+      </p>
 
       <form
         className="mt-4 flex flex-wrap items-end gap-3"
@@ -290,7 +293,7 @@ function InvitesPanel() {
         }}
       >
         <div className="flex flex-col gap-1">
-          <label htmlFor="invite-email" className="text-sm font-medium text-[var(--arc-text)]">
+          <label htmlFor="invite-email" className={LABEL_CLASS}>
             Email (optional)
           </label>
           <input
@@ -306,7 +309,7 @@ function InvitesPanel() {
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label htmlFor="invite-hours" className="text-sm font-medium text-[var(--arc-text)]">
+          <label htmlFor="invite-hours" className={LABEL_CLASS}>
             Expires in (hours)
           </label>
           <input
@@ -341,7 +344,7 @@ function InvitesPanel() {
       )}
 
       {invites.isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Loading invites…
         </p>
       ) : invites.isError ? (
@@ -354,7 +357,9 @@ function InvitesPanel() {
           }}
         />
       ) : invites.data.length === 0 ? (
-        <p className="mt-4 text-sm text-[var(--arc-text-muted)]">No invites have been issued.</p>
+        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
+          No invites have been issued.
+        </p>
       ) : (
         <div className="mt-4">
           <TableScroll>
@@ -395,7 +400,7 @@ function InvitesPanel() {
                           Revoke
                         </button>
                       ) : (
-                        <span className="text-xs text-[var(--arc-text-muted)]">—</span>
+                        <span className="text-[13px] text-[var(--arc-text-muted)]">—</span>
                       )}
                       {remove.isError && remove.variables === invite.id ? (
                         <InlineError className="mt-1" message={adminErrorMessage(remove.error)} />
@@ -416,7 +421,7 @@ export function UsersTab() {
   return (
     <div>
       <SectionHeading>Accounts</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
         A deactivated account is signed out on its next request and cannot sign in again. Arc keeps
         at least one active admin: the server refuses the change that would leave none.
       </p>

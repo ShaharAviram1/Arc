@@ -456,6 +456,58 @@ def test_the_encoder_settings_come_from_the_options() -> None:
     assert pairs["-pix_fmt"] == "yuv420p"
 
 
+def test_the_defaults_are_the_quality_settings_the_owner_asked_for() -> None:
+    """M15: ``veryfast``/CRF 20 looked soft, so the defaults moved."""
+    args = encode_args(plan_for(*MULTISUB))
+    pairs = dict(zip(args, args[1:], strict=False))
+    assert pairs["-preset"] == "fast"
+    assert pairs["-crf"] == "19"
+    assert pairs["-tune"] == "animation"
+    # Unchanged, and asserted here so a profile the browser cannot decode
+    # cannot slip in behind a quality change.
+    assert pairs["-profile:v"] == "high"
+    assert pairs["-level"] == "4.1"
+    assert pairs["-pix_fmt"] == "yuv420p"
+
+
+def test_no_tune_is_passed_when_it_is_turned_off() -> None:
+    """An empty ``-tune`` is an unknown tune, and ffmpeg exits on it."""
+    assert "-tune" not in encode_args(plan_for(*MULTISUB), EncodeOptions(tune=None))
+    assert "-tune" not in encode_args(plan_for(*MULTISUB), EncodeOptions(tune=""))
+
+
+def test_nothing_in_the_encode_scales_the_picture() -> None:
+    """One rendition at the source's size, so swscale is never asked to resize.
+
+    Which is why there is no ``-sws_flags``: it would describe a resize that
+    does not happen. The burn-in filter is the whole graph.
+    """
+    args = encode_args(plan_for(*MULTISUB), EncodeOptions(subtitle_file=ASS_FILE))
+    assert "-sws_flags" not in args
+    assert "-s" not in args
+    assert args[args.index("-vf") + 1] == f"ass={ASS_FILE}:fontsdir={FONTS_DIR}"
+
+
+def test_a_bitrate_ceiling_is_passed_only_when_it_is_set() -> None:
+    plain = encode_args(plan_for(*MULTISUB))
+    assert "-maxrate" not in plain
+    assert "-bufsize" not in plain
+
+    # A bufsize on its own means nothing to x264 without a ceiling.
+    assert "-bufsize" not in encode_args(plan_for(*MULTISUB), EncodeOptions(bufsize_kbps=9000))
+
+    capped = encode_args(plan_for(*MULTISUB), EncodeOptions(maxrate_kbps=6000))
+    pairs = dict(zip(capped, capped[1:], strict=False))
+    assert pairs["-maxrate"] == "6000k"
+    # Twice the ceiling when the buffer is not stated.
+    assert pairs["-bufsize"] == "12000k"
+
+    both = encode_args(plan_for(*MULTISUB), EncodeOptions(maxrate_kbps=6000, bufsize_kbps=9000))
+    pairs = dict(zip(both, both[1:], strict=False))
+    assert pairs["-maxrate"] == "6000k"
+    assert pairs["-bufsize"] == "9000k"
+
+
 def test_the_subtitle_extraction_copies_ass_and_converts_the_rest() -> None:
     ass = plan_for(*MULTISUB)
     args = subtitle_extract_args(ass)

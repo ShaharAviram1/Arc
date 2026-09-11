@@ -88,10 +88,19 @@ RESUME_MAX_FRACTION = 0.95
 #: home page renders and far less than a year of half-finished episodes.
 CONTINUE_LIMIT = 20
 
-#: And how far in an episode has to be to count as *started*. The same ten
-#: seconds as :data:`RESUME_MIN_S`, and for the same reason: a row written by
-#: a player that was open for four seconds is not something to come back to.
-CONTINUE_MIN_POSITION_S = 10.0
+#: And how far in an episode has to be to count as *started*. Stricter than
+#: :data:`RESUME_MIN_S` on purpose: ten seconds is enough to be worth resuming
+#: once a user has chosen the episode, but the home shelf is a list Arc offers
+#: unprompted, and half a minute is the point at which somebody was watching
+#: rather than sampling.
+CONTINUE_MIN_POSITION_S = 30.0
+
+#: The shelf's other end, on top of :data:`RESUME_MAX_FRACTION`. Ninety-five
+#: per cent of a forty-minute episode still leaves two minutes; of a five-minute
+#: short it leaves fifteen seconds. A fixed minute is what makes "there is
+#: something left to watch" mean the same thing at both lengths, and the
+#: tighter of the two bounds is the one that applies.
+CONTINUE_END_MARGIN_S = 60.0
 
 
 def is_completed(position_s: float, duration_s: float) -> bool:
@@ -112,8 +121,17 @@ def resume_position(row: WatchProgress | None, duration_s: float | None) -> floa
     ``duration_s`` is the *rendition's*, not the one the client last reported:
     it is the file's own length, and it is the number the 95 % ceiling has to
     be measured against for the answer to be the same on every device.
+
+    **``completed`` is not consulted.** A rewatch stopped at the midpoint is a
+    saved position like any other, and the flag says the user finished this
+    episode once, not that they are not part-way through it now — dropping them
+    back at zero loses the only record of where they were. The two bounds do
+    the work instead: a row at the very end resumes nowhere, whatever the flag
+    says, and a mark written by hand (``0``/``0``, FR-W3) is below the floor.
+    Nothing here reads or writes the flag, so completion itself — the MAL push,
+    the once-only advance, the watched mark — is untouched.
     """
-    if row is None or row.completed:
+    if row is None:
         return None
     if row.position_s <= RESUME_MIN_S:
         return None
@@ -338,12 +356,18 @@ async def completed_episode_ids(
 
 @dataclass(frozen=True, slots=True)
 class ContinueRow:
-    """One episode started and not finished, with where the player got to."""
+    """One episode with an unfinished position, and where the player got to.
+
+    ``completed`` rides along because a rewatch belongs here (see
+    :func:`continue_watching`) and the card still has to say, truthfully,
+    whether the user has watched this episode before.
+    """
 
     anime: Anime
     episode: Episode
     position_s: float
     duration_s: float | None
+    completed: bool = False
 
 
 async def continue_watching(
@@ -351,21 +375,46 @@ async def continue_watching(
 ) -> list[ContinueRow]:
     """Episodes this user is part-way through, most recent first (FR-W1).
 
-    Three conditions, and each excludes a different kind of noise: not
-    completed (it is *continue* watching), past
-    :data:`CONTINUE_MIN_POSITION_S` (a player that was open for four seconds
-    started nothing), and the episode still ``ready`` (retention deletes
-    renditions, and a row offering to resume a file that is gone is worse than
-    no row).
+    The question is "is there something left to watch here?", and the answer
+    is the saved position and nothing else. Three conditions, each excluding a
+    different kind of noise: at least :data:`CONTINUE_MIN_POSITION_S` in (a
+    player that was open for four seconds started nothing), short of the end —
+    the tighter of :data:`RESUME_MAX_FRACTION` and
+    :data:`CONTINUE_END_MARGIN_S`, which is deliberately no looser than the
+    resume rule so that everything this shelf offers actually resumes where it
+    says — and the episode still ``ready`` (retention deletes renditions, and a
+    row offering to resume a file that is gone is worse than no row).
+
+    **``completed`` is not one of them.** It used to be, and the case that
+    broke was the ordinary one: rewatch an episode, stop at the midpoint, and
+    the home page had nothing to offer — the shelf was the only way back to
+    that position and the flag hid it. A finished episode reopened and left
+    half-way is exactly the thing "continue watching" names, so the position
+    decides and the flag does not. Watched to the end, it falls off the shelf
+    again by the ceiling rather than by the flag, which is the same answer for
+    a first watch and a fifth.
+
+    Nothing else changes with it: this function only reads, so completion still
+    means what it meant to MyAnimeList, to the once-only advance, and to the
+    show page's watched marks.
     """
+    duration = WatchProgress.duration_s
     rows = await session.execute(
         select(Anime, Episode, WatchProgress)
         .join(Episode, Episode.id == WatchProgress.episode_id)
         .join(Anime, Anime.id == Episode.anime_id)
         .where(
             WatchProgress.user_id == user_id,
-            WatchProgress.completed.is_(False),
-            WatchProgress.position_s > CONTINUE_MIN_POSITION_S,
+            WatchProgress.position_s >= CONTINUE_MIN_POSITION_S,
+            or_(
+                # No duration to measure against — a row from a player that
+                # never reported one, or FR-W3's ``0``/``0`` hand-written mark,
+                # which the floor above has already excluded anyway.
+                duration.is_(None),
+                duration <= 0,
+                WatchProgress.position_s
+                < func.least(duration * RESUME_MAX_FRACTION, duration - CONTINUE_END_MARGIN_S),
+            ),
             Episode.state == EpisodeState.READY,
         )
         # The episode id breaks ties: two rows written in the same transaction
@@ -380,6 +429,7 @@ async def continue_watching(
             episode=episode,
             position_s=progress.position_s,
             duration_s=progress.duration_s,
+            completed=progress.completed,
         )
         for anime, episode, progress in rows.all()
     ]
@@ -387,6 +437,7 @@ async def continue_watching(
 
 __all__ = [
     "COMPLETION_FRACTION",
+    "CONTINUE_END_MARGIN_S",
     "CONTINUE_LIMIT",
     "CONTINUE_MIN_POSITION_S",
     "RESUME_MAX_FRACTION",

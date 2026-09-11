@@ -1,13 +1,27 @@
 """Catalogue endpoints: search, read a show, force a refresh.
 
-Search is live — it goes to a catalogue source on every call rather than
-querying the local cache — because the cache only holds what somebody has
-already looked at, and a search that cannot find a show nobody has added yet is
-not a search (FR-C1). What the cache gets out of it is the results: every hit
-is upserted on the way past, which is also what gives each result the internal
-id the rest of the API is addressed by (FR-C6). The response is built from the
-stored rows, not from the payload, so a card and a show page can never disagree
-about a title.
+Search is **local first, then live**. It still goes to a catalogue source on
+every call rather than only querying the cache, because the cache holds only
+what somebody has already looked at and a search that cannot find a show nobody
+has added yet is not a search (FR-C1). But the cached rows are matched first
+and put in front of the live page: upstream is not always up (AniList spent
+M15 disabled) and MyAnimeList — the fallback — matches whole words from the
+start of a title, so "jobless reincarnation" found nothing while the show sat
+cached, on the caller's list, with an episode downloading. See
+:mod:`arc.services.catalog.local` for what a local match is and how the hits
+are ordered.
+
+Two consequences, both deliberate. A search that has local hits answers 200
+even when both sources are down — it has something true to say — and only an
+empty local result on a failed upstream is a 502. And the merge happens on the
+first page only: the local hits are not paginated, so repeating them under
+``page=2`` would show the same twenty cards twice.
+
+What the cache gets out of the live half is the results: every hit is upserted
+on the way past, which is also what gives each result the internal id the rest
+of the API is addressed by (FR-C6). The response is built from the stored rows,
+not from the payload, so a card and a show page can never disagree about a
+title.
 
 Reading a show is the opposite: cache first, upstream only when the row is
 missing, older than a day, or filled from MAL while AniList is healthy again
@@ -35,6 +49,7 @@ from arc.api.anime_schemas import (
     AnimeDetail,
     AnimeSummary,
     MalSyncOut,
+    RelatedAnime,
     RelationOut,
     SearchPage,
 )
@@ -49,6 +64,7 @@ from arc.services.catalog import (
     ensure_anime,
     episodes_for,
     list_status_for,
+    local_search,
     upsert_summaries,
 )
 from arc.services.catalog.names import CATALOG_PRIORITY
@@ -83,12 +99,18 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-async def _relation_ids(session: SessionDep, anime: Anime) -> dict[tuple[str, int], int]:
-    """``(source, external id) → internal id`` for this show's relations.
+async def _related_anime(session: SessionDep, anime: Anime) -> dict[tuple[str, int], RelatedAnime]:
+    """``(source, external id) → the cached row`` for this show's relations.
 
-    One query for the whole relation list. Most relations resolve to nothing —
-    a sequel nobody has opened has no row — and the client renders those
-    unlinked rather than following an id that would 404.
+    One query for the whole relation list, and named columns rather than whole
+    ``Anime`` rows: the franchise rail (M15) renders a cover, a format, an
+    episode count and a year, and a dozen full rows would carry a dozen
+    synopses and relation blobs along for the ride.
+
+    Most relations resolve to nothing — a sequel nobody has opened has no row —
+    and the client renders those unlinked, with the placeholders the rail uses
+    for artwork it does not have. Nothing is fetched to change that: see
+    :class:`~arc.api.anime_schemas.RelationOut`.
     """
     anilist_ids, mal_ids = RelationOut.external_ids(anime)
     if not anilist_ids and not mal_ids:
@@ -99,14 +121,31 @@ async def _relation_ids(session: SessionDep, anime: Anime) -> dict[tuple[str, in
     if mal_ids:
         clauses.append(Anime.mal_id.in_(mal_ids))
     rows = await session.execute(
-        select(Anime.id, Anime.anilist_id, Anime.mal_id).where(or_(*clauses))
+        select(
+            Anime.id,
+            Anime.anilist_id,
+            Anime.mal_id,
+            Anime.cover_url,
+            Anime.cover_large_url,
+            Anime.format,
+            Anime.episodes,
+            Anime.season_year,
+        ).where(or_(*clauses))
     )
-    found: dict[tuple[str, int], int] = {}
-    for internal, anilist_id, mal_id in rows.all():
-        if anilist_id is not None:
-            found[("anilist", anilist_id)] = internal
-        if mal_id is not None:
-            found[("mal", mal_id)] = internal
+    found: dict[tuple[str, int], RelatedAnime] = {}
+    for row in rows.all():
+        related = RelatedAnime(
+            id=row.id,
+            cover_url=row.cover_url,
+            cover_large_url=row.cover_large_url,
+            format=row.format,
+            episodes=row.episodes,
+            season_year=row.season_year,
+        )
+        if row.anilist_id is not None:
+            found[("anilist", row.anilist_id)] = related
+        if row.mal_id is not None:
+            found[("mal", row.mal_id)] = related
     return found
 
 
@@ -123,26 +162,42 @@ async def search(
     q: Annotated[str, Query(min_length=MIN_QUERY_LENGTH, max_length=MAX_QUERY_LENGTH)],
     page: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 1,
 ) -> SearchPage:
+    # The cached rows first (see the module docstring), and only on the first
+    # page, because they are not paginated.
+    local = await local_search(session, q, user_id=user.id) if page == 1 else []
+
+    live: list[Anime] = []
+    live_page, has_next = page, False
     try:
         found = await catalog.search(q, page=page)
     except SourceUnavailable as exc:
         log.warning("catalogue search failed", extra={"query": q, "error": str(exc)})
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail=CATALOGUE_UNAVAILABLE
-        ) from exc
+        # An outage is only an error when Arc has nothing of its own to say.
+        if not local:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=CATALOGUE_UNAVAILABLE
+            ) from exc
+    else:
+        # Cache what came back before answering. These are summary-only
+        # upserts: they fill in the columns a card needs and deliberately leave
+        # ``refreshed_at`` alone, so opening one of these results still
+        # triggers a full fetch. They are also what mints the internal ids in
+        # the response.
+        live = await upsert_summaries(session, found.results)
+        await session.commit()
+        live_page, has_next = found.page, found.has_next
 
-    # Cache what came back before answering. These are summary-only upserts:
-    # they fill in the columns a card needs and deliberately leave
-    # ``refreshed_at`` alone, so opening one of these results still triggers a
-    # full fetch. They are also what mints the internal ids in the response.
-    rows = await upsert_summaries(session, found.results)
-    await session.commit()
+    # De-duplicated on the internal id, not on an external one: the whole point
+    # of that id is that one show is one row whichever source found it, so a
+    # cached hit and the live result for the same show are the same card.
+    seen = {row.id for row in local}
+    rows = local + [row for row in live if row.id not in seen]
 
     statuses = await list_status_for(session, user_id=user.id, anime_ids=[row.id for row in rows])
     return SearchPage(
         results=[AnimeSummary.from_anime(row, statuses.get(row.id)) for row in rows],
-        page=found.page,
-        has_next=found.has_next,
+        page=live_page,
+        has_next=has_next,
     )
 
 
@@ -199,7 +254,7 @@ async def detail(
         # (FR-S4). The tick on a show page is per user, so it cannot come from
         # the episode row.
         watched=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
-        relation_ids=await _relation_ids(session, anime),
+        related=await _related_anime(session, anime),
         torrents=extras.torrents,
         renditions=extras.renditions,
         transcode_jobs=extras.transcode_jobs,

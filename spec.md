@@ -72,8 +72,11 @@ any time, and the owner uses it daily.
 ## 4. Functional requirements
 
 ### 4.1 Catalogue and schedule (AniList)
-- FR-C1 Search AniList by title from the client; show results with cover,
-  year, format, episode count.
+- FR-C1 Search the catalogue by title from the client; show results with
+  cover, year, format, episode count. The shows Arc has already cached are
+  matched locally and listed first, then the live source's page — so a show
+  Arc knows about is findable while the catalogue is down, and by any word of
+  its title rather than only from the start of it.
 - FR-C2 Add an anime to the user's list in any status. Adding creates or
   refreshes the local Anime record.
 - FR-C3 Seasonal schedule: for the current season (and prev/next), list shows
@@ -90,6 +93,11 @@ any time, and the owner uses it daily.
   estimated in the UI until AniList data replaces them. Shows are identified
   internally, with AniList and MAL ids attached as they become known, so a
   show first seen through MAL is the same show once AniList returns.
+  Extended 2026-09-11 (M15.5): a weekly-imported offline catalogue (the
+  manami anime-offline-database plus Fribb's cross-id map) is consulted first
+  for search, matching and id mapping, so those never depend on a live API;
+  TMDB, reached through that id map, supplies key art, episode stills and
+  credits when AniList has not, and never overwrites AniList-provided values.
 - FR-C7 The current season's catalogue is pre-cached daily so the schedule
   survives an outage of both sources.
 
@@ -177,10 +185,16 @@ any time, and the owner uses it daily.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
 
 ### 4.6 Watch tracking and list states
-- FR-W1 Home shows **Continue watching** (episodes started but not completed,
-  most recent first), **Behind on** (followed airing shows with unwatched
+- FR-W1 Home shows **Continue watching** (episodes with a saved position that
+  is past the start and short of the end, most recent first — whether or not
+  the episode is also marked watched, so a rewatch stopped half-way is offered
+  and resumes where it stopped; owner, 2026-09-11), **Behind on** (followed airing shows with unwatched
   aired episodes), and **New this week** (episodes that aired in the last 7
-  days for followed shows, with ready/preparing state).
+  days for followed shows, with ready/preparing state). As shelved since M15
+  those are Continue watching, Catch up, and This week plus Ready to watch —
+  the latter being the ready, unstarted half of New this week. The page also
+  opens with a hero of season recommendations, which is presentation over the
+  same caches rather than a requirement of its own (owner, 2026-09-11).
 - FR-W2 Users can set a show to watching / planned / on hold / dropped /
   completed, and set a score (1–10) from the show page.
 - FR-W3 Marking an episode as watched manually is allowed (e.g. watched
@@ -272,7 +286,7 @@ any time, and the owner uses it daily.
 | Page | Phase | Contents |
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
-| Home | 1 | Continue watching, Behind on, New this week |
+| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week, Catch up (behind on), Picked for you |
 | Schedule | 1 | Weekday grid for the season; prev/next season; add-to-list actions |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and watched marks, play buttons |
@@ -281,6 +295,15 @@ any time, and the owner uses it daily.
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
 | Admin | 2 | Users/invites, rules, jobs, disk, review queue |
+| My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
+
+Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
+sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
+Schedule and the search field; the avatar menu holds My List, MyAnimeList,
+Match review (with the pending count), Admin and Log out; Recommendations is a
+button inside Browse and a shelf action on Home. On phones a bottom tab bar
+(Watch Now · Browse · My List · More) replaces the toolbar nav, with Schedule
+at the top of the "More" sheet.
 
 The client is responsive; primary target is desktop, but phone layout must be
 usable for the home page and player.
@@ -333,7 +356,7 @@ preparing → failed → (retry) → preparing
 | Legal/ToS | Owner's call, mitigated | Copyright notices reach the host via swarm monitoring; mitigations chosen: no seeding, upload capped, qBittorrent bound to a VPN with a kill switch, Arc isolated in its own project. Notices, if any, are the owner's to answer. |
 | Retention defaults G=7, D=21 | Provisional | Admin-configurable; revisit after use. |
 | Subtitle language default | Provisional: English | Configurable. |
-| Hardware transcoding | Open | Depends on host. Software x264 `veryfast` preset assumed. |
+| Hardware transcoding | Open | Depends on host. Software x264 assumed, `fast` preset / CRF 19 / `-tune animation` since 2026-09-11 (~1.5–2× real time on 2 vCPU). |
 
 ## 10. Decision log
 
@@ -367,6 +390,34 @@ preparing → failed → (retry) → preparing
   from the user's last action on the show; wants that end because the show
   left watching/planned are dropped (not deleted) so the grace period is
   never skipped; revival needs an Arc-side action.
+- 2026-09-11 — M15 sign-off (owner, on the built pages): Schedule joins the
+  toolbar nav and the top of the phone "More" sheet (the four tabs stay as
+  they are). Watch Now's hero stops being "continue watching" and becomes a
+  cycling set of up to six season recommendations — at most two slides for the
+  latest run's picks for shows airing this season or next, and the rest from
+  unfollowed shows of the cached season, ranked by overlap with the viewer's
+  top-three genres (weighted by list score) and then by how many people are
+  watching, rather than filtered by genre, so the season is always represented
+  even where the catalogue has not filled in its genres — with Add to list
+  (planned) and Details on it, and hidden entirely when there is nothing to
+  offer. Continue watching becomes the first shelf and "Up Next"
+  narrows to ready-but-unstarted episodes as "Ready to watch". Presentation
+  only: no endpoint, payload or behaviour changed.
+- 2026-09-12 — Encoding stays faithful to the source: no denoise pass (owner),
+  after a same-episode comparison with a denoised third-party encode; the
+  smoother look there comes from removing Crunchyroll's compression noise.
+- 2026-09-11 — M15.5 approved: the manami anime-offline-database (weekly
+  import) becomes the first stop for search, matching and id mapping, and
+  TMDB (via Fribb's anime-lists id map) enriches art, stills and credits —
+  both as fallbacks behind AniList, ahead of MAL for art. Kitsu rejected for
+  now. Reason: AniList suspended its API for three days this week.
+- 2026-09-11 — M15 design accepted (Apple TV grammar, "quiet cinema"): toolbar
+  navigation and avatar menu replace the sidebar; new My List page; Recs as a
+  Browse button; phone bottom tab bar. Data extension approved so the design
+  is not placeholders: key art (`cover_large_url`), staff credits and episode
+  titles/stills from AniList. Cour selector, synopses and the "Brand" page are
+  not shipped (no data / documentation only). Player subtitles chip dropped
+  (subtitles are burned in).
 - 2026-09-10 — M14 as built: admin panel (users/invites, validated rules editor,
   jobs with retry/cancel and worker heartbeat, storage with retention preview
   and per-episode delete/re-fetch, acquisition with qBittorrent status).
@@ -390,3 +441,15 @@ preparing → failed → (retry) → preparing
   (~€30/mo all in). AWS rejected on cost (~5× for this workload) and
   torrent AUP risk; home-tunnel rejected because the Mac would have to
   stay on.
+- 2026-09-11 — M15 sign-off remarks 8 and 5. Search merges Arc's own cached
+  rows in front of the live page (FR-C1), because the owner could not find a
+  show Arc was downloading while AniList was disabled upstream; an upstream
+  failure with local hits now answers 200 rather than 502. Transcode quality
+  defaults raised from `veryfast`/CRF 20 to `fast`/CRF 19/`-tune animation`
+  after the owner judged playback soft, and the three knobs plus an optional
+  bitrate ceiling became settings.
+- 2026-09-11 — M15 sign-off remark on Continue watching. The shelf lists any
+  episode with an in-progress position, completed or not (FR-W1), so a rewatch
+  left at the midpoint is offered; `completed` keeps every other meaning it
+  had. Resume (FR-S2) no longer refuses a completed row either — its 10 s floor
+  and 95 % ceiling are the whole rule.

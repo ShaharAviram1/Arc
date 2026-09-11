@@ -17,6 +17,7 @@ import pytest
 
 from arc.services.anilist.source import DISABLED_REASON
 from arc.services.catalog.breaker import Breaker
+from arc.services.catalog.local import MAX_TERMS, escape_like, terms_of
 from arc.services.catalog.service import CatalogService
 from arc.services.catalog.source import SourceNotFound, SourceUnavailable
 from tests.anilist_mock import FRIEREN_ID, FakeAniList, frieren_fake, summary_of
@@ -303,3 +304,25 @@ def test_healthy_is_false_for_an_open_or_unconfigured_source() -> None:
 
     service.breaker.record_failure("anilist", "boom")
     assert service.healthy("anilist") is False
+
+
+# --- The local half of a search ---------------------------------------------
+#
+# The query goes into an ``ILIKE`` pattern, so what it is allowed to mean is
+# part of the contract (``catalog/local.py``); the SQL itself is exercised over
+# a real database in ``test_catalogue_api``.
+
+
+def test_a_query_is_every_word_it_contains() -> None:
+    assert terms_of("jobless  reincarnation ") == ["jobless", "reincarnation"]
+    assert terms_of("   ") == []
+    assert len(terms_of(" ".join(str(n) for n in range(20)))) == MAX_TERMS
+
+
+def test_like_metacharacters_are_escaped_not_honoured() -> None:
+    """Otherwise "100%" matches the whole table and "_" matches any letter."""
+    assert escape_like("100%") == "100\\%"
+    assert escape_like("a_b") == "a\\_b"
+    # The escape character itself goes first, or escaping would double-escape.
+    assert escape_like("a\\b") == "a\\\\b"
+    assert escape_like("frieren") == "frieren"

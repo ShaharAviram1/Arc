@@ -420,6 +420,38 @@ async def test_validation_rejects_every_kind_of_half_written_output(
     assert await validate_output(output) == 0
 
 
+async def test_the_options_reach_the_encode_unabridged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every knob the caller set, on the command line the fake ffmpeg saw.
+
+    The runner only adds where the subtitle landed and whether there are fonts;
+    it used to re-list the rest field by field, which is how a new knob comes
+    to be configured everywhere and passed nowhere.
+    """
+    marker = tmp_path / "calls.txt"
+    install_fake_ffmpeg(tmp_path / "bin", monkeypatch, marker=marker)
+    plan = make_plan(tmp_path)
+
+    await transcode(
+        plan,
+        options=EncodeOptions(
+            preset="slow", crf=17, tune="film", maxrate_kbps=6000, bufsize_kbps=9000
+        ),
+        timeout=60,
+    )
+
+    argv = Path(f"{marker}.argv").read_text().strip().split("\0")
+    pairs = dict(zip(argv, argv[1:], strict=False))
+    assert pairs["-preset"] == "slow"
+    assert pairs["-crf"] == "17"
+    assert pairs["-tune"] == "film"
+    assert pairs["-maxrate"] == "6000k"
+    assert pairs["-bufsize"] == "9000k"
+    # …and the two the runner does decide.
+    assert pairs["-vf"] == "ass=_work/sub.ass:fontsdir=_work/fonts"
+
+
 async def test_an_ffmpeg_without_libass_says_so_before_the_encode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

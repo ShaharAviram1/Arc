@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from arc.services.playback.progress import (
     COMPLETION_FRACTION,
+    CONTINUE_END_MARGIN_S,
     CONTINUE_LIMIT,
     CONTINUE_MIN_POSITION_S,
     RESUME_MAX_FRACTION,
@@ -28,6 +29,7 @@ from arc.services.playback.progress import (
 
 __all__ = [
     "COMPLETION_FRACTION",
+    "CONTINUE_END_MARGIN_S",
     "CONTINUE_LIMIT",
     "CONTINUE_MIN_POSITION_S",
     "RESUME_MAX_FRACTION",

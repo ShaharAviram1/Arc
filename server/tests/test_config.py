@@ -22,6 +22,11 @@ ENV_VARS = [
     "QBIT_PASS",
     "DATA_DIR",
     "MAX_TRANSCODES",
+    "TRANSCODE_PRESET",
+    "TRANSCODE_CRF",
+    "TRANSCODE_TUNE",
+    "TRANSCODE_MAXRATE_KBPS",
+    "TRANSCODE_BUFSIZE_KBPS",
     "LLM_MATCH_SUGGESTIONS",
     "BOOTSTRAP_ADMIN_EMAIL",
     "BOOTSTRAP_ADMIN_PASSWORD",
@@ -94,3 +99,41 @@ def test_env_overrides_are_read(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.data_dir == Path("/data")
     assert settings.renditions_dir == Path("/data/renditions")
     assert settings.llm_match_suggestions is True
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_the_transcode_quality_defaults() -> None:
+    """M15: raised from veryfast/CRF 20, which the owner judged soft."""
+    settings = _settings()
+
+    assert settings.transcode_preset == "fast"
+    assert settings.transcode_crf == 19
+    assert settings.transcode_tune == "animation"
+    # A bitrate ceiling is opt-in: CRF alone is the control for one box.
+    assert settings.transcode_maxrate_kbps is None
+    assert settings.transcode_bufsize_kbps is None
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_the_transcode_knobs_are_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRANSCODE_PRESET", "veryfast")
+    monkeypatch.setenv("TRANSCODE_CRF", "22")
+    monkeypatch.setenv("TRANSCODE_TUNE", "")
+    monkeypatch.setenv("TRANSCODE_MAXRATE_KBPS", "6000")
+    monkeypatch.setenv("TRANSCODE_BUFSIZE_KBPS", "9000")
+
+    settings = _settings()
+
+    assert settings.transcode_preset == "veryfast"
+    assert settings.transcode_crf == 22
+    # Empty is how an operator turns tuning off; the options object turns it
+    # into ``None`` so no ``-tune`` reaches ffmpeg at all.
+    assert settings.transcode_tune == ""
+    assert settings.transcode_maxrate_kbps == 6000
+    assert settings.transcode_bufsize_kbps == 9000
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_an_impossible_crf_is_refused() -> None:
+    with pytest.raises(ValueError, match="transcode_crf"):
+        Settings(_env_file=None, transcode_crf=99)  # type: ignore[call-arg]

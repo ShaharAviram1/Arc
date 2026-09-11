@@ -16,6 +16,8 @@
  * is already refetching does not collect a queue of clicks.
  */
 
+import { buttonClass } from '@/components/ui/styles'
+
 const RETRY_LABEL = 'Try again'
 
 export interface ErrorStateProps {
@@ -30,14 +32,23 @@ export interface ErrorStateProps {
 
 export function ErrorState({ message, onRetry, pending = false, className }: ErrorStateProps) {
   return (
-    <div role="alert" className={className}>
-      <p className="text-sm text-[var(--arc-error)]">{message}</p>
+    <div
+      role="alert"
+      className={`rounded-card border-[0.5px] border-[color-mix(in_srgb,var(--arc-error)_32%,transparent)] bg-[color-mix(in_srgb,var(--arc-error)_8%,transparent)] p-5 ${className ?? ''}`}
+    >
+      <p className="flex items-start gap-2.5 text-[14px] text-[var(--arc-error)]">
+        <span
+          aria-hidden
+          className="mt-[6px] h-[7px] w-[7px] shrink-0 rounded-full bg-[var(--arc-error)]"
+        />
+        {message}
+      </p>
       {onRetry === undefined ? null : (
         <button
           type="button"
           disabled={pending}
           onClick={onRetry}
-          className="mt-2 rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-1.5 text-sm text-[var(--arc-text)] transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+          className={buttonClass('chip', 'mt-3.5')}
         >
           {RETRY_LABEL}
         </button>

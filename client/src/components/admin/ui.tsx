@@ -9,37 +9,32 @@
  * button that asks first, and a table that scrolls instead of pushing the page
  * sideways on a narrow screen.
  *
- * The design language is the one the other pages already speak (`ErrorState`,
- * `Recs`): surfaces on `--arc-surface`, muted secondary text, accent for the
- * one primary action, `--arc-error` for anything that removes something. M15's
- * design pass will take all of it somewhere better; until then, consistency is
- * worth more than invention.
+ * The design language is M15's (`design/arc-design/.../README.md`): the
+ * translucent `--arc-surface` cards, 0.5px hairlines, 44px controls, glass
+ * secondaries and a white primary. Tables stay tables — five of them, every
+ * column load-bearing — but at 13–14px with hairline row rules instead of
+ * boxes, and each scrolls inside itself rather than pushing the page sideways.
  */
 
 import { useState, type ReactNode } from 'react'
+import { dangerButtonClass, subtleButtonClass } from '@/components/admin/styles'
 
-export const primaryButtonClass =
-  'inline-flex items-center gap-2 rounded-md bg-[var(--arc-accent)] px-3 py-1.5 text-sm font-medium text-[var(--arc-accent-contrast)] transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
+export const panelClass =
+  'rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-[18px]'
 
-export const subtleButtonClass =
-  'inline-flex items-center gap-1.5 rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface)] px-2.5 py-1 text-xs text-[var(--arc-text)] transition-colors hover:border-[var(--arc-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-60'
-
-export const dangerButtonClass =
-  'inline-flex items-center gap-1.5 rounded-md border border-[var(--arc-error)]/40 bg-[var(--arc-error)]/10 px-2.5 py-1 text-xs text-[var(--arc-error)] transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-error)] disabled:cursor-not-allowed disabled:opacity-60'
-
-export const inputClass =
-  'rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-3 py-1.5 text-sm text-[var(--arc-text)] placeholder:text-[var(--arc-text-muted)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--arc-accent)] disabled:opacity-60'
-
-export const panelClass = 'rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)] p-4'
-
+/** The header row reads as an eyebrow, not as a second set of labels. */
 export const thClass =
-  'px-3 py-2 text-left text-xs font-medium tracking-wide text-[var(--arc-text-muted)] uppercase'
+  'px-3.5 py-3 text-left text-[12px] font-semibold tracking-[0.08em] text-[var(--arc-text-muted)] uppercase'
 
-export const tdClass = 'px-3 py-2 align-top text-sm text-[var(--arc-text)]'
+export const tdClass = 'px-3.5 py-3 align-top text-[14px] text-[var(--arc-text)]'
 
 /** A section heading, so every tab's headings are the same size and weight. */
 export function SectionHeading({ children }: { children: ReactNode }) {
-  return <h2 className="text-lg font-semibold tracking-tight text-[var(--arc-text)]">{children}</h2>
+  return (
+    <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
+      {children}
+    </h2>
+  )
 }
 
 /**
@@ -52,7 +47,7 @@ export function SectionHeading({ children }: { children: ReactNode }) {
  */
 export function TableScroll({ children }: { children: ReactNode }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-[var(--arc-border)] bg-[var(--arc-surface)]">
+    <div className="overflow-x-auto rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)]">
       {children}
     </div>
   )
@@ -60,11 +55,14 @@ export function TableScroll({ children }: { children: ReactNode }) {
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'muted' | 'busy'
 
+// Status only ever speaks in ok / warn / error, plus the cold focus blue for
+// "in flight". Ember is reserved for a broadcast happening tonight and never
+// appears on this page.
 const TONE_CLASSES: Record<Tone, string> = {
   ok: 'text-[var(--arc-ok)] border-[var(--arc-ok)]/40 bg-[var(--arc-ok)]/10',
   warn: 'text-[var(--arc-warn)] border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10',
   bad: 'text-[var(--arc-error)] border-[var(--arc-error)]/40 bg-[var(--arc-error)]/10',
-  busy: 'text-[var(--arc-accent)] border-[var(--arc-accent)]/40 bg-[var(--arc-accent)]/10',
+  busy: 'text-[var(--arc-focus)] border-[var(--arc-focus)]/40 bg-[var(--arc-focus)]/10',
   muted: 'text-[var(--arc-text-muted)] border-[var(--arc-border)] bg-[var(--arc-surface-raised)]',
 }
 
@@ -72,7 +70,7 @@ const TONE_CLASSES: Record<Tone, string> = {
 export function Pill({ tone = 'muted', children }: { tone?: Tone; children: ReactNode }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs whitespace-nowrap ${TONE_CLASSES[tone]}`}
+      className={`inline-flex items-center rounded-full border-[0.5px] px-2.5 py-0.5 text-[12px] whitespace-nowrap ${TONE_CLASSES[tone]}`}
     >
       {children}
     </span>
@@ -82,7 +80,7 @@ export function Pill({ tone = 'muted', children }: { tone?: Tone; children: Reac
 /** One failed action, said next to the control that caused it. */
 export function InlineError({ message, className = '' }: { message: string; className?: string }) {
   return (
-    <p role="alert" className={`text-sm text-[var(--arc-error)] ${className}`}>
+    <p role="alert" className={`text-[13px] text-[var(--arc-error)] ${className}`}>
       {message}
     </p>
   )
@@ -91,7 +89,7 @@ export function InlineError({ message, className = '' }: { message: string; clas
 /** One thing that worked, said the same way in every tab. */
 export function Notice({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <p role="status" className={`text-sm text-[var(--arc-ok)] ${className}`}>
+    <p role="status" className={`text-[13px] text-[var(--arc-ok)] ${className}`}>
       {children}
     </p>
   )
@@ -143,7 +141,7 @@ export function ConfirmButton({
 
   return (
     <span className="inline-flex flex-wrap items-center gap-2">
-      <span className="text-xs text-[var(--arc-text-muted)]">{question}</span>
+      <span className="text-[13px] text-[var(--arc-text-muted)]">{question}</span>
       <button
         type="button"
         className={dangerButtonClass}

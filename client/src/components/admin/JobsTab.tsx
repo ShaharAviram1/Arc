@@ -22,13 +22,13 @@ import {
   InlineError,
   Pill,
   SectionHeading,
-  inputClass,
-  subtleButtonClass,
   TableScroll,
   tdClass,
   thClass,
   type Tone,
 } from '@/components/admin/ui'
+import { inputClass, subtleButtonClass } from '@/components/admin/styles'
+import { LABEL_CLASS } from '@/components/ui'
 import {
   JOBS_PAGE_SIZE,
   JOB_STATUSES,
@@ -66,8 +66,10 @@ const STATUS_TONES: Record<JobStatus, Tone> = {
 function SummaryStrip({ summary }: { summary: JobsSummary }) {
   const backlog = Object.entries(summary.by_type_pending).filter(([, count]) => count > 0)
 
+  // The summary is the tab's headline, so it sits on a card of its own rather
+  // than floating as a loose row of pills above the filters.
   return (
-    <div className="mt-4 flex flex-col gap-2">
+    <div className="mt-5 flex flex-col gap-3 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-[18px]">
       <div className="flex flex-wrap items-center gap-2">
         {JOB_STATUSES.map((status) => (
           <Pill key={status} tone={STATUS_TONES[status]}>
@@ -77,14 +79,14 @@ function SummaryStrip({ summary }: { summary: JobsSummary }) {
         <Pill tone={summary.worker.alive ? 'ok' : 'bad'}>
           {summary.worker.alive ? 'worker alive' : 'worker not responding'}
         </Pill>
-        <span className="text-xs text-[var(--arc-text-muted)]">
+        <span className="text-[13px] text-[var(--arc-text-muted)]">
           {summary.worker.heartbeat_at === null
             ? 'no heartbeat yet'
             : `last heartbeat ${formatRelativeTime(summary.worker.heartbeat_at)}`}
         </span>
       </div>
       {backlog.length === 0 ? null : (
-        <p className="text-xs text-[var(--arc-text-muted)]">
+        <p className="text-[13px] text-[var(--arc-text-muted)]">
           Pending by type:{' '}
           {backlog.map(([type, count]) => `${type} (${String(count)})`).join(' · ')}
         </p>
@@ -102,7 +104,7 @@ function Timings({ job }: { job: JobRow }) {
   ]
 
   return (
-    <div className="flex flex-col gap-0.5 text-xs whitespace-nowrap text-[var(--arc-text-muted)]">
+    <div className="flex flex-col gap-0.5 text-[13px] whitespace-nowrap text-[var(--arc-text-muted)]">
       {rows.map(([label, at]) =>
         at === null ? null : (
           <span key={label}>
@@ -120,20 +122,20 @@ function LastError({ job }: { job: JobRow }) {
   const text = job.last_error
 
   if (text === null || text === '') {
-    return <span className="text-xs text-[var(--arc-text-muted)]">—</span>
+    return <span className="text-[13px] text-[var(--arc-text-muted)]">—</span>
   }
 
   const long = text.length > ERROR_PREVIEW
 
   return (
     <div className="min-w-0">
-      <p className="max-w-md text-xs break-words text-[var(--arc-error)]">
+      <p className="max-w-md text-[13px] break-words text-[var(--arc-error)]">
         {open || !long ? text : `${text.slice(0, ERROR_PREVIEW)}…`}
       </p>
       {long ? (
         <button
           type="button"
-          className="mt-1 text-xs text-[var(--arc-accent)] hover:underline"
+          className="mt-1.5 text-[13px] text-[var(--arc-focus)] underline-offset-2 hover:underline"
           onClick={() => {
             setOpen((current) => !current)
           }}
@@ -218,7 +220,7 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
                       </button>
                     ) : null}
                     {canRetry(job) || canCancel(job) ? null : (
-                      <span className="text-xs text-[var(--arc-text-muted)]">—</span>
+                      <span className="text-[13px] text-[var(--arc-text-muted)]">—</span>
                     )}
                   </div>
                   {error === null ? null : <InlineError className="mt-1" message={error} />}
@@ -254,7 +256,9 @@ export function JobsTab() {
   return (
     <div>
       <SectionHeading>Jobs</SectionHeading>
-      <p className="mt-1 max-w-3xl text-sm text-[var(--arc-text-muted)]">{EXPLANATION}</p>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {EXPLANATION}
+      </p>
 
       {summary.isError ? (
         <InlineError className="mt-4" message={adminErrorMessage(summary.error)} />
@@ -264,7 +268,7 @@ export function JobsTab() {
 
       <div className="mt-4 flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <label htmlFor="jobs-status" className="text-sm font-medium text-[var(--arc-text)]">
+          <label htmlFor="jobs-status" className={LABEL_CLASS}>
             Status
           </label>
           <select
@@ -285,7 +289,7 @@ export function JobsTab() {
           </select>
         </div>
         <div className="flex flex-col gap-1">
-          <label htmlFor="jobs-type" className="text-sm font-medium text-[var(--arc-text)]">
+          <label htmlFor="jobs-type" className={LABEL_CLASS}>
             Type
           </label>
           <select
@@ -308,7 +312,7 @@ export function JobsTab() {
       </div>
 
       {jobs.isPending ? (
-        <p role="status" className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           Loading jobs…
         </p>
       ) : jobs.isError ? (
@@ -321,7 +325,7 @@ export function JobsTab() {
           }}
         />
       ) : rows.length === 0 ? (
-        <p className="mt-4 text-sm text-[var(--arc-text-muted)]">
+        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
           No jobs match that filter{filter.offset > 0 ? ' on this page' : ''}.
         </p>
       ) : (
@@ -355,7 +359,7 @@ export function JobsTab() {
           >
             Older
           </button>
-          <span className="text-xs text-[var(--arc-text-muted)]">
+          <span className="text-[13px] tabular-nums text-[var(--arc-text-muted)]">
             Showing {filter.offset + 1}–{filter.offset + rows.length}
           </span>
         </div>

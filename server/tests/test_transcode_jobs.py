@@ -651,6 +651,34 @@ async def test_an_episode_that_went_away_is_not_an_error(
         await transcode_episode(context(session, settings, job))
 
 
+# --- Encoder settings -------------------------------------------------------
+
+
+def test_the_encoder_settings_reach_ffmpeg_from_the_environment() -> None:
+    """``Settings`` → ``EncodeOptions`` → argv, with nothing dropped on the way."""
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        transcode_preset="slow",
+        transcode_crf=17,
+        transcode_tune="film",
+        transcode_maxrate_kbps=6000,
+        transcode_bufsize_kbps=9000,
+        hls_segment_seconds=4,
+    )
+
+    options = media_jobs.encode_options(settings)
+
+    assert (options.preset, options.crf, options.tune) == ("slow", 17, "film")
+    assert (options.maxrate_kbps, options.bufsize_kbps) == (6000, 9000)
+    assert options.segment_seconds == 4
+
+
+def test_an_empty_tune_setting_means_no_tune_at_all() -> None:
+    settings = Settings(_env_file=None, transcode_tune="")  # type: ignore[call-arg]
+
+    assert media_jobs.encode_options(settings).tune is None
+
+
 # --- Languages --------------------------------------------------------------
 
 

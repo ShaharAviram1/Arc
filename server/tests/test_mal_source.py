@@ -244,6 +244,29 @@ def test_detail_parses_into_the_shared_vocabulary() -> None:
     assert media.tags == []
 
 
+def test_the_fallback_carries_the_studio_credit_and_nothing_else_new() -> None:
+    """M15's three fields, from the source that publishes almost none of them.
+
+    MAL's official API has no staff endpoint, no per-episode list, and nothing
+    bigger than a 230 px ``main_picture.large``. So the credits block is the
+    studio row alone and the other two are empty — which is what the show page
+    renders during an AniList outage, and what AniList overwrites the moment it
+    answers again.
+    """
+    media = parse(anime_payload(), full=True)
+
+    assert media.credits == [{"role": "Studio", "name": "Madhouse"}]
+    assert media.cover_large_url is None
+    assert media.episode_extras == []
+
+
+def test_a_summary_carries_no_credits_either() -> None:
+    media = parse(anime_payload(), full=False)
+
+    assert media.credits == []
+    assert media.cover_large_url is None
+
+
 def test_the_synopsis_is_plain_text_already() -> None:
     media = parse(anime_payload(), full=True)
 

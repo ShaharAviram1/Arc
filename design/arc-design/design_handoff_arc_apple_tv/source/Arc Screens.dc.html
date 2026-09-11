@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+  <div>
+    <div style="width:180px;height:30px;border-radius:8px;background:#1b1b20;animation:arcpulse 1.6s ease-in-out infinite"></div>
+    <div style="margin-top:10px;width:52ch;max-width:100%;height:14px;border-radius:6px;background:#16161a;animation:arcpulse 1.6s ease-in-out infinite"></div>
+    <div style="margin-top:34px;display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px">
+      <sc-for list="{{ skeletons }}" as="s" hint-placeholder-count="8">
+        <div>
+          <div style="aspect-ratio:2/3;border-radius:8px;background:#16161a;animation:arcpulse 1.6s ease-in-out infinite"></div>
+          <div style="margin-top:10px;height:13px;width:80%;border-radius:5px;background:#16161a;animation:arcpulse 1.6s ease-in-out infinite"></div>
+          <div style="margin-top:7px;height:11px;width:50%;border-radius:5px;background:#141418;animation:arcpulse 1.6s ease-in-out infinite"></div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+</sc-if>
+
+<sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+  <div>
+    <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">{{ title }}</h1>
+    <div style="margin-top:28px;border:1px solid #1e1e24;border-radius:12px;background:#131316;padding:40px 28px;text-align:center">
+      <p style="margin:0 auto;max-width:46ch;font-size:14px;line-height:1.65;color:#a3a1a9">{{ emptyCopy }}</p>
+      <button type="button" style="margin-top:20px;min-height:40px;padding:0 18px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">{{ emptyAction }}</button>
+    </div>
+  </div>
+</sc-if>
+
+<sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+  <div>
+    <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">{{ title }}</h1>
+    <div style="margin-top:28px;border:1px solid rgba(240,138,127,0.32);border-radius:12px;background:rgba(240,138,127,0.07);padding:22px">
+      <p style="margin:0;display:flex;align-items:center;gap:9px;font-size:14px;color:#f08a7f">
+        <span style="width:7px;height:7px;border-radius:999px;background:#f08a7f;flex-shrink:0"></span>
+        {{ errorCopy }}
+      </p>
+      <button type="button" style="margin-top:14px;min-height:40px;padding:0 16px;border:1px solid #2c2c34;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:13.5px;cursor:pointer">Try again</button>
+    </div>
+  </div>
+</sc-if>
+
+<sc-if value="{{ isData }}" hint-placeholder-val="{{ true }}">
+<div>
+
+  <sc-if value="{{ onHome }}" hint-placeholder-val="{{ true }}">
+    <div style="animation:arcfade 200ms ease">
+      <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px">
+        <div style="min-width:0">
+          <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Home</h1>
+          <p style="margin:6px 0 0;max-width:64ch;font-size:13.5px;line-height:1.6;color:#a3a1a9">What you were watching, what you have fallen behind on, and what turned up this week.</p>
+        </div>
+      </div>
+
+      <section style="margin-top:30px">
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Continue watching</h2>
+          <span style="font-size:12px;color:#8b8992">{{ continueCount }}</span>
+        </div>
+        <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">
+          <sc-for list="{{ continueWatching }}" as="item" hint-placeholder-count="2">
+            <article style="display:flex;gap:14px;padding:14px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+              <div style="position:relative;width:74px;flex-shrink:0;aspect-ratio:2/3;border-radius:6px;overflow:hidden;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px);display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:0.06em;color:#5e5c65">cover S</span>
+              </div>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:6px">
+                <p style="margin:0;font-size:14px;font-weight:500;line-height:1.35;color:#eceae7;text-wrap:pretty">{{ item.title }}</p>
+                <p style="margin:0;font-size:12.5px;color:#8b8992">Episode {{ item.ep }}</p>
+                <div style="margin-top:auto;display:flex;align-items:center;gap:10px">
+                  <span style="flex:1;height:3px;border-radius:999px;background:#26262c;overflow:hidden;display:block">
+                    <span style="display:block;height:100%;border-radius:999px;background:#f2a06a;width:{{ item.pct }}"></span>
+                  </span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">{{ item.clock }}</span>
+                </div>
+                <button type="button" onClick="{{ goPlayer }}" style="margin-top:4px;align-self:flex-start;min-height:36px;padding:0 14px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13px;font-weight:600;cursor:pointer">Resume</button>
+              </div>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:34px">
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Behind on</h2>
+          <span style="font-size:12px;color:#8b8992">{{ behindCount }}</span>
+        </div>
+        <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px">
+          <sc-for list="{{ behind }}" as="item" hint-placeholder-count="6">
+            <article style="min-width:0">
+              <button type="button" onClick="{{ goShow }}" style="display:block;width:100%;padding:0;border:0;background:transparent;cursor:pointer;position:relative">
+                <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:8px;aspect-ratio:2/3;border-radius:8px;border:1px solid #1e1e24;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px)">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.06em;color:#5e5c65">cover M</span>
+                </span>
+                <span style="position:absolute;left:8px;top:8px;padding:2px 7px;border-radius:999px;background:rgba(10,10,12,0.82);border:1px solid #2c2c34;font-size:10.5px;color:#eceae7">{{ item.behind }} behind</span>
+              </button>
+              <p style="margin:10px 0 0;font-size:13px;font-weight:500;line-height:1.35;color:#eceae7;text-wrap:pretty">{{ item.title }}</p>
+              <p style="margin:4px 0 0;font-size:11.5px;color:#8b8992">{{ item.line }}</p>
+              <select style="margin-top:9px;width:100%;min-height:36px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;padding:0 8px">
+                <option>Watching</option>
+                <option>Plan to watch</option>
+                <option>On hold</option>
+                <option>Dropped</option>
+                <option>Completed</option>
+                <option>Not on list</option>
+              </select>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+
+      <section style="margin-top:34px">
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">New this week</h2>
+          <span style="font-size:12px;color:#8b8992">{{ newCount }}</span>
+        </div>
+        <div style="margin-top:14px;border:1px solid #1e1e24;border-radius:12px;background:#131316;overflow:hidden">
+          <sc-for list="{{ newThisWeek }}" as="item" hint-placeholder-count="4">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:13px 16px;border-top:1px solid #1c1c22">
+              <span style="min-width:200px;flex:1;font-size:13.5px;color:#eceae7">{{ item.title }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a3a1a9">Ep {{ item.ep }}</span>
+              <span style="font-size:12px;color:#8b8992;white-space:nowrap">{{ item.when }}</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ item.bd }};background:{{ item.bg }};color:{{ item.fg }};font-size:11.5px;white-space:nowrap">{{ item.state }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992;min-width:34px;text-align:right">{{ item.pct }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <p style="margin:36px 0 0;display:flex;flex-wrap:wrap;gap:10px;font-size:11.5px;color:#8b8992">
+        <span style="color:#63d493">API: ok</span>
+        <span>0.14.2 · production</span>
+      </p>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onSchedule }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px">
+        <div>
+          <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Schedule</h1>
+          <p style="margin:6px 0 0;font-size:13.5px;color:#eceae7">Summer 2026</p>
+          <p style="margin:3px 0 0;font-size:12px;color:#8b8992">Times in Europe/Berlin · <button type="button" style="border:0;background:transparent;padding:0;color:#f2a06a;font-size:12px;text-decoration:underline;text-underline-offset:2px;cursor:pointer">Change</button></p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button type="button" style="min-height:36px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;cursor:pointer">Previous season</button>
+          <button type="button" style="min-height:36px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;cursor:pointer">Next season</button>
+        </div>
+      </div>
+
+      <div style="margin-top:24px;display:flex;flex-direction:column;gap:8px">
+        <sc-for list="{{ days }}" as="day" hint-placeholder-count="7">
+          <section style="display:flex;flex-wrap:wrap;gap:14px;padding:14px 16px;border:1px solid {{ day.bd }};border-radius:12px;background:{{ day.bg }}">
+            <div style="width:84px;flex-shrink:0">
+              <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:{{ day.labelColor }}">{{ day.label }}</p>
+              <p style="margin:4px 0 0;font-size:11.5px;color:#8b8992">{{ day.count }}</p>
+            </div>
+            <div style="flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:8px">
+              <sc-for list="{{ day.entries }}" as="entry" hint-placeholder-count="3">
+                <button type="button" onClick="{{ goShow }}" style="display:flex;align-items:center;gap:10px;padding:7px 12px 7px 7px;border:1px solid #22222a;border-radius:10px;background:#16161a;cursor:pointer;text-align:left;max-width:340px;box-shadow:inset 2px 0 0 {{ entry.edge }}">
+                  <span style="width:26px;flex-shrink:0;aspect-ratio:2/3;border-radius:4px;background:repeating-linear-gradient(45deg,#1f1f25 0 5px,#191920 5px 10px)"></span>
+                  <span style="min-width:0">
+                    <span style="display:block;font-size:12.5px;color:#eceae7;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px">{{ entry.title }}</span>
+                    <span style="display:block;margin-top:2px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ entry.slot }}</span>
+                  </span>
+                </button>
+              </sc-for>
+              <sc-if value="{{ day.quiet }}" hint-placeholder-val="{{ false }}">
+                <span style="font-size:12px;color:#5e5c65;align-self:center">Nothing airing</span>
+              </sc-if>
+            </div>
+          </section>
+        </sc-for>
+      </div>
+
+      <button type="button" style="margin-top:18px;min-height:36px;padding:0 14px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;cursor:pointer">Show movies, OVAs and unscheduled (9)</button>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onSearch }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Search</h1>
+      <p style="margin:6px 0 0;max-width:64ch;font-size:13.5px;line-height:1.6;color:#a3a1a9">Find a show in the catalogue and put it on your list. Anything you set to Watching is what Arc starts fetching episodes for.</p>
+
+      <div style="margin-top:20px;max-width:520px">
+        <input type="search" value="{{ query }}" onChange="{{ onQuery }}" placeholder="Title…" style="width:100%;min-height:44px;padding:0 14px;border:1px solid #26262c;border-radius:10px;background:#131316;color:#eceae7;font-size:14px" />
+      </div>
+
+      <p style="margin:16px 0 0;font-size:12.5px;color:#8b8992">{{ searchNote }}</p>
+
+      <div style="margin-top:20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px">
+        <sc-for list="{{ results }}" as="item" hint-placeholder-count="5">
+          <article style="min-width:0">
+            <button type="button" onClick="{{ goShow }}" style="display:block;position:relative;width:100%;padding:0;border:0;background:transparent;cursor:pointer">
+              <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:8px;aspect-ratio:2/3;border-radius:8px;border:1px solid #1e1e24;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px)">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.06em;color:#5e5c65">cover M</span>
+              </span>
+              <sc-if value="{{ item.viaMal }}" hint-placeholder-val="{{ false }}">
+                <span title="AniList is unavailable; this result came from MyAnimeList" style="position:absolute;right:8px;top:8px;padding:2px 6px;border-radius:5px;background:rgba(10,10,12,0.85);border:1px solid rgba(232,193,92,0.4);font-family:'JetBrains Mono',monospace;font-size:9px;color:#e8c15c">via MAL</span>
+              </sc-if>
+            </button>
+            <p style="margin:10px 0 0;font-size:13px;font-weight:500;line-height:1.35;color:#eceae7;text-wrap:pretty">{{ item.title }}</p>
+            <p style="margin:4px 0 0;font-size:11.5px;color:#8b8992">{{ item.meta }}</p>
+            <select style="margin-top:9px;width:100%;min-height:36px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;padding:0 8px">
+              <option>Not on list</option>
+              <option>Watching</option>
+              <option>Plan to watch</option>
+              <option>On hold</option>
+              <option>Dropped</option>
+              <option>Completed</option>
+            </select>
+          </article>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onShow }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <div style="position:relative;border-radius:14px;overflow:hidden;border:1px solid #1e1e24;background:repeating-linear-gradient(45deg,#1c1c22 0 10px,#17171c 10px 20px)">
+        <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,12,0.35) 0%,rgba(10,10,12,0.88) 62%,#0f0f12 100%)"></div>
+        <div style="position:relative;display:flex;flex-wrap:wrap;gap:22px;padding:34px 26px 24px">
+          <div style="width:158px;flex-shrink:0;aspect-ratio:2/3;border-radius:10px;border:1px solid #2c2c34;background:repeating-linear-gradient(45deg,#1f1f25 0 6px,#191920 6px 12px);display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;box-shadow:0 18px 40px rgba(0,0,0,0.5)">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:0.06em;color:#5e5c65">cover L</span>
+          </div>
+          <div style="min-width:0;flex:1">
+            <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;line-height:1.12;color:#eceae7;margin:0;text-wrap:pretty">Mushoku Tensei: Jobless Reincarnation Season 3</h1>
+            <p style="margin:8px 0 0;font-size:13px;color:#8b8992">Mushoku Tensei III: Isekai Ittara Honki Dasu · 無職転生 III 〜異世界行ったら本気だす〜</p>
+            <p style="margin:10px 0 0;font-size:13px;color:#a3a1a9">TV · 14 episodes · Releasing · Summer 2026 · Studio Bind</p>
+            <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:7px">
+              <sc-for list="{{ genres }}" as="g" hint-placeholder-count="4">
+                <span style="padding:3px 10px;border-radius:999px;border:1px solid #26262c;background:rgba(19,19,22,0.8);font-size:11.5px;color:#a3a1a9">{{ g }}</span>
+              </sc-for>
+            </div>
+            <div style="margin-top:16px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+              <select style="min-height:40px;min-width:170px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#eceae7;font-size:13px;padding:0 10px">
+                <option>Watching</option>
+                <option>Plan to watch</option>
+                <option>On hold</option>
+                <option>Dropped</option>
+                <option>Completed</option>
+                <option>Not on list</option>
+              </select>
+              <select style="min-height:40px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#eceae7;font-size:13px;padding:0 10px">
+                <option>Score —</option>
+                <option>9</option>
+                <option>8</option>
+              </select>
+              <span style="font-size:12.5px;color:#a3a1a9">Watched 8 / 14</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid rgba(99,212,147,0.28);background:rgba(99,212,147,0.1);color:#63d493;font-size:11.5px">MAL synced</span>
+            </div>
+            <p style="margin:14px 0 0;font-size:12.5px;color:#8b8992">Next episode: 12 airs Sun, Sep 13, 2026, 6:00 PM</p>
+          </div>
+        </div>
+      </div>
+
+      <p style="margin:22px 0 0;max-width:74ch;font-size:13.5px;line-height:1.7;color:#a3a1a9">The third season of Mushoku Tensei: Isekai Ittara Honki Dasu.</p>
+
+      <div style="margin-top:30px;display:flex;flex-wrap:wrap;align-items:baseline;gap:10px">
+        <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Episodes</h2>
+        <span style="font-size:12px;color:#8b8992">12 of 14 known · 8 watched</span>
+      </div>
+
+      <div style="margin-top:14px;border:1px solid #1e1e24;border-radius:12px;background:#131316;overflow:hidden">
+        <sc-for list="{{ episodes }}" as="ep" hint-placeholder-count="8">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:13px 16px;border-top:1px solid #1c1c22">
+            <span style="width:26px;flex-shrink:0;font-family:'JetBrains Mono',monospace;font-size:12px;color:#8b8992">{{ ep.number }}</span>
+            <span style="min-width:180px;flex:1">
+              <span style="display:block;font-size:13.5px;color:#eceae7">{{ ep.title }}</span>
+              <span style="display:block;margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ ep.detail }}</span>
+            </span>
+            <span style="font-size:12px;color:#8b8992;white-space:nowrap">{{ ep.air }}</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ ep.bd }};background:{{ ep.bg }};color:{{ ep.fg }};font-size:11.5px;white-space:nowrap">{{ ep.state }}</span>
+            <span style="width:70px;display:flex;align-items:center;gap:7px">
+              <sc-if value="{{ ep.hasBar }}" hint-placeholder-val="{{ false }}">
+                <span style="flex:1;height:3px;border-radius:999px;background:#26262c;display:block;overflow:hidden">
+                  <span style="display:block;height:100%;background:#f2a06a;border-radius:999px;width:{{ ep.pct }}"></span>
+                </span>
+              </sc-if>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ ep.pctLabel }}</span>
+            </span>
+            <span style="width:96px;text-align:right;font-size:12px;color:#8b8992">{{ ep.watched }}</span>
+            <span style="width:74px;display:flex;justify-content:flex-end">
+              <sc-if value="{{ ep.playable }}" hint-placeholder-val="{{ true }}">
+                <button type="button" onClick="{{ goPlayer }}" style="min-height:34px;padding:0 14px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:12.5px;font-weight:600;cursor:pointer">Play</button>
+              </sc-if>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Related</h2>
+      <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:14px">
+        <sc-for list="{{ relations }}" as="rel" hint-placeholder-count="3">
+          <div style="width:118px">
+            <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px;aspect-ratio:2/3;border-radius:8px;border:1px solid #1e1e24;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px)">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:#5e5c65">cover S</span>
+            </span>
+            <p style="margin:8px 0 0;font-size:12.5px;color:#eceae7;line-height:1.35">{{ rel.title }}</p>
+            <p style="margin:3px 0 0;font-size:11px;color:#8b8992">{{ rel.kind }}</p>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onPlayer }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:#000;display:flex;flex-direction:column">
+      <header style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px 20px;background:linear-gradient(180deg,rgba(0,0,0,0.85),rgba(0,0,0,0))">
+        <button type="button" onClick="{{ goShow }}" aria-label="Back to show" style="width:36px;height:36px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.7);color:#eceae7;font-size:15px;cursor:pointer">←</button>
+        <span style="min-width:0">
+          <span style="display:block;font-size:14px;font-weight:500;color:#eceae7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Mushoku Tensei: Jobless Reincarnation Season 3</span>
+          <span style="display:block;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992">Episode 9 · 1080p · subs en · audio ja</span>
+        </span>
+        <span style="margin-left:auto;display:flex;gap:8px">
+          <button type="button" style="min-height:34px;padding:0 12px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.7);color:#a3a1a9;font-size:12px;cursor:pointer">Previous · 8</button>
+          <button type="button" style="min-height:34px;padding:0 12px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.7);color:#eceae7;font-size:12px;cursor:pointer">Next · 10</button>
+        </span>
+      </header>
+
+      <div style="flex:1;min-height:200px;position:relative;display:flex;align-items:center;justify-content:center;background:repeating-linear-gradient(45deg,#0e0e11 0 12px,#0b0b0e 12px 24px)">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.08em;color:#4d4b53">video · HLS with burned-in subtitles</span>
+        <div style="position:absolute;left:20px;top:16px;display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:8px;border:1px solid rgba(232,193,92,0.35);background:rgba(232,193,92,0.1);font-size:12px;color:#e8c15c">
+          <span>Progress isn’t being saved — check your connection.</span>
+          <button type="button" style="border:0;background:transparent;padding:0;color:#e8c15c;font-size:12px;text-decoration:underline;text-underline-offset:2px;cursor:pointer">Dismiss</button>
+        </div>
+      </div>
+
+      <div style="padding:0 20px 20px;background:linear-gradient(0deg,rgba(0,0,0,0.9),rgba(0,0,0,0))">
+        <div style="display:flex;align-items:center;gap:12px;padding-top:14px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#a3a1a9;width:44px">{{ playedClock }}</span>
+          <span style="flex:1;height:4px;border-radius:999px;background:#26262c;position:relative;display:block;cursor:pointer">
+            <span style="position:absolute;left:0;top:0;bottom:0;width:78%;border-radius:999px;background:#3a3a44"></span>
+            <span style="position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:#f2a06a;width:{{ playedPct }}"></span>
+            <span style="position:absolute;top:-4px;width:12px;height:12px;border-radius:999px;background:#f7b183;left:{{ playedPct }};transform:translateX(-6px)"></span>
+          </span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992;width:44px;text-align:right">23:40</span>
+        </div>
+
+        <div style="margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+          <button type="button" onClick="{{ togglePlay }}" aria-label="Play or pause" style="width:46px;height:46px;border:0;border-radius:999px;background:#f2a06a;color:#1a0f06;font-size:15px;font-weight:700;cursor:pointer">{{ playGlyph }}</button>
+          <button type="button" aria-label="Mute" style="min-width:44px;height:40px;padding:0 12px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.8);color:#a3a1a9;font-size:12px;cursor:pointer">Volume</button>
+          <span style="width:88px;height:4px;border-radius:999px;background:#26262c;display:block">
+            <span style="display:block;height:100%;width:70%;border-radius:999px;background:#a3a1a9"></span>
+          </span>
+          <button type="button" style="min-width:44px;height:40px;padding:0 12px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.8);color:#a3a1a9;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">1.0×</button>
+          <button type="button" aria-label="Fullscreen" style="min-width:44px;height:40px;padding:0 12px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.8);color:#a3a1a9;font-size:12px;cursor:pointer">Fullscreen</button>
+          <span style="margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992">Length 23:40</span>
+            <button type="button" style="min-height:40px;padding:0 14px;border:1px solid #2c2c34;border-radius:8px;background:rgba(19,19,22,0.8);color:#eceae7;font-size:12.5px;cursor:pointer">Mark watched</button>
+          </span>
+        </div>
+        <p style="margin:12px 0 0;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.04em;color:#8b8992">Space play/pause · ← → 5s · F fullscreen · M mute</p>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onMal }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">MyAnimeList</h1>
+      <p style="margin:6px 0 0;max-width:70ch;font-size:13.5px;line-height:1.65;color:#a3a1a9">Arc reads your list as the baseline and writes back only changes you make in Arc: finishing an episode, changing a status, setting a score. Every write is listed below with the value it replaced, and you can put any of them back.</p>
+
+      <div style="margin-top:20px;padding:18px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+          <span style="display:inline-flex;align-items:center;gap:7px;font-size:13.5px;color:#eceae7">
+            <span style="width:7px;height:7px;border-radius:999px;background:#63d493"></span>
+            Connected as <strong style="font-weight:600">frieren_fan</strong>
+          </span>
+          <span style="font-size:12.5px;color:#8b8992">Last import: Sep 11, 2026, 03:31</span>
+          <span style="margin-left:auto;display:flex;flex-wrap:wrap;gap:8px">
+            <button type="button" style="min-height:38px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12.5px;cursor:pointer">Import now</button>
+            <button type="button" style="min-height:38px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12.5px;cursor:pointer">Push 2 pending writes</button>
+            <button type="button" onClick="{{ armDisconnect }}" style="min-height:38px;padding:0 13px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.08);color:#f08a7f;font-size:12.5px;cursor:pointer">{{ disconnectLabel }}</button>
+          </span>
+        </div>
+        <sc-if value="{{ disconnectArmed }}" hint-placeholder-val="{{ false }}">
+          <p style="margin:12px 0 0;display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12.5px;color:#a3a1a9">
+            Really disconnect? Arc throws away the tokens and stops every future write.
+            <button type="button" style="min-height:34px;padding:0 12px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.1);color:#f08a7f;font-size:12px;cursor:pointer">Yes, disconnect</button>
+            <button type="button" onClick="{{ armDisconnect }}" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#a3a1a9;font-size:12px;cursor:pointer">Cancel</button>
+          </p>
+        </sc-if>
+      </div>
+
+      <div style="margin-top:28px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px">
+        <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Write log</h2>
+        <select style="min-height:36px;border:1px solid #26262c;border-radius:8px;background:#131316;color:#a3a1a9;font-size:12.5px;padding:0 10px">
+          <option>All writes</option>
+          <option>Failed only</option>
+          <option>Pending only</option>
+        </select>
+      </div>
+
+      <div style="margin-top:14px;border:1px solid #1e1e24;border-radius:12px;background:#131316;overflow:hidden">
+        <sc-for list="{{ writes }}" as="w" hint-placeholder-count="5">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:14px 16px;border-top:1px solid #1c1c22">
+            <span style="min-width:190px;flex:1">
+              <span style="display:block;font-size:13.5px;color:#eceae7">{{ w.show }}</span>
+              <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">{{ w.field }} · {{ w.cause }} · {{ w.when }}</span>
+            </span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a3a1a9;white-space:nowrap">{{ w.change }}</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ w.bd }};background:{{ w.bg }};color:{{ w.fg }};font-size:11.5px;white-space:nowrap">{{ w.status }}</span>
+            <span style="width:66px;text-align:right">
+              <sc-if value="{{ w.revertible }}" hint-placeholder-val="{{ false }}">
+                <button type="button" style="border:0;background:transparent;padding:0;color:#f2a06a;font-size:12px;text-decoration:underline;text-underline-offset:2px;cursor:pointer">Revert</button>
+              </sc-if>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onRecs }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Recommendations</h1>
+      <p style="margin:6px 0 0;max-width:74ch;font-size:13.5px;line-height:1.65;color:#a3a1a9">Arc sends a language model a summary of your list — what you rated highly, what you finished recently, what you dropped — along with a pool of shows you have not seen, and asks for three to five picks with a short case for each. Every run is kept, so this page is instant when you come back.</p>
+
+      <div style="margin-top:22px;max-width:620px">
+        <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Mood (optional)</label>
+        <textarea rows="2" value="{{ mood }}" onChange="{{ onMood }}" placeholder="something short and funny · like Mushishi" style="margin-top:7px;width:100%;resize:vertical;padding:11px 13px;border:1px solid #26262c;border-radius:10px;background:#131316;color:#eceae7;font-size:13.5px;line-height:1.5"></textarea>
+        <p style="margin:6px 0 0;text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">{{ moodCount }}/300</p>
+        <div style="margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+          <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">Get picks</button>
+          <span style="font-size:12.5px;color:#8b8992">4 of 10 left today</span>
+        </div>
+        <p style="margin:10px 0 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">Models: gemini-3.5-flash ✓ · claude-haiku-4.5 resting until tomorrow</p>
+      </div>
+
+      <div style="margin-top:30px">
+        <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Picks for: something quiet with good food · 2 hours ago</h2>
+        <p style="margin:5px 0 0;font-size:11.5px;color:#8b8992">Picked 3 of 40 candidates · gemini-3.5-flash</p>
+        <div style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px">
+          <sc-for list="{{ picks }}" as="pick" hint-placeholder-count="3">
+            <article style="display:flex;gap:16px;padding:16px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+              <div style="width:90px;flex-shrink:0;aspect-ratio:2/3;border-radius:8px;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px);display:flex;align-items:flex-end;justify-content:center;padding-bottom:7px">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:#5e5c65">cover M</span>
+              </div>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:8px">
+                <p style="margin:0;font-size:14px;font-weight:500;color:#eceae7;line-height:1.35">{{ pick.title }}</p>
+                <p style="margin:0;font-size:11.5px;color:#8b8992">{{ pick.meta }}</p>
+                <p style="margin:0;font-size:13px;line-height:1.6;color:#d8d5d0;text-wrap:pretty">{{ pick.case }}</p>
+                <select style="margin-top:auto;max-width:220px;min-height:38px;border:1px solid #26262c;border-radius:8px;background:#16161a;color:#a3a1a9;font-size:12.5px;padding:0 9px">
+                  <option>Not on list</option>
+                  <option>Plan to watch</option>
+                  <option>Watching</option>
+                </select>
+              </div>
+            </article>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="margin-top:32px">
+        <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">New in your franchises</h2>
+        <p style="margin:5px 0 0;max-width:70ch;font-size:12.5px;color:#8b8992">Sequels, movies and spin-offs of shows on your list that you have not added yet.</p>
+        <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ continuations }}" as="c" hint-placeholder-count="3">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:11px 14px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+              <span style="width:30px;flex-shrink:0;aspect-ratio:2/3;border-radius:4px;background:repeating-linear-gradient(45deg,#1f1f25 0 5px,#191920 5px 10px)"></span>
+              <span style="min-width:180px;flex:1">
+                <span style="display:block;font-size:13px;color:#eceae7">{{ c.title }}</span>
+                <span style="display:block;margin-top:2px;font-size:11.5px;color:#8b8992">{{ c.because }}</span>
+              </span>
+              <select style="min-height:36px;min-width:150px;border:1px solid #26262c;border-radius:8px;background:#16161a;color:#a3a1a9;font-size:12.5px;padding:0 9px">
+                <option>Not on list</option>
+                <option>Plan to watch</option>
+              </select>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onReview }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Match review</h1>
+      <p style="margin:6px 0 0;max-width:74ch;font-size:13.5px;line-height:1.65;color:#a3a1a9">Files Arc could not match confidently wait here instead of being linked to a guess. Nothing from them is prepared or played until a person says which show and which episode they are.</p>
+
+      <div style="margin-top:18px;display:flex;flex-wrap:wrap;gap:8px">
+        <sc-for list="{{ reviewTabs }}" as="tab" hint-placeholder-count="3">
+          <button type="button" onClick="{{ tab.go }}" style="{{ tab.style }}">{{ tab.label }}</button>
+        </sc-for>
+      </div>
+
+      <sc-if value="{{ reviewNotice }}" hint-placeholder-val="{{ false }}">
+        <p style="margin:16px 0 0;display:flex;align-items:center;gap:8px;font-size:13px;color:#63d493">
+          <span style="width:6px;height:6px;border-radius:999px;background:#63d493"></span>
+          {{ reviewNotice }}
+        </p>
+      </sc-if>
+
+      <sc-if value="{{ reviewPending }}" hint-placeholder-val="{{ true }}">
+        <article style="margin-top:18px;padding:18px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+          <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:13px;word-break:break-all;color:#eceae7">[SubsPlease] Kunon the Sorcerer Can See - 13 (1080p) [A1B2C3D4].mkv</p>
+          <p style="margin:6px 0 0;font-size:11.5px;color:#8b8992">/data/downloads/complete · 1.4 GB · 2 hours ago</p>
+          <div style="margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:7px">
+            <sc-for list="{{ parsedChips }}" as="chip" hint-placeholder-count="4">
+              <span style="padding:3px 9px;border-radius:6px;border:1px solid #26262c;background:#1b1b20;font-family:'JetBrains Mono',monospace;font-size:11px;color:#a3a1a9">{{ chip }}</span>
+            </sc-for>
+            <span style="font-size:11.5px;color:#8b8992">41% confidence</span>
+          </div>
+
+          <section style="margin-top:16px;padding:14px;border:1px dashed rgba(242,160,106,0.55);border-radius:10px;background:rgba(242,160,106,0.05)">
+            <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+              <h3 style="margin:0;font-size:13px;font-weight:600;color:#eceae7">Suggestion</h3>
+              <span style="font-size:11.5px;color:#8b8992">from gemini-3.5-flash, never applied automatically</span>
+            </div>
+            <div style="margin-top:12px;display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px">
+              <span style="width:38px;flex-shrink:0;aspect-ratio:2/3;border-radius:5px;background:repeating-linear-gradient(45deg,#1f1f25 0 5px,#191920 5px 10px)"></span>
+              <span style="min-width:180px;flex:1">
+                <span style="display:block;font-size:13.5px;color:#eceae7">Kunon the Sorcerer Can See</span>
+                <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">TV · 13 eps · 2026</span>
+                <span style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px">
+                  <span style="padding:2px 8px;border-radius:6px;border:1px solid #26262c;background:#1b1b20;font-size:11px;color:#a3a1a9">Episode 13</span>
+                  <span style="padding:2px 8px;border-radius:6px;border:1px solid #26262c;background:#1b1b20;font-size:11px;color:#a3a1a9">high confidence</span>
+                </span>
+                <span style="display:block;margin-top:10px;font-size:13px;line-height:1.6;color:#d8d5d0">The release group and episode number match the only show on this server with 13 episodes airing this season; absolute numbering was not needed.</span>
+              </span>
+              <button type="button" onClick="{{ chooseSuggested }}" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12px;cursor:pointer">Use this</button>
+            </div>
+          </section>
+
+          <section style="margin-top:18px">
+            <h3 style="margin:0;font-size:13px;font-weight:600;color:#eceae7">Candidates</h3>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ candidates }}" as="cand" hint-placeholder-count="2">
+                <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 12px;border:1px solid #22222a;border-radius:10px;background:#16161a">
+                  <span style="width:30px;flex-shrink:0;aspect-ratio:2/3;border-radius:4px;background:repeating-linear-gradient(45deg,#1f1f25 0 5px,#191920 5px 10px)"></span>
+                  <span style="min-width:180px;flex:1">
+                    <span style="display:block;font-size:13px;color:#eceae7">{{ cand.title }}</span>
+                    <span style="display:block;margin-top:2px;font-size:11.5px;color:#8b8992">{{ cand.meta }}</span>
+                  </span>
+                  <button type="button" onClick="{{ chooseCandidate }}" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12px;cursor:pointer">Choose</button>
+                </div>
+              </sc-for>
+              <p style="margin:2px 0 0;font-size:12.5px;color:#8b8992">Why it is here: below the auto-link threshold — two shows share the release group and the episode number.</p>
+            </div>
+          </section>
+
+          <section style="margin-top:18px">
+            <label style="display:block;font-size:13px;font-weight:600;color:#eceae7">Search another title</label>
+            <input type="search" placeholder="Title…" style="margin-top:7px;width:100%;max-width:420px;min-height:40px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:13px" />
+          </section>
+
+          <div style="margin-top:18px;padding-top:16px;border-top:1px solid #1e1e24">
+            <p style="margin:0;font-size:13px;color:#a3a1a9">{{ chosenLine }}</p>
+            <div style="margin-top:12px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+              <span>
+                <span style="display:block;font-size:11.5px;color:#8b8992">Episode number</span>
+                <input type="number" value="13" style="margin-top:5px;width:96px;min-height:40px;padding:0 11px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:13px" />
+              </span>
+              <button type="button" onClick="{{ confirmMatch }}" style="min-height:40px;padding:0 18px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">Confirm</button>
+              <button type="button" style="min-height:40px;padding:0 14px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#a3a1a9;font-size:13px;cursor:pointer">Ignore (not anime)</button>
+            </div>
+          </div>
+        </article>
+      </sc-if>
+
+      <sc-if value="{{ reviewIgnored }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:18px;display:flex;flex-direction:column;gap:10px">
+          <sc-for list="{{ ignoredItems }}" as="item" hint-placeholder-count="2">
+            <article style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+              <span style="min-width:220px;flex:1">
+                <span style="display:block;font-family:'JetBrains Mono',monospace;font-size:12.5px;word-break:break-all;color:#eceae7">{{ item.name }}</span>
+                <span style="display:block;margin-top:5px;font-size:11.5px;color:#8b8992">{{ item.meta }}</span>
+              </span>
+              <button type="button" style="min-height:38px;padding:0 14px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12.5px;cursor:pointer">Reopen</button>
+            </article>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ reviewAuto }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:18px;border:1px solid #1e1e24;border-radius:12px;background:#131316;overflow:hidden">
+          <sc-for list="{{ autoItems }}" as="item" hint-placeholder-count="4">
+            <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;padding:12px 16px;border-top:1px solid #1c1c22">
+              <span style="min-width:240px;flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;word-break:break-all;color:#8b8992">{{ item.name }}</span>
+              <span style="font-size:13px;color:#eceae7">{{ item.linked }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onAdmin }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Admin</h1>
+      <p style="margin:6px 0 0;max-width:74ch;font-size:13.5px;line-height:1.65;color:#a3a1a9">Everything here applies to the whole server, not to your own account: the accounts that may sign in, the rules acquisition and retention run on, and what the worker is doing with them.</p>
+      <p style="margin:10px 0 0;font-size:13px;color:#a3a1a9">3 files are waiting in the match-review queue. <button type="button" onClick="{{ goReview }}" style="border:0;background:transparent;padding:0;color:#f2a06a;font-size:13px;text-decoration:underline;text-underline-offset:2px;cursor:pointer">Open the review queue</button></p>
+
+      <div style="margin-top:20px;display:flex;flex-wrap:wrap;gap:8px">
+        <sc-for list="{{ adminTabs }}" as="tab" hint-placeholder-count="5">
+          <button type="button" onClick="{{ tab.go }}" style="{{ tab.style }}">{{ tab.label }}</button>
+        </sc-for>
+      </div>
+
+      <sc-if value="{{ adminUsers }}" hint-placeholder-val="{{ true }}">
+        <div style="margin-top:22px">
+          <h2 style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7;margin:0">Accounts</h2>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ accounts }}" as="acc" hint-placeholder-count="3">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 16px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+                <span style="min-width:200px;flex:1">
+                  <span style="display:block;font-size:13.5px;color:#eceae7">{{ acc.email }}</span>
+                  <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">{{ acc.meta }}</span>
+                </span>
+                <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ acc.bd }};background:{{ acc.bg }};color:{{ acc.fg }};font-size:11.5px">{{ acc.status }}</span>
+                <span style="display:flex;gap:8px">
+                  <button type="button" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12px;cursor:pointer">{{ acc.roleAction }}</button>
+                  <button type="button" onClick="{{ armDeactivate }}" style="min-height:34px;padding:0 12px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.08);color:#f08a7f;font-size:12px;cursor:pointer">Deactivate</button>
+                </span>
+              </div>
+            </sc-for>
+            <sc-if value="{{ deactivateArmed }}" hint-placeholder-val="{{ false }}">
+              <p style="margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 16px;border:1px solid rgba(240,138,127,0.3);border-radius:10px;background:rgba(240,138,127,0.06);font-size:12.5px;color:#a3a1a9">
+                Deactivate leah@example.com?
+                <button type="button" style="min-height:34px;padding:0 12px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.12);color:#f08a7f;font-size:12px;cursor:pointer">Yes, deactivate</button>
+                <button type="button" onClick="{{ armDeactivate }}" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#a3a1a9;font-size:12px;cursor:pointer">Cancel</button>
+              </p>
+            </sc-if>
+          </div>
+
+          <h2 style="margin:28px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Invites</h2>
+          <p style="margin:5px 0 0;max-width:70ch;font-size:12.5px;color:#8b8992">An invite is a one-time link. Bind it to an address to fix who may use it, or leave the address blank for a link anyone with it can redeem.</p>
+          <div style="margin-top:12px;padding:16px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+            <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+              <span>
+                <span style="display:block;font-size:11.5px;color:#8b8992">Email (optional)</span>
+                <input type="email" placeholder="prof@example.edu" style="margin-top:5px;width:230px;min-height:40px;padding:0 11px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:13px" />
+              </span>
+              <span>
+                <span style="display:block;font-size:11.5px;color:#8b8992">Expires in hours · 1–720</span>
+                <input type="number" value="168" style="margin-top:5px;width:110px;min-height:40px;padding:0 11px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:13px" />
+              </span>
+              <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13px;font-weight:600;cursor:pointer">Create invite</button>
+            </div>
+            <div style="margin-top:14px;padding:12px 14px;border:1px solid rgba(232,193,92,0.32);border-radius:10px;background:rgba(232,193,92,0.07)">
+              <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px;word-break:break-all;color:#eceae7">https://arc.example.net/invite/9f3c1a8e5b7d4f20a6c1</p>
+              <p style="margin:7px 0 0;font-size:12px;color:#e8c15c">Copy it now — it is shown once. Arc stores only a hash of the token, so if this is lost the invite has to be issued again.</p>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ adminRules }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:22px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+          <sc-for list="{{ rules }}" as="rule" hint-placeholder-count="6">
+            <div style="padding:16px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+              <p style="margin:0;font-size:13px;font-weight:500;color:#eceae7">{{ rule.label }}</p>
+              <p style="margin:5px 0 0;font-size:11.5px;line-height:1.55;color:#8b8992">{{ rule.help }}</p>
+              <div style="margin-top:11px;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+                <input type="text" value="{{ rule.value }}" style="width:120px;min-height:38px;padding:0 11px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:13px" />
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">{{ rule.hint }}</span>
+              </div>
+              <button type="button" style="margin-top:10px;border:0;background:transparent;padding:0;color:#f2a06a;font-size:12px;text-decoration:underline;text-underline-offset:2px;cursor:pointer">Reset to default</button>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:14px;display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+          <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">Save rules</button>
+          <span style="font-size:12.5px;color:#63d493">Rules saved.</span>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ adminJobs }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:22px">
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <sc-for list="{{ jobSummary }}" as="s" hint-placeholder-count="6">
+              <span style="display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border:1px solid #1e1e24;border-radius:10px;background:#131316;font-size:12.5px;color:#a3a1a9">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:{{ s.color }}">{{ s.value }}</span>
+                {{ s.label }}
+              </span>
+            </sc-for>
+          </div>
+          <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ jobs }}" as="job" hint-placeholder-count="4">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:13px 16px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992;width:52px">#{{ job.id }}</span>
+                <span style="min-width:180px;flex:1">
+                  <span style="display:block;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#eceae7">{{ job.type }}</span>
+                  <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">{{ job.timing }}</span>
+                </span>
+                <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ job.bd }};background:{{ job.bg }};color:{{ job.fg }};font-size:11.5px">{{ job.status }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992">{{ job.attempts }}</span>
+                <span style="min-width:150px;flex:1;font-size:11.5px;color:#f08a7f">{{ job.error }}</span>
+                <button type="button" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12px;cursor:pointer">{{ job.action }}</button>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ adminStorage }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:22px">
+          <div style="padding:18px;border:1px solid #1e1e24;border-radius:12px;background:#131316">
+            <p style="margin:0;font-size:13px;font-weight:500;color:#eceae7">Data directory</p>
+            <span style="display:block;margin-top:12px;height:8px;border-radius:999px;background:#22222a;overflow:hidden">
+              <span style="display:block;height:100%;width:68%;border-radius:999px;background:#f2a06a"></span>
+            </span>
+            <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:22px;font-size:12.5px;color:#a3a1a9">
+              <span>168 GB used of 250 GB</span>
+              <span>82 GB free</span>
+              <span>Retained total 141 GB</span>
+              <span>Episodes retained 214</span>
+            </div>
+          </div>
+          <div style="margin-top:20px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px">
+            <h2 style="margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Next sweep</h2>
+            <button type="button" style="min-height:38px;padding:0 14px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12.5px;cursor:pointer">Run retention sweep now</button>
+          </div>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ sweep }}" as="row" hint-placeholder-count="3">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:13px 16px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+                <span style="min-width:200px;flex:1">
+                  <span style="display:block;font-size:13px;color:#eceae7">{{ row.title }}</span>
+                  <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">{{ row.reason }}</span>
+                </span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a3a1a9">{{ row.size }}</span>
+                <span style="display:flex;gap:8px">
+                  <button type="button" style="min-height:34px;padding:0 12px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:12px;cursor:pointer">Re-fetch</button>
+                  <button type="button" style="min-height:34px;padding:0 12px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.08);color:#f08a7f;font-size:12px;cursor:pointer">Delete files</button>
+                </span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ adminAcq }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:22px">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:16px 18px;border:1px solid rgba(232,193,92,0.3);border-radius:12px;background:rgba(232,193,92,0.06)">
+            <span style="display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:#e8c15c">
+              <span style="width:7px;height:7px;border-radius:999px;background:#e8c15c"></span>
+              Acquisition is paused.
+            </span>
+            <p style="margin:0;min-width:240px;flex:1;font-size:12px;line-height:1.55;color:#a3a1a9">While acquisition is paused Arc computes no new wants and sends no new query to Nyaa. Downloads already running still finish and are still ingested.</p>
+            <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13px;font-weight:600;cursor:pointer">Resume acquisition</button>
+          </div>
+
+          <h2 style="margin:24px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Active wants</h2>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ wants }}" as="want" hint-placeholder-count="3">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:13px 16px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+                <span style="min-width:180px;flex:1">
+                  <span style="display:block;font-size:13px;color:#eceae7">{{ want.show }}</span>
+                  <span style="display:block;margin-top:3px;font-size:11.5px;color:#8b8992">{{ want.user }} · episode {{ want.ep }}</span>
+                </span>
+                <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid {{ want.bd }};background:{{ want.bg }};color:{{ want.fg }};font-size:11.5px">{{ want.state }}</span>
+              </div>
+            </sc-for>
+          </div>
+
+          <h2 style="margin:24px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">qBittorrent</h2>
+          <p style="margin:6px 0 0;font-size:12.5px;color:#63d493">Reachable · v4.6.5</p>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ torrents }}" as="t" hint-placeholder-count="2">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:13px 16px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+                <span style="min-width:200px;flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;word-break:break-all;color:#a3a1a9">{{ t.name }}</span>
+                <span style="width:82px;display:flex;align-items:center;gap:7px">
+                  <span style="flex:1;height:3px;border-radius:999px;background:#26262c;display:block;overflow:hidden">
+                    <span style="display:block;height:100%;border-radius:999px;background:#f2a06a;width:{{ t.pct }}"></span>
+                  </span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ t.pct }}</span>
+                </span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b8992">{{ t.speed }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onAuth }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:28px;background:radial-gradient(120% 80% at 50% 0%,#141118 0%,#0a0a0c 60%)">
+      <div style="width:100%;max-width:400px">
+        <div style="display:flex;align-items:baseline;justify-content:center;gap:4px;padding-bottom:22px">
+          <span style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.03em;color:#eceae7">Arc</span>
+          <span style="width:7px;height:7px;border-radius:999px;background:#f2a06a;display:inline-block;margin-bottom:3px"></span>
+        </div>
+        <div style="display:flex;gap:6px;padding:2px;margin-bottom:14px;border:1px solid #26262c;border-radius:10px;background:#131316">
+          <sc-for list="{{ authVariants }}" as="v" hint-placeholder-count="3">
+            <button type="button" onClick="{{ v.go }}" style="{{ v.style }}">{{ v.label }}</button>
+          </sc-for>
+        </div>
+
+        <sc-if value="{{ authLogin }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:26px;border:1px solid #1e1e24;border-radius:14px;background:#131316">
+          <h1 style="margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:20px;font-weight:600;color:#eceae7">Sign in</h1>
+          <p style="margin:7px 0 0;font-size:13px;line-height:1.6;color:#a3a1a9">Arc is invite-only — there is no sign-up. Ask an admin for an invite link.</p>
+          <div style="margin-top:22px">
+            <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Email</label>
+            <input type="email" style="margin-top:6px;width:100%;min-height:44px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:14px" />
+          </div>
+          <div style="margin-top:16px">
+            <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Password</label>
+            <input type="password" style="margin-top:6px;width:100%;min-height:44px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:14px" />
+          </div>
+          <p style="margin:14px 0 0;display:flex;align-items:center;gap:8px;font-size:13px;color:#f08a7f">
+            <span style="width:6px;height:6px;border-radius:999px;background:#f08a7f;flex-shrink:0"></span>
+            Too many attempts — try again in 4 minutes.
+          </p>
+          <button type="button" onClick="{{ goHome }}" style="margin-top:20px;width:100%;min-height:44px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:14px;font-weight:600;cursor:pointer">Sign in</button>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ authInvite }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:26px;border:1px solid #1e1e24;border-radius:14px;background:#131316">
+          <h1 style="margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:20px;font-weight:600;color:#eceae7">Set up your account</h1>
+          <p style="margin:7px 0 0;font-size:13px;line-height:1.6;color:#a3a1a9">Choose a password to finish creating your Arc account. This invite expires Sep 18, 2026, 14:20.</p>
+          <div style="margin-top:22px">
+            <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Email</label>
+            <input type="email" value="prof@example.edu" readonly style="margin-top:6px;width:100%;min-height:44px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#0c0c0f;color:#a3a1a9;font-size:14px" />
+            <p style="margin:6px 0 0;font-size:11.5px;color:#a3a1a9">This invite is tied to this address.</p>
+          </div>
+          <div style="margin-top:16px">
+            <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Password</label>
+            <input type="password" style="margin-top:6px;width:100%;min-height:44px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:14px" />
+            <p style="margin:6px 0 0;font-size:11.5px;color:#a3a1a9">At least 10 characters.</p>
+          </div>
+          <div style="margin-top:16px">
+            <label style="display:block;font-size:13px;font-weight:500;color:#eceae7">Confirm password</label>
+            <input type="password" style="margin-top:6px;width:100%;min-height:44px;padding:0 13px;border:1px solid #26262c;border-radius:8px;background:#0f0f12;color:#eceae7;font-size:14px" />
+          </div>
+          <p style="margin:14px 0 0;display:flex;align-items:center;gap:8px;font-size:13px;color:#f08a7f">
+            <span style="width:6px;height:6px;border-radius:999px;background:#f08a7f;flex-shrink:0"></span>
+            Passwords do not match.
+          </p>
+          <button type="button" onClick="{{ goHome }}" style="margin-top:20px;width:100%;min-height:44px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:14px;font-weight:600;cursor:pointer">Create account</button>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ authSpent }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:26px;border:1px solid #1e1e24;border-radius:14px;background:#131316">
+          <h1 style="margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:20px;font-weight:600;color:#eceae7">Invite not valid</h1>
+          <p style="margin:7px 0 0;font-size:13px;line-height:1.6;color:#a3a1a9">This invite link is invalid or has already been used.</p>
+          <button type="button" onClick="{{ showLogin }}" style="margin-top:22px;min-height:40px;padding:0 16px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:13.5px;cursor:pointer">Go to sign in</button>
+        </div>
+        </sc-if>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ onDesign }}" hint-placeholder-val="{{ false }}">
+    <div style="animation:arcfade 200ms ease">
+      <h1 style="font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7;margin:0">Tokens and components</h1>
+      <p style="margin:6px 0 0;max-width:70ch;font-size:13.5px;line-height:1.65;color:#a3a1a9">Every current token name is kept so a light variant stays possible later. New names are marked.</p>
+
+      <h2 style="margin:28px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Colour</h2>
+      <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">
+        <sc-for list="{{ tokens }}" as="tok" hint-placeholder-count="16">
+          <div style="display:flex;align-items:center;gap:11px;padding:10px 12px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+            <span style="width:30px;height:30px;flex-shrink:0;border-radius:7px;border:1px solid #2c2c34;background:{{ tok.value }}"></span>
+            <span style="min-width:0">
+              <span style="display:block;font-family:'JetBrains Mono',monospace;font-size:11px;color:#eceae7;overflow:hidden;text-overflow:ellipsis">{{ tok.name }}</span>
+              <span style="display:block;margin-top:2px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ tok.value }} {{ tok.note }}</span>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Type</h2>
+      <div style="margin-top:14px;padding:20px;border:1px solid #1e1e24;border-radius:12px;background:#131316;display:flex;flex-direction:column;gap:16px">
+        <div>
+          <p style="margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:30px;font-weight:600;letter-spacing:-0.02em;color:#eceae7">Display · Bricolage Grotesque 600</p>
+          <p style="margin:5px 0 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">30/34 · page titles and the wordmark only · variable, 68 KB subset</p>
+        </div>
+        <div>
+          <p style="margin:0;font-size:18px;font-weight:600;color:#eceae7">Section · Bricolage Grotesque 18/24</p>
+          <p style="margin:5px 0 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">section headings</p>
+        </div>
+        <div>
+          <p style="margin:0;font-size:13.5px;line-height:1.65;color:#eceae7">Body · Instrument Sans 13.5/22. Every page explanation, every row, every control label. On phones the body step stays 13.5 and controls grow to 44 px instead.</p>
+          <p style="margin:5px 0 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b8992">small 11.5/16 muted · mono JetBrains Mono 11.5 for filenames, ids and clocks</p>
+        </div>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">State badges</h2>
+      <p style="margin:5px 0 0;font-size:12.5px;color:#8b8992">One shape, colour by meaning, always carrying the word. Muted is the resting default so “Not wanted” no longer reads as an error.</p>
+      <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+        <sc-for list="{{ badges }}" as="b" hint-placeholder-count="11">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:999px;border:1px solid {{ b.bd }};background:{{ b.bg }};color:{{ b.fg }};font-size:12px">{{ b.label }}</span>
+        </sc-for>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Buttons</h2>
+      <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">Primary</button>
+        <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f7b183;color:#1a0f06;font-size:13.5px;font-weight:600;cursor:pointer">Primary hover</button>
+        <button type="button" disabled style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;opacity:0.5">Disabled</button>
+        <button type="button" style="min-height:40px;padding:0 16px;border:1px solid #26262c;border-radius:8px;background:#1b1b20;color:#eceae7;font-size:13.5px;cursor:pointer">Secondary</button>
+        <button type="button" style="min-height:40px;padding:0 16px;border:1px solid rgba(240,138,127,0.35);border-radius:8px;background:rgba(240,138,127,0.08);color:#f08a7f;font-size:13.5px;cursor:pointer">Danger</button>
+        <button type="button" style="min-height:40px;padding:0 16px;border:0;border-radius:8px;background:#f2a06a;color:#1a0f06;font-size:13.5px;font-weight:600;outline:2px solid #f7b183;outline-offset:2px;cursor:pointer">Focus ring</button>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Posters and wordmark</h2>
+      <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:22px;align-items:flex-end">
+        <sc-for list="{{ posters }}" as="p" hint-placeholder-count="3">
+          <div>
+            <span style="display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px;width:{{ p.w }};aspect-ratio:2/3;border-radius:8px;border:1px solid #1e1e24;background:repeating-linear-gradient(45deg,#1b1b20 0 6px,#16161a 6px 12px)">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;color:#5e5c65">{{ p.label }}</span>
+            </span>
+            <p style="margin:7px 0 0;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">{{ p.note }}</p>
+          </div>
+        </sc-for>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <span style="display:flex;align-items:baseline;gap:4px">
+            <span style="font-family:'Bricolage Grotesque',sans-serif;font-size:34px;font-weight:600;letter-spacing:-0.03em;color:#eceae7">Arc</span>
+            <span style="width:8px;height:8px;border-radius:999px;background:#f2a06a;display:inline-block;margin-bottom:4px"></span>
+          </span>
+          <span style="width:32px;height:32px;border-radius:8px;background:#f2a06a;display:flex;align-items:center;justify-content:center;font-family:'Bricolage Grotesque',sans-serif;font-size:19px;font-weight:700;color:#1a0f06">A</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8992">favicon 32 px</span>
+        </div>
+      </div>
+
+      <h2 style="margin:30px 0 0;font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;color:#eceae7">Spacing, radius, motion, contrast</h2>
+      <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">
+        <sc-for list="{{ specs }}" as="spec" hint-placeholder-count="6">
+          <div style="padding:14px;border:1px solid #1e1e24;border-radius:10px;background:#131316">
+            <p style="margin:0;font-size:12.5px;font-weight:500;color:#eceae7">{{ spec.label }}</p>
+            <p style="margin:5px 0 0;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#8b8992">{{ spec.value }}</p>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</sc-if>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1200,&quot;height&quot;:800},&quot;screen&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;home&quot;,&quot;schedule&quot;,&quot;search&quot;,&quot;show&quot;,&quot;player&quot;,&quot;mal&quot;,&quot;recs&quot;,&quot;review&quot;,&quot;admin&quot;,&quot;auth&quot;,&quot;design&quot;],&quot;default&quot;:&quot;home&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;state&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;data&quot;,&quot;loading&quot;,&quot;empty&quot;,&quot;error&quot;],&quot;default&quot;:&quot;data&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;phone&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;},&quot;onGo&quot;:{&quot;editor&quot;:null,&quot;tsType&quot;:&quot;(screen: string) =&gt; void&quot;}}">
+const TONE = {
+  ok: { fg: '#63d493', bg: 'rgba(99,212,147,0.1)', bd: 'rgba(99,212,147,0.28)' },
+  busy: { fg: '#f2a06a', bg: 'rgba(242,160,106,0.1)', bd: 'rgba(242,160,106,0.3)' },
+  warn: { fg: '#e8c15c', bg: 'rgba(232,193,92,0.1)', bd: 'rgba(232,193,92,0.3)' },
+  bad: { fg: '#f08a7f', bg: 'rgba(240,138,127,0.1)', bd: 'rgba(240,138,127,0.3)' },
+  info: { fg: '#8fb4d8', bg: 'rgba(143,180,216,0.1)', bd: 'rgba(143,180,216,0.28)' },
+  muted: { fg: '#a3a1a9', bg: '#1b1b20', bd: '#26262c' },
+}
+
+const badge = (label, tone) => ({ label, state: label, status: label, ...TONE[tone] })
+
+const EMPTY_COPY = {
+  home: 'Nothing here yet. Add a show from Search, or connect MyAnimeList to bring your list in — Arc starts fetching episodes for anything you set to Watching.',
+  schedule: 'Nothing cached for this season yet — the catalogue sweep runs daily.',
+  search: 'Search the catalogue by title.',
+  show: 'No episodes known yet. Arc fills these in from the catalogue when the season is cached.',
+  player: 'Arc has no playable file for this episode yet. It may still be downloading or being prepared.',
+  mal: 'Nothing written to MyAnimeList yet.',
+  recs: 'No picks yet. Describe a mood if you have one, or ask for nothing in particular — the model gets the same list either way.',
+  review: 'Nothing waiting. Every file Arc has seen was matched with enough confidence.',
+  admin: 'No jobs in the queue. The worker is alive and idle.',
+  auth: 'This invite link has already been used. Ask an admin for a new one.',
+  design: 'Nothing to show.',
+}
+
+const EMPTY_ACTION = {
+  home: 'Go to Search', schedule: 'Next season', search: 'Clear', show: 'Back to search',
+  player: 'Back to home', mal: 'Import now', recs: 'Get picks', review: 'Open Admin',
+  admin: 'Refresh', auth: 'Back to sign in', design: 'Back',
+}
+
+const ERROR_COPY = {
+  home: 'Could not load your home page.',
+  schedule: 'Could not load the schedule.',
+  search: 'The catalogue is unavailable right now. Try again in a few minutes.',
+  show: 'Could not load this show.',
+  player: 'Could not load this episode. Try again shortly.',
+  mal: 'Could not reach MyAnimeList.',
+  recs: 'That run failed before it produced picks.',
+  review: 'Could not load the review queue.',
+  admin: 'Could not load the job queue.',
+  auth: 'Could not reach the server.',
+  design: 'Could not load.',
+}
+
+const TITLES = {
+  home: 'Home', schedule: 'Schedule', search: 'Search', show: 'Mushoku Tensei Season 3',
+  player: 'Episode not ready', mal: 'MyAnimeList', recs: 'Recommendations',
+  review: 'Match review', admin: 'Admin', auth: 'Set up your account', design: 'Tokens and components',
+}
+
+class Component extends DCLogic {
+  state = {
+    query: 'kunon',
+    mood: 'something quiet with good food',
+    reviewTab: 'pending',
+    adminTab: 'users',
+    playing: true,
+    chosen: null,
+    notice: null,
+    disconnect: false,
+    deactivate: false,
+    auth: 'login',
+  }
+
+  chipStyle(active) {
+    const base = 'min-height:38px;padding:0 14px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid;'
+    return active
+      ? base + 'border-color:#f2a06a;background:#1b1b20;color:#eceae7'
+      : base + 'border-color:#26262c;background:#131316;color:#a3a1a9'
+  }
+
+  renderVals() {
+    const screen = this.props.screen ?? 'home'
+    const view = this.props.state ?? 'data'
+    const go = this.props.onGo ?? (() => {})
+    const s = this.state
+
+    const episodes = [
+      { number: 5, title: 'A Blessing Undeserved', detail: '[SubsPlease] · 1080p · subs en · audio ja', air: 'Sun, Aug 2, 2026', state: 'Ready', tone: 'ok', watched: 'Watched ✓', playable: true },
+      { number: 6, title: 'The Turning Point', detail: '[SubsPlease] · 1080p · subs en · audio ja', air: 'Sun, Aug 9, 2026', state: 'Ready', tone: 'ok', watched: 'Watched ✓', playable: true },
+      { number: 7, title: 'Home', detail: '[SubsPlease] · 1080p', air: 'Sun, Aug 16, 2026', state: 'Ready', tone: 'ok', watched: 'Watched ✓', playable: true },
+      { number: 8, title: 'What Was Lost', detail: '[Erai-raws] · 1080p', air: 'Sun, Aug 23, 2026', state: 'Ready', tone: 'ok', watched: 'Watched ✓', playable: true },
+      { number: 9, title: 'The Sword Saint', detail: '[SubsPlease] · 1080p · 62% prepared', air: 'Sun, Aug 30, 2026', state: 'Preparing', tone: 'busy', pct: '62%', watched: 'Mark watched' },
+      { number: 10, title: 'Episode 10', detail: '[SubsPlease] · 1080p · 214 seeders', air: 'Sun, Sep 6, 2026', state: 'Downloading', tone: 'busy', pct: '18%', watched: 'Mark watched' },
+      { number: 11, title: 'Episode 11', detail: 'Searching Nyaa since 2 hours ago', air: 'Sun, Sep 13, 2026 6:00 PM', state: 'Searching', tone: 'busy', watched: '' },
+      { number: 12, title: 'Episode 12', detail: 'ffmpeg: stream 1 has no decodable frames', air: 'Sun, Sep 20, 2026 6:00 PM', state: 'Failed', tone: 'bad', watched: '' },
+      { number: 13, title: 'Episode 13', detail: '', air: 'Sun, Sep 27, 2026 6:00 PM est.', state: 'Not wanted', tone: 'muted', watched: '' },
+    ].map((ep) => ({
+      ...ep,
+      ...TONE[ep.tone],
+      hasBar: ep.pct !== undefined,
+      pct: ep.pct ?? '0%',
+      pctLabel: ep.pct ?? '',
+      playable: ep.playable === true,
+    }))
+
+    const day = (label, count, entries, today) => ({
+      label, count, entries, quiet: entries.length === 0, today,
+      bd: today ? 'rgba(242,160,106,0.32)' : '#1e1e24',
+      bg: today ? 'rgba(242,160,106,0.05)' : '#0f0f12',
+      labelColor: today ? '#f2a06a' : '#8b8992',
+    })
+    const entry = (title, slot, following) => ({ title, slot, edge: following ? '#f2a06a' : 'transparent' })
+
+    return {
+      isLoading: view === 'loading',
+      isEmpty: view === 'empty',
+      isError: view === 'error',
+      isData: view === 'data',
+      title: TITLES[screen] ?? screen,
+      emptyCopy: EMPTY_COPY[screen] ?? '',
+      emptyAction: EMPTY_ACTION[screen] ?? 'Back',
+      errorCopy: ERROR_COPY[screen] ?? '',
+      skeletons: [1, 2, 3, 4, 5, 6, 7, 8],
+
+      onHome: screen === 'home', onSchedule: screen === 'schedule', onSearch: screen === 'search',
+      onShow: screen === 'show', onPlayer: screen === 'player', onMal: screen === 'mal',
+      onRecs: screen === 'recs', onReview: screen === 'review', onAdmin: screen === 'admin',
+      onAuth: screen === 'auth', onDesign: screen === 'design',
+
+      goShow: () => go('show'),
+      goPlayer: () => go('player'),
+      goHome: () => go('home'),
+      goReview: () => go('review'),
+
+      continueCount: '2 episodes',
+      behindCount: '12 shows',
+      newCount: '4 episodes',
+      continueWatching: [
+        { title: 'Sousou no Frieren', ep: 12, clock: '14:02 / 23:40', pct: '59%' },
+        { title: 'Vinland Saga Season 2', ep: 4, clock: '08:31 / 24:10', pct: '35%' },
+      ],
+      behind: [
+        { title: 'That Time I Got Reincarnated as a Slime Season 4', behind: 17, line: '23 of 24 aired · latest Fri, Sep 4' },
+        { title: 'Re:ZERO -Starting Life in Another World- Season 4', behind: 18, line: '19 of 19 aired · latest Wed, Aug 12' },
+        { title: 'Witch Hat Atelier', behind: 6, line: '13 of 13 aired · latest Mon, Jun 29' },
+        { title: 'Dr. Stone: Science Future Part 3', behind: 6, line: '13 of 13 aired · latest Thu, Jun 25' },
+        { title: 'Fire Force Season 3 Part 2', behind: 12, line: '13 of 13 aired · latest Fri, Apr 3' },
+        { title: 'Kunon the Sorcerer Can See', behind: 2, line: '13 of 13 aired · latest Sun, Mar 29' },
+      ],
+      newThisWeek: [
+        { title: 'Mushoku Tensei: Jobless Reincarnation Season 3', ep: 11, when: 'Sun, Sep 6, 2026', ...badge('Ready', 'ok'), pct: '' },
+        { title: 'Kunon the Sorcerer Can See', ep: 13, when: 'Sun, Sep 6, 2026', ...badge('Preparing', 'busy'), pct: '62%' },
+        { title: 'The Beginning After the End Season 2', ep: 12, when: 'Sat, Sep 5, 2026', ...badge('Downloading', 'busy'), pct: '18%' },
+        { title: 'Witch Hat Atelier', ep: 14, when: 'Fri, Sep 4, 2026', ...badge('In review', 'warn'), pct: '' },
+      ],
+
+      days: [
+        day('Mon', '3 airing', [entry('Kunon the Sorcerer Can See', '19:00 · Ep 13', true), entry('Witch Hat Atelier', '21:30 · Ep 14', true), entry('Sakamoto Days Part 3', '23:00 est. · Ep 7', false)], false),
+        day('Tue', '2 airing', [entry('My Ribdiculous Reincarnation', '18:00 · Ep 12', false), entry('Dandadan Season 3', '23:56 · Ep 9', true)], false),
+        day('Wed', '1 airing', [entry('Re:ZERO Season 4', '22:00 · Ep 20', true)], false),
+        day('Thu', '2 airing', [entry('Dr. Stone: Science Future Part 3', '21:00 · Ep 14', true), entry('Hell Mode', '00:30 est. · Ep 11', false)], false),
+        day('Fri', '2 airing', [entry('That Time I Got Reincarnated as a Slime S4', '23:00 · Ep 24', true), entry('Fire Force Season 3 Part 2', '19:30 · Ep 14', true)], true),
+        day('Sat', '1 airing', [entry('The Beginning After the End Season 2', '20:00 · Ep 13', true)], false),
+        day('Sun', '3 airing', [entry('Mushoku Tensei Season 3', '18:00 · Ep 12', true), entry('Frieren: Beyond Journey’s End', '23:00 · Ep 29', true), entry('Reincarnated as a Dragon Hatchling', '22:30 est. · Ep 12', false)], false),
+      ],
+
+      query: s.query,
+      onQuery: (e) => this.setState({ query: e.target.value }),
+      searchNote: '5 results for “' + s.query + '”',
+      results: [
+        { title: 'Kunon the Sorcerer Can See', meta: 'TV · 13 eps · 2026', viaMal: false },
+        { title: 'Kunon the Sorcerer Can See: Specials', meta: 'Special · 3 eps · 2026', viaMal: true },
+        { title: 'Kuma Kuma Kuma Bear Punch!', meta: 'TV · 12 eps · 2024', viaMal: false },
+        { title: 'Kuragehime', meta: 'TV · 11 eps · 2010', viaMal: false },
+        { title: 'Kurokami: The Animation', meta: 'TV · 23 eps · 2009', viaMal: true },
+      ],
+
+      genres: ['Adventure', 'Drama', 'Ecchi', 'Fantasy'],
+      episodes,
+      relations: [
+        { title: 'Mushoku Tensei Season 2', kind: 'Prequel' },
+        { title: 'Mushoku Tensei: Redundant Reincarnation', kind: 'Side story' },
+        { title: 'Jobless Reincarnation: Special', kind: 'Special' },
+      ],
+
+      playing: s.playing,
+      playGlyph: s.playing ? '❙❙' : '▶',
+      playedClock: '14:02',
+      playedPct: '59%',
+      togglePlay: () => this.setState({ playing: !s.playing }),
+
+      disconnectArmed: s.disconnect,
+      disconnectLabel: s.disconnect ? 'Disconnecting…' : 'Disconnect',
+      armDisconnect: () => this.setState({ disconnect: !s.disconnect }),
+      writes: [
+        { show: 'Mushoku Tensei Season 3', field: 'Progress', cause: 'Watched an episode', when: '12 minutes ago', change: '7 → 8', revertible: true, ...badge('Written', 'ok') },
+        { show: 'Sousou no Frieren', field: 'Score', cause: 'Set in Arc', when: '2 hours ago', change: '— → 9', revertible: true, ...badge('Written', 'ok') },
+        { show: 'Vinland Saga Season 2', field: 'Status', cause: 'Set in Arc', when: '5 hours ago', change: 'Plan to watch → Watching', revertible: false, ...badge('Pending', 'info') },
+        { show: 'Witch Hat Atelier', field: 'Progress', cause: 'Watched an episode', when: 'Yesterday', change: '5 → 6', revertible: false, ...badge('Failed', 'bad') },
+        { show: 'Dandadan Season 3', field: 'Progress', cause: 'Conflict with MAL', when: 'Yesterday', change: '9 → 8', revertible: false, ...badge('Skipped', 'muted') },
+      ],
+
+      mood: s.mood,
+      moodCount: s.mood.length,
+      onMood: (e) => this.setState({ mood: e.target.value.slice(0, 300) }),
+      picks: [
+        { title: 'Kakuriyo: Bed & Breakfast for Spirits', meta: 'TV · 26 eps · 2018', case: 'You finished Natsume’s Book of Friends and rated it 9, and this shares its register: a quiet inn, spirits treated as neighbours rather than threats, and a great deal of food. Nothing in it hurries.' },
+        { title: 'Restaurant to Another World', meta: 'TV · 12 eps · 2017', case: 'Episodic, warm, and about cooking for strangers — closest thing on the pool to the mood you asked for. Twelve episodes, no ongoing plot to keep up with.' },
+        { title: 'Silver Spoon', meta: 'TV · 11 eps · 2013', case: 'Farming school, unglamorous work, food you watch being made from the animal up. You dropped two battle shonen this year and finished every slice-of-life you started.' },
+      ],
+      continuations: [
+        { title: 'Frieren: Beyond Journey’s End Season 2', because: 'Sequel to Sousou no Frieren, which you completed' },
+        { title: 'Vinland Saga Season 3', because: 'Sequel to Vinland Saga Season 2, which you are watching' },
+        { title: 'Dr. Stone: Science Future Part 4', because: 'Sequel to Dr. Stone: Science Future Part 3, which you are behind on' },
+      ],
+
+      reviewTabs: [
+        { label: 'Pending (3)', style: this.chipStyle(s.reviewTab === 'pending'), go: () => this.setState({ reviewTab: 'pending', notice: null }) },
+        { label: 'Ignored', style: this.chipStyle(s.reviewTab === 'ignored'), go: () => this.setState({ reviewTab: 'ignored', notice: null }) },
+        { label: 'Auto-linked', style: this.chipStyle(s.reviewTab === 'auto'), go: () => this.setState({ reviewTab: 'auto', notice: null }) },
+      ],
+      reviewPending: s.reviewTab === 'pending',
+      reviewIgnored: s.reviewTab === 'ignored',
+      reviewAuto: s.reviewTab === 'auto',
+      reviewNotice: s.notice ?? false,
+      parsedChips: ['Kunon the Sorcerer Can See', 'E13', 'SubsPlease', '1080p'],
+      candidates: [
+        { title: 'Kunon the Sorcerer Can See', meta: '61% · title match · group seen before' },
+        { title: 'Kuma Kuma Kuma Bear Punch!', meta: '38% · episode number · absolute numbering' },
+      ],
+      chosen: s.chosen,
+      chosenLine: s.chosen === null ? 'Nothing chosen yet — pick a candidate, a suggestion, or a search result.' : 'Confirming as ' + s.chosen,
+      chooseSuggested: () => this.setState({ chosen: 'Kunon the Sorcerer Can See' }),
+      chooseCandidate: () => this.setState({ chosen: 'Kunon the Sorcerer Can See' }),
+      confirmMatch: () => this.setState({ notice: '[SubsPlease] Kunon the Sorcerer Can See - 13 (1080p) [A1B2C3D4].mkv → Kunon the Sorcerer Can See, episode 13.' }),
+      ignoredItems: [
+        { name: 'Season 1 Extras/[Judas] OP-ED Collection (1080p).mkv', meta: '/data/downloads/complete · 418 MB · 6 days ago' },
+        { name: 'sample-video-please-delete.mkv', meta: '/data/manual · 12 MB · 2 weeks ago' },
+      ],
+      autoItems: [
+        { name: '[SubsPlease] Mushoku Tensei S3 - 08 (1080p) [BEEF0011].mkv', linked: 'Mushoku Tensei Season 3 · episode 8' },
+        { name: '[Erai-raws] Witch Hat Atelier - 13 [1080p][Multiple Subtitle].mkv', linked: 'Witch Hat Atelier · episode 13' },
+        { name: '[SubsPlease] Dandadan - 09 (1080p) [C0FFEE12].mkv', linked: 'Dandadan Season 3 · episode 9' },
+        { name: '[SubsPlease] Frieren - 28 (1080p) [DEAD00FF].mkv', linked: 'Frieren: Beyond Journey’s End · episode 28' },
+      ],
+
+      adminTabs: ['users', 'rules', 'jobs', 'storage', 'acquisition'].map((key) => ({
+        label: key.charAt(0).toUpperCase() + key.slice(1),
+        style: this.chipStyle(s.adminTab === key),
+        go: () => this.setState({ adminTab: key }),
+      })),
+      adminUsers: s.adminTab === 'users',
+      adminRules: s.adminTab === 'rules',
+      adminJobs: s.adminTab === 'jobs',
+      adminStorage: s.adminTab === 'storage',
+      adminAcq: s.adminTab === 'acquisition',
+      deactivateArmed: s.deactivate,
+      armDeactivate: () => this.setState({ deactivate: !s.deactivate }),
+      accounts: [
+        { email: 'owner@arc.local', meta: 'admin · Europe/Berlin · created Jan 4, 2026', roleAction: 'Own account', ...badge('Active', 'ok') },
+        { email: 'leah@example.com', meta: 'user · Europe/Berlin · created Mar 22, 2026', roleAction: 'Make admin', ...badge('Active', 'ok') },
+        { email: 'prof@example.edu', meta: 'user · America/New_York · created Sep 9, 2026', roleAction: 'Make admin', ...badge('Invited', 'info') },
+      ],
+      rules: [
+        { label: 'Preferred groups', value: 'SubsPlease, Erai-raws', help: 'Release groups the ranker prefers, in order.', hint: 'tag input' },
+        { label: 'Preferred resolution', value: '1080p', help: 'What the ranker looks for first.', hint: '2160p–480p' },
+        { label: 'Fallback resolution', value: '720p', help: 'Accepted when the preferred one is not available.', hint: '2160p–480p' },
+        { label: 'Look ahead N', value: '3', help: 'How many unwatched episodes ahead to keep for each show a user is watching.', hint: 'Default: 2 · 0–10' },
+        { label: 'Grace days G', value: '14', help: 'How long a watched episode’s files survive before the sweep deletes them.', hint: 'Default: 7 · 0–365' },
+        { label: 'Unwatched days D', value: '30', help: 'How long a ready episode may sit unwatched before its want is dropped.', hint: 'Default: 30 · 0–365' },
+      ],
+      jobSummary: [
+        { label: 'pending', value: '4', color: '#a3a1a9' },
+        { label: 'running', value: '1', color: '#f2a06a' },
+        { label: 'done', value: '1 284', color: '#63d493' },
+        { label: 'failed', value: '2', color: '#f08a7f' },
+        { label: 'cancelled', value: '0', color: '#a3a1a9' },
+        { label: 'worker alive · heartbeat 3s ago', value: '✓', color: '#63d493' },
+      ],
+      jobs: [
+        { id: '10428', type: 'transcode.prepare', timing: 'started 2 min ago · episode 9', attempts: '1/3', error: '', action: 'Cancel', ...badge('Running', 'busy') },
+        { id: '10427', type: 'acquisition.search', timing: 'queued 4 min ago · episode 11', attempts: '0/3', error: '', action: 'Cancel', ...badge('Pending', 'muted') },
+        { id: '10424', type: 'transcode.prepare', timing: 'failed 18 min ago · episode 12', attempts: '3/3', error: 'ffmpeg: stream 1 has no decodable frames', action: 'Retry', ...badge('Failed', 'bad') },
+        { id: '10421', type: 'mal.push', timing: 'finished 22 min ago · 3 writes', attempts: '1/3', error: '', action: 'Retry', ...badge('Done', 'ok') },
+      ],
+      sweep: [
+        { title: 'Frieren: Beyond Journey’s End · episode 24', reason: 'Watched 21 days ago · past grace G', size: '1.3 GB' },
+        { title: 'Dandadan Season 3 · episode 6', reason: 'Watched 16 days ago · past grace G', size: '1.1 GB' },
+        { title: 'Hell Mode · episode 4', reason: 'Ready and unwatched for 34 days · past D', size: '1.4 GB' },
+      ],
+      wants: [
+        { show: 'Mushoku Tensei Season 3', user: 'owner@arc.local', ep: 11, ...badge('Searching', 'busy') },
+        { show: 'Kunon the Sorcerer Can See', user: 'leah@example.com', ep: 13, ...badge('In review', 'warn') },
+        { show: 'Witch Hat Atelier', user: 'owner@arc.local', ep: 14, ...badge('Downloading', 'busy') },
+      ],
+      torrents: [
+        { name: '[SubsPlease] Witch Hat Atelier - 14 (1080p) [7F3A9C21].mkv', pct: '18%', speed: '4.2 MB/s ↓ · 0 B/s ↑' },
+        { name: '[Erai-raws] Dandadan - 09 [1080p][Multiple Subtitle].mkv', pct: '96%', speed: '11.8 MB/s ↓ · 0 B/s ↑' },
+      ],
+
+      authLogin: s.auth === 'login',
+      authInvite: s.auth === 'invite',
+      authSpent: s.auth === 'spent',
+      showLogin: () => this.setState({ auth: 'login' }),
+      authVariants: [
+        { label: 'Sign in', key: 'login' },
+        { label: 'Invite', key: 'invite' },
+        { label: 'Invite spent', key: 'spent' },
+      ].map((v) => ({
+        label: v.label,
+        style: 'flex:1;min-height:36px;border:0;border-radius:8px;font-size:12.5px;cursor:pointer;' +
+          (s.auth === v.key ? 'background:#1b1b20;color:#eceae7' : 'background:transparent;color:#a3a1a9'),
+        go: () => this.setState({ auth: v.key }),
+      })),
+
+      tokens: [
+        { name: '--arc-bg', value: '#0a0a0c', note: '' },
+        { name: '--arc-surface', value: '#131316', note: '' },
+        { name: '--arc-surface-raised', value: '#1b1b20', note: '' },
+        { name: '--arc-surface-hover', value: '#22222a', note: 'new' },
+        { name: '--arc-border', value: '#26262c', note: '' },
+        { name: '--arc-text', value: '#eceae7', note: '13.4:1' },
+        { name: '--arc-text-muted', value: '#a3a1a9', note: '6.4:1' },
+        { name: '--arc-text-faint', value: '#8b8992', note: '5.4:1 new' },
+        { name: '--arc-accent', value: '#f2a06a', note: '9.1:1' },
+        { name: '--arc-accent-hover', value: '#f7b183', note: 'new' },
+        { name: '--arc-accent-pressed', value: '#e08c56', note: 'new' },
+        { name: '--arc-accent-contrast', value: '#1a0f06', note: '' },
+        { name: '--arc-ok', value: '#63d493', note: '6.9:1' },
+        { name: '--arc-warn', value: '#e8c15c', note: '8.2:1' },
+        { name: '--arc-error', value: '#f08a7f', note: '5.6:1' },
+        { name: '--arc-info', value: '#8fb4d8', note: 'new' },
+        { name: '--arc-focus', value: '#f7b183', note: 'new' },
+      ],
+      badges: [
+        badge('Not wanted', 'muted'), badge('Wanted', 'info'), badge('Searching', 'busy'),
+        badge('Downloading 18%', 'busy'), badge('Downloaded', 'busy'), badge('Matching', 'busy'),
+        badge('Preparing 62%', 'busy'), badge('Ready', 'ok'), badge('In review', 'warn'),
+        badge('Failed', 'bad'), badge('Unavailable', 'bad'),
+      ],
+      posters: [
+        { w: '54px', label: 'S', note: 'S · 54px · rows' },
+        { w: '110px', label: 'M', note: 'M · 110–170px · cards' },
+        { w: '158px', label: 'L', note: 'L · 158px · show header' },
+      ],
+      specs: [
+        { label: 'Spacing', value: '4px base · gutter 32 desktop / 16 phone · section gap 32 · card padding 16' },
+        { label: 'Control height', value: '36 / 40 desktop · 44 minimum on phone' },
+        { label: 'Radius', value: 'card 12 · control 8 · badge 999 · poster 8 (S: 6)' },
+        { label: 'Shadow', value: 'level 1: 0 18px 40px rgba(0,0,0,.5) — poster L only\nlevel 2: 0 24px 60px rgba(0,0,0,.55) — sheet, dialog' },
+        { label: 'Motion', value: 'hover 140ms ease · tab change 180ms · toast in 200ms / out 140ms · player chrome auto-hide 3s\nprefers-reduced-motion: all animation off' },
+        { label: 'Scrim', value: '--arc-scrim rgba(8,8,10,0.72) — player overlay, phone More sheet, dialogs' },
+      ],
+    }
+  }
+}
+
+</script>
+</body>
+</html>

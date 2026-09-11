@@ -88,10 +88,13 @@ DURATION = {duration!r}
 MARKER = {marker!r}
 FILTERS = {filters!r}
 
-def note(kind):
+def note(kind, argv=None):
     if MARKER:
         with open(MARKER, "a") as handle:
             handle.write(kind + "\\n")
+        if argv is not None:
+            with open(MARKER + ".argv", "a") as handle:
+                handle.write("\\0".join(argv) + "\\n")
 
 if "-filters" in args:
     print("Filters:")
@@ -118,7 +121,7 @@ if "-c:s" in args:
         handle.write("[Script Info]\\nTitle: stub\\n")
     sys.exit(0)
 
-note("encode")
+note("encode", args)
 if FAIL:
     for line in range(60):
         print("[libx264 @ 0x1] stub complaint line %d" % line, file=sys.stderr)
@@ -176,6 +179,9 @@ def install_fake_ffmpeg(
 
     ``marker`` is a file each invocation appends its kind to, so a test can
     assert that the fonts were dumped before the encode without parsing a log.
+    The encode also writes its whole argument vector, NUL-separated, to
+    ``<marker>.argv`` — which is how "the configured preset actually reached
+    ffmpeg" is asserted without stubbing the subprocess away.
     ``filters`` is what it claims to support: pass ``()`` for the Homebrew-style
     build with no libass.
     """

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..700&family=Instrument+Sans:ital,wght@0,400..700;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  body { margin: 0; background: #0a0a0c; color: #eceae7; font-family: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: #f2a06a; text-decoration: none; }
+  a:hover { color: #f7b183; }
+  * { box-sizing: border-box; }
+  select, input, textarea, button { font: inherit; }
+  @keyframes arcpulse { 0%, 100% { opacity: 0.42; } 50% { opacity: 0.85; } }
+  @keyframes arcfade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column;background:#0a0a0c">
+
+  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-bottom:1px solid #22222a;background:#101013;font-size:12px;color:#8b8992">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#8b8992">Arc · M15 prototype</span>
+    <span style="display:flex;gap:4px;padding:2px;border:1px solid #26262c;border-radius:8px;background:#16161a">
+      <button type="button" onClick="{{ setDesktop }}" style="{{ desktopTabStyle }}">Desktop 1440</button>
+      <button type="button" onClick="{{ setPhone }}" style="{{ phoneTabStyle }}">Phone 390</button>
+    </span>
+    <span style="display:flex;align-items:center;gap:6px">
+      <span style="color:#8b8992">State</span>
+      <select value="{{ state }}" onChange="{{ onState }}" style="border:1px solid #26262c;border-radius:8px;background:#16161a;color:#eceae7;padding:4px 8px;font-size:12px">
+        <option value="data">Loaded</option>
+        <option value="loading">Loading</option>
+        <option value="empty">Empty</option>
+        <option value="error">Error</option>
+      </select>
+    </span>
+    <button type="button" onClick="{{ toggleNotes }}" style="border:1px solid #26262c;border-radius:8px;background:#16161a;color:#a3a1a9;padding:4px 10px;font-size:12px;cursor:pointer">{{ notesLabel }}</button>
+    <span style="margin-left:auto;color:#8b8992;font-size:11px">Visual only — no API or behaviour changes</span>
+  </div>
+
+  <div style="flex:1;min-height:0;display:flex;justify-content:center;padding:0">
+
+    <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+      <div style="flex:1;display:flex;min-width:0;align-items:stretch">
+
+        <sc-if value="{{ chromeVisible }}" hint-placeholder-val="{{ true }}">
+          <aside style="width:240px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;padding:24px 12px;border-right:1px solid #1e1e24;background:#0d0d10">
+            <div style="display:flex;align-items:baseline;gap:3px;padding:0 12px 22px">
+              <span style="font-family:'Bricolage Grotesque',sans-serif;font-size:21px;font-weight:600;letter-spacing:-0.02em;color:#eceae7">Arc</span>
+              <span style="width:5px;height:5px;border-radius:999px;background:#f2a06a;display:inline-block;margin-bottom:2px"></span>
+            </div>
+            <sc-for list="{{ nav }}" as="item" hint-placeholder-count="7">
+              <button type="button" onClick="{{ item.go }}" style="{{ item.style }}">
+                <span>{{ item.label }}</span>
+                <sc-if value="{{ item.count }}" hint-placeholder-val="{{ false }}">
+                  <span style="min-width:20px;padding:1px 6px;border-radius:999px;background:#f2a06a;color:#1a0f06;font-size:11px;font-weight:600;text-align:center">{{ item.count }}</span>
+                </sc-if>
+              </button>
+            </sc-for>
+            <div style="margin-top:18px;padding:10px 12px 0;border-top:1px solid #1e1e24">
+              <p style="margin:0;display:flex;align-items:center;gap:7px;font-size:12px;color:#a3a1a9">
+                <span style="width:6px;height:6px;border-radius:999px;background:#e8c15c;flex-shrink:0"></span>
+                Acquisition paused
+              </p>
+            </div>
+            <div style="margin-top:auto;padding-top:16px;border-top:1px solid #1e1e24">
+              <p style="margin:0 0 6px;padding:0 12px;font-size:12px;color:#8b8992;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">owner@arc.local</p>
+              <button type="button" onClick="{{ goAuth }}" style="width:100%;text-align:left;padding:8px 12px;border:0;border-radius:8px;background:transparent;color:#a3a1a9;font-size:13px;cursor:pointer">Log out</button>
+            </div>
+          </aside>
+        </sc-if>
+
+        <main style="flex:1;min-width:0;overflow:auto;position:relative;background:#0a0a0c">
+          <div style="max-width:1200px;margin:0 auto;padding:32px">
+            <dc-import name="Arc Screens" screen="{{ screen }}" state="{{ state }}" on-go="{{ goTo }}" phone="{{ false }}" model="{{ model }}" hint-size="100%,600px"></dc-import>
+          </div>
+        </main>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:28px 16px;display:flex;justify-content:center;width:100%">
+        <div style="width:390px;height:800px;border-radius:34px;border:1px solid #26262c;background:#0a0a0c;overflow:hidden;position:relative;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,0.55)">
+          <sc-if value="{{ chromeVisible }}" hint-placeholder-val="{{ true }}">
+            <header style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid #1e1e24;background:#0d0d10;flex-shrink:0">
+              <span style="display:flex;align-items:baseline;gap:3px">
+                <span style="font-family:'Bricolage Grotesque',sans-serif;font-size:18px;font-weight:600;letter-spacing:-0.02em;color:#eceae7">Arc</span>
+                <span style="width:4px;height:4px;border-radius:999px;background:#f2a06a;display:inline-block"></span>
+              </span>
+              <span style="margin-left:auto;width:30px;height:30px;border-radius:999px;border:1px solid #26262c;background:#16161a;display:flex;align-items:center;justify-content:center;font-size:11px;color:#a3a1a9">O</span>
+            </header>
+          </sc-if>
+
+          <div style="flex:1;min-height:0;overflow:auto;padding:16px">
+            <dc-import name="Arc Screens" screen="{{ screen }}" state="{{ state }}" on-go="{{ goTo }}" phone="{{ true }}" model="{{ model }}" hint-size="100%,600px"></dc-import>
+          </div>
+
+          <sc-if value="{{ chromeVisible }}" hint-placeholder-val="{{ true }}">
+            <nav style="display:flex;gap:2px;padding:8px 8px 14px;border-top:1px solid #1e1e24;background:#0d0d10;flex-shrink:0">
+              <sc-for list="{{ tabs }}" as="tab" hint-placeholder-count="4">
+                <button type="button" onClick="{{ tab.go }}" style="{{ tab.style }}">
+                  <span style="width:5px;height:5px;border-radius:999px;background:{{ tab.dot }}"></span>
+                  <span>{{ tab.label }}</span>
+                </button>
+              </sc-for>
+            </nav>
+          </sc-if>
+
+          <sc-if value="{{ sheetOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;inset:0;background:rgba(8,8,10,0.72);display:flex;align-items:flex-end">
+              <div style="width:100%;border-radius:20px 20px 0 0;border-top:1px solid #26262c;background:#131316;padding:10px 12px 22px">
+                <div style="width:36px;height:4px;border-radius:999px;background:#2c2c34;margin:2px auto 12px"></div>
+                <sc-for list="{{ sheetItems }}" as="item" hint-placeholder-count="5">
+                  <button type="button" onClick="{{ item.go }}" style="display:flex;width:100%;align-items:center;justify-content:space-between;gap:8px;padding:14px 12px;min-height:48px;border:0;border-bottom:1px solid #1e1e24;background:transparent;color:#eceae7;font-size:15px;text-align:left;cursor:pointer">
+                    <span>{{ item.label }}</span>
+                    <span style="font-size:12px;color:#8b8992">{{ item.hint }}</span>
+                  </button>
+                </sc-for>
+                <button type="button" onClick="{{ closeSheet }}" style="margin-top:12px;width:100%;padding:13px;min-height:48px;border:1px solid #26262c;border-radius:10px;background:#1b1b20;color:#a3a1a9;font-size:14px;cursor:pointer">Close</button>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </sc-if>
+
+  </div>
+
+  <sc-if value="{{ notesOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="border-top:1px solid #22222a;background:#101013;padding:16px 20px">
+      <p style="margin:0 0 4px;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#8b8992">Implementation note — {{ noteTitle }}</p>
+      <p style="margin:0;max-width:78ch;font-size:13px;line-height:1.6;color:#a3a1a9">{{ noteBody }}</p>
+    </div>
+  </sc-if>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+const NAV = [
+  { key: 'home', label: 'Home' },
+  { key: 'schedule', label: 'Schedule' },
+  { key: 'search', label: 'Search' },
+  { key: 'mal', label: 'MyAnimeList' },
+  { key: 'recs', label: 'Recommendations' },
+  { key: 'review', label: 'Match review', count: 3 },
+  { key: 'admin', label: 'Admin' },
+  { key: 'design', label: 'Tokens & components' },
+]
+
+const NOTES = {
+  home: 'Home.tsx keeps its three sections and every query. Continue watching becomes the hero row (poster S + progress bar); Behind on moves from a 3-up card grid to poster cards on a 2:3 aspect so a missing cover no longer collapses the row; New this week keeps the single-line row and gains the shared StateBadge. Copy unchanged; the HealthBadge moves into the footer of the page rather than a loose paragraph.',
+  schedule: 'Schedule.tsx swaps seven equal columns for seven day bands: DayColumn becomes DayBand, EntryRow loses the per-card select and via-MAL pill in favour of a poster S thumb, title, time and one hover/tap action. The list-status control moves into the row action sheet — reachable in one more tap, per §3.6. TimezoneControl and season nav are unchanged, just re-laid out into the page header.',
+  search: 'Search.tsx keeps its debounce and URL sync. AnimeCard is retuned: title first, secondary line muted, via-MAL becomes a small corner marker on the poster instead of a pill competing with the title, and ListStatusControl becomes a 44px-tall control.',
+  show: 'Show.tsx: the banner becomes a scrim behind the header rather than a separate image block. The episodes <table> becomes episode rows (EpisodeRow keeps its props) so it needs no horizontal scroll on a phone; the state column becomes the shared StateBadge, with Not wanted rendered muted rather than as an error-looking chip. Play stays the accent action and the row is the touch target.',
+  player: 'Player.tsx keeps every handler, shortcut and ProgressReporter wiring. New: a designed control bar (play/pause, time, seek with buffered range, volume, speed, fullscreen) replacing native <video> chrome, and the header/footer merged into two overlay bars that auto-hide after 3s. The progress-not-saved strip and resume strip keep their exact copy.',
+  mal: 'Mal.tsx keeps the status panel and every mutation. The write-log <table> becomes log rows: show and field on the first line, old → new and cause on the second, status badge and Revert right-aligned. Filter select unchanged.',
+  recs: 'Recs.tsx unchanged in behaviour: mood textarea with its 300 counter, Get picks with the spinner label, the remaining-today line and the admin models line. Pick cards get poster M and the case as body type; continuations stay compact rows.',
+  review: 'Review.tsx keeps tabs, the suggestion box and the confirm form. The suggestion box keeps its dashed accent border as the one proposal style in Arc; candidates become rows with the score chip inside the text column; Choose and Confirm are full-width on phone.',
+  admin: 'Admin.tsx keeps ?tab= sync and all five tabs. admin/ui.tsx is where most of this lands: TableScroll is replaced by a record-card list so Users, Jobs, Storage and Acquisition share one row language, Pill becomes StateBadge, and ConfirmButton keeps the arm-then-confirm pattern.',
+  auth: 'AuthShell.tsx gains the wordmark lockup and a wider card; Login.tsx and Invite.tsx are unchanged apart from field styling and the 44px submit.',
+  design: 'index.css: the @theme block keeps every current token name and adds --arc-info, --arc-focus, hover/pressed variants and --arc-scrim. Nothing is renamed, so a light variant stays possible.',
+}
+
+const TITLES = {
+  home: 'Home', schedule: 'Schedule', search: 'Search', show: 'Show', player: 'Player',
+  mal: 'MyAnimeList', recs: 'Recommendations', review: 'Match review', admin: 'Admin',
+  auth: 'Login and Invite', design: 'Tokens and components',
+}
+
+class Component extends DCLogic {
+  state = { screen: 'home', viewport: 'desktop', view: 'data', notes: false, sheet: false }
+
+  go(key) {
+    return () => this.setState({ screen: key, sheet: false })
+  }
+
+  navStyle(active) {
+    const base = 'display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:9px 12px;border:0;border-radius:8px;font-size:13.5px;text-align:left;cursor:pointer;transition:background 140ms ease,color 140ms ease;'
+    return active
+      ? base + 'background:#1b1b20;color:#eceae7;box-shadow:inset 2px 0 0 #f2a06a'
+      : base + 'background:transparent;color:#a3a1a9'
+  }
+
+  tabStyle(active) {
+    const base = 'flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-height:48px;padding:6px 2px;border:0;border-radius:10px;background:transparent;font-size:11px;cursor:pointer;'
+    return base + (active ? 'color:#eceae7' : 'color:#8b8992')
+  }
+
+  vpStyle(active) {
+    const base = 'padding:3px 9px;border:0;border-radius:6px;font-size:12px;cursor:pointer;'
+    return active ? base + 'background:#26262c;color:#eceae7' : base + 'background:transparent;color:#8b8992'
+  }
+
+  renderVals() {
+    const { screen, viewport, view, notes, sheet } = this.state
+    const chrome = screen !== 'player' && screen !== 'auth'
+    const phoneKeys = ['home', 'schedule', 'search']
+
+    return {
+      screen, state: view, model: {},
+      goTo: (key) => this.setState({ screen: key, sheet: false }),
+      isDesktop: viewport === 'desktop',
+      isPhone: viewport === 'phone',
+      chromeVisible: chrome,
+      notesOpen: notes,
+      sheetOpen: sheet,
+      notesLabel: notes ? 'Hide note' : 'Implementation note',
+      noteTitle: TITLES[screen] ?? screen,
+      noteBody: NOTES[screen] ?? '',
+      setDesktop: () => this.setState({ viewport: 'desktop' }),
+      setPhone: () => this.setState({ viewport: 'phone' }),
+      desktopTabStyle: this.vpStyle(viewport === 'desktop'),
+      phoneTabStyle: this.vpStyle(viewport === 'phone'),
+      onState: (e) => this.setState({ view: e.target.value }),
+      toggleNotes: () => this.setState({ notes: !notes }),
+      closeSheet: () => this.setState({ sheet: false }),
+      goAuth: this.go('auth'),
+      nav: NAV.map((item) => ({
+        label: item.label,
+        count: item.count ?? false,
+        style: this.navStyle(item.key === screen),
+        go: this.go(item.key),
+      })),
+      tabs: [
+        ...phoneKeys.map((key) => ({
+          label: key === 'home' ? 'Home' : key === 'schedule' ? 'Schedule' : 'Search',
+          style: this.tabStyle(key === screen && !sheet),
+          dot: key === screen && !sheet ? '#f2a06a' : 'transparent',
+          go: this.go(key),
+        })),
+        {
+          label: 'More',
+          style: this.tabStyle(sheet || !phoneKeys.includes(screen)),
+          dot: sheet || !phoneKeys.includes(screen) ? '#f2a06a' : 'transparent',
+          go: () => this.setState({ sheet: true }),
+        },
+      ],
+      sheetItems: [
+        { label: 'MyAnimeList', hint: 'Connected', go: this.go('mal') },
+        { label: 'Recommendations', hint: '4 of 10 left today', go: this.go('recs') },
+        { label: 'Match review', hint: '3 waiting', go: this.go('review') },
+        { label: 'Admin', hint: 'Acquisition paused', go: this.go('admin') },
+        { label: 'Log out', hint: 'owner@arc.local', go: this.go('auth') },
+      ],
+    }
+  }
+}
+
+</script>
+</body>
+</html>

@@ -261,18 +261,38 @@ class Settings(BaseSettings):
     #: deployment guide sizes the host for; swapping in ``h264_vaapi`` or
     #: ``h264_nvenc`` is how hardware encoding is enabled later (§8).
     ffmpeg_video_encoder: str = "libx264"
-    #: x264's speed/size trade-off, and its quality target. ``veryfast`` at
-    #: CRF 20 is roughly real time on two cores for 1080p and visually
-    #: transparent for anime, which is what FR-P3's timing budget assumes.
-    ffmpeg_preset: str = "veryfast"
-    ffmpeg_crf: int = Field(default=20, ge=0, le=51)
+    #: x264's speed/quality trade-off, its quality target, and its content
+    #: tuning. ``veryfast`` at CRF 20 was the original pair and the owner
+    #: judged the result soft (M15 sign-off): at ``veryfast`` x264 gives up
+    #: most of its analysis, which on flat anime gradients and line art shows
+    #: up as smearing and banding rather than as noise. ``fast`` at CRF 19 with
+    #: ``-tune animation`` costs roughly 1.5–2× real time on two cores instead
+    #: of about 1×, which is still inside FR-P3's budget because an episode is
+    #: prepared ahead of being watched, not while it is.
+    #:
+    #: All three are settings rather than constants so a smaller host can go
+    #: back to ``veryfast`` without a code change (architecture.md §5.3).
+    #: ``TRANSCODE_TUNE`` empty means "no ``-tune`` at all", which is what a
+    #: live-action-heavy library wants.
+    transcode_preset: str = "fast"
+    transcode_crf: int = Field(default=19, ge=0, le=51)
+    transcode_tune: str = "animation"
+    #: An optional bitrate ceiling, in kbit/s, and the VBV buffer that goes
+    #: with it. Unset by default — CRF alone is the right control for a library
+    #: served off one box — and set only where the *network* is the constraint:
+    #: a 1080p CRF 19 anime encode can peak well past 10 Mbit/s on an action
+    #: sequence, which is more than some connections will stream. Setting the
+    #: maxrate without a bufsize gets a bufsize of twice the maxrate, x264's
+    #: usual one-second-at-double-rate window.
+    transcode_maxrate_kbps: int | None = Field(default=None, ge=1)
+    transcode_bufsize_kbps: int | None = Field(default=None, ge=1)
     #: Target HLS segment length in seconds (FR-P1: "~6 s"). Keyframes are
     #: forced onto this boundary, so raising it makes seeking coarser and
     #: lowering it makes the playlist longer.
     hls_segment_seconds: int = Field(default=6, ge=1, le=60)
     #: How long one ffmpeg may run before it is killed and the job retried.
-    #: Three hours: a 24-minute episode is about twenty minutes on the
-    #: intended hardware, and a film at ``veryfast`` is still well inside it.
+    #: Three hours: a 24-minute episode is about forty minutes on the intended
+    #: hardware at the default preset, and a film is still inside it.
     #: Deliberately *longer* than :attr:`worker_stale_after`, and that is not a
     #: mistake: the transcode handler pushes ``jobs.locked_at`` forward every
     #: ``HEARTBEAT_SECONDS`` from the moment it starts waiting for an encode

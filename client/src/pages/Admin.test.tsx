@@ -134,6 +134,10 @@ describe('Admin — the page and its tabs', () => {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
     expect(screen.getByRole('button', { name: 'Users' })).toHaveAttribute('aria-pressed', 'true')
+    // M15: the tab bar is a chip row, 44px pills, not bordered boxes.
+    for (const label of ['Users', 'Rules', 'Jobs', 'Storage', 'Acquisition']) {
+      expect(screen.getByRole('button', { name: label })).toHaveClass('h-11', 'rounded-full')
+    }
     expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
 
     // FR-D4: the count and the way in, not a second copy of the queue.

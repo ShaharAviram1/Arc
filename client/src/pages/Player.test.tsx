@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
@@ -55,9 +55,17 @@ function equipVideo(video: HTMLVideoElement, duration = 1436.8): void {
   let paused = true
   let currentTime = 0
   let muted = false
+  let playbackRate = 1
 
   Object.defineProperties(video, {
     paused: { configurable: true, get: () => paused },
+    playbackRate: {
+      configurable: true,
+      get: () => playbackRate,
+      set: (value: number) => {
+        playbackRate = value
+      },
+    },
     currentTime: {
       configurable: true,
       get: () => currentTime,
@@ -116,6 +124,41 @@ function stubBrowserSupport(answer: CanPlayTypeResult, mediaSource: boolean): vo
   vi.stubGlobal('MediaSource', mediaSource ? class FakeMediaSource {} : undefined)
 }
 
+/**
+ * jsdom implements no Fullscreen API whatever — no `requestFullscreen`, no
+ * `exitFullscreen`, and a `fullscreenElement` that cannot be moved — so both
+ * halves of the toggle and the state the page reads back are installed by hand
+ * and taken off again in `afterEach`.
+ */
+let fullscreenStubbed = false
+
+function stubFullscreen(): { request: ReturnType<typeof vi.fn>; exit: ReturnType<typeof vi.fn> } {
+  const request = vi.fn(() => Promise.resolve())
+  const exit = vi.fn(() => Promise.resolve())
+  Object.defineProperty(Element.prototype, 'requestFullscreen', {
+    configurable: true,
+    writable: true,
+    value: request,
+  })
+  Object.defineProperty(document, 'exitFullscreen', {
+    configurable: true,
+    writable: true,
+    value: exit,
+  })
+  fullscreenStubbed = true
+  return { request, exit }
+}
+
+/** What the browser would tell the page after it entered or left fullscreen. */
+function enterFullscreen(): void {
+  Object.defineProperty(document, 'fullscreenElement', {
+    configurable: true,
+    writable: true,
+    value: document.body,
+  })
+  fireEvent(document, new Event('fullscreenchange'))
+}
+
 beforeEach(() => {
   resetHls()
 })
@@ -123,6 +166,12 @@ beforeEach(() => {
 afterEach(() => {
   canPlayTypeSpy?.mockRestore()
   canPlayTypeSpy = null
+  if (fullscreenStubbed) {
+    Reflect.deleteProperty(Element.prototype, 'requestFullscreen')
+    Reflect.deleteProperty(document, 'exitFullscreen')
+    Reflect.deleteProperty(document, 'fullscreenElement')
+    fullscreenStubbed = false
+  }
   vi.unstubAllGlobals()
 })
 
@@ -189,10 +238,13 @@ describe('Player', () => {
       'href',
       `/anime/${String(FRIEREN.id)}`,
     )
-    // There is no previous episode, so no control at all for it.
-    expect(screen.queryByText(/^Previous/)).not.toBeInTheDocument()
+    // There is no previous episode: the arrow is still there, dimmed, rather
+    // than the bar changing width between episodes.
+    const previous = screen.getByRole('button', { name: 'Previous episode' })
+    expect(previous).toBeDisabled()
+    expect(previous).toHaveAttribute('title', 'No previous episode')
     // The next one exists but is still being prepared: shown, disabled, explained.
-    const next = screen.getByRole('button', { name: 'Next · Episode 2' })
+    const next = screen.getByRole('button', { name: 'Next episode 2' })
     expect(next).toBeDisabled()
     expect(next).toHaveAttribute('title', 'Episode 2 isn’t ready yet')
   })
@@ -207,7 +259,7 @@ describe('Player', () => {
   it('links a ready next episode straight to its own player page', async () => {
     renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
 
-    expect(await screen.findByRole('link', { name: 'Next · Episode 2' })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: 'Next episode 2' })).toHaveAttribute(
       'href',
       '/watch/9002',
     )
@@ -392,8 +444,8 @@ describe('Player', () => {
       'GET /api/episodes/9002/play': { body: PLAY_INFO_EPISODE_2 },
     })
 
-    await userEvent.click(await screen.findByRole('link', { name: 'Next · Episode 2' }))
-    await userEvent.click(await screen.findByRole('link', { name: 'Previous · Episode 1' }))
+    await userEvent.click(await screen.findByRole('link', { name: 'Next episode 2' }))
+    await userEvent.click(await screen.findByRole('link', { name: 'Previous episode 1' }))
 
     await waitFor(() => {
       expect(requestsMade(fetchMock).filter((path) => path === PLAY_PATH)).toHaveLength(2)
@@ -443,6 +495,570 @@ describe('Player', () => {
     view.unmount()
 
     expect(instances[0]?.destroy).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * The controls the page draws itself (M15). The native ones are gone, so each
+ * of these is now the only way a mouse reaches something the keyboard already
+ * had — and each of them has to move the media element, not a copy of its
+ * state held beside it.
+ */
+describe('Player controls', () => {
+  /** The bar, or null once it has taken itself out of the accessibility tree. */
+  function controlBar(): HTMLElement | null {
+    return screen.queryByRole('group', { name: 'Player controls' })
+  }
+
+  it('draws no native controls: the page is the chrome', async () => {
+    renderPlayer()
+
+    const video = await readyVideo(false)
+    expect(video).not.toHaveAttribute('controls')
+    expect(controlBar()).toBeInTheDocument()
+  })
+
+  it('plays and pauses the media element', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    const button = screen.getByRole('button', { name: 'Play or pause' })
+
+    await userEvent.click(button)
+    expect(video.paused).toBe(false)
+    await userEvent.click(button)
+    expect(video.paused).toBe(true)
+  })
+
+  it('moves the playhead by ten seconds, and never past the ends', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    video.currentTime = 100
+
+    await userEvent.click(screen.getByRole('button', { name: 'Forward 10 seconds' }))
+    expect(video.currentTime).toBe(110)
+    await userEvent.click(screen.getByRole('button', { name: 'Back 10 seconds' }))
+    expect(video.currentTime).toBe(100)
+
+    video.currentTime = 4
+    await userEvent.click(screen.getByRole('button', { name: 'Back 10 seconds' }))
+    expect(video.currentTime).toBe(0)
+  })
+
+  /**
+   * The owner's sign-off pass took both chips off the bar. The speed control
+   * went entirely; mute kept its keyboard shortcut, which is the way anyone
+   * actually reaches it, and lost the chip that was taking up a third of the
+   * row to say something the viewer can already hear. The second pass took the
+   * two `± 10s` text chips as well — the jump is now a round arrow with the
+   * number inside it, so no word is left on the bar at all.
+   */
+  it('offers no speed, no volume and no text chips', async () => {
+    renderPlayer()
+
+    await readyVideo()
+    expect(screen.queryByRole('button', { name: /speed/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /volume/i })).not.toBeInTheDocument()
+    expect(screen.queryAllByText(/×/)).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: '+ 10s' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '− 10s' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/10s/)).not.toBeInTheDocument()
+  })
+
+  /**
+   * The hint line is off the screen — it was a permanent row of text sitting on
+   * top of burned-in subtitles — but nothing about it is lost: it hangs off the
+   * play button, which is where a viewer looking for the transport already is.
+   */
+  it('keeps the shortcuts in the play button’s tooltip, not on the bar', async () => {
+    renderPlayer()
+
+    await readyVideo()
+
+    expect(screen.queryByText('Space · ← → 5s · F · M')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Play or pause' })).toHaveAttribute(
+      'title',
+      'Play · Space · ← → 5s · F · M',
+    )
+  })
+
+  it('still mutes from the keyboard with no chip to show for it', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    expect(video.muted).toBe(false)
+
+    fireEvent.keyDown(window, { key: 'm' })
+    expect(video.muted).toBe(true)
+    fireEvent.keyDown(window, { key: 'M' })
+    expect(video.muted).toBe(false)
+  })
+
+  it('seeks to where the scrubber was clicked', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+
+    const track = screen.getByRole('slider', { name: 'Seek' })
+    // jsdom lays nothing out, so the track has to be told how wide it is.
+    vi.spyOn(track, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      width: 200,
+    } as DOMRect)
+
+    fireEvent.pointerDown(track, { clientX: 50 })
+    expect(video.currentTime).toBeCloseTo(1436.8 * 0.25)
+    expect(track).toHaveAttribute('aria-valuenow', String(Math.round(1436.8 * 0.25)))
+  })
+
+  it('answers Home and End as the ends of the episode (FR-S6)', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+
+    fireEvent.keyDown(window, { key: 'End' })
+    expect(video.currentTime).toBe(1436.8)
+    fireEvent.keyDown(window, { key: 'Home' })
+    expect(video.currentTime).toBe(0)
+  })
+
+  it('shows how far in and how far left', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    video.currentTime = 600
+    fireEvent.timeUpdate(video)
+
+    expect(screen.getByText('10:00')).toBeInTheDocument()
+    expect(screen.getByText('-13:56')).toBeInTheDocument()
+  })
+
+  /**
+   * A second and a half, and the mouse pointer goes with the bar: the owner's
+   * complaint was that the chrome sits on top of the picture — and on the
+   * subtitles burned into it — that it is there to serve. Nothing hides while
+   * the video is paused.
+   */
+  it('gets out of the way after a second and a half, cursor and all', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    const surface = video.parentElement
+    expect(controlBar()).toBeInTheDocument()
+    expect(surface).not.toHaveClass('cursor-none')
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      // Still up at a second: the wait is shorter than it was, not none.
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(controlBar()).toBeInTheDocument()
+
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(controlBar()).toBeNull()
+      expect(surface).toHaveClass('cursor-none')
+
+      act(() => {
+        fireEvent.pointerMove(window, { clientX: 10, clientY: 10 })
+      })
+      expect(controlBar()).toBeInTheDocument()
+      expect(surface).not.toHaveClass('cursor-none')
+
+      // A pause is a sign of a person, so the bar comes back — and then the
+      // same timer takes it away again, because pausing is not a request to
+      // keep it (owner, 2026-09-12).
+      act(() => {
+        video.pause()
+      })
+      expect(controlBar()).toBeInTheDocument()
+      expect(surface).not.toHaveClass('cursor-none')
+
+      act(() => {
+        vi.advanceTimersByTime(1700)
+      })
+      expect(controlBar()).toBeNull()
+      expect(surface).toHaveClass('cursor-none')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * The timer is about the pointer, not about playback (owner, 2026-09-12).
+   * Someone who pauses on a frame to read a sign in the background wants the
+   * bar off the picture exactly as much as someone watching does, and one wave
+   * of the mouse brings it back — so being wrong costs nothing.
+   */
+  it('hides while paused too, once the pointer has been still', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    const surface = video.parentElement
+    expect(controlBar()).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    try {
+      // The mouse moves, as it must have done for the bar to be up at all…
+      act(() => {
+        fireEvent.pointerMove(window, { clientX: 40, clientY: 40 })
+      })
+      expect(controlBar()).toBeInTheDocument()
+
+      // …and then stops. This episode has never been played, and it still goes.
+      act(() => {
+        vi.advanceTimersByTime(1700)
+      })
+      expect(video.paused).toBe(true)
+      expect(controlBar()).toBeNull()
+      expect(surface).toHaveClass('cursor-none')
+
+      act(() => {
+        fireEvent.pointerMove(window, { clientX: 80, clientY: 80 })
+      })
+      expect(controlBar()).toBeInTheDocument()
+      expect(surface).not.toHaveClass('cursor-none')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * Two things outrank the timer because both are the page saying something
+   * playback cannot show, and both put a control inside the bar's own fade
+   * group that has to stay reachable while they are up.
+   */
+  it('holds the bar open while the end overlay is showing', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    expect(controlBar()).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        fireEvent.ended(video)
+      })
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+      expect(screen.getByText('Next: Episode 2')).toBeInTheDocument()
+      expect(controlBar()).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** A drag still pins it: the track may not go out from under the finger. */
+  it('holds the bar open while the scrubber is being dragged', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    const track = screen.getByRole('slider', { name: 'Seek' })
+    vi.spyOn(track, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      width: 200,
+    } as DOMRect)
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      act(() => {
+        fireEvent.pointerDown(track, { clientX: 50 })
+      })
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+      expect(controlBar()).toBeInTheDocument()
+
+      // Let go, and the ordinary timer applies again.
+      act(() => {
+        fireEvent.pointerUp(track, { clientX: 50 })
+      })
+      act(() => {
+        vi.advanceTimersByTime(1700)
+      })
+      expect(controlBar()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** A pointer resting on the bar is not asking for anything (owner, M15). */
+  it('hides even while the pointer is sitting still over the bar', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      act(() => {
+        fireEvent.pointerMove(window, { clientX: 10, clientY: 10 })
+      })
+      // No further moves: the pointer is parked, wherever it is parked.
+      act(() => {
+        vi.advanceTimersByTime(2200)
+      })
+      expect(controlBar()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks the episode watched from the bar, and takes the mark off (FR-W3)', async () => {
+    const unwatched: PlayInfo = { ...PLAY_INFO, episode: { ...PLAY_INFO.episode, watched: false } }
+    const { fetchMock } = renderPlayer({
+      [PLAY_PATH]: { body: unwatched },
+      'POST /api/episodes/9001/watched': {
+        body: { completed: true, newly_completed: false, list_progress: 1 },
+      },
+      'DELETE /api/episodes/9001/watched': {
+        body: { completed: false, newly_completed: false, list_progress: 0 },
+      },
+    })
+
+    const mark = await screen.findByRole('button', { name: 'Mark watched' })
+    expect(mark).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(mark)
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('POST /api/episodes/9001/watched')
+    })
+    const unmark = await screen.findByRole('button', { name: 'Unmark watched' })
+    expect(unmark).toHaveAttribute('aria-pressed', 'true')
+
+    await userEvent.click(unmark)
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('DELETE /api/episodes/9001/watched')
+    })
+    expect(await screen.findByRole('button', { name: 'Mark watched' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+  })
+
+  /**
+   * The words came off the bar; none of them came off the page. Every glyph
+   * still says what it is to a screen reader and to a hover.
+   */
+  it('says in words what each glyph means', async () => {
+    renderPlayer()
+
+    await readyVideo()
+
+    expect(screen.getByRole('button', { name: 'Play or pause' })).toBeInTheDocument()
+    const fullscreen = screen.getByRole('button', { name: 'Fullscreen' })
+    expect(fullscreen).toHaveAttribute('title', 'Fullscreen')
+    expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
+
+    // This fixture's episode is already watched, so the mark is pressed.
+    const watched = screen.getByRole('button', { name: 'Unmark watched' })
+    expect(watched).toHaveAttribute('aria-pressed', 'true')
+    expect(watched).toHaveAttribute('title', 'Unmark watched')
+
+    // The two neighbours, and nothing else, still live in the Episodes nav.
+    const nav = screen.getByRole('navigation', { name: 'Episodes' })
+    expect(within(nav).getAllByRole('button')).toHaveLength(2)
+    expect(within(nav).getByRole('button', { name: 'Previous episode' })).toBeInTheDocument()
+    expect(within(nav).getByRole('button', { name: 'Next episode 2' })).toBeInTheDocument()
+
+    // The two skip buttons are glyphs now too, and say so.
+    const back = screen.getByRole('button', { name: 'Back 10 seconds' })
+    expect(back).toHaveAttribute('title', 'Back 10 seconds')
+    const forward = screen.getByRole('button', { name: 'Forward 10 seconds' })
+    expect(forward).toHaveAttribute('title', 'Forward 10 seconds')
+  })
+
+  /**
+   * The row's shape, not just its contents (owner, M15 second pass): transport
+   * on the left, what-to-watch centred, fullscreen alone on the right. Asserted
+   * as three sibling groups in document order, because the order is the point —
+   * fullscreen moved out of the left group and to the far right, and a test
+   * that only names the buttons would not have noticed.
+   */
+  it('lays the controls out in three groups, in order', async () => {
+    renderPlayer()
+
+    await readyVideo()
+
+    const bar = screen.getByRole('group', { name: 'Player controls' })
+    // The bar is [scrubber row, control row]; the control row is the second.
+    const row = bar.children[1]
+    if (row === undefined) throw new Error('the control row is missing')
+
+    // `querySelectorAll` rather than `getAllByRole`, because what is being
+    // asserted is document order across two different roles (a disabled
+    // neighbour is a button, a ready one is a link).
+    const groups = Array.from(row.children).map((group) =>
+      Array.from(group.querySelectorAll('button, a')).map(
+        (node) => node.getAttribute('aria-label') ?? '',
+      ),
+    )
+
+    expect(groups).toEqual([
+      ['Back 10 seconds', 'Play or pause', 'Forward 10 seconds'],
+      ['Previous episode', 'Next episode 2', 'Unmark watched'],
+      ['Fullscreen'],
+    ])
+
+    // The nav wraps exactly the two episode links and lives in the middle group.
+    const nav = screen.getByRole('navigation', { name: 'Episodes' })
+    expect(row.children[1]).toContainElement(nav)
+    expect(within(nav).getAllByRole('button')).toHaveLength(2)
+  })
+
+  it('says what the episode is, beside the show it belongs to', async () => {
+    renderPlayer()
+
+    expect(
+      await screen.findByRole('heading', { name: FRIEREN.title.preferred }),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/The Journey’s End · subs en, audio ja/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * The picture itself is a control (M15 sign-off): click to play or pause,
+ * double-click for fullscreen. The whole difficulty is that a double click is
+ * two clicks, so the single one has to be held back long enough to find out
+ * whether it was the first half of one — otherwise going fullscreen would also
+ * stop the episode, at exactly the moment nobody wants it stopped.
+ */
+describe('Player video gestures', () => {
+  function controlBar(): HTMLElement | null {
+    return screen.queryByRole('group', { name: 'Player controls' })
+  }
+
+  it('plays on a single click of the video, once the double-click window passes', async () => {
+    stubFullscreen()
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        fireEvent.click(video)
+      })
+      // Nothing yet: the click is still waiting to be contradicted.
+      expect(video.paused).toBe(true)
+
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(video.paused).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('goes fullscreen on a double click, and does not pause as well', async () => {
+    const { request } = stubFullscreen()
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        fireEvent.click(video)
+      })
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+      act(() => {
+        fireEvent.click(video)
+      })
+      expect(request).toHaveBeenCalledTimes(1)
+
+      // The pending single click was cancelled, so playback never moved.
+      act(() => {
+        vi.advanceTimersByTime(600)
+      })
+      expect(video.paused).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('toggles fullscreen from the bar and renames the button when it lands', async () => {
+    const { request, exit } = stubFullscreen()
+    renderPlayer()
+
+    await readyVideo()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Fullscreen' }))
+    expect(request).toHaveBeenCalledTimes(1)
+
+    // The browser owns the state; the page reads it back off the document.
+    act(() => {
+      enterFullscreen()
+    })
+    const leave = await screen.findByRole('button', { name: 'Exit fullscreen' })
+    expect(leave).toHaveAttribute('aria-pressed', 'true')
+
+    await userEvent.click(leave)
+    expect(exit).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * On a touch screen the first tap is how the controls come back, and it has
+   * to mean only that: pausing as well would make the bar impossible to
+   * consult without interrupting the episode.
+   */
+  it('lets a touch tap bring the hidden controls back without pausing', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      act(() => {
+        vi.advanceTimersByTime(2200)
+      })
+      expect(controlBar()).toBeNull()
+
+      act(() => {
+        fireEvent.touchStart(window)
+        fireEvent.click(video)
+      })
+      expect(controlBar()).toBeInTheDocument()
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(video.paused).toBe(false)
+
+      // The next tap, with the bar already up, is an ordinary one.
+      act(() => {
+        fireEvent.touchStart(window)
+        fireEvent.click(video)
+      })
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(video.paused).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -535,6 +1151,29 @@ describe('Player progress reporting failures', () => {
     await waitFor(() => {
       expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
     })
+  })
+
+  /**
+   * The strip carries the only Dismiss there is, and it sits inside the chrome
+   * that the idle timer fades. While the warning is up the bar stays, whatever
+   * the pointer is doing (owner, 2026-09-12).
+   */
+  it('holds the control bar open while the warning is up', async () => {
+    const { fetchMock } = failingPlayer()
+    const video = await readyVideo()
+
+    await failWrites(video, fetchMock, [100, 200, 300])
+    await screen.findByText(PROGRESS_UNSAVED)
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+      expect(screen.getByRole('group', { name: 'Player controls' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('lets the viewer wave the warning away', async () => {

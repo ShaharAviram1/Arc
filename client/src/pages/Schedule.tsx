@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { CoverThumb } from '@/components/CoverThumb'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
+import {
+  Artwork,
+  buttonClass,
+  cx,
+  EmptyState,
+  inputClass,
+  Skeleton,
+  FIELD_ERROR_CLASS,
+  FOCUS_RING,
+} from '@/components/ui'
 import { catalogErrorMessage } from '@/lib/anime'
 import { authErrorMessage, timezoneOptions, useUpdateTimezone } from '@/lib/auth'
 import {
@@ -20,20 +29,23 @@ const EMPTY_SEASON = 'Nothing cached for this season yet — the catalogue sweep
 
 const UNSCHEDULED_TITLE = 'Movies, OVAs and unscheduled'
 
-const buttonClass =
-  'rounded-md border border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-1.5 text-sm text-[var(--arc-text)] transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)] disabled:cursor-not-allowed disabled:opacity-40'
-
 /** Why a time carries "est." — same wording as the show page (FR-C6). */
 const ESTIMATED_HINT = 'Estimated from the broadcast slot'
+
+/** The caveat that travels with a MAL-sourced row (FR-C6). */
+const VIA_MAL_HINT = 'AniList is unavailable; this row came from MyAnimeList'
 
 /**
  * "20:00 est. · Ep 7", with the parts the server actually knows. The marker
  * sits against the time because that is what it qualifies: the episode number
  * is not a guess even when the moment it airs is.
+ *
+ * A `<span>` rather than a `<p>`: the whole row is one `<a>`, and a paragraph
+ * inside a link is legal but reads oddly to anything walking the tree.
  */
 function SlotLine({ entry }: { entry: ScheduleEntry }) {
   return (
-    <p className="mt-0.5 text-xs text-[var(--arc-text-muted)] tabular-nums">
+    <span className="mt-0.5 block text-[12px] tabular-nums text-[var(--arc-text-muted)]">
       {entry.air_time_local ?? 'Time unknown'}
       {entry.next_at_estimated ? (
         <>
@@ -44,56 +56,98 @@ function SlotLine({ entry }: { entry: ScheduleEntry }) {
         </>
       ) : null}
       {entry.next_episode === null ? null : ` · Ep ${String(entry.next_episode)}`}
-    </p>
+    </span>
   )
 }
 
 /**
- * One show in a day column. A followed show gets an accent edge rather than a
- * different position: the column stays in air-time order, which is what a
- * person reads it for (FR-C3).
+ * One show in a day column: a 38px key visual, a two-line title and the slot.
+ * Nothing else.
+ *
+ * A seven-column week is about 158px per column, and everything that used to
+ * live in this row — a 112px status select, a bordered "via MAL" pill, a third
+ * line of text — was competing for those 158px and losing: the select alone
+ * took more width than the column had left, so titles broke one word per line
+ * and the control sat on top of the artwork. The row is now the link, at the
+ * two sizes that fit (13px title, 12px slot), and the caveat is the link's
+ * `title` rather than a line of its own.
+ *
+ * The list-status control survives below `lg`, where the days stack and a row
+ * is the full width of the page. On the seven-column grid it is one tap away
+ * on the show page, which is the prototype's own answer ("the list-status
+ * control moves into the row action sheet — reachable in one more tap").
+ *
+ * `aria-label` on the link so its accessible name stays the title alone; the
+ * slot inside it is detail, not part of what the link is called.
+ *
+ * A followed show keeps the column's air-time order — the order is what a
+ * person reads a schedule for (FR-C3) — and is marked by the grouped surface
+ * arriving under it. The old accent edge went with the old palette: in this
+ * design colour means state, and "on my list" is not a state wanting a colour.
  */
-function EntryRow({ entry }: { entry: ScheduleEntry }) {
+function EntryRow({
+  entry,
+  statusClassName = 'px-2 pb-2 lg:hidden',
+}: {
+  entry: ScheduleEntry
+  /**
+   * Where the list-status control is allowed to appear. The week grid hides it
+   * from `lg` up (there is no room); the unscheduled list, which is never
+   * seven columns wide, keeps it at every size.
+   */
+  statusClassName?: string
+}) {
   const { anime } = entry
-  const edge = entry.following
-    ? 'border-l-[var(--arc-accent)] bg-[var(--arc-accent)]/5'
-    : 'border-l-transparent'
+  const href = `/anime/${String(anime.id)}`
 
   return (
     <li
       data-following={entry.following ? 'true' : undefined}
-      className={`flex gap-2 rounded-md border-l-2 bg-[var(--arc-surface)] p-2 ${edge}`}
+      className={cx(
+        'rounded-row transition-colors duration-200',
+        entry.following
+          ? 'bg-[var(--arc-surface)]'
+          : 'hover:bg-[color-mix(in_srgb,var(--arc-surface)_60%,transparent)]',
+      )}
     >
-      <CoverThumb url={anime.cover_url} className="h-14 w-10 rounded" />
-      <div className="min-w-0 flex-1">
-        <Link
-          to={`/anime/${anime.id}`}
-          className="block text-sm leading-snug font-medium text-[var(--arc-text)] hover:text-[var(--arc-accent)]"
-        >
-          {anime.title.preferred}
-        </Link>
-        <SlotLine entry={entry} />
-        {anime.source === 'mal' ? (
-          <p className="mt-1">
-            <span
-              title="AniList is unavailable; this row came from MyAnimeList"
-              className="inline-block rounded-full border border-[var(--arc-warn)]/40 bg-[var(--arc-warn)]/10 px-1.5 py-0.5 text-[0.625rem] text-[var(--arc-warn)]"
-            >
-              via MAL
-            </span>
-          </p>
-        ) : null}
-        <ListStatusControl
-          animeId={anime.id}
-          status={entry.list_status}
-          label={`List status for ${anime.title.preferred}`}
-          className="mt-1.5"
-        />
-      </div>
+      <Link
+        to={href}
+        aria-label={anime.title.preferred}
+        title={anime.source === 'mal' ? VIA_MAL_HINT : undefined}
+        className={cx('flex items-center gap-2.5 rounded-row p-2', FOCUS_RING)}
+      >
+        <span className="block w-[38px] shrink-0">
+          <Artwork url={anime.cover_url} shape="thumb" />
+        </span>
+        <span className="block min-w-0 flex-1">
+          {/* No `block` here: `line-clamp-2` is `display:-webkit-box`, and a
+              `display` utility beside it silently wins and un-clamps the
+              title. `break-words` is for the single long word a Japanese
+              title transliterates into, which would otherwise run out of the
+              column rather than wrap inside it. */}
+          <span className="line-clamp-2 text-[13px] leading-snug font-medium break-words text-[var(--arc-text)]">
+            {anime.title.preferred}
+          </span>
+          <SlotLine entry={entry} />
+        </span>
+      </Link>
+
+      <ListStatusControl
+        animeId={anime.id}
+        status={entry.list_status}
+        label={`List status for ${anime.title.preferred}`}
+        className={statusClassName}
+      />
     </li>
   )
 }
 
+/**
+ * One weekday. On a phone the days stack and today comes first, because the
+ * question a schedule answers on a phone is "what is on tonight"; on a wide
+ * screen the seven columns stay in weekday order, which is what makes the grid
+ * readable as a week.
+ */
 function DayColumn({
   weekday,
   entries,
@@ -109,20 +163,18 @@ function DayColumn({
     <section
       aria-label={label}
       data-today={isToday ? 'true' : undefined}
-      className={`min-w-0 rounded-lg border p-2 ${
-        isToday
-          ? 'border-[var(--arc-accent)] bg-[var(--arc-accent)]/5'
-          : 'border-[var(--arc-border)] bg-[var(--arc-surface)]/40'
-      }`}
+      className={cx('min-w-0', isToday ? 'order-first lg:order-none' : '')}
     >
-      <h2 className="px-1 pb-2 text-xs font-medium tracking-wide text-[var(--arc-text-muted)] uppercase">
-        {label}
-        {isToday ? <span className="ml-1 text-[var(--arc-accent)]">· today</span> : null}
+      <h2 className="px-2 pb-2.5 text-[12px] font-semibold tracking-[0.08em] uppercase">
+        <span className={isToday ? 'text-[var(--arc-ember)]' : 'text-[var(--arc-text-muted)]'}>
+          {label}
+        </span>
+        {isToday ? <span className="text-[var(--arc-ember)]">· today</span> : null}
       </h2>
       {entries.length === 0 ? (
-        <p className="px-1 pb-1 text-xs text-[var(--arc-text-muted)]">Nothing airing</p>
+        <p className="px-2 text-[13px] text-[var(--arc-text-muted)]">Nothing airing</p>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-0.5">
           {entries.map((entry) => (
             <EntryRow key={entry.anime.id} entry={entry} />
           ))}
@@ -141,21 +193,21 @@ function Unscheduled({ entries }: { entries: ScheduleEntry[] }) {
   if (entries.length === 0) return null
 
   return (
-    <section className="mt-8">
+    <section className="mt-12">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => {
           setOpen((current) => !current)
         }}
-        className={buttonClass}
+        className={buttonClass('chip')}
       >
         {`${open ? 'Hide' : 'Show'} ${UNSCHEDULED_TITLE} (${String(entries.length)})`}
       </button>
       {open ? (
-        <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <ul className="mt-4 grid gap-0.5 sm:grid-cols-2 lg:grid-cols-3">
           {entries.map((entry) => (
-            <EntryRow key={entry.anime.id} entry={entry} />
+            <EntryRow key={entry.anime.id} entry={entry} statusClassName="px-2 pb-2" />
           ))}
         </ul>
       ) : null}
@@ -201,14 +253,17 @@ function TimezoneControl({ timezone }: { timezone: string }) {
   }
 
   return (
-    <div className="mt-0.5 text-xs text-[var(--arc-text-muted)]">
+    <div className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
       <p>
         <span>{`Times in ${shown}`}</span>
         {editing ? null : (
           <button
             type="button"
             onClick={open}
-            className="ml-2 rounded-sm underline underline-offset-2 hover:text-[var(--arc-text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-accent)]"
+            className={cx(
+              'ml-2 rounded-sm underline underline-offset-2 hover:text-[var(--arc-text)]',
+              FOCUS_RING,
+            )}
           >
             Change
           </button>
@@ -216,8 +271,10 @@ function TimezoneControl({ timezone }: { timezone: string }) {
       </p>
 
       {editing ? (
-        <div className="mt-1.5 flex flex-wrap items-center gap-2">
-          <label htmlFor="schedule-timezone">Timezone</label>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <label htmlFor="schedule-timezone" className="text-[13px]">
+            Timezone
+          </label>
           <select
             id="schedule-timezone"
             value={choice}
@@ -225,7 +282,7 @@ function TimezoneControl({ timezone }: { timezone: string }) {
             onChange={(event) => {
               setChoice(event.target.value)
             }}
-            className="rounded-md border border-[var(--arc-border)] bg-[var(--arc-bg)] px-2 py-1.5 text-sm text-[var(--arc-text)] focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-[var(--arc-accent)] disabled:opacity-60"
+            className={inputClass()}
           >
             {zones.map((zone) => (
               <option key={zone} value={zone}>
@@ -233,12 +290,17 @@ function TimezoneControl({ timezone }: { timezone: string }) {
               </option>
             ))}
           </select>
-          <button type="button" className={buttonClass} disabled={update.isPending} onClick={save}>
+          <button
+            type="button"
+            className={buttonClass('chip')}
+            disabled={update.isPending}
+            onClick={save}
+          >
             Save
           </button>
           <button
             type="button"
-            className={buttonClass}
+            className={buttonClass('chip')}
             disabled={update.isPending}
             onClick={cancel}
           >
@@ -248,7 +310,7 @@ function TimezoneControl({ timezone }: { timezone: string }) {
       ) : null}
 
       {update.isError ? (
-        <p role="alert" className="mt-1 text-[var(--arc-error)]">
+        <p role="alert" className={`mt-2 ${FIELD_ERROR_CLASS}`}>
           {authErrorMessage(update.error)}
         </p>
       ) : null}
@@ -314,12 +376,14 @@ export function Schedule() {
 
   return (
     <section className="mx-auto max-w-[110rem]">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-[var(--arc-text)]">Schedule</h1>
+      <div className="flex flex-wrap items-end justify-between gap-5">
+        <div className="min-w-0">
+          <h1 className="text-[40px] leading-[1.08] font-semibold tracking-[-0.028em] text-[var(--arc-text)]">
+            Schedule
+          </h1>
           {data === undefined ? null : (
             <>
-              <p className="mt-1 text-sm text-[var(--arc-text)]">
+              <p className="mt-2 text-[14px] text-[var(--arc-text)]">
                 {seasonLabel(data.year, data.season)}
               </p>
               <TimezoneControl timezone={data.timezone} />
@@ -327,10 +391,10 @@ export function Schedule() {
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <button
             type="button"
-            className={buttonClass}
+            className={buttonClass('chip')}
             disabled={data === undefined}
             onClick={() => {
               if (data !== undefined) goTo(data.prev)
@@ -340,7 +404,7 @@ export function Schedule() {
           </button>
           <button
             type="button"
-            className={buttonClass}
+            className={buttonClass('chip')}
             disabled={data === undefined}
             onClick={() => {
               if (data !== undefined) goTo(data.next)
@@ -353,7 +417,7 @@ export function Schedule() {
 
       {isError ? (
         <ErrorState
-          className="mt-8"
+          className="mt-10"
           message={catalogErrorMessage(error, 'Could not load the schedule.')}
           pending={isFetching}
           onRetry={() => {
@@ -361,26 +425,34 @@ export function Schedule() {
           }}
         />
       ) : data === undefined ? (
-        <p role="status" className="mt-8 text-sm text-[var(--arc-text-muted)]">
-          Loading…
-        </p>
+        <Skeleton shape="row" count={5} className="mt-10 max-w-3xl" />
       ) : isEmpty ? (
-        <p className="mt-8 text-sm text-[var(--arc-text-muted)]">{EMPTY_SEASON}</p>
+        <EmptyState className="mt-10 max-w-3xl" message={EMPTY_SEASON} />
       ) : (
         <>
-          <div
-            className={`mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7 ${
-              isFetching ? 'opacity-60' : ''
-            }`}
-          >
-            {data.days.map((day) => (
-              <DayColumn
-                key={day.weekday}
-                weekday={day.weekday}
-                entries={day.entries}
-                isToday={day.weekday === today}
-              />
-            ))}
+          {/* The week is laid to the design's 1180px content measure, which is
+              what `Layout` caps every page at: seven columns and six 12px gaps
+              make each day 158px — enough for a 38px thumb and a two-line
+              title, which is what the column is for. Below that measure the
+              week scrolls sideways inside this box rather than shrinking the
+              columns to one word per line. Under `lg` there is no minimum and
+              the days simply stack, today first. */}
+          <div className="no-scrollbar mt-8 overflow-x-auto">
+            <div
+              className={cx(
+                'grid grid-cols-1 gap-x-4 gap-y-8 md:grid-cols-2 lg:min-w-[1180px] lg:grid-cols-7 lg:gap-x-3',
+                isFetching ? 'opacity-60' : '',
+              )}
+            >
+              {data.days.map((day) => (
+                <DayColumn
+                  key={day.weekday}
+                  weekday={day.weekday}
+                  entries={day.entries}
+                  isToday={day.weekday === today}
+                />
+              ))}
+            </div>
           </div>
           <Unscheduled entries={data.unscheduled} />
         </>

@@ -1,8 +1,9 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AnimeDetail, EpisodeOut } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
 import type { MalSync } from '@/lib/mal'
 import { Show } from '@/pages/Show'
@@ -35,6 +36,9 @@ const WATCHED_PATH = '/api/episodes/9001/watched'
 const UNWATCHED_PATH = '/api/episodes/9002/watched'
 const PROGRESS_RESULT = { completed: true, newly_completed: true, list_progress: 2 }
 
+/** The design's meta line: studio, when it aired, how much of it there is. */
+const META_LINE = 'Madhouse · Fall 2023 · 28 episodes · 1 watched'
+
 function renderShow(id: number | string = FRIEREN.id) {
   const router = createMemoryRouter(
     [
@@ -52,7 +56,37 @@ function renderShow(id: number | string = FRIEREN.id) {
   return router
 }
 
+/** The hero, by the one `<h1>` on the page: the frame is its own section. */
+function hero(): HTMLElement {
+  return screen.getByRole('heading', { level: 1 }).closest('section') as HTMLElement
+}
+
+/** The fixture with one episode replaced, keyed by its position in the list. */
+function withEpisode(index: number, patch: Partial<EpisodeOut>): AnimeDetail {
+  return {
+    ...FRIEREN_DETAIL,
+    episodes: FRIEREN_DETAIL.episodes.map((episode, at) =>
+      at === index ? { ...episode, ...patch } : episode,
+    ),
+  }
+}
+
+/**
+ * A fixed mid-day instant, for the one thing on this page that asks what day
+ * it is. Mid-day in Berlin (TEST_USER's zone) so that "an hour from now" and
+ * "this evening" are still the same day there — a clock read off the machine
+ * made the "Airs tonight" test fail after 23:00 local.
+ */
+const MIDDAY = new Date('2026-09-12T10:00:00Z')
+
+/** Freezes `Date` only: `waitFor` and `userEvent` keep their real timers. */
+function freezeClock(): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(MIDDAY)
+}
+
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -66,18 +100,219 @@ describe('Show', () => {
       await screen.findByRole('heading', { name: FRIEREN.title.preferred }),
     ).toBeInTheDocument()
     expect(screen.getByText('Sousou no Frieren · 葬送のフリーレン')).toBeInTheDocument()
-    expect(
-      screen.getByText('TV · 28 episodes · Finished · Fall 2023 · Madhouse'),
-    ).toBeInTheDocument()
+    expect(screen.getByText(META_LINE)).toBeInTheDocument()
     expect(screen.getByText('Fantasy')).toBeInTheDocument()
 
-    // One row per episode, with the untitled one falling back to its number.
-    expect(screen.getByText('The Journey’s End')).toBeInTheDocument()
-    expect(screen.getByText('Episode 2')).toBeInTheDocument()
-    // Each unplayable episode shows its state twice: badge, and in place of Play.
-    expect(screen.getAllByText('Preparing')).toHaveLength(2)
-    expect(screen.getAllByText('Not wanted')).toHaveLength(2)
-    expect(screen.getByLabelText('Watched')).toBeInTheDocument()
+    // One row per episode, numbered, with the untitled one falling back to its
+    // number rather than leaving the line blank.
+    expect(screen.getByText('1. The Journey’s End')).toBeInTheDocument()
+    expect(screen.getByText('2. Episode 2')).toBeInTheDocument()
+    // Each row says one thing about its state, in the state column.
+    expect(screen.getByText('Watched')).toBeInTheDocument()
+    expect(screen.getByText('Preparing 30%')).toBeInTheDocument()
+    expect(screen.getByText('Searching')).toBeInTheDocument()
+  })
+
+  it('fills the hero with the banner when the catalogue has one', async () => {
+    const banner = 'https://example.test/frieren-banner.jpg'
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL, banner_url: banner } satisfies AnimeDetail },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const frame = hero()
+    expect(frame.querySelector('img')).toHaveAttribute('src', banner)
+    expect(frame.querySelector('img')).toHaveAttribute('loading', 'eager')
+    // Nothing has to be blurred to stand in for a banner.
+    expect(frame.querySelector('[data-hero-backdrop]')).toBeNull()
+
+    // And the frame takes the banner's own shape rather than cropping to the
+    // middle half of it: AniList ships ~1900×400.
+    const image = frame.querySelector('img') as HTMLImageElement
+    const box = image.parentElement as HTMLElement
+    expect(box).toHaveClass('aspect-[21/9]')
+    expect(box.style.aspectRatio).toBe('')
+
+    Object.defineProperty(image, 'naturalWidth', { value: 1900, configurable: true })
+    Object.defineProperty(image, 'naturalHeight', { value: 400, configurable: true })
+    fireEvent.load(image)
+    expect(Number.parseFloat(box.style.aspectRatio)).toBe(3.6)
+  })
+
+  it('never stretches a poster across the hero when the show has no banner', async () => {
+    const poster = 'https://example.test/no-banner-large.jpg'
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          banner_url: null,
+          cover_url: 'https://example.test/no-banner.jpg',
+          cover_large_url: poster,
+        } satisfies AnimeDetail,
+      },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const frame = hero()
+
+    // The cover, blurred and darkened, is the ground — not a picture to read.
+    const backdrop = frame.querySelector('[data-hero-backdrop]')
+    expect(backdrop).toHaveAttribute('src', poster)
+    expect(backdrop).toHaveAttribute('aria-hidden', 'true')
+    expect(backdrop).toHaveClass('blur-[40px]')
+
+    // The one crisp copy keeps its own 2:3 ratio, beside the title.
+    const key = frame.querySelector('[data-hero-poster]') as HTMLElement
+    expect(key.querySelector('img')).toHaveAttribute('src', poster)
+    expect(key.firstElementChild).toHaveClass('aspect-[2/3]')
+    expect(key).not.toContainElement(screen.getByRole('heading', { level: 1 }))
+
+    // The frame itself stays 21:9: the wash fills it, it does not shape it.
+    expect(backdrop?.parentElement).toHaveClass('aspect-[21/9]')
+    expect((backdrop?.parentElement as HTMLElement).style.aspectRatio).toBe('')
+  })
+
+  it('offers the first ready episode as the primary action', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const play = await screen.findByRole('link', { name: 'Play episode 1' })
+    expect(play).toHaveAttribute('href', '/watch/9001')
+  })
+
+  it('offers nothing to play when no episode has arrived', async () => {
+    const nothingReady: AnimeDetail = {
+      ...FRIEREN_DETAIL,
+      episodes: FRIEREN_DETAIL.episodes.map((episode) =>
+        episode.state === 'ready' ? { ...episode, state: 'preparing' } : episode,
+      ),
+    }
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: nothingReady } })
+
+    renderShow()
+
+    expect(await screen.findByRole('button', { name: 'Nothing ready yet' })).toBeDisabled()
+    expect(screen.queryByRole('link', { name: /^Play episode/ })).not.toBeInTheDocument()
+  })
+
+  it('makes only a ready episode row a link into the player', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const row = await screen.findByRole('link', { name: '1. The Journey’s End' })
+    expect(row).toHaveAttribute('href', '/watch/9001')
+    // Every other episode is text: there is nothing to open.
+    expect(screen.queryByRole('link', { name: '2. Episode 2' })).not.toBeInTheDocument()
+  })
+
+  it('says when an upcoming episode lands today, in the viewer’s own zone', async () => {
+    freezeClock()
+    // 20:00 in Berlin on the frozen day: still to come, still today.
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(2, { air_at: '2026-09-12T18:00:00Z', aired: false }),
+      },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText('Airs tonight')).toBeInTheDocument()
+  })
+
+  it('says only that an episode further out has not aired', async () => {
+    freezeClock()
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(2, { air_at: '2026-09-13T18:00:00Z', aired: false }),
+      },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText('Not yet aired')).toBeInTheDocument()
+    expect(screen.queryByText('Airs tonight')).not.toBeInTheDocument()
+  })
+
+  it('names an episode that has not aired yet, whatever Arc wants of it', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    // Episode 3 is `not_wanted` and unaired: the row says the fact, not the
+    // internal state, and never in an error colour.
+    expect(await screen.findByText('Not yet aired')).toBeInTheDocument()
+  })
+
+  it('calls an episode nobody asked for "Not fetched", not "Not wanted"', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(2, { aired: true, air_at: '2023-10-13T14:00:00Z' }),
+      },
+    })
+
+    renderShow()
+
+    // A resting state is a fact about Arc's queue, not a refusal, and never
+    // reads in an error colour.
+    expect(await screen.findByText('Not fetched')).toBeInTheDocument()
+    expect(screen.queryByText('Not wanted')).not.toBeInTheDocument()
+  })
+
+  it('carries the air date, the runtime, the resolution and the group in the row', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    // Episode 1 is ready, so its own rendition says how long it runs and what
+    // it is; episode 4 has only the release Arc picked for it (FR-A3).
+    expect(await screen.findByText(/24 min · 1080p$/)).toBeInTheDocument()
+    expect(screen.getByText(/1080p · SubsPlease$/)).toBeInTheDocument()
+  })
+
+  it('drops the group from the row when the parser did not find one', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          episodes: FRIEREN_DETAIL.episodes.map((episode) =>
+            episode.release === null
+              ? episode
+              : { ...episode, release: { ...episode.release, group: null } },
+          ),
+        },
+      },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    expect(screen.queryByText(/SubsPlease/)).not.toBeInTheDocument()
+  })
+
+  it('prefers what the transcode produced over what the release claimed', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(0, { release: { ...CHOSEN_RELEASE, resolution: '720p' } }),
+      },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText(/24 min · 1080p · SubsPlease$/)).toBeInTheDocument()
+    expect(screen.queryByText(/720p/)).not.toBeInTheDocument()
   })
 
   it('links a relation Arc has a row for, to that row', async () => {
@@ -101,7 +336,122 @@ describe('Show', () => {
     expect(screen.queryByRole('link', { name: title })).not.toBeInTheDocument()
   })
 
-  it('renders a show with no airing status and no romaji title', async () => {
+  it('numbers the franchise, with this show in its place and side stories outside it', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const shelf = (await screen.findByRole('heading', { name: 'The franchise, in order' })).closest(
+      'section',
+    )
+    if (shelf === null) throw new Error('the franchise shelf has no section')
+
+    // No prequel in the fixture: this show is first, the sequel follows it,
+    // and the side story carries a dash rather than a number it has not earned.
+    const orders = within(shelf)
+      .getAllByText(/^(\d+|—)$/)
+      .map((node) => node.textContent)
+    expect(orders).toEqual(['1', '2', '—'])
+    expect(within(shelf).getByText('TV · 28 episodes · 2023 · This show')).toBeInTheDocument()
+    // The side story is cached, so its card carries the counts; the sequel is
+    // not, so the relation itself is the most useful thing left to say.
+    expect(within(shelf).getByText('SPECIAL · 4 episodes · 2024')).toBeInTheDocument()
+    expect(within(shelf).getByText('TV · Sequel')).toBeInTheDocument()
+  })
+
+  it('draws a cached relation’s own key visual, and a placeholder for the rest', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const shelf = (await screen.findByRole('heading', { name: 'The franchise, in order' })).closest(
+      'section',
+    )
+    if (shelf === null) throw new Error('the franchise shelf has no section')
+
+    // The large key visual wins over the small one; the uncached sequel has
+    // no image at all, so its card keeps the stripes.
+    const sources = [...shelf.querySelectorAll('img')].map((image) => image.getAttribute('src'))
+    expect(sources).toEqual([FRIEREN.cover_large_url, LINKED_RELATION.cover_large_url])
+  })
+
+  it('links a relation by the id the server sends for it', async () => {
+    // `anime_id` is what the card follows; `id` may be absent on the wire.
+    const relation = { ...LINKED_RELATION, id: null, anime_id: 4242 }
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL, relations: [relation] } },
+    })
+
+    renderShow()
+
+    expect(
+      await screen.findByRole('link', { name: LINKED_RELATION.title.preferred }),
+    ).toHaveAttribute('href', '/anime/4242')
+  })
+
+  it('says nothing about the franchise when the show has no relations', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL, relations: [] } },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    expect(
+      screen.queryByRole('heading', { name: 'The franchise, in order' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('credits the studio as an auteur, and the staff the catalogue published', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          credits: [
+            { role: 'Studio', name: 'Madhouse' },
+            { role: 'Director', name: 'Keiichirou Saitou' },
+            { role: 'Music', name: 'Evan Call' },
+          ],
+        },
+      },
+    })
+
+    renderShow()
+
+    const made = (await screen.findByRole('heading', { name: 'Made by' })).closest('section')
+    if (made === null) throw new Error('the credits have no section')
+    expect(within(made).getByText('Director')).toBeInTheDocument()
+    expect(within(made).getByText('Keiichirou Saitou')).toBeInTheDocument()
+    expect(within(made).getByText('Evan Call')).toBeInTheDocument()
+  })
+
+  it('falls back to the studio alone when the catalogue published no staff', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const made = (await screen.findByRole('heading', { name: 'Made by' })).closest('section')
+    if (made === null) throw new Error('the credits have no section')
+    expect(within(made).getByText('Studio')).toBeInTheDocument()
+    expect(within(made).getByText('Madhouse')).toBeInTheDocument()
+  })
+
+  it('hides the credits entirely when there is not even a studio', async () => {
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL, studio: null } },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    expect(screen.queryByRole('heading', { name: 'Made by' })).not.toBeInTheDocument()
+  })
+
+  it('renders a show with no romaji title', async () => {
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL_NO_STATUS } })
 
     renderShow()
@@ -109,19 +459,10 @@ describe('Show', () => {
     expect(
       await screen.findByRole('heading', { name: FRIEREN.title.preferred }),
     ).toBeInTheDocument()
-    // The status is dropped from the meta line rather than rendered as "Null".
-    expect(screen.getByText('TV · 28 episodes · Fall 2023 · Madhouse')).toBeInTheDocument()
     expect(screen.getByText('葬送のフリーレン')).toBeInTheDocument()
-  })
-
-  it('offers Play only for episodes that are ready', async () => {
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
-
-    renderShow()
-
-    const play = await screen.findAllByRole('link', { name: 'Play' })
-    expect(play).toHaveLength(1)
-    expect(play[0]).toHaveAttribute('href', '/watch/9001')
+    // The airing status is not part of the design's meta line, so a null one
+    // is not rendered as "Null" either.
+    expect(screen.getByText(META_LINE)).toBeInTheDocument()
   })
 
   it('shows how far a downloading episode has got, as a bar and as text (FR-A7)', async () => {
@@ -134,10 +475,9 @@ describe('Show', () => {
     expect(bar).toHaveAttribute('aria-valuemin', '0')
     expect(bar).toHaveAttribute('aria-valuemax', '100')
     expect(bar).toHaveAttribute('aria-valuetext', '42%')
-    expect(screen.getByText('42%')).toBeInTheDocument()
-    // Only work in flight gets a bar: searching and wanted are just badges.
+    expect(screen.getByText('Downloading 42%')).toBeInTheDocument()
+    // Only work in flight gets a bar: searching and wanted are just a word.
     expect(screen.getAllByRole('progressbar')).toHaveLength(2)
-    expect(screen.getAllByText('Searching')).toHaveLength(2)
   })
 
   it('shows how far a transcode has got, on the same bar (FR-P4)', async () => {
@@ -145,12 +485,12 @@ describe('Show', () => {
 
     renderShow()
 
-    // Named for the job it is measuring, since the badge beside it is not read
-    // out with it.
+    // Named for the job it is measuring, since the words beside it are not
+    // read out with it.
     const bar = await screen.findByRole('progressbar', { name: 'Preparing' })
     expect(bar).toHaveAttribute('aria-valuenow', '30')
     expect(bar).toHaveAttribute('aria-valuetext', '30%')
-    expect(screen.getByText('30%')).toBeInTheDocument()
+    expect(screen.getByText('Preparing 30%')).toBeInTheDocument()
   })
 
   it('says why a transcode failed, and offers no retry to a non-admin (FR-P4)', async () => {
@@ -160,7 +500,7 @@ describe('Show', () => {
 
     const hint = await screen.findByLabelText(`Failed: ${FAILURE_REASON}`)
     expect(hint).toHaveAttribute('title', FAILURE_REASON)
-    expect(screen.getAllByText('Failed')).toHaveLength(2)
+    expect(screen.getByText('Failed')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
@@ -182,15 +522,9 @@ describe('Show', () => {
   })
 
   it('reads downloaded and matching as complete', async () => {
-    const [first, ...rest] = FRIEREN_DETAIL.episodes
     mockApi({
       'GET /api/auth/me': ME,
-      [DETAIL_PATH]: {
-        body: {
-          ...FRIEREN_DETAIL,
-          episodes: [{ ...first, state: 'matching', download_progress: null }, ...rest],
-        },
-      },
+      [DETAIL_PATH]: { body: withEpisode(0, { state: 'matching', download_progress: null }) },
     })
 
     renderShow()
@@ -198,7 +532,7 @@ describe('Show', () => {
     await screen.findByRole('heading', { name: FRIEREN.title.preferred })
     const bars = screen.getAllByRole('progressbar')
     expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['100', '30', '42'])
-    expect(screen.getByText('100%')).toBeInTheDocument()
+    expect(screen.getByText('Matching 100%')).toBeInTheDocument()
   })
 
   it('says why an unavailable episode is not coming (FR-A6)', async () => {
@@ -209,74 +543,7 @@ describe('Show', () => {
     // Hoverable for a mouse, and spelled out for a screen reader, which cannot.
     const hint = await screen.findByLabelText(`Unavailable: ${UNAVAILABLE_REASON}`)
     expect(hint).toHaveAttribute('title', UNAVAILABLE_REASON)
-    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
-  })
-
-  it('names the chosen release under the episode title (FR-A3)', async () => {
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
-
-    renderShow()
-
-    expect(await screen.findByText('[SubsPlease] · 1080p · 123 seeders')).toBeInTheDocument()
-  })
-
-  it('drops the group from the release line when the parser did not find one', async () => {
-    mockApi({
-      'GET /api/auth/me': ME,
-      [DETAIL_PATH]: {
-        body: {
-          ...FRIEREN_DETAIL,
-          episodes: FRIEREN_DETAIL.episodes.map((episode) =>
-            episode.release === null
-              ? episode
-              : { ...episode, release: { ...episode.release, group: null } },
-          ),
-        },
-      },
-    })
-
-    renderShow()
-
-    expect(await screen.findByText('1080p · 123 seeders')).toBeInTheDocument()
-  })
-
-  it('shows no release line for an episode nothing has been picked for', async () => {
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
-
-    renderShow()
-
-    // Episode 1 is ready and carries no release, so the only thing under its
-    // title is what the transcode produced — the exact-text match lands on the
-    // cell itself, not on an inner span.
-    const title = await screen.findByText('The Journey’s End')
-    expect(title.tagName).toBe('TD')
-    expect(screen.getAllByText('[SubsPlease] · 1080p · 123 seeders')).toHaveLength(1)
-  })
-
-  it('says what a ready episode actually is, under its title (FR-P4)', async () => {
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
-
-    renderShow()
-
-    expect(await screen.findByText('1080p · subs en · audio ja')).toBeInTheDocument()
-    // Only the ready episode has a rendition; nothing else grew a second line.
-    expect(screen.getAllByText(/subs en/)).toHaveLength(1)
-  })
-
-  it('appends the rendition to the release line when the episode has both', async () => {
-    const [first, ...rest] = FRIEREN_DETAIL.episodes
-    mockApi({
-      'GET /api/auth/me': ME,
-      [DETAIL_PATH]: {
-        body: { ...FRIEREN_DETAIL, episodes: [{ ...first, release: CHOSEN_RELEASE }, ...rest] },
-      },
-    })
-
-    renderShow()
-
-    expect(
-      await screen.findByText('[SubsPlease] · 1080p · 123 seeders · 1080p · subs en · audio ja'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
   })
 
   it('shows score and progress only once the show is on the list', async () => {
@@ -303,6 +570,23 @@ describe('Show', () => {
       expect(requestsMade(fetchMock)).toContain(`PUT ${LIST_PATH}`)
     })
     expect(jsonBodyOf(callTo(fetchMock, LIST_PATH))).toEqual({ status: 'watching' })
+  })
+
+  it('PUTs the chosen score', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: FRIEREN_DETAIL_ON_LIST },
+      [`PUT ${LIST_PATH}`]: { body: listEntry({ progress: 4, score: 7 }) },
+    })
+
+    renderShow()
+    await screen.findByText('Watched 4 / 28')
+    await userEvent.setup().selectOptions(screen.getByLabelText('Score'), '7')
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(`PUT ${LIST_PATH}`)
+    })
+    expect(jsonBodyOf(callTo(fetchMock, LIST_PATH))).toEqual({ score: 7 })
   })
 
   it('DELETEs the entry when the show is taken off the list', async () => {
@@ -425,7 +709,7 @@ describe('Show', () => {
       })
     })
 
-    it('shows the marker for a watched episode and takes it off again', async () => {
+    it('shows the state for a watched episode and takes the mark off again', async () => {
       const fetchMock = mockApi({
         'GET /api/auth/me': ME,
         [DETAIL_PATH]: { body: FRIEREN_DETAIL },
@@ -436,7 +720,7 @@ describe('Show', () => {
 
       renderShow()
 
-      expect(await screen.findByLabelText('Watched')).toBeInTheDocument()
+      expect(await screen.findByText('Watched')).toBeInTheDocument()
       await userEvent.click(screen.getByRole('button', { name: 'Unmark' }))
 
       await waitFor(() => {

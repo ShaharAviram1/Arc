@@ -482,13 +482,26 @@ def build_plan(
 
 @dataclass(frozen=True, slots=True)
 class EncodeOptions:
-    """The knobs ``arc/config.py`` holds, in the shape the args builder wants."""
+    """The knobs ``arc/config.py`` holds, in the shape the args builder wants.
+
+    The defaults are the defaults in :class:`~arc.config.Settings`, so a test
+    that builds a bare ``EncodeOptions()`` encodes what production encodes.
+    """
 
     video_encoder: str = "libx264"
-    preset: str = "veryfast"
-    crf: int = 20
+    preset: str = "fast"
+    crf: int = 19
+    #: x264's content tuning, or ``None``/``""`` for none at all. ``-tune``
+    #: is only passed when it is set: an empty string on the command line is
+    #: not "no tuning", it is an unknown tune and ffmpeg exits on it.
+    tune: str | None = "animation"
     segment_seconds: int = 6
     audio_bitrate: str = "160k"
+    #: Optional VBV ceiling in kbit/s. ``bufsize`` defaults to twice the
+    #: maxrate when only the maxrate is set; neither is passed when the
+    #: maxrate is not, because a bufsize alone means nothing to x264.
+    maxrate_kbps: int | None = None
+    bufsize_kbps: int | None = None
     #: Set once the subtitle track has actually been extracted. ``None`` means
     #: "no burn-in": either the source had no text track, or the extraction
     #: failed and the job chose a subtitle-less encode over no episode at all.
@@ -523,6 +536,12 @@ def encode_args(plan: TranscodePlan, options: EncodeOptions | None = None) -> li
     rather than left to ``-g``: the HLS muxer can only cut where there is an
     IDR frame, and without this a 6-second target produces segments of 4 and
     11 seconds, which hls.js stalls on when seeking.
+
+    Nothing here scales the picture, and that is on purpose: Arc serves one
+    rendition at the source's own resolution, so the only filter in the graph
+    is the subtitle burn-in and swscale is never asked to resample. It is also
+    why there is no ``-sws_flags``: the flag would describe a resize that does
+    not happen (architecture.md §5.3a).
     """
     options = options or EncodeOptions()
     segment = max(int(options.segment_seconds), 1)
@@ -548,6 +567,13 @@ def encode_args(plan: TranscodePlan, options: EncodeOptions | None = None) -> li
         options.preset,
         "-crf",
         str(options.crf),
+    ]
+    if options.tune:
+        args += ["-tune", options.tune]
+    if options.maxrate_kbps:
+        bufsize = options.bufsize_kbps or options.maxrate_kbps * 2
+        args += ["-maxrate", f"{options.maxrate_kbps}k", "-bufsize", f"{bufsize}k"]
+    args += [
         "-pix_fmt",
         "yuv420p",
         "-profile:v",

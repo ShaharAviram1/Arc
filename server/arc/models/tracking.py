@@ -16,12 +16,18 @@ from arc.db import Base
 from arc.models._columns import TZDateTime, updated_at
 from arc.models.enums import ListStatus, UpdatedBy, enum_column
 
-#: "Continue watching" (FR-W1) and the home page's resume rail read one user's
-#: *unfinished* rows, newest first — never the finished ones, which is most of
-#: the table for anybody who has used Arc for a season. Named as a constant for
-#: the same reason :data:`arc.models.job.TRANSCODE_EPISODE_INDEX` is: the
-#: migration that creates it and the test that proves it survived both spell
-#: it, and three spellings of one index is how an index quietly disappears.
+#: One user's rows, newest first. Named as a constant for the same reason
+#: :data:`arc.models.job.TRANSCODE_EPISODE_INDEX` is: the migration that
+#: creates it and the test that proves it survived both spell it, and three
+#: spellings of one index is how an index quietly disappears.
+#:
+#: Since 2026-09-11 it no longer covers "continue watching": that query dropped
+#: its ``completed`` filter so a rewatch left half-way appears (FR-W1), and a
+#: partial index cannot serve a query that does not carry its predicate. The
+#: full ``ix_watch_progress_user_id_updated_at`` below answers it instead —
+#: same columns, same order, without the predicate. This one is kept rather
+#: than dropped because dropping an index is a schema change, and it still fits
+#: any question that does ask only for unfinished rows.
 IN_PROGRESS_INDEX = "ix_watch_progress_in_progress"
 
 #: ``DESC`` because the query orders that way, and a descending scan of an
@@ -79,9 +85,10 @@ class WatchProgress(Base):
     __table_args__ = (
         # "Continue watching", most recent first, for one user (FR-W1).
         Index("ix_watch_progress_user_id_updated_at", "user_id", "updated_at"),
-        # The same question, asked the way the query actually asks it: one
-        # user's *unfinished* rows, newest first (:func:`arc.services.playback.
-        # progress.continue_watching`).
+        # The same columns restricted to unfinished rows. No longer what
+        # :func:`arc.services.playback.progress.continue_watching` reads — see
+        # :data:`IN_PROGRESS_INDEX` — and kept because removing it is a schema
+        # change rather than because anything now depends on it.
         Index(
             IN_PROGRESS_INDEX,
             "user_id",
