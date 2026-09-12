@@ -17,6 +17,8 @@
         "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-qQTzQnEJJ3oB.jpg",
         "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx154587-qQTzQnEJJ3oB.jpg"
       },
+      "popularity": 479337,
+      "averageScore": 91,
       "bannerImage": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/154587-ivXNJ23SM1xB.jpg",
       "description": "The adventure is over but life goes on for an elf mage just beginning to learn what living is all about. Elf mage Frieren and her courageous fellow adventurers have defeated the Demon King and brought peace to the land. But Frieren will long outlive the rest of her former party. How will she come to understand what life means to the people around her? Decades after their victory, the funeral of one her friends confronts Frieren with her own near immortality. Frieren sets out to fulfill the last wishes of her comrades and finds herself beginning a new adventure…\n<br><br>\n(Source: Crunchyroll)",
       "genres": [
@@ -162,6 +164,220 @@
           }
         ]
       },
+      "staff": {
+        "edges": [
+          {
+            "role": "Original Story",
+            "node": {
+              "name": {
+                "full": "Kanehito Yamada"
+              }
+            }
+          },
+          {
+            "role": "Original Character Design",
+            "node": {
+              "name": {
+                "full": "Tsukasa Abe"
+              }
+            }
+          },
+          {
+            "role": "Director",
+            "node": {
+              "name": {
+                "full": "Keiichirou Saitou"
+              }
+            }
+          },
+          {
+            "role": "Series Composition",
+            "node": {
+              "name": {
+                "full": "Tomohiro Suzuki"
+              }
+            }
+          },
+          {
+            "role": "Action Director",
+            "node": {
+              "name": {
+                "full": "Tooru Iwazawa"
+              }
+            }
+          },
+          {
+            "role": "Character Design",
+            "node": {
+              "name": {
+                "full": "Reiko Nagasawa"
+              }
+            }
+          },
+          {
+            "role": "Original Work Assistance",
+            "node": {
+              "name": {
+                "full": "Hironobu Yoshinaka"
+              }
+            }
+          },
+          {
+            "role": "Original Work Assistance",
+            "node": {
+              "name": {
+                "full": "Katsumasa Ogura"
+              }
+            }
+          },
+          {
+            "role": "Original Work Assistance",
+            "node": {
+              "name": {
+                "full": "Kazunori Ooshima"
+              }
+            }
+          },
+          {
+            "role": "Title Logo Design",
+            "node": {
+              "name": {
+                "full": "Masato Ishizawa"
+              }
+            }
+          },
+          {
+            "role": "Design Works",
+            "node": {
+              "name": {
+                "full": "Akiko Takase"
+              }
+            }
+          },
+          {
+            "role": "Design Works",
+            "node": {
+              "name": {
+                "full": "Ran Kamezawa"
+              }
+            }
+          }
+        ]
+      },
+      "streamingEpisodes": [
+        {
+          "title": "Episode 1 - The Journey's End",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/0a540e01e5d00a998a241d1ea23181ad1695991424_full.jpg"
+        },
+        {
+          "title": "Episode 2 - It Didn't Have to Be Magic...",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/747ed837208f39c176f3bf2b21e619cf1695997330_full.jpg"
+        },
+        {
+          "title": "Episode 3 - Killing Magic",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/f5297f95ee0122d9fa2338bc02e2f0841695997426_full.jpg"
+        },
+        {
+          "title": "Episode 4 - The Land Where Souls Rest",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/be41aa39b17e6af8505008be17704fc21695997457_full.jpg"
+        },
+        {
+          "title": "Episode 5 - Phantoms of the Dead",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/5511652dd902e2c68713a059d79524681696586792_full.jpg"
+        },
+        {
+          "title": "Episode 6 - The Hero of the Village",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/8f58dbe3742e24df5cfcb34e966343cb1697192129_full.jpg"
+        },
+        {
+          "title": "Episode 7 - Like a Fairy Tale",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/7415f048b9950f447fe53daf052b83511697807940_full.jpg"
+        },
+        {
+          "title": "Episode 8 - Frieren the Slayer",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/b4c1b2828197930c28e7222c8674f7db1698398711_full.jpg"
+        },
+        {
+          "title": "Episode 9 - Aura the Guillotine",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/011eed937d57541a48b41654aa7196f41699023505_full.jpg"
+        },
+        {
+          "title": "Episode 10 - A Powerful Mage",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/71a64490900288c051509d5ead8078c81699629921_full.jpg"
+        },
+        {
+          "title": "Episode 11 - Winter in the Northern Lands",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/1d362c34b136f3d7dae0f8e2483d292c1700200761_full.jpg"
+        },
+        {
+          "title": "Episode 12 - A Real Hero",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/a4fb43dd94ffef24c89c737cb582d9d71700837484_full.jpg"
+        },
+        {
+          "title": "Episode 13 - Aversion to One's Own Kind",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/daec8c87d3d141cb4db3862d6dbce8e61701407594_full.jpg"
+        },
+        {
+          "title": "Episode 14 - Privilege of the Young",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/571e40382b362b8e079a1c1105f9aa121702044026_full.jpg"
+        },
+        {
+          "title": "Episode 15 - Smells Like Trouble",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/0632aa850feca384b1586dedbafc75771702649756_full.jpg"
+        },
+        {
+          "title": "Episode 16 - Long-Lived Friends",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/089ef00e4cd07c88f94f19cc748bcb991703259561_full.jpg"
+        },
+        {
+          "title": "Episode 17 - Take Care",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/e18f2ee07942246cd068fad9d154adaa1704458527_full.jpg"
+        },
+        {
+          "title": "Episode 18 - First-Class Mage Exam",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/8b67d3369e6d5cff70354925f129e47a1705032276_full.jpg"
+        },
+        {
+          "title": "Episode 19 - Well-Laid Plans",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/edc57dc72424d622047aa9ff632722d01705668067_full.jpg"
+        },
+        {
+          "title": "Episode 20 - Necessary Killing",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/5084aa3fa2b746c4d94ce982a02f53831706275610_full.jpg"
+        },
+        {
+          "title": "Episode 21 - The World of Magic",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/1bff419f590742822f733d968b2bfece1706866862_full.jpg"
+        },
+        {
+          "title": "Episode 22 - Future Enemies",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/9c5901edffefae3af8732ebad4a5a51b1707491556_full.jpg"
+        },
+        {
+          "title": "Episode 23 - Conquering the Labyrinth",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/f3560639fe0f53c64bf6e25cd84fb1e91708082146_full.jpg"
+        },
+        {
+          "title": "Episode 24 - Perfect Replicas",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/ddefe54ecd4b64728dd2aebaae6284601708700271_full.jpg"
+        },
+        {
+          "title": "Episode 25 - A Fatal Vulnerability",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/56674020dfd38ca7445e9d1c340e81ea1709305367_full.jpg"
+        },
+        {
+          "title": "Episode 26 - The Height of Magic",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire4-tmb/8190c1e5388f2f83a19f9fd550d355801709908851_full.jpg"
+        },
+        {
+          "title": "Episode 27 - An Era of Humans",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire2-tmb/87a75d6cd7468397e75311ed1dee58d31710511818_full.jpg"
+        },
+        {
+          "title": "Episode 28 - It Would Be Embarrassing When We Met Again",
+          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire1-tmb/fccf5fe3454a077e0d68299b7453e5121711114121_full.jpg"
+        }
+      ],
       "nextAiringEpisode": null,
       "relations": {
         "edges": [
@@ -357,141 +573,7 @@
       },
       "upcoming": {
         "nodes": []
-      },
-      "staff": {
-        "edges": [
-          {
-            "role": "Original Creator",
-            "node": {
-              "name": {
-                "full": "Kanehito Yamada"
-              }
-            }
-          },
-          {
-            "role": "Director",
-            "node": {
-              "name": {
-                "full": "Keiichirou Saitou"
-              }
-            }
-          },
-          {
-            "role": "Series Composition",
-            "node": {
-              "name": {
-                "full": "Tomohiro Suzuki"
-              }
-            }
-          },
-          {
-            "role": "Character Design",
-            "node": {
-              "name": {
-                "full": "Reiko Nagasawa"
-              }
-            }
-          },
-          {
-            "role": "Music",
-            "node": {
-              "name": {
-                "full": "Evan Call"
-              }
-            }
-          },
-          {
-            "role": "Original Creator",
-            "node": {
-              "name": {
-                "full": "Tsukasa Abe"
-              }
-            }
-          },
-          {
-            "role": "Chief Animation Director",
-            "node": {
-              "name": {
-                "full": "Chikashi Kubota"
-              }
-            }
-          },
-          {
-            "role": "Art Director",
-            "node": {
-              "name": {
-                "full": "Atsushi Morikawa"
-              }
-            }
-          },
-          {
-            "role": "Sound Director",
-            "node": {
-              "name": {
-                "full": "Satoki Iida"
-              }
-            }
-          },
-          {
-            "role": "Director of Photography",
-            "node": {
-              "name": {
-                "full": "Yohei Igarashi"
-              }
-            }
-          },
-          {
-            "role": "Theme Song Performance",
-            "node": {
-              "name": {
-                "full": "YOASOBI"
-              }
-            }
-          },
-          {
-            "role": "Episode Director",
-            "node": {
-              "name": {
-                "full": "Naoyuki Onda"
-              }
-            }
-          }
-        ]
-      },
-      "streamingEpisodes": [
-        {
-          "title": "Episode 1 - The Journey's End",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e01.jpg"
-        },
-        {
-          "title": "Episode 2 - It Didn't Have to Be Magic",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e02.jpg"
-        },
-        {
-          "title": "Episode 3 - Killing Magic",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e03.jpg"
-        },
-        {
-          "title": "Episode 4 - The Land Where Souls Rest",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e04.jpg"
-        },
-        {
-          "title": "Episode 5 - Like a Fairy Tale",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e05.jpg"
-        },
-        {
-          "title": "Episode 6 - The Hero of the Village",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e06.jpg"
-        },
-        {
-          "title": "Episode 7 - Sole Heir",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e07.jpg"
-        },
-        {
-          "title": "Episode 8 - Frieren the Slayer",
-          "thumbnail": "https://img1.ak.crunchyroll.com/i/spire3-tmb/frieren-e08.jpg"
-        }
-      ]
+      }
     }
   }
 }

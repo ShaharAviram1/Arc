@@ -14,6 +14,7 @@ import type {
   InviteRow,
   JobRow,
   JobsSummary,
+  OfflineCatalogue,
   QbitStatus,
   RetentionDisk,
   RetentionPreview,
@@ -204,6 +205,53 @@ export const RETENTION_PREVIEW: RetentionPreview = {
       torrents: ['abc123'],
     },
   ],
+}
+
+/* --- Offline catalogue (M15.5) ---------------------------------------- */
+
+/**
+ * Relative to *now*, because the tab reports an age: a fixed timestamp would
+ * read "2 years ago" the year after it was written. The extra hour keeps the
+ * rounding off the boundary, so "3 days ago" cannot flip to "4 days ago"
+ * between the fixture being read and the assertion running.
+ */
+function daysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000 - 3_600_000).toISOString()
+}
+
+/** A healthy import: both sources, three days old, nothing to act on. */
+export const OFFLINE_CATALOGUE: OfflineCatalogue = {
+  sources: [
+    {
+      source: 'manami',
+      version: '2026-09-07',
+      imported_at: daysAgo(3),
+      rows: 41_537,
+      checksum: 'a'.repeat(64),
+    },
+    {
+      // Fribb ships an ETag, not a tag — the tab shows the first 12 of it.
+      source: 'fribb',
+      version: 'b3c1d9f4a77e2c05e9b1d3f6a8c0e2b4d6f8a0c2',
+      imported_at: daysAgo(3),
+      rows: 32_281,
+      checksum: 'b'.repeat(64),
+    },
+  ],
+  stale: false,
+  anime_rows: 41_537,
+  id_rows: 32_281,
+}
+
+/** The same import, two missed Mondays later. */
+export const OFFLINE_STALE: OfflineCatalogue = { ...OFFLINE_CATALOGUE, stale: true }
+
+/** A deployment where the job has not run yet. */
+export const OFFLINE_NEVER: OfflineCatalogue = {
+  sources: [],
+  stale: true,
+  anime_rows: 0,
+  id_rows: 0,
 }
 
 /* --- Acquisition ------------------------------------------------------ */

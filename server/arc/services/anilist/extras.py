@@ -8,12 +8,14 @@ module of their own instead of inside :func:`arc.services.anilist.client.parse_m
 **Staff roles.** ``role`` is a free-text credit written by whoever edited the
 entry: "Director", "Sound Director", "Chief Animation Director", "Music",
 "Theme Song Performance", "Director (ep 4)". Arc wants exactly six credits
-(:data:`arc.services.catalog.credits.CREDIT_ORDER`) and a substring match on
-"director" would put the sound director in the director's row — so a keyword
-match is paired with a list of qualifiers that turn the same keyword into a
-different job. Anything that matches nothing is dropped: an unmapped role is
-not a credit Arc has a place for, and showing it would be a seventh row the
-design has no slot for.
+(:data:`arc.services.catalog.credits.CREDIT_ORDER`), and AniList's vocabulary
+builds new jobs by *adding words to an existing one*: "Action Director" and
+"Original Work Assistance" are not the director and not the author. So a role
+is matched **whole** against a table of the spellings Arc knows, never as a
+substring — a near-miss is a different job, not a fuzzy version of the same
+one. Anything that matches nothing is dropped: an unmapped role is not a
+credit Arc has a place for, and showing it would be a seventh row the design
+has no slot for.
 
 **Streaming episodes.** ``streamingEpisodes`` is a list of links to Crunchyroll
 and friends, and the *title* of each is the only statement of which episode it
@@ -36,46 +38,34 @@ from typing import Any
 
 from arc.services.catalog.source import EpisodeArt
 
-#: ``role keyword → the credit it means``, tried in order. Longest and most
-#: specific first, so that "original creator" is not read as "creator" of
-#: something else and "character design" wins before anything looks for a
-#: shorter word inside it.
-ROLE_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("series composition", "Series Composition"),
-    ("character design", "Character Design"),
-    ("original creator", "Original Creator"),
-    ("original story", "Original Creator"),
-    ("director", "Director"),
-    ("music", "Music"),
-)
+#: ``the whole role, normalised → the credit it means``. Every entry is a
+#: spelling AniList actually publishes; a role that is not one of these keys is
+#: not one of Arc's six, however many of the same words it contains. "Chief
+#: Director" is here because a chief director *is* the director, while "Action
+#: Director", "Sound Director", "Animation Director", "Original Character
+#: Design" and "Original Work Assistance" are deliberately absent — they are
+#: other people's jobs, and the old substring match promoting them into the
+#: director's and the author's rows is exactly the bug this table fixes.
+ROLE_CREDITS: dict[str, str] = {
+    "director": "Director",
+    "chief director": "Director",
+    "general director": "Director",
+    "series composition": "Series Composition",
+    "character design": "Character Design",
+    "music": "Music",
+    "original creator": "Original Creator",
+    "original story": "Original Creator",
+    "original work": "Original Creator",
+    "original manga": "Original Creator",
+    "original novel": "Original Creator",
+    "original light novel": "Original Creator",
+}
 
-#: Words that make one of the keywords above a *different* job. "Animation
-#: Director" and "Sound Director" are not the director; "Theme Song
-#: Performance" and "Music Producer" are not the composer; "Original Character
-#: Design" is the manga artist's design, not the anime's character designer.
-#: Matched against the whole normalised role, so a qualified credit is dropped
-#: rather than promoted into a row it does not belong in. "Chief" is
-#: deliberately absent: a chief director *is* the director, and every other
-#: "chief …" credit is already caught by one of the words below.
-ROLE_QUALIFIERS: tuple[str, ...] = (
-    "animation",
-    "art",
-    "assistant",
-    "cg",
-    "episode",
-    "insert song",
-    "mecha",
-    "opening",
-    "original character",
-    "photography",
-    "producer",
-    "prop",
-    "sound",
-    "sub",
-    "theme song",
-    "unit",
-    "3d",
-)
+#: The separators AniList editors use when one person holds two of these jobs
+#: ("Director, Series Composition"). Each half is matched whole in its own
+#: right, so splitting widens what is recognised without letting a longer job
+#: title match a shorter one inside it.
+_SEPARATOR = re.compile(r"\s*(?:,|/|&|\band\b)\s*")
 
 #: The parenthetical AniList editors append to a per-episode credit
 #: ("Director (eps 1, 14)"). Stripped before matching so that the episode-range
@@ -95,17 +85,19 @@ EPISODE_TITLE = re.compile(
 def credit_role(role: str | None) -> str | None:
     """The credit ``role`` means, or ``None`` if it is not one of the six.
 
-    Case-insensitive, and blind to the ``(eps 3, 7)`` note AniList editors add.
+    Case-insensitive, blind to the ``(eps 3, 7)`` note AniList editors add, and
+    matched against :data:`ROLE_CREDITS` *whole*: "Action Director" is a
+    fight choreographer and "Original Character Design" is the manga artist, so
+    neither is allowed to answer for the role it merely contains.
     """
     if not role:
         return None
-    normalised = _PARENTHETICAL.sub("", role).strip().casefold()
+    normalised = " ".join(_PARENTHETICAL.sub("", role).casefold().split())
     if not normalised:
         return None
-    if any(qualifier in normalised for qualifier in ROLE_QUALIFIERS):
-        return None
-    for keyword, credit in ROLE_KEYWORDS:
-        if keyword in normalised:
+    for part in _SEPARATOR.split(normalised):
+        credit = ROLE_CREDITS.get(part.strip())
+        if credit is not None:
             return credit
     return None
 
@@ -194,8 +186,7 @@ def _clean(value: Any) -> str | None:
 
 __all__ = [
     "EPISODE_TITLE",
-    "ROLE_KEYWORDS",
-    "ROLE_QUALIFIERS",
+    "ROLE_CREDITS",
     "credit_role",
     "parse_streaming_episodes",
     "staff_credits",

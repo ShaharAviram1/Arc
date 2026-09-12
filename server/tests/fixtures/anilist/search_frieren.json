@@ -22,7 +22,9 @@
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-qQTzQnEJJ3oB.jpg",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx154587-qQTzQnEJJ3oB.jpg"
-          }
+          },
+          "popularity": 479337,
+          "averageScore": 91
         },
         {
           "id": 209939,
@@ -40,7 +42,9 @@
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx209939-g2Njkml1rheG.jpg",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx209939-g2Njkml1rheG.jpg"
-          }
+          },
+          "popularity": 42786,
+          "averageScore": null
         },
         {
           "id": 182255,
@@ -58,7 +62,9 @@
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx182255-butzrqd4I0aC.jpg",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx182255-butzrqd4I0aC.jpg"
-          }
+          },
+          "popularity": 224107,
+          "averageScore": 88
         },
         {
           "id": 170068,
@@ -76,7 +82,9 @@
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx170068-ijY3tCP8KoWP.jpg",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx170068-ijY3tCP8KoWP.jpg"
-          }
+          },
+          "popularity": 10889,
+          "averageScore": 73
         },
         {
           "id": 189513,
@@ -94,7 +102,9 @@
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx189513-1R9Sryve0K53.png",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx189513-1R9Sryve0K53.png"
-          }
+          },
+          "popularity": 4516,
+          "averageScore": 71
         },
         {
           "id": 206425,
@@ -105,14 +115,16 @@
             "native": "葬送のフリーレン ～●●の魔法～ 3クール"
           },
           "format": "ONA",
-          "episodes": null,
-          "status": "RELEASING",
+          "episodes": 6,
+          "status": "FINISHED",
           "season": "WINTER",
           "seasonYear": 2026,
           "coverImage": {
             "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/b206425-WOwXsfDbHZwb.jpg",
             "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/b206425-WOwXsfDbHZwb.jpg"
-          }
+          },
+          "popularity": 2231,
+          "averageScore": 69
         }
       ]
     }

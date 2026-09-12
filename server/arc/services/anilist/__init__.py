@@ -20,6 +20,7 @@ from arc.services.anilist.client import (
     AniListDisabled,
     AniListError,
     AniListNotFound,
+    AniListRateLimited,
     parse_media,
     strip_html,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "AniListDisabled",
     "AniListError",
     "AniListNotFound",
+    "AniListRateLimited",
     "AniListSource",
     "parse_media",
     "strip_html",

@@ -271,6 +271,13 @@ CLEANUP_TABLES = (
     "renditions",
     "episodes",
     "anime",
+    # The offline catalogue (M15.5). No foreign keys either way — it is a copy
+    # of a public file, not part of Arc's aggregate — but a test that imports a
+    # fixture slice with a committing session would otherwise leave 29 rows and
+    # an ``offline_imports`` row behind for the next one to find.
+    "offline_anime",
+    "offline_ids",
+    "offline_imports",
     "sessions",
     "invites",
     "users",

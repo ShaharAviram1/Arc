@@ -213,6 +213,25 @@ def warnings(settings: Settings) -> list[ConfigWarning]:
             )
         )
 
+    # TMDB (M15.5). A warning, never an error, for the same reason the
+    # recommendation chain is one: a deployment with no key is a complete Arc
+    # that renders AniList's artwork, and `/api/health`'s count must still
+    # reach zero. It is worth a line because the absence is invisible — the
+    # shows that would have gained a backdrop simply do not, and nothing on
+    # the page says why.
+    if is_placeholder("tmdb_api_key", _value(settings, "tmdb_api_key")):
+        found.append(
+            ConfigWarning(
+                key="TMDB_API_KEY",
+                message=(
+                    "unset: key art and stills will not be enriched (a free key from "
+                    "themoviedb.org/settings/api fills the backdrops, posters, episode "
+                    "stills and credits AniList has not)"
+                ),
+                level="warning",
+            )
+        )
+
     # Match suggestions (M13) ride the same provider chain as the
     # recommendations (§5.2, §5.6), so the question is not "is there an
     # Anthropic key" — it is "can anything in the chain be called". An ERROR

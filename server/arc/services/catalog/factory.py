@@ -27,10 +27,21 @@ from arc.services.catalog.service import CatalogService
 from arc.services.mal.catalog import MalSource
 
 
-def create_catalog(settings: Settings, *, breaker: Breaker | None = None) -> CatalogService:
-    """AniList primary, MAL fallback, with a breaker in front of both."""
+def create_catalog(
+    settings: Settings,
+    *,
+    breaker: Breaker | None = None,
+    wait_on_rate_limit: bool = True,
+) -> CatalogService:
+    """AniList primary, MAL fallback, with a breaker in front of both.
+
+    ``wait_on_rate_limit`` is the other difference between the two lifetimes
+    above: a job may sleep off AniList's 429 and an API request may not (§6).
+    The default is the job's, so that only the one caller with a user waiting
+    on it has to say so.
+    """
     return CatalogService(
-        AniListSource.from_settings(settings),
+        AniListSource.from_settings(settings, wait_on_rate_limit=wait_on_rate_limit),
         MalSource.from_settings(settings),
         breaker if breaker is not None else Breaker(settings.catalog_breaker_seconds),
     )

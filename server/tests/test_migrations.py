@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
-from arc.models import IN_PROGRESS_INDEX, TRANSCODE_EPISODE_INDEX, Base
+from arc.models import (
+    IN_PROGRESS_INDEX,
+    OFFLINE_SEARCH_INDEX,
+    TRANSCODE_EPISODE_INDEX,
+    Base,
+)
 from arc.models.settings import DEFAULT_SETTINGS
 from tests.conftest import alembic_config
 
@@ -177,3 +182,22 @@ def test_the_in_progress_index_is_created_by_a_migration(
     assert definition is not None, f"{IN_PROGRESS_INDEX} is not on the watch_progress table"
     assert "user_id" in definition and "updated_at DESC" in definition
     assert "WHERE" in definition and "completed = false" in definition
+
+
+def test_the_offline_search_index_is_a_trigram_index(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The third index that needs more than a column declaration.
+
+    M15.5's search runs ``search_text ILIKE '%needle%'`` over 41k rows, which a
+    btree cannot answer at all. It needs a GIN index with ``gin_trgm_ops``, and
+    that operator class needs the ``pg_trgm`` extension — installed by the same
+    migration. If the extension were ever missing, the index would silently
+    become something else and the search would silently become a sequential
+    scan, which is exactly the kind of regression nothing else would notice.
+    """
+    definition = _index_definition(test_database_url, "offline_anime", OFFLINE_SEARCH_INDEX)
+
+    assert definition is not None, f"{OFFLINE_SEARCH_INDEX} is not on the offline_anime table"
+    assert "USING gin" in definition
+    assert "gin_trgm_ops" in definition

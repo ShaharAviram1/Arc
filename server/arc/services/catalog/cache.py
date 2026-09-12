@@ -52,9 +52,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode
 from arc.services.catalog.airing import next_airing_estimated
+from arc.services.catalog.offline.ids import fill_missing_ids
 from arc.services.catalog.service import CatalogService
 from arc.services.catalog.source import (
-    SOURCE_NAMES,
+    SOURCE_STRENGTH,
     AiringEntry,
     CatalogMedia,
     EpisodeArt,
@@ -117,22 +118,23 @@ DETAIL_COLUMNS = (
 def _rank(source: str | None) -> int:
     """How much a source's word is worth: lower is stronger.
 
-    :data:`SOURCE_NAMES` is the order :class:`CatalogService` tries its sources
-    in, which is the same order as "who is believed": AniList is asked first
-    because it is the better answer, and MAL is the fallback. Reading the rank
-    off that tuple rather than off two ``== "mal"`` comparisons means a third
-    source would slot in without a branch here.
+    :data:`SOURCE_STRENGTH` is the order "who is believed": AniList first
+    because it is the better answer, MAL as the live fallback, and the offline
+    import (M15.5) last — it knows one title, a cover and an episode count, and
+    nothing at all about a synopsis. Reading the rank off that tuple rather
+    than off two ``== "mal"`` comparisons means a fourth source would slot in
+    without a branch here.
 
     A source name nothing recognises — including ``None``, which is a row no
     source has filled in yet — ranks below every real one, so anything may
     write over it.
     """
     if source is None:
-        return len(SOURCE_NAMES)
+        return len(SOURCE_STRENGTH)
     try:
-        return SOURCE_NAMES.index(source)
+        return SOURCE_STRENGTH.index(source)
     except ValueError:
-        return len(SOURCE_NAMES)
+        return len(SOURCE_STRENGTH)
 
 
 def _outranked(incoming: SourceName, wrote_it: str | None) -> bool:
@@ -512,6 +514,33 @@ async def _insert_or_retry(
     return resolved
 
 
+async def _with_mapped_ids(
+    session: AsyncSession, media: Sequence[CatalogMedia]
+) -> list[CatalogMedia]:
+    """``media`` with each payload's missing external id filled from the map.
+
+    Rule 1 says one show is one row, matched by ``anilist_id`` then ``mal_id``
+    — which works as long as *something* tells Arc the two ids belong together.
+    AniList's payloads say so themselves (they carry ``idMal``); MAL's never
+    do, so before M15.5 a show first seen through MAL got a second row the
+    moment AniList came back and answered with an id nothing had attached yet.
+    ``catalog_reconcile`` repaired that afterwards, over the network, from the
+    source that was down.
+
+    The offline id map answers it up front and for free
+    (:func:`~arc.services.catalog.offline.ids.fill_missing_ids`): a MAL-only
+    payload arrives here already carrying the AniList id, so the lookup below
+    finds the row AniList created and updates it instead of inserting beside
+    it. Nothing is overwritten — only a null id is filled — and an id the map
+    is not sure about is left null, which is the state Arc already handles.
+    """
+    pairs = await fill_missing_ids(session, [_key(item) for item in media])
+    return [
+        item if (anilist, mal) == _key(item) else replace(item, anilist_id=anilist, mal_id=mal)
+        for item, (anilist, mal) in zip(media, pairs, strict=True)
+    ]
+
+
 async def _upsert(session: AsyncSession, media: list[CatalogMedia]) -> list[Anime]:
     """Upsert every payload and return the rows in the order they were given.
 
@@ -521,7 +550,7 @@ async def _upsert(session: AsyncSession, media: list[CatalogMedia]) -> list[Anim
     """
     usable: list[CatalogMedia] = []
     seen: set[tuple[int | None, int | None]] = set()
-    for item in media:
+    for item in await _with_mapped_ids(session, media):
         if item.anilist_id is None and item.mal_id is None:
             continue
         if _key(item) in seen:

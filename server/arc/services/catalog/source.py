@@ -19,8 +19,10 @@ Two rules shape the dataclasses:
 
 Errors are the other half of the contract. :class:`SourceUnavailable` means
 "ask someone else" — a connection failure, a timeout, a 5xx, AniList's
-"temporarily disabled" 403, a missing client id. :class:`SourceNotFound` means
-"this is the answer": the id does not exist.
+"temporarily disabled" 403, a missing client id. :class:`SourceRateLimited`
+narrows that to "and it will be able to answer again in a few seconds", which
+is the same fallback without the breaker. :class:`SourceNotFound` means "this
+is the answer": the id does not exist.
 """
 
 from __future__ import annotations
@@ -29,11 +31,27 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, Literal, Protocol, runtime_checkable
 
-#: The two sources, as stored in ``anime.summary_source`` / ``detail_source``.
-SourceName = Literal["anilist", "mal"]
+#: The sources, as stored in ``anime.summary_source`` / ``detail_source``.
+#: ``"offline"`` is not a *service*: it is the weekly import of the manami
+#: database (M15.5, §5.0a), which answers a search and seeds a season but is
+#: never asked for a detail record.
+SourceName = Literal["anilist", "mal", "offline"]
 
-#: Every source name, in the order :class:`CatalogService` tries them.
+#: The *live* sources, in the order :class:`CatalogService` tries them. The
+#: offline catalogue is deliberately absent: it has no client, no breaker and
+#: nothing for :meth:`CatalogService.status` to report, and the callers that
+#: read it consult it before the service rather than through it.
 SOURCE_NAMES: tuple[SourceName, ...] = ("anilist", "mal")
+
+#: Every source, strongest first — the order cache rule 3 reads
+#: (:func:`arc.services.catalog.cache._rank`). The same order as
+#: :data:`SOURCE_NAMES` with the offline catalogue last: its record is one
+#: title, a handful of summary columns and no synopsis at all, so it may fill
+#: a null and must never overwrite what a live source published.
+SOURCE_STRENGTH: tuple[SourceName, ...] = (*SOURCE_NAMES, "offline")
+
+#: The offline catalogue's name, as written to ``anime.summary_source``.
+OFFLINE: SourceName = "offline"
 
 
 class CatalogError(RuntimeError):
@@ -53,6 +71,22 @@ class SourceUnavailable(CatalogError):
         super().__init__(f"{source} is unavailable: {reason}")
         self.source = source
         self.reason = reason
+
+
+class SourceRateLimited(SourceUnavailable):
+    """This source is up, but it is out of budget for the next few seconds.
+
+    A :class:`SourceUnavailable` because every caller should do the same thing
+    with it — ask the next source — and a subclass because
+    :class:`~arc.services.catalog.service.CatalogService` should *not* do the
+    other thing it does with one, which is open the source's breaker for five
+    minutes. A burst limit is not an outage: it clears in seconds, and treating
+    a noisy keystroke as an outage would take AniList away from the whole
+    process for the rest of the window and then some.
+
+    Only interactive callers ever see it; a job waits its 429 out instead (see
+    :mod:`arc.services.anilist.client`, "Who may wait").
+    """
 
 
 class SourceNotFound(CatalogError):
@@ -235,7 +269,9 @@ class CatalogSource(Protocol):
 
 
 __all__ = [
+    "OFFLINE",
     "SOURCE_NAMES",
+    "SOURCE_STRENGTH",
     "AiringEntry",
     "CatalogError",
     "CatalogMedia",
@@ -246,5 +282,6 @@ __all__ = [
     "SearchPage",
     "SourceName",
     "SourceNotFound",
+    "SourceRateLimited",
     "SourceUnavailable",
 ]

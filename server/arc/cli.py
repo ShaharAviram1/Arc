@@ -1,17 +1,21 @@
 """Operator commands: ``python -m arc.cli <command>`` (roadmap M11).
 
-Three things an operator has to do on a host with no browser session yet, and
+Four things an operator has to do on a host with no browser session yet, and
 one thing they always want to know:
 
-* ``invite``          — issue an invite link and print it.
-* ``warm-catalogue``  — queue the work that gives a fresh deployment a
-                        schedule and covers, instead of waiting for 03:30 UTC.
-* ``demo-list``       — put a show on somebody's list, by title.
-* ``status``          — a one-screen summary of the deployment.
+* ``invite``            — issue an invite link and print it.
+* ``warm-catalogue``    — queue the work that gives a fresh deployment a
+                          schedule and covers, instead of waiting for 03:30 UTC.
+* ``import-catalogue``  — import the offline catalogue **now**, in the
+                          foreground, instead of waiting for Monday (M15.5).
+* ``demo-list``         — put a show on somebody's list, by title.
+* ``status``            — a one-screen summary of the deployment.
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry, the two
-enqueueing commands deduplicate on the job type, and ``status`` writes nothing.
-Re-running the lot after a failed deploy is a supported thing to do.
+enqueueing commands deduplicate on the job type, ``import-catalogue`` replaces
+what it imported last time (and skips the work entirely when the files have not
+changed), and ``status`` writes nothing. Re-running the lot after a failed
+deploy is a supported thing to do.
 
 These are thin wrappers over the same services the API calls — nothing here
 reimplements a rule. ``demo-list`` in particular goes through
@@ -26,6 +30,7 @@ Run it from ``server/``::
     uv run python -m arc.cli demo-list --user-email prof@example.edu \\
         --add "Sousou no Frieren" --add "Vinland Saga"
     uv run python -m arc.cli warm-catalogue
+    uv run python -m arc.cli import-catalogue
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -67,6 +72,7 @@ from arc.services.catalog import SourceUnavailable, preferred_title, set_list_en
 from arc.services.catalog.cache import upsert_summaries
 from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import CATALOG_PRIORITY, REFRESH_ALL, SEASON_SWEEP
+from arc.services.catalog.offline.jobs import import_all
 from arc.services.jobs import enqueue
 from arc.services.retention.sweep import retained_bytes
 
@@ -166,6 +172,50 @@ async def cmd_warm_catalogue(
     print(f"refresh sweep   job {refresh.id} ({refresh.status.value})")
     print(f"listed shows    {followed or 0} (the refresh sweep fans out one job per followed show)")
     print("Both jobs deduplicate: an existing pending job is reported rather than doubled.")
+    return 0
+
+
+# --- import-catalogue -------------------------------------------------------
+
+
+async def cmd_import_catalogue(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Download and import the offline catalogue now, in the foreground.
+
+    The same :func:`~arc.services.catalog.offline.jobs.import_all` the Monday
+    job runs, not a second implementation — so what an operator gets here is
+    exactly what the scheduler would have produced, including the replace
+    semantics and the "nothing changed" short-circuit.
+
+    Inline rather than enqueued, unlike ``warm-catalogue``, and that is the
+    point of having it: a fresh deployment wants the offline catalogue *before*
+    somebody searches for something, and a queued job gives no way to watch it
+    or to find out that the download 404ed. About half a minute: 6 MB and
+    7.5 MB down, and 41.5k + 32k rows in (measured); a couple of seconds when
+    neither file has changed.
+
+    Exits 1 when **either** source failed, which is stricter than the job (it
+    only fails when both did). An operator who ran this on purpose wants a
+    non-zero exit for a half-import; the scheduler wants the half that worked
+    to stand.
+    """
+    results, failures = await import_all(session, settings)
+
+    for result in results:
+        state = "unchanged" if result.unchanged else "imported"
+        version = result.version or "(unknown version)"
+        print(f"{result.source:<8} {state:<10} {version:<24} {result.rows} rows")
+    for failure in failures:
+        print(f"{failure.source:<8} FAILED     {failure.error}", file=sys.stderr)
+
+    if failures:
+        print(
+            "The tables of any source that failed are untouched; "
+            "the previous import is still in force.",
+            file=sys.stderr,
+        )
+        return EXIT_FAILED
     return 0
 
 
@@ -333,6 +383,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="queue the season pre-cache and a refresh of every followed show",
     )
     warm.set_defaults(handler=cmd_warm_catalogue)
+
+    catalogue = sub.add_parser(
+        "import-catalogue",
+        help="download and import the offline catalogue now (manami + Fribb)",
+    )
+    catalogue.set_defaults(handler=cmd_import_catalogue)
 
     demo = sub.add_parser("demo-list", help="add shows to a user's list as watching")
     demo.add_argument("--user-email", required=True, help="whose list to add to")

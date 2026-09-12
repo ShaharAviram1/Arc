@@ -30,6 +30,7 @@ import {
   type AnimeCredit,
   type AnimeDetail,
   type AnimeRelation,
+  type CatalogSource,
   type EpisodeOut,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
@@ -54,6 +55,19 @@ const ESTIMATED_HINT = 'Estimated from the broadcast slot'
 
 const MAL_FALLBACK_NOTICE =
   'Catalogue data via MyAnimeList — AniList is unavailable. Air dates are estimated.'
+
+const OFFLINE_FALLBACK_NOTICE =
+  'Catalogue data from the weekly offline import — live sources are unavailable. Air dates unknown until a live source answers.'
+
+/**
+ * The caveat for a record no live catalogue has filled (FR-C6). Keyed by
+ * source so it follows the server: the row stops carrying a notice the moment
+ * AniList or MAL fills it, with nothing here to remember to clear.
+ */
+const FALLBACK_NOTICES: Partial<Record<CatalogSource, string>> = {
+  mal: MAL_FALLBACK_NOTICE,
+  offline: OFFLINE_FALLBACK_NOTICE,
+}
 
 /**
  * Why a related title is not a link: Arc has no row for it, so there is no
@@ -827,9 +841,11 @@ function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
 
       <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">{metaLine(anime)}</p>
 
-      {anime.source === 'mal' ? (
-        <p className="mt-1.5 text-[14px] text-[var(--arc-text-muted)]">{MAL_FALLBACK_NOTICE}</p>
-      ) : null}
+      {anime.source === null || FALLBACK_NOTICES[anime.source] === undefined ? null : (
+        <p className="mt-1.5 text-[14px] text-[var(--arc-text-muted)]">
+          {FALLBACK_NOTICES[anime.source]}
+        </p>
+      )}
 
       {anime.next_airing === null ? null : (
         <p className="mt-1.5 text-[14px] text-[var(--arc-text-muted)]">

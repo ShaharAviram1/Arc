@@ -89,9 +89,12 @@ def user_timezone(name: str | None) -> ZoneInfo:
 class ScheduleRow:
     """One cached show, plus the two facts placement needs about it.
 
-    ``latest_air_at`` is the air time of the last episode that has one — a
-    single ``max(air_at)`` per show in the router rather than the whole episode
-    list, because placement only ever asks for the weekday it fell on.
+    ``latest_air_at`` is the air time of the highest-numbered episode that has
+    one — a single row per show in the router rather than the whole episode
+    list, because placement only ever asks for the weekday it fell on. The last
+    episode rather than the latest date, so that a source which dates an early
+    episode after a later one cannot move the show to another weekday; see
+    :mod:`arc.services.catalog.airing`.
     """
 
     anime: Anime

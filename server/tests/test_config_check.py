@@ -29,6 +29,8 @@ GOOD = {
     "qbit_pass": "a-real-qbittorrent-password",
     # RECS_PROVIDER defaults to gemini, so this is the key that stack needs.
     "gemini_api_key": "AIza-a-real-gemini-key",
+    # M15.5: its absence is a warning, so a baseline meant to be silent sets it.
+    "tmdb_api_key": "a-real-tmdb-key",
 }
 
 
@@ -541,3 +543,29 @@ async def test_health_reports_zero_for_a_configured_production_stack(settings: S
 
     assert body["config_warnings"] == 0
     assert body["env"] == "prod"
+
+
+# --- TMDB enrichment (M15.5) -------------------------------------------------
+
+
+def test_a_missing_tmdb_key_is_a_warning_not_an_error() -> None:
+    """No key is a complete Arc rendering AniList's art, not a broken one."""
+    settings = prod(tmdb_api_key=None)
+    found = [
+        warning for warning in config_check.warnings(settings) if warning.key == "TMDB_API_KEY"
+    ]
+
+    assert len(found) == 1
+    assert found[0].level == "warning"
+    assert "key art and stills will not be enriched" in found[0].message
+    # `/api/health` publishes the error count, and a smoke test asserts zero.
+    assert config_check.count(settings) == 0
+
+
+def test_a_tmdb_key_that_is_set_says_nothing() -> None:
+    assert "TMDB_API_KEY" not in {warning.key for warning in config_check.warnings(prod())}
+
+
+def test_the_tmdb_warning_is_production_only() -> None:
+    dev = Settings(_env_file=None, env="dev", tmdb_api_key=None)  # type: ignore[call-arg]
+    assert config_check.warnings(dev) == []

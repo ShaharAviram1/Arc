@@ -306,8 +306,8 @@ def window(
             break
         if not is_aired(episode, now=now, anime_status=anime_status, boundary=boundary):
             # Not `break`: episode lists are ordered but not always complete,
-            # and a gap with no air date must not hide the aired episode after
-            # it. The bound above is what stops the loop.
+            # and one episode the rule cannot place must not hide the aired
+            # episode after it. The bound above is what stops the loop.
             continue
         picked.append(episode)
     return picked

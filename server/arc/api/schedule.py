@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from arc.api.deps import CurrentUser, SessionDep
 from arc.api.schedule_schemas import SchedulePage, SeasonName
@@ -88,16 +88,24 @@ async def schedule(
     )
     anime_ids = [row.id for row in rows]
 
-    # The last episode that has an air time, per show: what places a season
-    # that has finished airing on the weekday it used to air. One grouped
-    # query rather than the episode lists themselves — placement only needs
-    # the weekday, and a season is two hundred shows.
+    # The air time of the *highest-numbered* episode that has one, per show:
+    # what places a season that has finished airing on the weekday it used to
+    # air. One query rather than the episode lists themselves — placement only
+    # needs the weekday, and a season is two hundred shows.
+    #
+    # Deliberately the last episode rather than ``max(air_at)``, which is the
+    # same answer on every well-formed list and the wrong one on a source that
+    # dates an early episode after a later one: the stray date would win the
+    # max and move a whole show to another weekday. It is the query form of
+    # :func:`~arc.services.catalog.airing.effective_air_at`, whose corrected
+    # times always peak at the last episode's.
     latest: dict[int, datetime] = {}
     if anime_ids:
         aired = await session.execute(
-            select(Episode.anime_id, func.max(Episode.air_at))
+            select(Episode.anime_id, Episode.air_at)
             .where(Episode.anime_id.in_(anime_ids), Episode.air_at.isnot(None))
-            .group_by(Episode.anime_id)
+            .distinct(Episode.anime_id)
+            .order_by(Episode.anime_id, Episode.number.desc())
         )
         latest = {anime_id: at_ for anime_id, at_ in aired.all() if at_ is not None}
 

@@ -52,11 +52,15 @@ from arc.services.catalog.names import (
     SEASON_SWEEP,
     dedupe_key,
 )
+from arc.services.catalog.offline.ids import anilist_ids_for
+from arc.services.catalog.offline.search import offline_season
 from arc.services.catalog.schedule import SCHEDULED_FORMATS
 from arc.services.catalog.seasons import current_season, next_season
 from arc.services.catalog.source import SourceNotFound, SourceUnavailable
 from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
+from arc.services.tmdb.names import TMDB_ENRICH, TMDB_PRIORITY
+from arc.services.tmdb.names import dedupe_key as tmdb_dedupe_key
 
 #: List states that mean somebody still cares what this show does. Dropped and
 #: completed shows are deliberately absent: they generate no wants (FR-W4), so
@@ -88,6 +92,12 @@ RELEASING = "RELEASING"
 RECONCILE_LIMIT = 50
 RECONCILE_SPACING_SECONDS = 5.0
 
+#: How many MAL-only rows one run will try to place from the offline id map.
+#: Ten times the network limit because it costs two queries rather than fifty
+#: round trips: the map is a table, and the whole point of consulting it first
+#: is that an outage does not slow the repair down.
+OFFLINE_RECONCILE_LIMIT = 500
+
 #: How many unplaced rows one season sweep will follow up with a detail fetch
 #: (:func:`_enqueue_season_details`). Sixty at five seconds is five minutes of
 #: queue for a job that runs once a day, so a fresh season fills in over a few
@@ -108,6 +118,7 @@ async def catalog_refresh(ctx: JobContext) -> None:
         # max_age=0 forces the fetch: the point of this job is that whatever
         # is cached is not to be trusted.
         anime = await ensure_anime(ctx.session, catalog, anime_id=anime_id, max_age=timedelta(0))
+    await _maybe_enrich(ctx, anime)
     ctx.log.info(
         "catalogue refresh",
         extra={
@@ -116,6 +127,48 @@ async def catalog_refresh(ctx: JobContext) -> None:
             "status": anime.status,
             "episodes": anime.episodes,
         },
+    )
+
+
+async def _maybe_enrich(ctx: JobContext, anime: Anime) -> None:
+    """Queue a TMDB enrichment when this refresh left a followed show short.
+
+    The nightly sweep (:mod:`arc.services.tmdb.jobs`) would find the same row
+    tonight; this is what keeps a show somebody has just added from looking
+    blank until then. Only for followed shows, only when there is actually a
+    hole, and deduplicated on the same key the sweep uses, so a row that is
+    refreshed hourly does not queue an enrichment an hour.
+
+    Imported from :mod:`arc.services.tmdb.names` rather than from that
+    package's ``jobs``: the handler module imports *this* one for
+    :data:`FOLLOWED_STATUSES`, and a names module is what keeps the two from
+    being a circular import. The key is checked in the handler, not here — an
+    enqueue with no ``TMDB_API_KEY`` costs one row and one INFO line.
+    """
+    missing_still = exists().where(
+        Episode.anime_id == anime.id,
+        Episode.still_url.is_(None),
+        Episode.air_at.isnot(None),
+        Episode.air_at <= func.now(),
+    )
+    if anime.banner_url is not None and anime.cover_large_url is not None:
+        # Cheap test first: a row with both images only needs the episode
+        # query when something might still be missing below it.
+        if not await ctx.session.scalar(select(missing_still)):
+            return
+    followed = await ctx.session.scalar(
+        select(ListEntry.user_id)
+        .where(ListEntry.anime_id == anime.id, ListEntry.status.in_(FOLLOWED_STATUSES))
+        .limit(1)
+    )
+    if followed is None:
+        return
+    await enqueue(
+        ctx.session,
+        TMDB_ENRICH,
+        {"anime_id": anime.id},
+        priority=TMDB_PRIORITY,
+        dedupe_key=tmdb_dedupe_key(anime.id),
     )
 
 
@@ -205,17 +258,86 @@ async def catalog_pre_air(ctx: JobContext) -> None:
     ctx.log.info("catalogue pre-air sweep", extra={"candidates": len(anime_ids), "queued": queued})
 
 
+async def _reconcile_from_offline(ctx: JobContext) -> int:
+    """Place MAL-only rows from the offline id map; return how many were placed.
+
+    Two queries and no network at all (M15.5), which is why it runs *before*
+    the AniList pass and outside its health gate: the repair this job exists to
+    do is most needed exactly when AniList cannot be asked to do it, and
+    Fribb's map already holds the answer for most of the catalogue.
+
+    An id another row already holds is skipped and logged, the same rule the
+    AniList pass follows: two ``anime`` rows for one show is a mess to
+    untangle, and the unique index would fail the whole job rather than the one
+    row. The map's own ambiguity is handled a level down — it declines to
+    answer at all when two entries disagree.
+    """
+    statement = (
+        select(Anime.id, Anime.mal_id)
+        .where(Anime.mal_id.isnot(None), Anime.anilist_id.is_(None))
+        .order_by(Anime.id)
+        .limit(OFFLINE_RECONCILE_LIMIT)
+    )
+    rows = [(row.id, int(row.mal_id)) for row in (await ctx.session.execute(statement)).all()]
+    if not rows:
+        return 0
+
+    mapped = await anilist_ids_for(ctx.session, [mal_id for _, mal_id in rows])
+    if not mapped:
+        return 0
+
+    taken = set(
+        (
+            await ctx.session.scalars(
+                select(Anime.anilist_id).where(Anime.anilist_id.in_(sorted(set(mapped.values()))))
+            )
+        ).all()
+    )
+    attached = 0
+    for anime_id, mal_id in rows:
+        anilist_id = mapped.get(mal_id)
+        if anilist_id is None:
+            continue
+        if anilist_id in taken:
+            ctx.log.warning(
+                "offline id map points at an anilist id already in use",
+                extra={"anime_id": anime_id, "anilist_id": anilist_id, "mal_id": mal_id},
+            )
+            continue
+        row = await ctx.session.get(Anime, anime_id)
+        if row is None or row.anilist_id is not None:
+            continue
+        row.anilist_id = anilist_id
+        taken.add(anilist_id)
+        attached += 1
+
+    await ctx.session.flush()
+    ctx.log.info(
+        "catalogue reconcile filled ids from the offline map",
+        extra={"candidates": len(rows), "attached": attached},
+    )
+    return attached
+
+
 @register(RECONCILE)
 async def catalog_reconcile(ctx: JobContext) -> None:
     """Attach AniList ids to rows that arrived through MAL (FR-C6).
 
-    Asks AniList *specifically* — not the service — because the whole question
-    is "does AniList know this show", and letting the fallback answer it would
-    return the MAL record Arc already has and learn nothing.
+    Two passes, cheapest first. The **offline id map** places whatever it can
+    with no network and no health gate (:func:`_reconcile_from_offline`, M15.5)
+    — during an outage that is the only pass that runs at all, and it is the
+    one that matters, because the rows needing repair are exactly the ones the
+    outage created.
 
-    Skipped entirely while AniList's breaker is open: fifty lookups against a
-    source that is down is fifty timeouts and no ids.
+    The **AniList pass** then asks about the leftovers: the entries neither
+    public file has heard of. It asks AniList *specifically* — not the service
+    — because the whole question is "does AniList know this show", and letting
+    the fallback answer it would return the MAL record Arc already has and
+    learn nothing. Skipped entirely while AniList's breaker is open: fifty
+    lookups against a source that is down is fifty timeouts and no ids.
     """
+    await _reconcile_from_offline(ctx)
+
     async with catalog_for(ctx.settings) as catalog:
         if not catalog.healthy("anilist"):
             ctx.log.info("catalogue reconcile skipped; anilist is not healthy")
@@ -317,6 +439,15 @@ async def catalog_season_sweep(ctx: JobContext) -> None:
     point is that the *schedule* renders from local rows: a day when neither
     source answers should cost the airing times, not the season itself.
 
+    Since M15.5 that is literally true rather than aspirational. A season
+    neither live source could answer for is seeded from the offline import
+    instead (:func:`~arc.services.catalog.offline.search.offline_season`),
+    which knows which titles are in a season and nothing whatever about when
+    they air — so the season page lists them and the schedule shows them
+    unplaced until a source comes back. The fallback lives here rather than
+    inside :class:`CatalogService` deliberately: the service is a composite of
+    two *HTTP* sources and holds no session, and this is its only caller.
+
     The summaries alone leave a hole, though: a season row between broadcasts
     has no ``nextAiringEpisode`` and no episodes, and the schedule can place
     neither. So the sweep finishes by queueing a spaced-out detail fetch for
@@ -328,19 +459,36 @@ async def catalog_season_sweep(ctx: JobContext) -> None:
     cached = 0
     async with catalog_for(ctx.settings) as catalog:
         for target_year, target_season in ((year, season), upcoming):
+            source = "live"
             try:
                 media = await catalog.season(target_year, target_season)
             except SourceUnavailable as exc:
+                # FR-C7's whole point: the season must still be there. The
+                # offline import has the titles — it has no air times at all,
+                # which is what the outage costs.
+                media = await offline_season(ctx.session, target_year, target_season)
+                source = "offline"
                 ctx.log.warning(
-                    "catalogue season sweep skipped a season",
-                    extra={"year": target_year, "season": target_season, "error": str(exc)},
+                    "catalogue season sweep fell back to the offline catalogue",
+                    extra={
+                        "year": target_year,
+                        "season": target_season,
+                        "titles": len(media),
+                        "error": str(exc),
+                    },
                 )
-                continue
+                if not media:
+                    continue
             rows = await upsert_summaries(ctx.session, media)
             cached += len(rows)
             ctx.log.info(
                 "catalogue season cached",
-                extra={"year": target_year, "season": target_season, "titles": len(rows)},
+                extra={
+                    "year": target_year,
+                    "season": target_season,
+                    "titles": len(rows),
+                    "source": source,
+                },
             )
     queued = await _enqueue_season_details(ctx, year, season)
     ctx.log.info("catalogue season sweep", extra={"titles": cached, "queued": queued})
@@ -358,6 +506,7 @@ __all__ = [
     "REFRESH",
     "REFRESH_ALL",
     "SEASON_DETAIL_LIMIT",
+    "OFFLINE_RECONCILE_LIMIT",
     "SEASON_SWEEP",
     "SPACING_SECONDS",
     "catalog_pre_air",

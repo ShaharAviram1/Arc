@@ -1,0 +1,269 @@
+{
+  "_id": "631b4b67ebb99d007f2d440a",
+  "air_date": "2023-09-29",
+  "episodes": [
+    {
+      "air_date": "2023-09-29",
+      "episode_number": 1,
+      "episode_type": "standard",
+      "id": 3946240,
+      "name": "The Journey's End",
+      "overview": "The world celebrates the Demon King's defeat at the hands of the Hero and his companions. Now that their great adventure is over, what will Frieren the mage do next?",
+      "production_code": "",
+      "runtime": 26,
+      "season_number": 1,
+      "show_id": 209867,
+      "still_path": "/7SfqQVmW125ugsktoRVTnRXpAkd.jpg",
+      "vote_average": 8.439,
+      "vote_count": 57
+    },
+    {
+      "air_date": "2023-09-29",
+      "episode_number": 2,
+      "episode_type": "standard",
+      "id": 4698536,
+      "name": "It Didn't Have to Be Magic...",
+      "overview": "Frieren instructs Fern in the use of magic while deciphering a grimoire for Heiter.",
+      "production_code": "",
+      "runtime": 26,
+      "season_number": 1,
+      "show_id": 209867,
+      "still_path": "/jVeDv4dZI5KbRQw3eD8RRiojUZ5.jpg",
+      "vote_average": 7.716,
+      "vote_count": 51
+    },
+    {
+      "air_date": "2023-09-29",
+      "episode_number": 3,
+      "episode_type": "standard",
+      "id": 4698538,
+      "name": "Killing Magic",
+      "overview": "While retracing the path she took on her adventure with her former traveling companions, Frieren confronts an old enemy.",
+      "production_code": "",
+      "runtime": 25,
+      "season_number": 1,
+      "show_id": 209867,
+      "still_path": "/5uVpkiIoMRCDaLcAxfG8Gc7VJWo.jpg",
+      "vote_average": 8.149,
+      "vote_count": 47
+    },
+    {
+      "air_date": "2023-09-29",
+      "episode_number": 4,
+      "episode_type": "standard",
+      "id": 4698539,
+      "name": "The Land Where Souls Rest",
+      "overview": "Frieren and Fern pay a visit to Eisen, who requests their help in finding the notes of Flamme the Legendary Mage.",
+      "production_code": "",
+      "runtime": 26,
+      "season_number": 1,
+      "show_id": 209867,
+      "still_path": "/nYFUXvyrxCRwcOdIiqRdLJtVScj.jpg",
+      "vote_average": 8.222,
+      "vote_count": 45
+    },
+    {
+      "air_date": "2023-10-06",
+      "episode_number": 5,
+      "episode_type": "standard",
+      "id": 4698540,
+      "name": "Phantoms of the Dead",
+      "overview": "Frieren and Fern investigate ghost sightings at a village where people have started going missing.",
+      "production_code": "",
+      "runtime": 25,
+      "season_number": 1,
+      "show_id": 209867,
+      "still_path": "/ioJWXpvWXAEjK1ues1ZZBwdYOA0.jpg",
+      "vote_average": 8.073,
+      "vote_count": 41
+    }
+  ],
+  "name": "Season 1",
+  "networks": [
+    {
+      "id": 57,
+      "logo_path": "/uxaXSoT8K0S2NE5PWsBpHUl3GGU.png",
+      "name": "Nippon TV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 3698,
+      "logo_path": "/rrw1HbmPpR9GQ3K19taPCYYf5jY.png",
+      "name": "STV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4815,
+      "logo_path": "/igW7DjfUZ8Ew7BLzCxKHKpeFFL3.png",
+      "name": "RAB",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4816,
+      "logo_path": "/9qQIAEYEw1ZyPPK3tqE18Z00AwW.png",
+      "name": "TVI",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4817,
+      "logo_path": "/oxuY8YFFO6Iv1IicYRGFcLizERc.png",
+      "name": "MMT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6155,
+      "logo_path": "/cvePJ33fR2SeirKZWD8rCV7rAaF.png",
+      "name": "YBC",
+      "origin_country": "JP"
+    },
+    {
+      "id": 3644,
+      "logo_path": "/8Cue5NzJ6cucpA5k73GVrCqn2JI.png",
+      "name": "FCT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4790,
+      "logo_path": "/5aEqvKUgffp6zehXyCUhJyzeZPg.png",
+      "name": "YBS",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6286,
+      "logo_path": "/mcA2WrzDxg1MuZ2TnewjVZaTvM2.png",
+      "name": "TSB",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6668,
+      "logo_path": "/atlFO76SPaLGIt9Wmxzg23M0IoA.png",
+      "name": "TeNY",
+      "origin_country": "JP"
+    },
+    {
+      "id": 7076,
+      "logo_path": "/tFePbc4dqJzcUaHeKAQkhRgT5zJ.png",
+      "name": "Daiichi-TV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 3741,
+      "logo_path": "/hiI8H4WLDlCtRZQboq4BTdM2KAg.png",
+      "name": "KNB",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4791,
+      "logo_path": "/e9WRfzkc8HNsZ1qEF26ENHlBMvn.png",
+      "name": "KTK",
+      "origin_country": "JP"
+    },
+    {
+      "id": 7077,
+      "logo_path": "/r1vdmMUpIGnGvLE3UMqkuEtWlG4.png",
+      "name": "FBC",
+      "origin_country": "JP"
+    },
+    {
+      "id": 2727,
+      "logo_path": "/85U2onICiQV9fMHORxw8EWSQ6MZ.png",
+      "name": "Chukyo TV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 569,
+      "logo_path": "/cIMyE9cw1W4kMFGxmC17HKTnVz9.png",
+      "name": "YTV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6669,
+      "logo_path": "/w9VRiRNT3OrP09OHXl6i1nGFWiL.png",
+      "name": "RNC",
+      "origin_country": "JP"
+    },
+    {
+      "id": 3201,
+      "logo_path": "/4OpeDJ8jzPeaSiOlzGCnHjm6tpt.png",
+      "name": "HTV",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4797,
+      "logo_path": "/ggNJJiuB0mT4cQckN9h6jxT7exe.png",
+      "name": "NKT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4822,
+      "logo_path": "/xX0I9Sc0AxSoKoVtwwmz0DWOWcr.png",
+      "name": "JRT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 2728,
+      "logo_path": "/kwC7bfbGknKuL7uxKahk6paamlp.png",
+      "name": "RNB",
+      "origin_country": "JP"
+    },
+    {
+      "id": 7078,
+      "logo_path": "/7QYtCUc3PxYvOQ0NDOw3vQHAIJh.png",
+      "name": "RKC",
+      "origin_country": "JP"
+    },
+    {
+      "id": 1896,
+      "logo_path": "/suqJy99xiGr8PV7eQovUFRgquYT.png",
+      "name": "FBS",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6670,
+      "logo_path": "/7OAJi6aS9zQWwP64jqxRllBvYKR.png",
+      "name": "NIB",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6671,
+      "logo_path": "/jd0KEJ6Md6JBRWjxTHRU9BYpbuv.png",
+      "name": "KKT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6156,
+      "logo_path": "/gxpzF98cV1DHpXzJmXf2Ew6sQvV.png",
+      "name": "UMK TV Miyazaki",
+      "origin_country": "JP"
+    },
+    {
+      "id": 7079,
+      "logo_path": "/wqeYNfsn0LSwbmQGPkcqMg5yhpW.png",
+      "name": "KYT",
+      "origin_country": "JP"
+    },
+    {
+      "id": 6156,
+      "logo_path": "/gxpzF98cV1DHpXzJmXf2Ew6sQvV.png",
+      "name": "UMK TV Miyazaki",
+      "origin_country": "JP"
+    },
+    {
+      "id": 7092,
+      "logo_path": "/5IzL2Fq2yErfy4LH96KX5PKOAbv.png",
+      "name": "KRY",
+      "origin_country": "JP"
+    },
+    {
+      "id": 4818,
+      "logo_path": "/rddkLH5IZoh5IW5b6FHgrOBjBgE.png",
+      "name": "ABS",
+      "origin_country": "JP"
+    }
+  ],
+  "overview": "",
+  "id": 307972,
+  "poster_path": "/yHsxHEugPPlOPqFZrPGvurltPjm.jpg",
+  "season_number": 1,
+  "vote_average": 8.2
+}

@@ -15,6 +15,9 @@ import {
   JOBS,
   JOBS_SUMMARY,
   LONG_ERROR,
+  OFFLINE_CATALOGUE,
+  OFFLINE_NEVER,
+  OFFLINE_STALE,
   OTHER_USER,
   PENDING_JOB,
   QBIT,
@@ -36,6 +39,7 @@ const JOBS_PATH = 'GET /api/jobs?limit=50&offset=0'
 const JOBS_SUMMARY_PATH = 'GET /api/jobs/summary'
 const DISK_PATH = 'GET /api/retention/disk'
 const PREVIEW_PATH = 'GET /api/retention/preview'
+const OFFLINE_PATH = 'GET /api/catalogue/offline'
 const STATUS_PATH = 'GET /api/acquisition/status'
 const WANTS_PATH = 'GET /api/acquisition/wants'
 const QBIT_PATH = 'GET /api/acquisition/qbit'
@@ -55,6 +59,7 @@ const ALL_ROUTES: MockRoutes = {
   [JOBS_SUMMARY_PATH]: { body: JOBS_SUMMARY },
   [DISK_PATH]: { body: DISK },
   [PREVIEW_PATH]: { body: RETENTION_PREVIEW },
+  [OFFLINE_PATH]: { body: OFFLINE_CATALOGUE },
   [STATUS_PATH]: { body: RUNNING },
   [WANTS_PATH]: { body: WANTS },
   [QBIT_PATH]: { body: QBIT },
@@ -655,6 +660,37 @@ describe('Admin — Storage (FR-D3, FR-T4)', () => {
       expect(requestsMade(fetchMock)).toContain('POST /api/episodes/9005/search')
     })
     expect(await screen.findByText('Search queued.')).toBeInTheDocument()
+  })
+
+  it('shows what the offline catalogue import loaded, and how old it is (M15.5)', async () => {
+    await openStorage()
+
+    expect(await screen.findByText('Anime database (manami)')).toBeInTheDocument()
+    expect(screen.getByText(/2026-09-07 · 41,537 rows · imported 3 days ago/)).toBeInTheDocument()
+
+    expect(screen.getByText('Id map (Fribb)')).toBeInTheDocument()
+    // The ETag is shown short: the first 12 characters and no more.
+    expect(screen.getByText(/^b3c1d9f4a77e · 32,281 rows/)).toBeInTheDocument()
+
+    expect(screen.getByText('Next run: Mondays 03:30 UTC (weekly)')).toBeInTheDocument()
+    expect(screen.queryByText(/Import is stale/)).not.toBeInTheDocument()
+  })
+
+  it('warns when the offline import is stale, and says how to fix it', async () => {
+    await openStorage({ [OFFLINE_PATH]: { body: OFFLINE_STALE } })
+
+    const warning = await screen.findByText(/Import is stale \(older than 14 days\)/)
+    expect(warning).toHaveTextContent('or wait for Monday')
+    expect(screen.getByText('python -m arc.cli import-catalogue')).toBeInTheDocument()
+  })
+
+  it('says so when the offline catalogue has never been imported', async () => {
+    await openStorage({ [OFFLINE_PATH]: { body: OFFLINE_NEVER } })
+
+    expect(
+      await screen.findByText('Never imported. The worker imports it on first start.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Anime database (manami)')).not.toBeInTheDocument()
   })
 })
 

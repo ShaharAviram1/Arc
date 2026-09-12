@@ -16,7 +16,10 @@ Three rules decide when the fallback is used.
    simply has no row for many MAL ids, so its "not found" there means "I cannot
    help", not "no such title".
 3. **A failure is remembered.** Every :class:`SourceUnavailable` opens that
-   source's breaker, so the rest of the outage costs no timeouts at all.
+   source's breaker, so the rest of the outage costs no timeouts at all. With
+   one exception: a :class:`SourceRateLimited` falls back without opening it.
+   A burst limit clears in seconds and costs no timeout to discover, so
+   standing the source down for five minutes would be a self-inflicted outage.
 
 The "catalogue is now coming from MAL" warning is written when the breaker
 *opens*, not when it is consulted: an outage is one log line, not one per
@@ -36,6 +39,7 @@ from arc.services.catalog.source import (
     CatalogSource,
     SearchPage,
     SourceNotFound,
+    SourceRateLimited,
     SourceUnavailable,
 )
 
@@ -183,6 +187,16 @@ class CatalogService:
                 self.breaker.record_success(source.name)
                 if not_found_final:
                     raise
+                continue
+            except SourceRateLimited as exc:
+                # Falls back like any unavailability, but leaves the breaker
+                # alone: the source is up and will answer again in seconds,
+                # and its own client already remembers not to ask until then.
+                failure = exc
+                log.info(
+                    "catalogue source rate limited; falling back",
+                    extra={"source": source.name, "operation": operation},
+                )
                 continue
             except SourceUnavailable as exc:
                 failure = exc

@@ -1,21 +1,28 @@
 """Catalogue endpoints: search, read a show, force a refresh.
 
-Search is **local first, then live**. It still goes to a catalogue source on
-every call rather than only querying the cache, because the cache holds only
-what somebody has already looked at and a search that cannot find a show nobody
-has added yet is not a search (FR-C1). But the cached rows are matched first
-and put in front of the live page: upstream is not always up (AniList spent
-M15 disabled) and MyAnimeList — the fallback — matches whole words from the
-start of a title, so "jobless reincarnation" found nothing while the show sat
-cached, on the caller's list, with an episode downloading. See
-:mod:`arc.services.catalog.local` for what a local match is and how the hits
-are ordered.
+Search is **local, then offline, then live** (M15.5). It still goes to a
+catalogue source on every call rather than only querying its own tables,
+because a search that cannot find a show nobody has added yet is not a search
+(FR-C1). But two local answers are matched first and put in front of the live
+page:
 
-Two consequences, both deliberate. A search that has local hits answers 200
-even when both sources are down — it has something true to say — and only an
-empty local result on a failed upstream is a 502. And the merge happens on the
-first page only: the local hits are not paginated, so repeating them under
-``page=2`` would show the same twenty cards twice.
+1. the cached ``anime`` rows — what somebody here has already looked at, which
+   is where the answer is for anything on a list or downloading. Upstream is
+   not always up (AniList spent M15 disabled) and MyAnimeList — the fallback —
+   matches whole words from the start of a title, so "jobless reincarnation"
+   found nothing while the show sat cached, on the caller's list, with an
+   episode downloading. See :mod:`arc.services.catalog.local`;
+2. the **offline catalogue** — 41k titles and every synonym each was released
+   under, imported weekly (:mod:`arc.services.catalog.offline.search`). Those
+   hits are materialised as ``anime`` rows on the way past, which is what mints
+   the internal id their cards link to, and they are written as the weakest
+   source, so the first live payload for the same show overwrites all of it.
+
+Two consequences, both deliberate. A search with local or offline hits answers
+200 even when both live sources are down — it has something true to say — and
+only an empty result from *both* local tables on a failed upstream is a 502.
+And the merge happens on the first page only: neither set is paginated, so
+repeating them under ``page=2`` would show the same cards twice.
 
 What the cache gets out of the live half is the results: every hit is upserted
 on the way past, which is also what gives each result the internal id the rest
@@ -44,6 +51,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.anime_schemas import (
     AnimeDetail,
@@ -70,6 +78,8 @@ from arc.services.catalog import (
 from arc.services.catalog.names import CATALOG_PRIORITY
 from arc.services.catalog.names import REFRESH as REFRESH_JOB
 from arc.services.catalog.names import dedupe_key as refresh_dedupe_key
+from arc.services.catalog.offline.materialise import upsert_offline_summaries
+from arc.services.catalog.offline.search import offline_search
 from arc.services.jobs import enqueue
 from arc.services.mal.names import is_linked
 from arc.services.mal.writelog import SyncState, sync_state
@@ -86,6 +96,13 @@ ANIME_NOT_FOUND = "anime not found"
 MIN_QUERY_LENGTH = 2
 MAX_QUERY_LENGTH = 100
 MAX_PAGE = 50
+
+#: How many cards the two local halves may fill between them before the live
+#: page starts. ``local.py``'s twenty is one screen, and the offline catalogue
+#: answers *every* query — it has every title there is — so an uncapped second
+#: block would put forty cards in front of the results the user can only get
+#: from upstream.
+PRE_LIVE_LIMIT = 20
 
 
 def now() -> datetime:
@@ -149,6 +166,33 @@ async def _related_anime(session: SessionDep, anime: Anime) -> dict[tuple[str, i
     return found
 
 
+async def _offline_results(session: AsyncSession, q: str, local: list[Anime]) -> list[Anime]:
+    """The offline catalogue's hits for ``q``, as ``anime`` rows (M15.5).
+
+    Narrowed twice before anything is written. The query asks for only as many
+    rows as the cache left room for (:data:`PRE_LIVE_LIMIT`), and the shows the
+    cache already returned are dropped by external id before the upsert rather
+    than after it — the de-duplication downstream would catch them anyway, but
+    only after writing a page of rows to say what Arc had already said.
+
+    A deployment that has never run the import has an empty table and gets an
+    empty list, which is precisely the behaviour search had before M15.5.
+    """
+    room = PRE_LIVE_LIMIT - len(local)
+    if room <= 0:
+        return []
+    known = {row.anilist_id for row in local} | {row.mal_id for row in local}
+    known.discard(None)
+    rows = [
+        row
+        for row in await offline_search(session, q, limit=room)
+        if row.anilist_id not in known and row.mal_id not in known
+    ]
+    if not rows:
+        return []
+    return await upsert_offline_summaries(session, rows)
+
+
 @router.get(
     "/search",
     response_model=SearchPage,
@@ -162,9 +206,14 @@ async def search(
     q: Annotated[str, Query(min_length=MIN_QUERY_LENGTH, max_length=MAX_QUERY_LENGTH)],
     page: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 1,
 ) -> SearchPage:
-    # The cached rows first (see the module docstring), and only on the first
-    # page, because they are not paginated.
+    # The cached rows first, then the offline catalogue (see the module
+    # docstring), and only on the first page, because neither is paginated.
     local = await local_search(session, q, user_id=user.id) if page == 1 else []
+    offline = await _offline_results(session, q, local) if page == 1 else []
+    if offline:
+        # The materialised rows are somebody's cards; they must survive the
+        # request whether or not the live half goes on to fail.
+        await session.commit()
 
     live: list[Anime] = []
     live_page, has_next = page, False
@@ -172,8 +221,9 @@ async def search(
         found = await catalog.search(q, page=page)
     except SourceUnavailable as exc:
         log.warning("catalogue search failed", extra={"query": q, "error": str(exc)})
-        # An outage is only an error when Arc has nothing of its own to say.
-        if not local:
+        # An outage is only an error when Arc has nothing of its own to say —
+        # which, since M15.5, means neither the cache nor the offline import.
+        if not local and not offline:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=CATALOGUE_UNAVAILABLE
             ) from exc
@@ -189,9 +239,16 @@ async def search(
 
     # De-duplicated on the internal id, not on an external one: the whole point
     # of that id is that one show is one row whichever source found it, so a
-    # cached hit and the live result for the same show are the same card.
+    # cached hit, an offline hit and the live result for the same show are one
+    # card. The offline rows have internal ids by now — materialising them is
+    # what mints those — so the same one line covers all three.
     seen = {row.id for row in local}
-    rows = local + [row for row in live if row.id not in seen]
+    rows = list(local)
+    for row in offline + live:
+        if row.id in seen:
+            continue
+        seen.add(row.id)
+        rows.append(row)
 
     statuses = await list_status_for(session, user_id=user.id, anime_ids=[row.id for row in rows])
     return SearchPage(

@@ -269,6 +269,32 @@ export interface RetentionPreview {
   bytes: number
 }
 
+/* --- Wire shapes: offline catalogue (M15.5) --------------------------- */
+
+/** One row of `offline_imports` (`OfflineSourceOut`). */
+export interface OfflineSource {
+  /** `"manami"` or `"fribb"`. Anything else is a source Arc has no words for. */
+  source: string
+  /**
+   * manami's release tag, or the `ETag`/`Last-Modified` Fribb's file was served
+   * with. Null when the last import could not determine one.
+   */
+  version: string | null
+  imported_at: string
+  rows: number
+  checksum: string | null
+}
+
+/** `GET /api/catalogue/offline` — what the weekly import has loaded. */
+export interface OfflineCatalogue {
+  /** Newest first; empty on a deployment where the import has never run. */
+  sources: OfflineSource[]
+  /** manami's alone: never imported, or older than the staleness window. */
+  stale: boolean
+  anime_rows: number
+  id_rows: number
+}
+
 /* --- Wire shapes: acquisition (FR-D3) --------------------------------- */
 
 /** One live want (`WantOut`), with enough context to read the row. */
@@ -349,6 +375,7 @@ export const adminJobsQueryKey = [ADMIN_QUERY_KEY, 'jobs'] as const
 export const adminJobsSummaryQueryKey = [...adminJobsQueryKey, 'summary'] as const
 export const adminDiskQueryKey = [ADMIN_QUERY_KEY, 'disk'] as const
 export const adminPreviewQueryKey = [ADMIN_QUERY_KEY, 'preview'] as const
+export const adminOfflineQueryKey = [ADMIN_QUERY_KEY, 'offline'] as const
 export const adminWantsQueryKey = [ADMIN_QUERY_KEY, 'wants'] as const
 export const adminQbitQueryKey = [ADMIN_QUERY_KEY, 'qbit'] as const
 
@@ -513,6 +540,30 @@ export function usedFraction(disk: DiskUsage): number {
   return Math.min(1, Math.max(0, disk.used / disk.total))
 }
 
+/** "41,537" — a row count is read for its magnitude, and a bare 41537 is not. */
+export function formatCount(rows: number): string {
+  if (!Number.isFinite(rows)) return '0'
+  return Math.round(rows).toLocaleString()
+}
+
+/** What an offline source is, in the words an admin would use for it. */
+export function offlineSourceLabel(source: string): string {
+  if (source === 'manami') return 'Anime database (manami)'
+  if (source === 'fribb') return 'Id map (Fribb)'
+  return source
+}
+
+/**
+ * manami ships a dated release tag, which is the answer on its own. Fribb
+ * ships whatever `ETag` its host felt like — a 40-character sha — and only its
+ * first few characters are ever compared by eye, so the rest is noise.
+ */
+export function offlineVersionLabel(version: string | null): string {
+  const tag = version === null ? '' : version.trim()
+  if (tag === '') return 'unknown version'
+  return tag.length > 12 ? tag.slice(0, 12) : tag
+}
+
 /** "3/5" — attempts against the ceiling, which is what decides a retry. */
 export function attemptsLabel(job: JobRow): string {
   return `${String(job.attempts)}/${String(job.max_attempts)}`
@@ -603,6 +654,16 @@ export function useRetentionDisk(): UseQueryResult<RetentionDisk, Error> {
 /** `GET /api/retention/preview` — what the next sweep would delete, and why. */
 export function useRetentionPreview(): UseQueryResult<RetentionPreview, Error> {
   return useAdminQuery<RetentionPreview>(adminPreviewQueryKey, '/api/retention/preview')
+}
+
+/**
+ * `GET /api/catalogue/offline` (M15.5).
+ *
+ * The import is invisible when it works, so the tab asks for it every time it
+ * opens rather than caching a version that may be two missed Mondays old.
+ */
+export function useOfflineCatalogue(): UseQueryResult<OfflineCatalogue, Error> {
+  return useAdminQuery<OfflineCatalogue>(adminOfflineQueryKey, '/api/catalogue/offline')
 }
 
 /** `GET /api/acquisition/wants` — the whole want table (FR-A2). */

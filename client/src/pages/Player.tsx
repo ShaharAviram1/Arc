@@ -77,6 +77,17 @@ const DOUBLE_CLICK_MS = 250
 /** Pointer moves are continuous; this is how often one is allowed to re-render. */
 const ACTIVITY_THROTTLE_MS = 400
 
+/**
+ * How long "Resumed from 12:34" stays up before it takes itself away.
+ *
+ * The notice is a receipt, not a decision: it tells a viewer why the episode
+ * started where it did, and once that has been read it is a box sitting on the
+ * picture. The owner asked for it on a timer rather than waiting on a click
+ * (owner, 2026-09-12). Five seconds is long enough to catch the eye and read
+ * six words; Dismiss still works for anyone who wants it gone sooner.
+ */
+const RESUME_NOTICE_MS = 5000
+
 /** Fields that own their keystrokes; a shortcut must not fire inside one. */
 const EDITABLE = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
 
@@ -830,6 +841,25 @@ function PlayerView({ id }: { id: number }) {
       window.clearTimeout(timer)
     }
   }, [chromeHeld, playing, activity, setChrome])
+
+  /**
+   * The resume notice takes itself off after five seconds (FR-S2).
+   *
+   * Keyed on `resumedAt` rather than run once: a Dismiss sets it to `null`,
+   * which cancels the pending timeout instead of leaving one armed to clear a
+   * value that is already gone, and a fresh resume would start its own five
+   * seconds. Nothing else in the page reads the timer, so it needs no ref.
+   */
+  useEffect(() => {
+    if (resumedAt === null) return
+
+    const timer = window.setTimeout(() => {
+      setResumedAt(null)
+    }, RESUME_NOTICE_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [resumedAt])
 
   if (isPending) {
     return (

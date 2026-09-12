@@ -147,6 +147,44 @@ class Settings(BaseSettings):
     #: short enough that a blip is over in five minutes.
     catalog_breaker_seconds: float = Field(default=300.0, ge=0)
 
+    # --- Offline catalogue (M15.5) ---------------------------------------
+    #
+    # Two public files, imported weekly, that make search and matching work
+    # when nothing upstream answers (FR-C6, architecture.md §5.0a). Neither
+    # needs a key; both are settings rather than constants so a test can point
+    # them at a local file and an operator at a mirror.
+
+    #: manami's ``anime-offline-database``, the zstd-compressed JSONL release
+    #: asset. ``releases/latest/download`` rather than a pinned tag: the point
+    #: of a weekly job is that it picks up the week's release.
+    offline_manami_url: str = (
+        "https://github.com/manami-project/anime-offline-database/releases/latest/download/"
+        "anime-offline-database.jsonl.zst"
+    )
+    #: Fribb's ``anime-lists`` cross-id map, served raw from GitHub. It is a
+    #: file in a git repository rather than a release, which is why its version
+    #: comes from the response headers rather than from the payload.
+    offline_fribb_url: str = (
+        "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json"
+    )
+    #: How old the manami import may be before ``GET /api/catalogue/offline``
+    #: calls it stale. Fourteen days is two missed weekly runs: one skipped
+    #: release is a GitHub blip, two is a job that is not running.
+    offline_catalogue_stale_days: int = Field(default=14, ge=1)
+
+    # --- TMDB (M15.5) ----------------------------------------------------
+    #: The free v3 API key from ``themoviedb.org/settings/api``. Unset means
+    #: no enrichment at all: the nightly job logs one line and does nothing,
+    #: and shows render whatever art AniList and MAL provided (FR-C6,
+    #: architecture.md §5.8). Reached by id through the offline cross-id map,
+    #: so nothing here is a URL — Arc never searches TMDB.
+    #:
+    #: A plain string rather than a ``SecretStr``, like :attr:`mal_client_id`
+    #: and for the same reason: a v3 key authorises read-only catalogue calls
+    #: and nothing about an account, which makes it an application identifier
+    #: rather than a credential.
+    tmdb_api_key: str | None = None
+
     # --- Recommendations: the model chain (M12, §5.6) --------------------
     #
     # Not one model but a *chain*, because production runs on Gemini's free

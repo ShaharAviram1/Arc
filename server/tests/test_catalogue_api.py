@@ -529,18 +529,19 @@ async def test_detail_carries_the_key_art_the_credits_and_the_episode_stills(
         "Director",
         "Series Composition",
         "Character Design",
-        "Music",
-        "Original Creator",
         "Original Creator",
     ]
 
     episodes = body["episodes"]
     assert episodes[0]["title"] == "The Journey's End"
     assert episodes[0]["still_url"].startswith("https://")
-    # The fixture has links for the first eight episodes only, which is the
-    # ordinary state of a show mid-season; the rest render a placeholder.
-    assert episodes[8]["title"] is None
-    assert episodes[8]["still_url"] is None
+    # The fixture carries a link for every episode of the run, so no row on
+    # this show falls back to the placeholder. (A show with no links at all is
+    # ``test_a_mal_sourced_show_has_no_key_art_and_one_credit``; a partial list
+    # is covered in ``tests.test_catalog_cache``.)
+    assert len(episodes) == 28
+    assert all(episode["still_url"].startswith("https://") for episode in episodes)
+    assert episodes[8]["title"] == "Aura the Guillotine"
 
 
 async def test_a_search_result_carries_the_key_art(user_client: AsyncClient) -> None:

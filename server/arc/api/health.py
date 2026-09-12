@@ -23,6 +23,12 @@ class Health(BaseModel):
     #: the startup log, one ERROR line each. ``0`` is the healthy answer, and
     #: is what a post-deploy smoke test should assert.
     config_warnings: int | None = None
+    #: Whether TMDB enrichment is configured (``TMDB_API_KEY``). The client
+    #: reads it for one reason: TMDB's terms require an attribution line
+    #: wherever their data is shown, and a deployment with no key shows none of
+    #: it (architecture.md §5.8). Not a secret — it says a feature is on, the
+    #: way the artwork on the page already does.
+    tmdb_enabled: bool = False
 
 
 @router.get(
@@ -40,4 +46,5 @@ async def health(settings: SettingsDep) -> Health:
         # the key out of the dev response entirely rather than showing a 0 that
         # would read as "checked and fine".
         config_warnings=config_check.count(settings) if settings.is_prod else None,
+        tmdb_enabled=bool((settings.tmdb_api_key or "").strip()),
     )

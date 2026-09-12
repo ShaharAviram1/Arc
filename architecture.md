@@ -120,6 +120,12 @@ arc/
         library/                 file watcher, parser (anitopy), matcher, scoring
         media/                   ffprobe, transcode plan, HLS packaging
         acquisition/             want computation, window logic
+        catalog/                 source protocol, AniList+MAL service, breaker,
+                                 cache, seasons, list states, local search
+          offline/               M15.5: the weekly manami + Fribb import
+        tmdb/                    M15.5: key art, episode stills and credits
+                                 for what AniList has not filled
+                                 (download, parse, importer, job)
         retention/               cleanup rules
         recs/                    candidate pool, continuations, model prompt,
                                  schema, provider chain
@@ -139,7 +145,8 @@ arc/
                                  pieces (CoverThumb, ListStatusControl, …)
         ui/                      design primitives (M15): Artwork, Button,
                                  Chip, Row, Shelf, Segmented, Eyebrow,
-                                 HeroFrame, Skeleton, EmptyState + styles.ts
+                                 HeroFrame, PosterWash, Skeleton,
+                                 EmptyState + styles.ts
       player/                    hls.js wrapper, progress reporter
       lib/                       auth context, query hooks, media queries
   deploy/
@@ -189,6 +196,28 @@ progress in My List and nothing else — playback progress is plain white — an
 for pages not yet restyled. A primary action is `--arc-action` (white), a
 focus ring is `--arc-focus`.
 
+**Artwork is never cropped past recognition.** Anime's native art is a 2:3
+poster, and the two frames that are wider than they are tall pick what to put
+in them by the *shape* of the picture, not only by its presence:
+
+- The 21:9 hero (`ui/HeroFrame.tsx`) takes AniList's `banner_url` and sizes the
+  frame to the banner's own ratio, clamped to 21:9–3.6:1; with no banner it
+  falls back to the poster treatment below.
+- The 16:9 episode card on Watch Now (`EpisodeArt` in `pages/Home.tsx`) takes
+  the episode's `still_url`; failing that the show's `banner_url` **only if its
+  natural ratio is ≤ 2.2** — a TMDB backdrop is 16:9 and passes, an AniList
+  banner is ~4.75:1 and does not, and `object-cover` would show a 3× zoom of a
+  sliver of it (owner, 2026-09-12); failing that, the poster treatment. The
+  ratio is learnt from `Artwork`'s `onNaturalSize` on an off-frame copy of the
+  banner, and the poster treatment is what shows until it is known, so a card
+  never flashes a zoomed strip on its way to the right answer.
+
+The **poster treatment** is one component (`ui/PosterWash.tsx`), shared by
+both: the poster blurred (40 px, scale 1.15, brightness 0.5, saturate 1.2) and
+scrimmed to fill the frame as a colour wash — a ground, not a picture, so its
+resolution stops mattering — with the crisp poster laid over it at its own 2:3
+ratio. A poster is never scaled up to fill a wide frame.
+
 The reduced-motion rule in `index.css` turns off every CSS animation and
 transition, but it cannot reach movement driven by a timer. Anything that
 advances itself — today only Watch Now's hero — asks
@@ -215,6 +244,9 @@ and simply never starts the timer.
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
 | `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused), plus per-show overrides under `override:anime:<id>`. Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
+| `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
+| `offline_ids` | id (surrogate PK), anidb_id, anilist_id (indexed), mal_id (indexed), kitsu_id, tmdb_tv_id, tmdb_movie_id, tmdb_season, tvdb_id, tvdb_season, imdb_id (the first when the entry carries several), type. Fribb's `anime-lists`, and the only route from an Arc show to a **TMDB** id — AniList publishes none. An entry with neither an AniList nor a MAL id is dropped on import: nothing could ever reach it |
+| `offline_imports` | source (PK: `manami` \| `fribb`), version (manami's release tag out of the header's `$schema`; Fribb's `ETag`/`Last-Modified`/download date), imported_at, rows, checksum (sha256 of the downloaded file — an unchanged file skips the parse and the replace entirely) |
 
 ## 5. Key flows
 
@@ -284,7 +316,16 @@ and simply never starts the timer.
   title_key).
 - Candidates: expected-episode prior (Arc-downloaded files; applied as a
   bounded bonus so it can never beat a title that says otherwise), fuzzy
-  search over the local cache, and a catalogue search (AniList → MAL).
+  search over the local cache, then (M15.5) the **offline catalogue** — up to
+  `OFFLINE_HITS` = 12 hits, materialised as `anime` rows — and a live catalogue
+  search (AniList → MAL) **only when the offline search returned nothing**.
+  Offline first because release groups write in manami's synonym vocabulary:
+  "Mushoku Tensei S3" is one of its names and is a string no live search
+  matches. The offline pool is wider than the live one (12 vs 5) because its
+  ranking leads with exact-name holders and a franchise's earlier seasons all
+  list the base title as a synonym, so five hits cut the numbered sequel off.
+  The scoring, the threshold and the "below it, review — never auto-link a
+  guess" rule are untouched; `origin` is recorded in the reasons, never scored.
 - Score weights: title 0.55, episode plausibility 0.20, season/sequel
   agreement 0.15, format 0.05, year 0.05. Non-exact title matches are
   capped at 0.88; an exact `title_key` match scores 1.0. Confidence is the
@@ -788,9 +829,10 @@ outage skips that episode for this sweep only. Admin:
   breaker opens after a failure and skips AniList for 5 minutes (probing on
   the next call after that), so an outage never costs a timeout per request.
   If both fail: 502 `catalogue is unavailable`.
-- **Search is local first, then live** (`catalog/local.py`, M15). The cached
-  `anime` rows are matched before the upstream call and put in front of the
-  live page: the query is split on whitespace and every word must appear, as a
+- **Search is local, then offline, then live** (`catalog/local.py` +
+  `catalog/offline/search.py`, M15 / M15.5). The cached `anime` rows are
+  matched before the upstream call and put in front of the live page: the
+  query is split on whitespace and every word must appear, as a
   case-insensitive `ILIKE` substring, in `title_romaji`, `title_english` or the
   `synonyms` JSONB cast to text — not necessarily the same field for each word.
   `%` and `_` in the query are escaped. Ordering: exact title match, then
@@ -802,6 +844,17 @@ outage skips that episode for this sweep only. Admin:
   upstream is a 502. Why: with AniList disabled, MAL's search matches whole
   words from the start of a title, so "jobless reincarnation" found nothing
   while the show sat cached, on the owner's list, with an episode downloading.
+  **Then the offline catalogue** (M15.5): the same word-by-word rule over
+  `offline_anime.search_text` (title + every synonym, lowercased, trigram GIN),
+  ranked exact name → prefix → `score DESC NULLS LAST` → type (TV/MOVIE/ONA
+  ahead of OVA/SPECIAL) → episodes → id. Exact/prefix are judged against the
+  whole name list, not the title alone, because manami publishes one romaji
+  title and the English name is a synonym. Those hits are **materialised as
+  `anime` rows** (`offline/materialise.py`) so each has an internal id its card
+  can link to, and entries carrying neither an AniList nor a MAL id are
+  dropped. The two local blocks together are capped at 20 (`PRE_LIVE_LIMIT`),
+  so the offline block only fills what the cache left. A 502 now needs *both*
+  local tables empty on a failed upstream.
 - Breakers are per API process (on `app.state`) and per job run (a fresh
   breaker per scheduled job, so each sweep re-probes a source that was down).
 - A cached row is served when a source reports the id as not found, so a
@@ -821,19 +874,42 @@ outage skips that episode for this sweep only. Admin:
   racing the reconcile job) converge on one row.
 - Identity: `anime.id` is internal. Upserts look up by `anilist_id`, then by
   `mal_id`; AniList payloads carry `idMal`, so an AniList upsert attaches to
-  a MAL-first row instead of creating a second one. `detail_source` records
-  which source last filled the detail columns; MAL data never overwrites
-  AniList-sourced detail, AniList always overwrites MAL-sourced detail.
+  a MAL-first row instead of creating a second one. Since M15.5 a payload
+  carrying only one of the two ids has the other **filled from the offline id
+  map before the lookup** (`offline/ids.py`, Fribb first then manami's parsed
+  cross-ids), so a MAL-found show lands on the row AniList made — and the
+  other way round — with no network at all. Only a null id is ever filled, and
+  an id two map rows disagree about is declined rather than guessed.
+  `detail_source` records which source last filled the detail columns; MAL data
+  never overwrites AniList-sourced detail, AniList always overwrites
+  MAL-sourced detail.
+- Source strength for rule 3 is `SOURCE_STRENGTH` = AniList, MAL, **offline**
+  (`catalog/source.py`); `SOURCE_NAMES` stays the two *live* sources
+  `CatalogService` tries and reports on. So an offline-materialised row fills
+  nulls only, never sets `refreshed_at` or `detail_source` (opening it still
+  triggers a real fetch), and the first live payload for the show overwrites
+  every column it wrote. `synonyms` and `studio` are written by the
+  materialiser where the row has none — the synonym list is what makes the
+  next local search and the filename matcher find the show.
 - MAL-sourced episodes: `air_at` synthesised from `start_date` + broadcast
   weekday/time (JST) for 1..num_episodes, `air_at_estimated = true`; AniList
   schedule data replaces them and clears the flag.
-- Jobs: `catalog_reconcile` (hourly when AniList is healthy: fill missing
-  `anilist_id` via `Media(idMal:)`), `catalog_season_sweep` (daily at 03:30
+- Jobs: `catalog_reconcile` (hourly; since M15.5 it first fills missing
+  `anilist_id` from the offline id map for up to 500 MAL-only rows with no
+  network and no health gate — the pass that works *during* the outage that
+  created those rows — and only then, when AniList is healthy, asks
+  `Media(idMal:)` about the leftovers), `catalog_season_sweep` (daily at 03:30
   UTC, and at worker start when the current season has no cached rows:
   upsert the current and next season's summaries from whichever source is
   up, including `nextAiringEpisode`; MAL-sourced airing shows get a
   synthesised `next_airing` from their broadcast slot, marked
-  `estimated`, episode number unknown).
+  `estimated`, episode number unknown). When **both live sources fail** for a
+  season the sweep seeds it from `offline_season()` instead (M15.5): the
+  titles, as `source="offline"` summaries with no `next_airing` and no
+  episodes, so the season page lists them and the schedule shows them
+  unscheduled until a source answers again (FR-C7). The fallback lives in the
+  sweep rather than inside `CatalogService`, which is a composite of two HTTP
+  sources and holds no session — and is the only caller of `season()`.
   After the summary upsert the sweep enqueues a detail refresh (which
   brings the airing schedule) for every current-season TV/TV_SHORT/ONA row
   with no `next_airing` and no episode rows, spaced 5 s, max 60 per sweep,
@@ -843,10 +919,181 @@ outage skips that episode for this sweep only. Admin:
   one; AniList blobs always replace MAL ones. The schedule exposes
   `next_at_estimated` so the UI can mark synthesised times.
 - Schedule placement: a `next_airing` older than 7 days is ignored (hiatus)
-  and the row falls back to its last real episode air time. The aired rule
+  and the row falls back to its last real episode air time (the *highest-
+  numbered* episode with one, not `max(air_at)`). The aired rule
   (`air_at <= now`, estimated dates count, RELEASING boundary, FINISHED
   fallback) lives in one place, `catalog/airing.py`, used by the show page
   and by behind-by.
+- **Airing sanity (2026-09-12).** Two rules in `catalog/airing.py` sit over the
+  stored dates, because both sources publish ones that cannot be true: a
+  `FINISHED` show has no future episodes (every episode counts as aired
+  whatever its `air_at`), and an episode dated *after* a higher-numbered one is
+  non-monotonic — it is reported `air_at_estimated` (the client's "est."
+  marker) and counts as aired by the earlier of its own date and the next
+  episode's. Derived, never written: the row keeps the date the source
+  published, so the next refresh can still correct it. Every reader of
+  aired-ness gets both for free — show page rows, behind-by, the acquisition
+  window, `aired_episodes` — since all of them already go through
+  `aired_through`/`is_aired`. Found on One Room 3rd Season (AniList 205068,
+  MAL 64683): `FINISHED`, episode 3 dated 2026-09-27 between episodes that
+  aired in August and early September.
+
+### 5.0a Offline catalogue (M15.5)
+
+Two public datasets, imported weekly into `offline_anime` and `offline_ids`,
+so that search, filename matching and id mapping have a source that **cannot be
+unreachable** (FR-C6). It exists because AniList suspended its third-party API
+for three days in September 2026 and took all three with it.
+
+- **Sources.** manami's `anime-offline-database` — one zstd-compressed JSONL
+  release asset, ≈ 6 MB compressed / 62 MB raw, ≈ 41.5k anime, every
+  alternative title each one has ever been released under — and Fribb's
+  `anime-lists` (`anime-list-full.json`, ≈ 7.5 MB), the cross-id map that adds
+  TMDB series + season, TVDB and IMDb. Neither needs a key. `OFFLINE_MANAMI_URL`
+  points at `releases/latest`, deliberately: the point of a weekly job is that
+  it picks up the week's release.
+- **Download** (`catalog/offline/download.py`) streams to a temporary file
+  under `DATA_DIR/offline`, hashing as it goes (sha256, 60 s timeouts, 1 MiB
+  chunks), and deletes it afterwards whatever happens. Nothing holds either
+  file in memory. The reader sniffs zstd's frame magic rather than trusting a
+  file name, which is what lets the test fixture be a plain `.jsonl` slice.
+- **Parse** (`parse.py`) is pure functions, and the hard part is leniency:
+  every field in both files is optional in practice. `animeSeason.year` is null
+  for 1,557 titles; `themoviedb_id` is `{"tv": N}`, `{"movie": [N, …]}`, null,
+  or a bare integer in older entries; `imdb_id` is a list now and was a string
+  before; manami carries records with no MyAnimeList source at all. Ids are
+  parsed out of the entry's `sources` URLs (anilist.co, myanimelist.net,
+  kitsu.app **and** the old kitsu.io, anidb.net; the other six hosts are
+  ignored). An unreadable line is skipped, not fatal. The only thing that
+  disqualifies a record is having no title.
+- **Replace-on-import** (`importer.py`), in **one transaction** per source:
+  `DELETE` every row, insert the new ones in chunks of 2000, upsert the
+  `offline_imports` row, commit. `DELETE` rather than `TRUNCATE` on purpose —
+  `TRUNCATE` takes an `ACCESS EXCLUSIVE` lock and would block every concurrent
+  reader; this way a reader sees last week's rows until the commit and this
+  week's after it, never a half-replaced table. An import whose checksum
+  matches the loaded one is skipped entirely (unless the table is empty, which
+  is a state to repair rather than preserve). Measured on the real files: 37 s
+  for a full import of 41,537 + 32,281 rows, 2.4 s when nothing changed.
+- **Independent sources.** `import_offline_catalogue` imports manami and Fribb
+  in separate transactions with separate error handling: one failing keeps its
+  existing rows and does not stop the other, and the job raises only when
+  *both* failed — a job that always succeeded would never be retried, and one
+  that failed when half worked would redo the half that did.
+- **Schedule.** Weekly cron, Monday 03:30 UTC (`arc/worker.py`), plus once at
+  start-up when `offline_imports` is empty: a deployment that has never
+  imported would otherwise have no offline catalogue for up to seven days,
+  which is exactly the window it exists to cover. `python -m arc.cli
+  import-catalogue` runs it inline for an operator who does not want to wait
+  (and exits 1 if *either* source failed — stricter than the job, because a
+  person is watching).
+- **Staleness.** `GET /api/catalogue/offline` reports the loaded versions, the
+  row counts and `stale` — true when manami has never been imported or its
+  import is older than `OFFLINE_CATALOGUE_STALE_DAYS` (14, two missed weekly
+  runs). The admin **Storage tab** shows it: one row per source with its
+  version (Fribb's ETag truncated to 12 characters), row count and relative
+  age, the weekly schedule, and — when `stale` — the line that names
+  `python -m arc.cli import-catalogue`.
+- **What reads them** (M15.5 bullets 2 and 3, implemented): `offline/search.py`
+  (`offline_search` for the search endpoint and the matcher, `offline_season`
+  for the sweep), `offline/materialise.py` (offline row → `anime` row, as the
+  weakest source), `offline/ids.py` (the AniList ↔ MAL map used by the cache
+  upsert and by `catalog_reconcile`). manami's vocabulary is mapped on the way
+  in: `ONGOING`→`RELEASING`, `UPCOMING`→`NOT_YET_RELEASED`, `UNKNOWN`→null,
+  season `UNDEFINED`→null, `episodes: 0`→null, `score`×10 → `average_score`,
+  `picture`→`cover_url`, `studios[0]`→`studio` (title-cased only when the
+  dataset lowercased the whole name). The title goes to `title_romaji` and
+  `title_english` is left null — nothing guesses which synonym is the English
+  one. The TMDB enrichment the id map also exists for (bullet 4) is separate.
+
+### 5.8 TMDB enrichment (M15.5)
+
+AniList is the best catalogue Arc has and it is still missing things: a show
+that arrived through MAL during an outage has a 230 px cover and no banner, and
+even an AniList row often has no episode stills and no staff beyond the studio.
+TMDB has all three. It is reached **by id only** — Arc never searches it — over
+the cross-id map of §5.0a: `anime` → `offline_ids` (by AniList id, else MAL id)
+→ `tmdb_tv_id` (+ `tmdb_season`) or `tmdb_movie_id`. AniList publishes no TMDB
+id at all, which is why the offline import is a prerequisite for this.
+
+- **What is filled.** `anime.banner_url` from the backdrop (`w1280`),
+  `anime.cover_large_url` from the poster (`w780`), `episodes.still_url` from
+  each episode's still (`w300`) and `episodes.title` from its name, and
+  `anime.credits` from the series crew mapped onto the same six roles the
+  AniList path produces (`services/catalog/credits.py`). Image sizes and the
+  `https://image.tmdb.org/t/p/` base are constants, not a `/configuration`
+  call: that answer has not changed in a decade and asking would be a request
+  per sweep to learn a constant.
+- **Never overwrite** (cache rule 3, one source further down). TMDB is the
+  weakest source Arc has, so it fills nulls and touches nothing else.
+  `cover_url` is not its column — MAL's 230 px cover stays. `credits` is
+  filled where there is nothing and *completed* where a weaker source left only
+  the studio row; a column `detail_source = anilist` has filled is AniList's
+  outright, however short its answer. An episode title or still is written only
+  where there is none, and no episode row is ever created (rule 4).
+- **Which season.** `offline_ids.tmdb_season` when the series has it. Failing
+  that: the season whose `air_date` year is `anime.season_year`, and among
+  those the one whose `episode_count` is closest to `anime.episodes`; failing
+  *that*, a series with exactly one (non-special) season whose count agrees.
+  Anything else resolves to no season, and the show gets its backdrop and
+  poster with no stills — a still from the wrong cour is worse than none.
+- **Crew.** TMDB's job strings are an exact-match table
+  (`tmdb/enrich.py::CREW_JOBS`), separate from AniList's
+  (`anilist/extras.py::ROLE_CREDITS`) only because the two spell the same jobs
+  differently ("Original Music Composer" vs "Music"); both match the job
+  *whole*, since "Music Director" is neither the director nor the composer.
+  `aggregate_credits` rather than `credits`, because its per-job
+  `episode_count` is what tells the series director (38 episodes) from the
+  twenty-two people credited as "Director" on two each. Two names per role.
+- **Jobs and pacing.** `tmdb_enrich` (one show) and `tmdb_enrich_all` (nightly
+  at 04:10 UTC, after the catalogue sweep). The sweep runs **two passes** in
+  order, capped at 300 shows between them and spacing its children 2 s apart:
+  1. **Watched** shows that the id map can reach and that still have a hole.
+     Full enrichment: three requests, art + stills + credits. "Watched" is
+     three ways in, any one of which is enough (`_worth_enriching`): a list
+     entry in `FOLLOWED_STATUSES`, **any user's `watch_progress` on an episode
+     of the show**, or **an episode Arc holds ready** (`episodes.state =
+     ready`, or a `renditions` row with `ready_at` set). The last two were
+     added on 2026-09-12: Arc plays what it holds whether or not the show was
+     ever added to a list, and a show watched off-list could otherwise never
+     gain a single episode still.
+  2. **This season's and next season's** shows (`catalog/seasons.py`) that the
+     id map can reach and that have no backdrop or no key-art poster, most
+     popular first (`popularity DESC NULLS LAST`). **Art only**: one
+     `/tv/{id}`, backdrop + poster, no season and no credits call —
+     `{"anime_id": N, "art_only": true}` in the payload, honoured by `_fetch`
+     and by `plan_enrichment(..., art_only=True)`.
+
+  Pass 2 exists because the Home hero offers shows the viewer does *not*
+  follow, so under the followed-only rule nothing it showed could ever be
+  enriched (owner, 2026-09-12). The client paces at 4 req/s and shares one
+  process-wide breaker, so a 429 or a 5xx stops the rest of the night instead
+  of timing out three hundred times.
+- **On demand.** `catalog_refresh` queues one enrichment when it leaves a
+  followed show without a banner, without key art, or with an aired episode
+  that has no still. `GET /api/home` queues two kinds, in this order and
+  waiting for neither:
+  1. **Full** enrichments (`enqueue_episode_stills`, up to `STILL_LIMIT` = 8)
+     for the shows on the page's 16:9 shelves — Continue watching, then Ready
+     to watch — whose card episode has no `still_url` and which the id map can
+     reach. The nightly sweep reaches these shows too, but "tonight" is the
+     wrong answer for the card somebody is looking at now (owner, 2026-09-12).
+  2. **Art-only** enrichments for up to 12 shows of this or next season that
+     have *no* artwork at all — the pool the client's hero picks its six
+     slides from, ranked the same way.
+
+  Each is one SELECT that also filters out anything already queued, and
+  returns nothing once the artwork is in. Everything deduplicates on
+  `tmdb_enrich:<anime_id>`, so a show refreshed hourly (or a home page opened
+  every ten minutes) does not queue an enrichment an hour; where two callers
+  want the same show the richer job is the one that stands, which is why the
+  watched pass runs before the season pass and the stills before the hero's
+  art.
+- **No key, no feature.** Both handlers log one INFO line and return when
+  `TMDB_API_KEY` is unset; `config_check` says so once at startup in prod
+  (warning, not error). `GET /api/health` publishes `tmdb_enabled`, and the
+  client shows TMDB's required attribution line under the Home shelves only
+  when it is true.
 
 ## 5b. API surface (kept current)
 
@@ -867,6 +1114,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/settings`, `PUT /api/settings` | admin | the rules editor (FR-D2, FR-T5): `{values, defaults, overrides[{anime_id, title, preferred_groups, resolution}]}` for every `DEFAULT_SETTINGS` key. PUT takes a partial object of those keys and writes only what it names; 422 `{detail: [{loc: ["body", key], msg, type}]}` for an unknown key or a refused value (resolutions ∈ 2160p/1080p/720p/480p and fallback ≠ preferred — enforced only when the patch names one of the two, so a hand-edited collision does not block unrelated edits — N 0..10, G and D 0..365, ≤ 20 groups of ≤ 64 chars de-duplicated case-insensitively, languages 2–8 lowercase letters/dashes). Writing `acquisition_paused` goes through the same `set_paused` the pause button uses, and clearing it enqueues `compute_wants` in the same transaction, so unpausing from the editor and from the button do the same thing. Overrides are read-only here; editing them is M16 |
 | `GET /api/anime/search?q=&page=` | any | **local hits first, then the live search** (§5.0): cached rows matching every word of `q` in a title or synonym, ordered exact/prefix title → followed → popularity, capped at 20 and merged on `page=1` only; the live results follow, de-duplicated by internal id, and are cached. `page`/`has_next` describe the live half. Local hits with the catalogue down is a 200; 502 only when the local half is empty *and* upstream failed. Each `AnimeSummary` carries `cover_large_url` (nullable) beside `cover_url`, so a card prefers the sharp key art and falls back, plus `popularity` and `average_score` (both nullable; real summary columns, straight off the search — `average_score` is 0–100 whichever source answered, MAL's 0–10 scaled on the way in), plus `genres[]`, `banner_url` and `studio` — **read off the cached row, not the search payload**: AniList's search fragment does not carry them, so they are empty/null on a show no detail fetch has reached and fill in the moment one does. They are deliberately *not* in the summary write path; a search payload's empty genres would otherwise blank them (cache rule 2) |
 | `GET /api/catalog/status` | admin | source health and breaker state |
+| `GET /api/catalogue/offline` | admin | offline-catalogue import status (M15.5, §5.0a): `{sources: [{source, version, imported_at, rows, checksum}] (newest first), stale, anime_rows, id_rows}`. `stale` is manami's alone — the id map without the titles is not a catalogue — and is true when it has never been imported or is older than `OFFLINE_CATALOGUE_STALE_DAYS`. Reads three counts and nothing else; the import itself is a job |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
 | `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, watched) |
@@ -893,15 +1141,15 @@ Mutating requests must carry an allowed `Origin`.
 
 | Service | Auth | Rate/limits | Notes |
 |---|---|---|---|
-| AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
+| AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). **Interactive calls do not wait on 429**: the app's catalogue is built with `wait_on_rate_limit=False` (`create_catalog`), so a 429 on a search or a show page raises `SourceRateLimited` at once and falls straight through to MAL/offline instead of holding the request open — and, being a burst limit rather than an outage, it leaves the breaker closed, only noting a per-client "rate-limited until" so the next interactive call inside the window skips AniList without a request. The worker's `catalog_for()` keeps the wait. Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
 | Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 5 query forms per episode (romaji and english full titles, plus season-stripped base title with `S<k>`, roman numeral, and plain), ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows differently (`Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
 | qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
-| Offline catalogue (M15.5, planned): manami `anime-offline-database` weekly release (`anime-offline-database.jsonl.zst`, ≈ 62 MB / 6 MB) + Fribb `anime-lists` (`anime-list-full.json`, ≈ 7.5 MB) | none | one download each per week (GitHub releases / raw) | Loaded by a weekly job into `offline_anime` and `offline_ids` (replace-on-import, release tag stored). First stop for search, filename matching and cross-id mapping (AniList ↔ MAL ↔ Kitsu ↔ AniDB ↔ TMDB series+season). Seeds season lists when live sources are unavailable. |
-| TMDB `https://api.themoviedb.org/3` (M15.5, planned) | `TMDB_API_KEY` (free) | ~50 req/s; enrichment job paces at 4 req/s | Nightly enrichment of followed shows via the id map: backdrop → `banner_url`, poster → `cover_large_url`, episode stills/titles → `episodes.still_url`/`title`, credits. Fills only what AniList has not provided (cache rule 3). UI footer carries TMDB attribution. |
+| Offline catalogue (M15.5, **implemented — import, search, filename matching, id mapping and season seeding; TMDB follows**): manami `anime-offline-database` weekly release (`anime-offline-database.jsonl.zst`, ≈ 6 MB / 62 MB raw, 41,537 entries) + Fribb `anime-lists` (`anime-list-full.json`, ≈ 7.5 MB, 32,281 mappable entries) | none | one download each per week (Monday 03:30 UTC), 60 s timeouts, streamed to disk | Loaded by `import_offline_catalogue` into `offline_anime` and `offline_ids` (replace-on-import in one transaction; manami's release tag and Fribb's ETag stored in `offline_imports`, and a matching sha256 skips the work). Decompressed with the stdlib `compression.zstd` — no dependency. One source failing keeps its own rows and does not stop the other. `GET /api/catalogue/offline` reports version, age and counts; `arc.cli import-catalogue` runs it now. It **is** the first stop for search (§5.0, behind the cached rows and ahead of the live page), for filename matching (§5.2a, ahead of the live catalogue search), and for cross-id mapping (AniList ↔ MAL, filled into the cache upsert and into `catalog_reconcile` with no network); and it seeds the season when both live sources fail (FR-C7). Hits are materialised as `anime` rows written as the weakest source, so a live payload overwrites everything they wrote. The TMDB ids it also carries (series + season) are bullet 4. |
+| TMDB `https://api.themoviedb.org/3` (M15.5, **implemented**) | `TMDB_API_KEY` (free, v3, sent as `api_key=`) | ~50 req/s; the client paces at 4 req/s, one process-wide breaker on 429/5xx/401, two retries on 5xx | Nightly `tmdb_enrich_all` (04:10 UTC; watched shows in full — on a list, with playback progress, or holding a ready episode — then this and next season's shows art-only, most popular first) + on-demand from `catalog_refresh` and from `GET /api/home` (full, for the shelf cards missing a still; art-only for the hero's pool), reached by id through `offline_ids` (§5.0a). Three calls per full enrichment and one per art-only one: `/tv/{id}` (or `/movie/{id}`), `/tv/{id}/season/{n}`, `/tv/{id}/aggregate_credits`. Fills `banner_url` (backdrop w1280), `cover_large_url` (poster w780), `episodes.still_url` (w300) / `title`, and `credits` — only where they are null, and never a column AniList filled (cache rule 3, §5.8). Season from `offline_ids.tmdb_season`, else the year + episode-count heuristic; no plausible season means art only. `/api/health` publishes `tmdb_enabled` and the Home footer carries TMDB's attribution line. |
 
 ## 7. Security
 
@@ -1043,7 +1291,11 @@ requeued, default 7200; transcodes heartbeat their lock),
 `CORS_ALLOWED_ORIGINS` (comma list, optional; dev origins are added
 automatically when `ENV` is not prod), `MAL_OAUTH_URL`
 (https://myanimelist.net, the authorize/token host), `MAL_IMPORT_INTERVAL_HOURS`
-(6). `FERNET_KEY` must be set before anyone links MAL and is not rotatable
+(6), `OFFLINE_MANAMI_URL` / `OFFLINE_FRIBB_URL` (the two public datasets of
+§5.0a; overridable for a mirror or a test), `OFFLINE_CATALOGUE_STALE_DAYS` (14), `TMDB_API_KEY` (unset; a free v3 key from
+themoviedb.org/settings/api turns on the enrichment of §5.8 — without it shows
+render whatever art AniList and MAL provided, and no attribution line is
+shown). `FERNET_KEY` must be set before anyone links MAL and is not rotatable
 without re-linking every account. In prod, `arc.main` and `arc.worker` log
 an ERROR per production-required key that is missing or still a
 placeholder, and `/api/health` reports `config_warnings` (a count).
@@ -1070,8 +1322,9 @@ is what `GET /api/health` counts as `config_warnings`; a healthy deploy reports
 0 — `LLM_MATCH_SUGGESTIONS` on with no provider in the chain is one of these,
 because the flag is an operator saying the feature should be on. **WARNING**
 means an optional feature is off and does *not* count: today, the
-recommendations key being unset, and a `RECS_MODEL` that does not look like
-the selected `RECS_PROVIDER`'s. "Is anything configured" is
+recommendations key being unset, a `RECS_MODEL` that does not look like
+the selected `RECS_PROVIDER`'s, and `TMDB_API_KEY` being unset (§5.8: key art
+and stills are simply not enriched, which is invisible without the line). "Is anything configured" is
 `config_check.model_chain_configured`, a deliberate restatement of
 `recs.factory.chain_entries` (the factory imports `is_placeholder` from
 config_check, so importing it back would be a cycle) with a test pinning the
@@ -1098,6 +1351,17 @@ two together.
   eval itself is five frozen runs (list + pool + recorded answer) asserting
   what FR-R3/FR-R4 imply: 3–5 picks, all from the pool, none already watched,
   every case naming a show from the user's history.
+- Offline catalogue (M15.5): parsing is tested against a **real slice** of both
+  files — `tests/fixtures/offline/{manami-slice.jsonl,fribb-slice.json}`, 29
+  records captured from release `2026-27` by `scripts/capture_offline.py`,
+  chosen for coverage (the five Mushoku Tensei entries a matcher has to tell
+  apart, Frieren, three films, an entry with no season year, one with no
+  MyAnimeList source at all, a film whose TMDB id is a list, and an entry with
+  no TMDB id). A fixture invented from the documentation would agree with the
+  documentation; these files' interesting shapes are all things somebody else
+  chose. The import, the job and the CLI run against a real Postgres with the
+  download behind an `httpx.MockTransport`; nothing in the suite fetches
+  either dataset.
 
 ## 11. Decision log
 
@@ -1390,6 +1654,19 @@ two together.
 - 2026-09-11 — M15.5 approved (owner): offline catalogue import (manami DB +
   Fribb id map) as the first stop for search/matching/ids; TMDB enrichment for
   art, stills and credits behind AniList. Kitsu not adopted.
+- 2026-09-12 — M15.5 bullets 2 and 3 as built: the offline catalogue answers
+  search (behind the cached rows, ahead of the live page), is the *first*
+  candidate source for filename matching (the live search runs only when it
+  finds nothing), fills the missing AniList/MAL id in every cache upsert and in
+  `catalog_reconcile`, and seeds a season when both live sources fail. Its rows
+  are materialised into `anime` as the **weakest** source
+  (`SOURCE_STRENGTH = anilist, mal, offline`): nulls only, no `refreshed_at`,
+  no `detail_source`, so opening one still fetches and the first live payload
+  overwrites everything it wrote. The season fallback lives in
+  `catalog_season_sweep` rather than in `CatalogService`, which composes two
+  HTTP sources, holds no session, and has exactly one caller of `season()`.
+  Offline gets its own strength tuple rather than joining `SOURCE_NAMES` so
+  that `GET /api/catalog/status` keeps reporting the two live sources only.
 - 2026-09-11 — M15 shell: the left sidebar becomes a top toolbar with an avatar
   menu, and phones get a bottom tab bar with a "More" sheet (owner decisions,
   2026-09-11). The palette in `client/src/index.css` is replaced wholesale by
@@ -1478,3 +1755,110 @@ two together.
   they read as null in every AniList-driven test until
   `scripts/capture_anilist.py` can run again (AniList has been 403
   "temporarily disabled" all day).
+- 2026-09-12 — M15.5 part 1 landed: the offline catalogue import (§5.0a).
+  Three tables (`offline_anime`, `offline_ids`, `offline_imports`), a weekly
+  job, a Monday 03:30 UTC cron with a run-now-if-never-imported startup probe,
+  `arc.cli import-catalogue`, and `GET /api/catalogue/offline`. Decisions made
+  in the doing: **replace with `DELETE`, not `TRUNCATE`** (an `ACCESS
+  EXCLUSIVE` lock would block the readers this table exists for); **sha256 of
+  the downloaded file** as the skip condition rather than the release tag,
+  because a tag tells you nothing about a file served from a branch; **the two
+  sources fail independently** and the job raises only when both did;
+  **`compression.zstd` from the 3.14 standard library**, so a 62 MB dataset
+  costs no new dependency; **`search_text` denormalised with a pg_trgm GIN
+  index** (`CREATE EXTENSION` in the migration — measured: an `ILIKE '%…%'`
+  over 41,537 rows is a 1.9 ms bitmap index scan); and **`offline_ids` kept
+  separate from `offline_anime`**, because they are two files with two
+  cadences and two coverages, and joining them at import time would mean
+  choosing which side's absence wins. Nothing reads either table yet.
+- 2026-09-12 — M15.5 part 2 landed: TMDB enrichment (§5.8, `services/tmdb/`).
+  Reached by id through `offline_ids` only — AniList publishes no TMDB id — and
+  held to cache rule 3 one source further down: it fills `banner_url`,
+  `cover_large_url`, `episodes.still_url`/`title` and `credits` where they are
+  null, never touches `cover_url`, and never a column `detail_source = anilist`
+  has filled, however short that answer is. Season from
+  `offline_ids.tmdb_season`, else the air-date year plus the closest episode
+  count; no plausible season means art without stills, because a still from the
+  wrong cour is worse than none. Crew from `aggregate_credits` with an
+  exact-match job table and an episode-count ranking, since TMDB credits
+  twenty-two people as "Director" on two episodes each. Nightly
+  `tmdb_enrich_all` at 04:10 UTC plus an on-demand enqueue from
+  `catalog_refresh`, deduplicated on `tmdb_enrich:<anime_id>`. `TMDB_API_KEY`
+  unset is a *warning*, not an error: the job no-ops and the deployment is
+  complete without it. `/api/health` gained `tmdb_enabled`, which is what the
+  Home footer's TMDB attribution line follows.
+
+- 2026-09-12 — AniList staff roles are matched **whole** against a table of
+  known spellings (`anilist/extras.py::ROLE_CREDITS`), replacing the keyword +
+  qualifier-blocklist matcher. AniList's vocabulary builds new jobs by adding
+  words to an existing one, so a blocklist is a race the credit always loses:
+  a re-capture of the Frieren fixture brought "Action Director" (read as the
+  director) and "Original Work Assistance" (read as the author), neither of
+  which the list knew. A role AniList spells in a way the table does not know
+  is dropped, as an unmapped role always was; a combined credit
+  ("Director, Series Composition") is split on `,` `/` `&` `and` and each half
+  matched in its own right. The six credits and their order are unchanged.
+- 2026-09-12 — **TMDB art for the hero, not only for followed shows** (owner:
+  "make sure we are using the new art from TMDB, the hero posters are still
+  bad"). The nightly sweep only ever selected *followed* shows, and the Home
+  hero offers shows the viewer does not follow — recommendation picks and the
+  current season — so on the dev database 203 of Summer 2026's 210 rows had no
+  banner and all 210 had no `cover_large_url`, 68 of them mapped to a TMDB id
+  nothing would ever fetch. `tmdb_enrich_all` now runs a second pass over this
+  and next season's mapped shows that lack key art, ranked by `popularity DESC
+  NULLS LAST`, and `GET /api/home` queues the same thing for the top 12 shows
+  of the hero's own pool that have no artwork at all. Both use a new
+  **art-only** mode (`{"art_only": true}`): one `/tv/{id}` for the backdrop and
+  the poster, no season and no credits call, because stills and crew are for a
+  page somebody opens rather than for a frame they scroll past. `SWEEP_LIMIT`
+  200 → 300 so a season (~200 shows) cannot be crowded out by the followed
+  pass. Rule 3 is untouched: TMDB still only fills nulls, and the one dedupe
+  key per show means the richer followed job always wins. The client needed no
+  change — `HeroFrame` already prefers `banner_url` → `cover_large_url` →
+  `cover_url` and clamps a 16:9 backdrop to its 21:9 floor, which crops it
+  rather than letterboxing it.
+- 2026-09-12 — **Airing sanity rule** (§5.0, owner). `catalog/airing.py` now
+  reads two impossible-data rules over the stored dates: a `FINISHED` show has
+  no future episodes, and an episode dated after a higher-numbered one is
+  flagged estimated and airs with its neighbour. Both are derivations — the
+  stored `air_at` is never rewritten, so a corrected upstream still lands — and
+  both reach every caller through `aired_through`/`is_aired`, which the show
+  page, behind-by, the acquisition window and `aired_episodes` already shared.
+  Two places that read air times *outside* that pair were moved onto the same
+  reading: behind-by's `latest_aired_at` (through `effective_air_at`) and the
+  schedule's weekday placement, which now takes the last episode's date rather
+  than `max(air_at)` so a stray date cannot move a show to another weekday. The
+  cost is one behaviour change: an episode genuinely delayed past a later one
+  is now wanted with it rather than left behind, which is the better failure —
+  broadcasts do not overtake each other, so the case is a typo far more often
+  than it is a delay.
+- 2026-09-12 — **Interactive AniList calls do not sleep off a 429** (§6, owner).
+  `AniListClient(wait_on_rate_limit=False)` raises `AniListRateLimited` instead
+  of waiting out `Retry-After`; `AniListSource` maps it to a new
+  `SourceRateLimited(SourceUnavailable)`, which `CatalogService` falls back on
+  like any unavailability but deliberately does **not** open the breaker for
+  300 s — a burst limit clears in seconds and costs no timeout to discover, so
+  standing AniList down for five minutes would be the larger outage. The client
+  keeps a per-instance "rate-limited until" so the next interactive call inside
+  the window skips the request entirely. `arc/main.py` passes `False` (a user
+  is waiting on every call the app's catalogue makes); the worker's
+  `catalog_for()` keeps the wait, having nowhere better to be. Found when a
+  search sat for 3 s before falling back to MAL.
+- 2026-09-12 — The httpx logger is held at WARNING: it prints request URLs with query strings, and the TMDB key rides in one (orchestrator, small call).
+- 2026-09-12 — **The Continue watching card frames a poster instead of zooming
+  into a banner** (owner: "continue watching posters need adjustment"; §2,
+  §5.8). The 16:9 episode card fell back to the show's `banner_url` when the
+  episode had no still, and an AniList banner is ~1900 × 399: `object-cover` in
+  a 279 × 157 box showed a 3× zoom of a sliver of it. The card's art order is
+  now still → banner *only if its measured ratio is ≤ 2.2* (a TMDB backdrop
+  passes, an AniList strip does not) → the poster treatment, which is
+  `HeroFrame`'s poster hero extracted into `ui/PosterWash.tsx` and shared by
+  both. The ratio comes from `Artwork`'s `onNaturalSize` on an off-frame copy,
+  and the poster treatment holds the card until it is known, so nothing flashes.
+  The root cause of the missing still was the enrichment's eligibility rule:
+  TMDB stills only ever reached shows on somebody's *list*, and this one was
+  being watched off-list. A show is now worth a full enrichment if anyone has
+  `watch_progress` on an episode of it or Arc holds a ready episode of it, and
+  `GET /api/home` queues a full `tmdb_enrich` (bounded at 8, same dedupe key,
+  before the hero's art-only pass) for each shelf card whose episode has no
+  still. `lib/anime.ts::heroArt` went with it — nothing else used it.

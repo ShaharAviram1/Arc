@@ -10,6 +10,7 @@ import {
   Eyebrow,
   FOCUS_RING,
   HeroFrame,
+  PosterWash,
   Shelf,
   Skeleton,
 } from '@/components/ui'
@@ -18,7 +19,6 @@ import {
   catalogErrorMessage,
   episodeStateLabel,
   hasBanner,
-  heroArt,
   keyVisual,
   listErrorMessage,
   useMyList,
@@ -625,13 +625,100 @@ function tileLine(item: EpisodeItem): string {
 }
 
 /**
- * The 16:9 art for an episode: its own still, else the show's banner, else
- * the key visual. The last of those is 2:3 and will crop, which is still the
- * show's own artwork and beats a striped placeholder on the shelf people are
- * meant to press play from.
+ * Wider than this and a picture is a strip: an AniList banner is 1900 × 400,
+ * around 4.75:1, and `object-cover` in a 280 × 157 card shows a 3× zoom of a
+ * sliver of it — the "continue watching posters need adjustment" the owner
+ * reported on 2026-09-12. A TMDB backdrop is 16:9 and passes untouched.
  */
-function stillUrl(item: EpisodeItem): string | null {
-  return item.episode.still_url ?? heroArt(item.anime)
+const MAX_TILE_ASPECT = 2.2
+
+/** The card's own classes, on whichever frame the art rule lands on. */
+const TILE_ART =
+  'shadow-tile transition-transform duration-[240ms] ease-arc group-hover:-translate-y-[5px]'
+
+/**
+ * Loads a banner off-frame so its shape can be measured before anything shows
+ * it: the rule below needs the ratio of an image that has not loaded, and
+ * rendering it to find out is the zoomed strip the rule exists to prevent. An
+ * `Artwork` like any other — a copy the layout cannot see, reporting the one
+ * thing only the browser knows.
+ */
+function AspectProbe({
+  url,
+  onSize,
+}: {
+  url: string
+  onSize: (size: { width: number; height: number }) => void
+}) {
+  return (
+    <div aria-hidden className="pointer-events-none absolute h-0 w-0 overflow-hidden opacity-0">
+      <Artwork url={url} shape="free" className="h-px w-px" onNaturalSize={onSize} />
+    </div>
+  )
+}
+
+/**
+ * The 16:9 art for an episode, in the order it is worth showing:
+ *
+ * 1. the episode's own still, which is what the card is for;
+ * 2. the show's banner, **only if** it is no wider than
+ *    {@link MAX_TILE_ASPECT} — a TMDB backdrop, not an AniList strip;
+ * 3. otherwise the key visual, blurred into a wash with the crisp poster
+ *    framed inside it, the same treatment a hero with no banner gets.
+ *
+ * Until the banner's shape is known the poster treatment is what shows, so a
+ * card never flashes a zoomed strip on its way to the right answer. A show
+ * with no poster at all keeps the old behaviour — a cropped banner is still
+ * the show's own artwork, and beats a striped box on a shelf people press play
+ * from.
+ */
+function EpisodeArt({ item }: { item: EpisodeItem }) {
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null)
+
+  const still = item.episode.still_url ?? null
+  const banner = bannerArt(item.anime)
+  const poster = keyVisual(item.anime)
+  const progress = fractionWatched(item)
+
+  if (still !== null) {
+    return <Artwork url={still} shape="still" progress={progress} className={TILE_ART} />
+  }
+  if (poster === null) {
+    return <Artwork url={banner} shape="still" progress={progress} className={TILE_ART} />
+  }
+
+  const aspect = size === null ? null : size.width / size.height
+  if (banner !== null && aspect !== null && aspect <= MAX_TILE_ASPECT) {
+    return <Artwork url={banner} shape="still" progress={progress} className={TILE_ART} />
+  }
+
+  return (
+    <>
+      <PosterWash
+        poster={poster}
+        shape="still"
+        progress={progress}
+        padding="p-3"
+        align="center"
+        className={TILE_ART}
+      />
+      {banner !== null && aspect === null ? (
+        // Kept identical when the size has not actually changed, so React bails
+        // out: a ref callback is re-run on every render, and a fresh object
+        // each time would be a re-render that causes a re-render.
+        <AspectProbe
+          url={banner}
+          onSize={(next) => {
+            setSize((current) =>
+              current !== null && current.width === next.width && current.height === next.height
+                ? current
+                : next,
+            )
+          }}
+        />
+      ) : null}
+    </>
+  )
 }
 
 function EpisodeTile({ item }: { item: EpisodeItem }) {
@@ -643,12 +730,7 @@ function EpisodeTile({ item }: { item: EpisodeItem }) {
       aria-label={`${resuming ? 'Resume' : 'Play'} ${item.anime.title.preferred} episode ${String(item.episode.number)}`}
       className={cx('group block w-[280px] max-w-[78vw] rounded-art', FOCUS_RING)}
     >
-      <Artwork
-        url={stillUrl(item)}
-        shape="still"
-        progress={fractionWatched(item)}
-        className="shadow-tile transition-transform duration-[240ms] ease-arc group-hover:-translate-y-[5px]"
-      />
+      <EpisodeArt item={item} />
       <p className="mt-2.5 truncate text-[16px] font-medium text-[var(--arc-text)]">
         {item.anime.title.preferred}
       </p>
@@ -998,11 +1080,24 @@ export function Home() {
   )
 }
 
+/**
+ * TMDB's required attribution, verbatim from their terms of use.
+ *
+ * Text only: the logo is offered, not demanded, and a wordmark in the quietest
+ * line on the page would be louder than the credit deserves.
+ */
+const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB.'
+
 /** The API's own state, kept from the pre-M15 page: quiet, and last. */
 function Footer() {
+  const { data } = useHealth()
+
   return (
-    <p className="mt-[72px] text-[13px] text-[var(--arc-text-muted)]">
-      <HealthBadge />
-    </p>
+    <footer className="mt-[72px] text-[13px] text-[var(--arc-text-muted)]">
+      <p>
+        <HealthBadge />
+      </p>
+      {data?.tmdb_enabled ? <p className="mt-1">{TMDB_ATTRIBUTION}</p> : null}
+    </footer>
   )
 }

@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode, ListEntry, ListStatus, User
-from arc.services.catalog.airing import aired_episodes
+from arc.services.catalog.airing import aired_episodes, effective_air_at
 
 #: How far back "new this week" looks (FR-W1).
 NEW_WINDOW = timedelta(days=7)
@@ -120,8 +120,12 @@ async def behind_for_user(session: AsyncSession, user: User, *, now: datetime) -
         unwatched = [episode for episode in aired if episode.number > entry.progress]
         if not unwatched:
             continue
+        # Effective times, not stored ones: a source that dates episode 3 after
+        # episode 7 would otherwise put "aired 27 Sep" — a date in the future —
+        # at the top of a shelf sorted by exactly this value.
+        times = effective_air_at(aired)
         latest = max(
-            (episode.air_at for episode in aired if episode.air_at is not None),
+            (at for at in (times.get(episode.number) for episode in aired) if at is not None),
             default=None,
         )
         behind.append(

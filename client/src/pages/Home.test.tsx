@@ -31,7 +31,7 @@ import {
   type MockRoutes,
 } from '@/test/apiMock'
 
-const HEALTH = { status: 'ok', version: '0.1.0', env: 'dev' }
+const HEALTH = { status: 'ok', version: '0.1.0', env: 'dev', tmdb_enabled: false }
 
 /** Every shelf on the page asks for something; a test opts into the answers. */
 function renderHome(routes: MockRoutes) {
@@ -621,6 +621,80 @@ describe('Watch Now hero', () => {
   })
 })
 
+describe('the episode card’s art (owner, 2026-09-12)', () => {
+  /** The tile on "Continue watching", which is the card under test. */
+  function tile(): HTMLElement {
+    return within(shelf('Continue watching')).getAllByRole('link')[0] as HTMLElement
+  }
+
+  /** The off-frame copy of the banner the card measures before showing it. */
+  function probe(): HTMLImageElement {
+    return tile().querySelector(`img[src="${String(FRIEREN.banner_url)}"]`) as HTMLImageElement
+  }
+
+  /** jsdom decodes nothing: the intrinsic size is planted and the load announced. */
+  function load(image: HTMLImageElement, width: number, height: number): void {
+    Object.defineProperty(image, 'naturalWidth', { value: width, configurable: true })
+    Object.defineProperty(image, 'naturalHeight', { value: height, configurable: true })
+    fireEvent.load(image)
+  }
+
+  async function renderCard(episode: Partial<EpisodeOut> = {}): Promise<void> {
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          continue_watching: [
+            { ...CONTINUE_FRIEREN, episode: { ...CONTINUE_FRIEREN.episode, ...episode } },
+          ],
+        },
+      },
+    })
+    await screen.findByRole('heading', { level: 2, name: 'Continue watching' })
+  }
+
+  it('shows the episode’s own still when TMDB has one', async () => {
+    await renderCard({ still_url: 'https://example.test/still-5.jpg' })
+
+    const images = tile().querySelectorAll('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]).toHaveAttribute('src', 'https://example.test/still-5.jpg')
+    // Nothing to frame around: the still is the picture.
+    expect(tile().querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+
+  it('frames the poster rather than zooming into a 4.75:1 banner', async () => {
+    await renderCard()
+
+    // AniList ships ~1900 × 400; `object-cover` in a 16:9 card shows a sliver.
+    load(probe(), 1900, 400)
+
+    expect(tile().querySelector(`img[src="${String(FRIEREN.banner_url)}"]`)).toBeNull()
+    const backdrop = tile().querySelector('[data-hero-backdrop]')
+    expect(backdrop).toHaveAttribute('src', FRIEREN.cover_large_url)
+    expect(backdrop).toHaveClass('blur-[40px]')
+
+    // And the crisp poster over the wash, at its own 2:3 ratio.
+    const poster = tile().querySelector('[data-hero-poster]') as HTMLElement
+    expect(poster.querySelector('img')).toHaveAttribute('src', FRIEREN.cover_large_url)
+    expect(poster.firstElementChild).toHaveClass('aspect-[2/3]')
+    // The card is the same card: still 16:9, still carrying its strip.
+    expect(tile().firstElementChild).toHaveClass('aspect-[16/9]')
+    expect(progressWidth(tile())).toMatch(/^52\.5/)
+  })
+
+  it('fills the card with a banner that is a 16:9 backdrop', async () => {
+    await renderCard()
+
+    load(probe(), 1920, 1080)
+
+    const images = tile().querySelectorAll('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]).toHaveAttribute('src', FRIEREN.banner_url)
+    expect(tile().querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+})
+
 describe('Watch Now shelves', () => {
   it('opens with what the viewer stopped in the middle of (FR-W1)', async () => {
     renderHome({ 'GET /api/home': { body: HOME_PAGE_CONTINUE } })
@@ -635,8 +709,12 @@ describe('Watch Now shelves', () => {
     expect(within(tile).getByText('Episode 5 · 11 min left')).toBeInTheDocument()
     // 754 s into 1436: the white strip says how far, to the pixel.
     expect(progressWidth(tile)).toMatch(/^52\.5/)
-    // No episode still on this one, so it falls back to the show's banner.
-    expect(tile.querySelector('img')).toHaveAttribute('src', FRIEREN.banner_url)
+    // No episode still on this one, and nothing yet knows what shape the
+    // show's banner is: the poster treatment holds the card until it does.
+    expect(tile.querySelector('[data-hero-backdrop]')).toHaveAttribute(
+      'src',
+      FRIEREN.cover_large_url,
+    )
   })
 
   it('says what it can when nothing recorded the episode’s length', async () => {
@@ -797,6 +875,22 @@ describe('Watch Now failures', () => {
 
     expect(await screen.findByText('API: ok')).toBeInTheDocument()
     expect(screen.getByText('0.1.0 · dev')).toBeInTheDocument()
+    // No TMDB key on this deployment, so no attribution line to carry.
+    expect(screen.queryByText(/not endorsed or certified by TMDB/)).not.toBeInTheDocument()
+  })
+
+  it("carries TMDB's attribution when the deployment has a key", async () => {
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/health': { body: { ...HEALTH, tmdb_enabled: true } },
+    })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(
+      await screen.findByText(
+        'This product uses the TMDB API but is not endorsed or certified by TMDB.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('shows "API: unreachable" when the API cannot be reached', async () => {

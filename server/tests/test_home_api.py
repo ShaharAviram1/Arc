@@ -27,6 +27,7 @@ from arc.models import (
     Job,
     JobStatus,
     ListStatus,
+    OfflineId,
     Rendition,
     Torrent,
     User,
@@ -487,8 +488,13 @@ async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
         event.remove(engine, "before_cursor_execute", record)
 
     assert len(rows) == 30
+    # The hero's art-only enqueue reads ``jobs`` too, in an EXISTS inside a
+    # query *over* ``anime`` (``enqueue_hero_art``). It is one statement and
+    # not per-episode, so it is not what this test is about: the extras are the
+    # lookups that select from the table itself.
+    extras = [statement for statement in counted if "from anime" not in statement.lower()]
     for table in ("torrents", "renditions", "jobs"):
-        matched = [statement for statement in counted if f" {table}" in statement.lower()]
+        matched = [statement for statement in extras if f" {table}" in statement.lower()]
         assert len(matched) == 1, f"{table} was queried {len(matched)} times"
 
 
@@ -853,3 +859,154 @@ async def test_a_home_card_for_an_unrated_show_sends_nulls(
     for row in body["behind"]:
         assert row["anime"]["popularity"] is None
         assert row["anime"]["average_score"] is None
+
+
+# --- The hero's art (owner, 2026-09-12) --------------------------------------
+
+
+async def map_to_tmdb(factory: SessionFactory, *, anilist_id: int, tmdb_tv_id: int) -> None:
+    """The offline cross-id row that makes a show reachable on TMDB (§5.0a)."""
+    async with factory() as session:
+        session.add(OfflineId(anilist_id=anilist_id, tmdb_tv_id=tmdb_tv_id, type="TV"))
+        await session.commit()
+
+
+async def enrichments(factory: SessionFactory) -> list[Job]:
+    async with factory() as session:
+        rows = await session.scalars(select(Job).where(Job.type == "tmdb_enrich").order_by(Job.id))
+        return list(rows.all())
+
+
+async def test_the_page_queues_art_for_a_season_show_that_has_none(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The hero offers shows nobody follows, so nothing else would fetch it."""
+    anime_id = await add_anime(api_factory, title="Unloved", anilist_id=910040)
+    await map_to_tmdb(api_factory, anilist_id=910040, tmdb_tv_id=4040)
+
+    await home(client)
+
+    jobs = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in jobs] == [anime_id]
+    assert jobs[0].payload["art_only"] is True
+
+
+async def test_a_second_visit_does_not_queue_the_art_again(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    await add_anime(api_factory, title="Unloved", anilist_id=910041)
+    await map_to_tmdb(api_factory, anilist_id=910041, tmdb_tv_id=4041)
+
+    await home(client)
+    await home(client)
+
+    assert len(await enrichments(api_factory)) == 1
+
+
+async def test_a_season_show_with_a_banner_is_left_alone(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    anime_id = await add_anime(api_factory, title="Framed", anilist_id=910042)
+    await map_to_tmdb(api_factory, anilist_id=910042, tmdb_tv_id=4042)
+    async with api_factory() as session:
+        row = await session.get(Anime, anime_id)
+        assert row is not None
+        row.banner_url = "https://anilist.example/banner.jpg"
+        await session.commit()
+
+    await home(client)
+
+    assert await enrichments(api_factory) == []
+
+
+async def test_a_show_the_id_map_cannot_reach_is_not_queued(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    await add_anime(api_factory, title="Unmapped", anilist_id=910043)
+    await home(client)
+    assert await enrichments(api_factory) == []
+
+
+# --- The shelves' stills (owner, 2026-09-12) ----------------------------------
+
+
+async def give_art(factory: SessionFactory, anime_id: int) -> None:
+    """Key art, so the hero's own enqueue has no claim on the row."""
+    async with factory() as session:
+        row = await session.get(Anime, anime_id)
+        assert row is not None
+        row.banner_url = "https://anilist.example/banner.jpg"
+        row.cover_large_url = "https://anilist.example/cover.jpg"
+        await session.commit()
+
+
+async def set_still(factory: SessionFactory, episode_id: int, url: str) -> None:
+    async with factory() as session:
+        row = await session.get(Episode, episode_id)
+        assert row is not None
+        row.still_url = url
+        await session.commit()
+
+
+async def test_the_page_queues_stills_for_the_episode_the_viewer_is_half_way_through(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The owner's case: watched, never added to a list, so nothing else asks."""
+    anime_id = await airing_show(api_factory, title="Off list", anilist_id=910044)
+    await map_to_tmdb(api_factory, anilist_id=910044, tmdb_tv_id=4044)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, episode)
+
+    await home(client)
+
+    jobs = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in jobs] == [anime_id]
+    # In full, and only once: a still is the point, and the art-only job the
+    # hero would have queued for the same row must not be the one standing.
+    assert "art_only" not in jobs[0].payload
+
+
+async def test_the_page_queues_stills_for_a_ready_episode_nobody_has_started(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The other 16:9 shelf: Ready to watch is drawn from new this week."""
+    anime_id = await airing_show(api_factory, title="Ready", anilist_id=910045)
+    await give_art(api_factory, anime_id)
+    await map_to_tmdb(api_factory, anilist_id=910045, tmdb_tv_id=4045)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+
+    await home(client)
+
+    jobs = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in jobs] == [anime_id]
+
+
+async def test_a_card_that_already_has_its_still_is_left_alone(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await airing_show(api_factory, title="Framed", anilist_id=910046)
+    await give_art(api_factory, anime_id)
+    await map_to_tmdb(api_factory, anilist_id=910046, tmdb_tv_id=4046)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    # Episode 7 aired yesterday and is the only card this page draws for the
+    # show; it is the one whose still decides.
+    episode = await episode_number(api_factory, anime_id, 7)
+    await set_still(api_factory, episode.id, "https://image.tmdb.example/still.jpg")
+
+    await home(client)
+
+    assert await enrichments(api_factory) == []
+
+
+async def test_a_second_visit_does_not_queue_the_stills_again(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await airing_show(api_factory, title="Twice", anilist_id=910047)
+    await give_art(api_factory, anime_id)
+    await map_to_tmdb(api_factory, anilist_id=910047, tmdb_tv_id=4047)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+
+    await home(client)
+    await home(client)
+
+    assert len(await enrichments(api_factory)) == 1

@@ -57,7 +57,7 @@ from arc.api.media_stream import playlist_url
 from arc.api.playback_schemas import EpisodeRef, PlayInfo, ProgressIn, ProgressOut
 from arc.models import Anime, Episode, EpisodeState, Rendition, WatchProgress
 from arc.services.catalog import episodes_for
-from arc.services.catalog.airing import aired_through
+from arc.services.catalog.airing import aired_through, out_of_order
 from arc.services.playback.progress import (
     ProgressOutcome,
     record_progress,
@@ -145,6 +145,7 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
             boundary=aired_through(
                 siblings, now=at, anime_status=anime.status, next_airing=anime.next_airing
             ),
+            out_of_order=episode.number in out_of_order(siblings),
             watched=progress is not None and progress.completed,
             torrent=extras.torrents.get(episode.id),
             rendition=rendition,

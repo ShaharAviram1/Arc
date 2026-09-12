@@ -73,17 +73,23 @@ any time, and the owner uses it daily.
 
 ### 4.1 Catalogue and schedule (AniList)
 - FR-C1 Search the catalogue by title from the client; show results with
-  cover, year, format, episode count. The shows Arc has already cached are
-  matched locally and listed first, then the live source's page — so a show
-  Arc knows about is findable while the catalogue is down, and by any word of
-  its title rather than only from the start of it.
+  cover, year, format, episode count. The search order is **cached rows, then
+  the offline catalogue, then the live source's page** (M15.5): the shows Arc
+  already has are matched locally and listed first, the weekly-imported offline
+  database answers next — by any of the thirty-odd names a show has been
+  released under — and the live page follows. So a show is findable while the
+  catalogue is down whether or not Arc has seen it before, and by any word of
+  any of its titles rather than only from the start of one.
 - FR-C2 Add an anime to the user's list in any status. Adding creates or
   refreshes the local Anime record.
 - FR-C3 Seasonal schedule: for the current season (and prev/next), list shows
   grouped by weekday with air time in the user's timezone. Shows the user
   follows are highlighted. "Add to planned / watching" from the schedule.
 - FR-C4 Per followed show, know which episodes have aired and how many the
-  user has not watched ("behind by N").
+  user has not watched ("behind by N"). Published air dates that the rest of
+  the list contradicts are not believed: a finished show has no future
+  episodes, and an episode dated after a later one is shown as an estimate and
+  treated as having aired with its neighbour.
 - FR-C5 Refresh airing data at least daily and within one hour of a followed
   show's scheduled air time.
 - FR-C6 Catalogue fallback: when AniList is unreachable, disabled, or
@@ -98,6 +104,10 @@ any time, and the owner uses it daily.
   for search, matching and id mapping, so those never depend on a live API;
   TMDB, reached through that id map, supplies key art, episode stills and
   credits when AniList has not, and never overwrites AniList-provided values.
+  A record no live source has answered for carries a quiet "via offline
+  catalogue" caveat wherever it is shown — the counterpart of "via MAL" — and
+  that caveat disappears on its own once AniList or MAL fills the record,
+  because the UI reads the record's current source and nothing else.
 - FR-C7 The current season's catalogue is pre-cached daily so the schedule
   survives an outage of both sources.
 
@@ -172,7 +182,8 @@ any time, and the owner uses it daily.
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
   Playlists and segments are served by the server behind auth.
 - FR-S2 Resume: on open, the player seeks to the user's last position if it
-  is > 10 s and < 95 % of duration.
+  is > 10 s and < 95 % of duration. The "Resumed from M:SS" notice auto-hides
+  after five seconds; Dismiss closes it sooner.
 - FR-S3 Progress is reported every 10 s while playing and on pause/seek/close.
 - FR-S4 An episode counts as **watched** when position ≥ 90 % of duration.
   This sets WatchProgress.completed, advances ListEntry.progress if this
@@ -304,6 +315,12 @@ Match review (with the pending count), Admin and Log out; Recommendations is a
 button inside Browse and a shelf action on Home. On phones a bottom tab bar
 (Watch Now · Browse · My List · More) replaces the toolbar nav, with Schedule
 at the top of the "More" sheet.
+
+Attribution: where a deployment has a TMDB key (FR-C6), the shell carries
+TMDB's required line — "This product uses the TMDB API but is not endorsed or
+certified by TMDB." — in the quiet footer under the Home shelves, beside the
+API status. Text only; TMDB's terms offer the logo but do not require it. With
+no key nothing of theirs is shown and the line is absent.
 
 The client is responsive; primary target is desktop, but phone layout must be
 usable for the home page and player.
@@ -453,3 +470,21 @@ preparing → failed → (retry) → preparing
   left at the midpoint is offered; `completed` keeps every other meaning it
   had. Resume (FR-S2) no longer refuses a completed row either — its 10 s floor
   and 95 % ceiling are the whole rule.
+- 2026-09-12 — Resume notice auto-hides after 5 s (owner).
+- 2026-09-12 — TMDB attribution text in the shell: the required sentence sits
+  in the Home footer next to the API status, shown only when the deployment has
+  a `TMDB_API_KEY` (the server publishes `tmdb_enabled` on `/api/health`). The
+  footer rather than the avatar menu or the "More" sheet because attribution
+  should be visible without opening anything, and the quietest line on the page
+  is the right loudness for a credit.
+- 2026-09-12 — Offline-sourced records carry a quiet "via offline catalogue"
+  caveat (owner).
+- 2026-09-12 — M15.5 shipped: offline catalogue (manami + Fribb) is the first stop for search, matching, id mapping and season seeding; TMDB fills key art, stills and credits behind AniList. Fixture re-capture waits for AniList to lift its rate limit.
+- 2026-09-12 — Airing sanity rule (owner): a FINISHED show's episodes have all
+  aired whatever date they carry, and an episode dated after a higher-numbered
+  one is marked estimated and aired with its neighbour (FR-C4, FR-C5). Derived
+  only — the source's date is still stored and still shown.
+- 2026-09-12 — Interactive AniList calls do not wait out a 429 (owner): a
+  search or show page falls back to MAL/offline immediately rather than paying
+  `Retry-After`, and a rate limit no longer stands AniList down for five
+  minutes (FR-C6). Background jobs still wait.

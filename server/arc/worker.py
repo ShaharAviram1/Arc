@@ -7,9 +7,10 @@ One process, two things running side by side (architecture.md §2):
   at a time;
 * the **scheduler** (APScheduler) — periodic work: the heartbeat, the sweep
   that recovers jobs a crashed worker left locked, the hourly purge of expired
-  sessions (M2), the catalogue's five periodic jobs (M3, M3b), and the library
-  scan that finds new files on disk (M5). M6+ hangs the rest (Nyaa polling,
-  MAL re-import, retention) off the same scheduler.
+  sessions (M2), the catalogue's five periodic jobs (M3, M3b), the weekly
+  offline-catalogue import and the nightly TMDB enrichment (M15.5), and the
+  library scan that finds new files on disk (M5). M6+ hangs the rest (Nyaa
+  polling, MAL re-import, retention) off the same scheduler.
 
 More than one worker may run at once; ``SKIP LOCKED`` is what makes that safe.
 """
@@ -24,6 +25,7 @@ import signal
 import socket
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
@@ -33,7 +35,7 @@ from arc.config import Settings, get_settings
 from arc.core import config_check
 from arc.core.logging import setup_logging
 from arc.db import SessionFactory, create_engine, create_session_factory
-from arc.models import DEFAULT_PRIORITY, Anime, Job
+from arc.models import DEFAULT_PRIORITY, Anime, Job, OfflineImport
 from arc.services.acquisition import jobs as acquisition_jobs  # noqa: F401  (registers handlers)
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
@@ -47,6 +49,8 @@ from arc.services.acquisition.nyaa import close_shared_client
 from arc.services.auth import purge_expired
 from arc.services.catalog import jobs as catalog_jobs  # noqa: F401  (registers handlers)
 from arc.services.catalog.names import CATALOG_PRIORITY
+from arc.services.catalog.offline import jobs as offline_jobs  # noqa: F401  (registers handlers)
+from arc.services.catalog.offline.names import IMPORT_OFFLINE, OFFLINE_PRIORITY
 from arc.services.catalog.seasons import current_season
 from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
 
@@ -81,6 +85,8 @@ from arc.services.media.jobs import sweep_transcodes
 from arc.services.recs.factory import close_shared_model
 from arc.services.retention import jobs as retention_jobs  # noqa: F401  (registers handlers)
 from arc.services.retention.names import RETENTION_PRIORITY, RETENTION_SWEEP
+from arc.services.tmdb import jobs as tmdb_jobs  # noqa: F401  (registers handlers)
+from arc.services.tmdb.names import TMDB_ENRICH_ALL, TMDB_PRIORITY
 
 log = logging.getLogger("arc.worker")
 
@@ -146,6 +152,30 @@ RETENTION_SWEEP_SECONDS = 3600
 #: outage has not been revived yet — and retention is the one job in Arc
 #: whose mistakes are not recoverable. Ten minutes costs nothing.
 RETENTION_SWEEP_DELAY_SECONDS = 600
+
+#: When the offline catalogue import runs (UTC). manami publishes one release
+#: a week and Fribb's file moves a few times a week, so weekly is the cadence
+#: of the data rather than a choice about load. Monday 03:30 puts it a week
+#: after the previous one, in the same quiet hour as the season pre-cache and
+#: half an hour before the daily refresh sweep — and after Sunday, which is
+#: when manami's release lands.
+OFFLINE_IMPORT_DAY = "mon"
+OFFLINE_IMPORT_HOUR = 3
+OFFLINE_IMPORT_MINUTE = 30
+
+#: When the nightly TMDB enrichment runs (UTC). Ten past four: after the
+#: catalogue refresh sweep at 04:00, because a refresh that has just filled a
+#: row's key art from AniList is a row the enrichment should leave alone, and
+#: ten minutes is more than the sweep's own SELECT needs to finish queueing.
+TMDB_ENRICH_HOUR = 4
+TMDB_ENRICH_MINUTE = 10
+
+#: And how long after start-up the first one runs. Two minutes: unlike the
+#: catalogue sweeps this one has nothing time-critical to catch up on, and a
+#: worker that has just come up has a library scan and a wants recompute to
+#: get through first. It is here at all so that a deployment which has just
+#: gained a TMDB key sees backdrops today rather than tomorrow morning.
+TMDB_ENRICH_DELAY_SECONDS = 120
 
 #: How often to look for MAL-only rows that AniList could now identify
 #: (FR-C6). Hourly: the ids only change when an outage has just ended, and the
@@ -248,6 +278,33 @@ async def _seed_season_sweep(factory: SessionFactory) -> None:
         )
     except Exception:  # pragma: no cover - a scheduling failure must not kill the worker
         log.exception("could not seed the season sweep")
+
+
+async def _offline_never_imported(factory: SessionFactory) -> bool:
+    """Has the offline catalogue ever been imported on this deployment?
+
+    Asked once at start-up, to decide whether the weekly import should also run
+    *now*. A fresh deployment — or one that has just gained M15.5 — would
+    otherwise have no offline catalogue at all until the next Monday, and the
+    offline catalogue is precisely the thing that is supposed to be there when
+    the live sources are not.
+
+    Asked of ``offline_imports`` rather than of the job table, because the
+    question is whether the rows exist rather than whether the job has been
+    queued: a run that failed on both sources leaves a finished job and an
+    empty catalogue.
+
+    A failure here answers "no": a database that cannot be read at start-up is
+    not a reason to schedule a 62 MB download immediately, and the cron entry
+    is added either way.
+    """
+    try:
+        async with factory() as session:
+            seen = await session.scalar(select(OfflineImport.source).limit(1))
+        return seen is None
+    except Exception:  # pragma: no cover - a probe failure must not kill the worker
+        log.exception("could not check the offline catalogue import state")
+        return False
 
 
 async def _sweep_transcodes(factory: SessionFactory) -> None:
@@ -355,6 +412,35 @@ async def run(settings: Settings) -> None:
         minute=SEASON_SWEEP_MINUTE,
         id=catalog_jobs.SEASON_SWEEP,
         args=[factory, catalog_jobs.SEASON_SWEEP, CATALOG_PRIORITY],
+    )
+    # Offline catalogue (M15.5, FR-C6): the weekly import of manami's database
+    # and Fribb's id map. Once a week on the schedule, and immediately when the
+    # tables have never been filled — see ``_offline_never_imported``.
+    offline_kwargs: dict[str, Any] = {}
+    if await _offline_never_imported(factory):
+        offline_kwargs["next_run_time"] = datetime.now(UTC)
+        log.info("offline catalogue has never been imported; queueing it now")
+    scheduler.add_job(
+        _enqueue_sweep,
+        "cron",
+        day_of_week=OFFLINE_IMPORT_DAY,
+        hour=OFFLINE_IMPORT_HOUR,
+        minute=OFFLINE_IMPORT_MINUTE,
+        id=IMPORT_OFFLINE,
+        args=[factory, IMPORT_OFFLINE, OFFLINE_PRIORITY],
+        **offline_kwargs,
+    )
+    # TMDB enrichment (M15.5, FR-C6): fill the key art, stills and credits
+    # AniList has not, for the shows people actually follow. Nightly, and once
+    # shortly after start-up — see the constants above.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "cron",
+        hour=TMDB_ENRICH_HOUR,
+        minute=TMDB_ENRICH_MINUTE,
+        id=TMDB_ENRICH_ALL,
+        args=[factory, TMDB_ENRICH_ALL, TMDB_PRIORITY],
+        next_run_time=datetime.now(UTC) + timedelta(seconds=TMDB_ENRICH_DELAY_SECONDS),
     )
     # Acquisition (FR-A1, FR-A5): recompute the wants, and watch the client.
     # Both start immediately rather than one interval in: a worker that has

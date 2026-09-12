@@ -68,8 +68,14 @@ export interface AnimeTitle {
   preferred: string
 }
 
-/** Which catalogue a record was last filled from (spec §4.1 FR-C6). */
-export type CatalogSource = 'anilist' | 'mal'
+/**
+ * Which catalogue a record was last filled from (spec §4.1 FR-C6).
+ *
+ * `'offline'` is the weekly import of the manami database (M15.5): a summary
+ * good enough for a card, filled in only where no live source has said
+ * anything, and replaced by the first AniList or MAL payload for the show.
+ */
+export type CatalogSource = 'anilist' | 'mal' | 'offline'
 
 export interface AnimeSummary {
   /**
@@ -372,21 +378,6 @@ export function bannerArt(anime: Pick<AnimeSummary, 'banner_url'>): string | nul
 /** True when a show has art a 21:9 frame can be filled with honestly. */
 export function hasBanner(anime: Pick<AnimeSummary, 'banner_url'>): boolean {
   return bannerArt(anime) !== null
-}
-
-/**
- * The widest art a show has, for a frame that is wider than it is tall but is
- * not a hero: the banner where AniList has one, then the key visual, which is
- * 2:3 and will crop.
- *
- * Used for an episode still that has none of its own, where a cropped cover is
- * still the show's own artwork and beats the striped placeholder on a shelf
- * people press play from. Not for a hero: see `HeroFrame`.
- */
-export function heroArt(
-  anime: Pick<AnimeSummary, 'cover_url' | 'cover_large_url' | 'banner_url'>,
-): string | null {
-  return bannerArt(anime) ?? keyVisual(anime)
 }
 
 /** Below this a title match is meaningless and the server answers 422. */

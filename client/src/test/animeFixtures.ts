@@ -315,6 +315,24 @@ export const FRIEREN_DETAIL_VIA_MAL: AnimeDetail = {
 }
 
 /**
+ * The same show as it comes back while neither live catalogue answers (FR-C6):
+ * filled from the weekly offline import, so it has no live ids and no air
+ * dates at all — the offline catalogue does not carry them.
+ */
+export const FRIEREN_DETAIL_VIA_OFFLINE: AnimeDetail = {
+  ...FRIEREN_DETAIL,
+  anilist_id: null,
+  mal_id: null,
+  source: 'offline',
+  next_airing: null,
+  episodes: FRIEREN_DETAIL.episodes.map((episode) => ({
+    ...episode,
+    air_at: null,
+    air_at_estimated: false,
+  })),
+}
+
+/**
  * The same show with nothing left in flight: every episode has either arrived
  * or was never wanted, so the show page has no reason to poll (FR-A7).
  */

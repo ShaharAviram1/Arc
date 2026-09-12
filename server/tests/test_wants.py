@@ -110,22 +110,24 @@ def test_the_window_is_the_next_n_aired_episodes(
     assert [episode.number for episode in picked] == expected
 
 
-def test_an_unaired_episode_does_not_hide_an_aired_one_behind_it() -> None:
-    """The bound stops the loop, not the first unaired episode in the range.
+def test_an_episode_dated_after_a_later_one_is_wanted_with_it() -> None:
+    """A non-monotonic date is a typo, and the window reads it as one.
 
-    Air times are not always monotonic: a delayed episode 5 airing after 6 is
-    ordinary enough (a special, a broadcast pushed a week), and skipping the
-    rest of the window on the first future date would leave episode 6 unwanted
-    until the delay resolved.
+    Broadcasts do not overtake each other: an episode 5 dated a week after
+    episode 6 already aired is the source contradicting itself, so
+    :mod:`arc.services.catalog.airing` takes the sibling's date and the episode
+    is wanted like any other aired one. Leaving it out was the old behaviour,
+    and it left a hole in the middle of a user's downloads until the source
+    fixed itself.
     """
     rows = episodes_with(count=6, aired=6)
-    rows[4].air_at = NOW + timedelta(days=7)  # episode 5 has been pushed back
+    rows[4].air_at = NOW + timedelta(days=7)  # episode 5, dated after episode 6
 
     picked = window(
         rows, progress=3, look_ahead=3, now=NOW, anime_status="RELEASING", next_airing=None
     )
 
-    assert [episode.number for episode in picked] == [4, 6]
+    assert [episode.number for episode in picked] == [4, 5, 6]
 
 
 def test_an_episode_with_no_date_at_all_is_judged_by_the_boundary() -> None:

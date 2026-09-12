@@ -97,3 +97,10 @@ def setup_logging(settings: Settings) -> None:
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers.clear()
         uvicorn_logger.propagate = True
+
+    # httpx logs every request URL at INFO, query string included — and the
+    # TMDB v3 key travels as ``?api_key=`` (M15.5). Arc's own clients log what
+    # matters about a call on their own loggers, so httpx's line is noise at
+    # best and a secret in the worker's log at worst. WARNING keeps its real
+    # complaints.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

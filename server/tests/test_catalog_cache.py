@@ -867,13 +867,15 @@ async def test_an_anilist_detail_fetch_stores_the_key_art_and_the_credits(
         "Director",
         "Series Composition",
         "Character Design",
-        "Music",
-        "Original Creator",
         "Original Creator",
     ]
-    # The sound director, the art director and the theme song performer are in
-    # the fixture's twelve staff edges and in none of these rows.
-    assert "Satoki Iida" not in [row["name"] for row in anime.credits]
+    # The action director, the manga's character designer and the three
+    # original-work assistants are in the fixture's twelve staff edges and in
+    # none of these rows: a near-miss role is a different job, not a credit.
+    names = [row["name"] for row in anime.credits]
+    assert "Tooru Iwazawa" not in names  # Action Director
+    assert "Tsukasa Abe" not in names  # Original Character Design
+    assert "Hironobu Yoshinaka" not in names  # Original Work Assistance
 
 
 async def test_a_search_result_carries_the_key_art_but_no_credits(

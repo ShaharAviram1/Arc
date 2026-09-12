@@ -20,9 +20,25 @@ three places and hands them to the scorer:
 2. the **local cache** — a fuzzy sweep over ``anime`` titles and synonyms with
    rapidfuzz. Free, and it is where the answer is for every show a user has
    already added;
-3. the **catalogue** — ``CatalogService.search`` for the top few hits, which
-   is what finds a show nobody has added yet, and which comes with the MAL
-   fallback for free (FR-C6).
+3. the **offline catalogue**, and only if that finds nothing, the **live**
+   one. Both answer the same question — "which show is nobody's yet?" — and
+   since M15.5 the offline import answers it better as well as first: it holds
+   every title there is *and every name each was released under*, which is the
+   vocabulary release groups actually write in. "[SubsPlease] Mushoku Tensei S3
+   - 10" names a string that is one of manami's synonyms and that no live
+   search matches at all. The live search (``CatalogService.search``, with the
+   MAL fallback behind it, FR-C6) is the fallback for a title the weekly import
+   has not caught up with — a show announced since Monday.
+
+The offline hits are materialised as ``anime`` rows on the way past, exactly
+as the live ones are: a candidate is addressed by Arc's internal id, and that
+is what mints it. They are written as the weakest source, so the row a review
+decision lands on is upgraded by the first live payload for the same show.
+
+**Nothing about the scoring changes.** The candidate sources decide what is
+weighed; :func:`score`, ``MATCH_AUTO_THRESHOLD`` and the "below the threshold
+it goes to review, never auto-link a guess" rule (FR-L4) are untouched, and a
+candidate's ``origin`` is recorded in the reasons and never scored.
 
 Scoring weights (they sum to 1.0 before the prior):
 
@@ -68,6 +84,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime
 from arc.services.catalog import CatalogService, SourceUnavailable, upsert_summaries
+from arc.services.catalog.offline.materialise import upsert_offline_summaries
+from arc.services.catalog.offline.search import offline_search
 from arc.services.library.parser import ParsedName, strip_season, title_key
 
 log = logging.getLogger(__name__)
@@ -138,8 +156,20 @@ AMBIGUOUS_CEILING = 0.80
 
 #: How many candidates the result carries, and how many the review UI shows.
 MAX_CANDIDATES = 5
-#: How many catalogue search hits are considered.
+#: How many *live* catalogue search hits are considered.
 SEARCH_HITS = 5
+#: How many **offline** ones. Wider than the live search on purpose, and the
+#: reason is the offline ranking: it leads with the entries whose name is
+#: exactly what was asked for and orders the rest by the dataset's score, so a
+#: franchise's four earlier seasons — all of which list the base title as a
+#: synonym — arrive ahead of the numbered sequel the file actually names.
+#: "Mushoku Tensei S3" parses to the title "Mushoku Tensei", and five hits is
+#: seasons one and two twice over with season three cut off. It costs one
+#: local index scan rather than an upstream request, so the pool is widened
+#: instead of the ranking being taught about seasons — which is the scorer's
+#: job, and the scorer is what must not change (FR-L3, FR-L4).
+OFFLINE_HITS = 12
+
 #: How many cache rows the fuzzy sweep keeps before scoring.
 CACHE_HITS = 8
 #: Below this rapidfuzz ratio a cache row is not worth scoring at all.
@@ -194,8 +224,8 @@ class Candidate:
     season_year: int | None = None
     #: ``anime.relations`` as stored, used only by the absolute-numbering rule.
     relations: tuple[dict[str, Any], ...] = ()
-    #: Where this candidate came from: ``"cache"``, ``"search"`` or
-    #: ``"prior"``. Recorded in the reasons, never scored.
+    #: Where this candidate came from: ``"cache"``, ``"offline"``, ``"search"``
+    #: or ``"prior"``. Recorded in the reasons, never scored.
     origin: str = "cache"
 
     @property
@@ -713,6 +743,27 @@ async def cache_candidates(
     return [row for _, _, row in scored[:limit]]
 
 
+async def offline_candidates(
+    session: AsyncSession, term: str, *, limit: int = OFFLINE_HITS
+) -> list[Anime]:
+    """The offline catalogue's best hits for ``term``, as ``anime`` rows (M15.5).
+
+    The upsert is the same one :func:`search_candidates` does and is there for
+    the same reason: a candidate is addressed by Arc's internal id, and
+    materialising the row is what mints it. Written as the weakest source, so
+    nothing a live source has already said about the show is disturbed.
+
+    Empty when the import has never run, which is what makes this safe to put
+    in front of the live search unconditionally.
+    """
+    if not term:
+        return []
+    rows = await offline_search(session, term, limit=limit)
+    if not rows:
+        return []
+    return await upsert_offline_summaries(session, rows)
+
+
 async def search_candidates(
     session: AsyncSession, catalog: CatalogService, term: str, *, limit: int = SEARCH_HITS
 ) -> list[Anime]:
@@ -823,8 +874,18 @@ async def match(
 
     for row in await cache_candidates(session, parsed.title_key):
         pool.add(row, "cache")
-    for row in await search_candidates(session, catalog, parsed.title):
-        pool.add(row, "search")
+
+    # The offline catalogue first, the live one only if it found nothing (see
+    # the module docstring). Not both: the offline import holds every title
+    # there is, so a non-empty answer from it means the show exists and has
+    # been considered — and an upstream request per imported file, on the
+    # ingest path, is a cost with nothing to buy.
+    offline = await offline_candidates(session, parsed.title)
+    for row in offline:
+        pool.add(row, "offline")
+    if not offline:
+        for row in await search_candidates(session, catalog, parsed.title):
+            pool.add(row, "search")
 
     candidates = pool.candidates()
     has_prior = expected_id is not None and expected_id in pool.rows
@@ -848,6 +909,7 @@ __all__ = [
     "FORMAT_WEIGHT",
     "MAX_CANDIDATES",
     "MOVIE_EPISODE",
+    "OFFLINE_HITS",
     "NON_EXACT_CEILING",
     "PART_DISAGREEMENT",
     "PRIOR_MIN_TITLE",
@@ -866,6 +928,7 @@ __all__ = [
     "episode_plausibility",
     "format_agreement",
     "match",
+    "offline_candidates",
     "offset_candidates",
     "part_factor",
     "rank",

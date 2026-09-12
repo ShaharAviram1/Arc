@@ -3,8 +3,8 @@
 A thin adapter over :class:`AniListClient`: the client keeps everything that
 is about talking to AniList politely (pacing, retries, schedule paging), and
 this class keeps everything that is about being one of two interchangeable
-catalogue sources — which is, almost entirely, translating AniList's three
-exception types into the catalogue's two.
+catalogue sources — which is, almost entirely, translating AniList's four
+exception types into the catalogue's three.
 
 That translation is the whole point. Above this module, "AniList is having an
 outage" and "MAL has no client id" have to look the same, or the fallback logic
@@ -21,6 +21,7 @@ from arc.services.anilist.client import (
     AniListDisabled,
     AniListError,
     AniListNotFound,
+    AniListRateLimited,
 )
 from arc.services.catalog.source import (
     CatalogError,
@@ -28,6 +29,7 @@ from arc.services.catalog.source import (
     SearchPage,
     SourceName,
     SourceNotFound,
+    SourceRateLimited,
     SourceUnavailable,
 )
 
@@ -44,6 +46,8 @@ def _as_catalog_error(exc: AniListError) -> CatalogError:
     """
     if isinstance(exc, AniListNotFound):
         return SourceNotFound(str(exc))
+    if isinstance(exc, AniListRateLimited):
+        return SourceRateLimited("anilist", str(exc))
     if isinstance(exc, AniListDisabled):
         return SourceUnavailable("anilist", DISABLED_REASON)
     return SourceUnavailable("anilist", str(exc))
@@ -58,8 +62,9 @@ class AniListSource:
         self.client = client
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> AniListSource:
-        return cls(AniListClient.from_settings(settings))
+    def from_settings(cls, settings: Settings, *, wait_on_rate_limit: bool = True) -> AniListSource:
+        """``wait_on_rate_limit=False`` for the app, true for a job (§6)."""
+        return cls(AniListClient.from_settings(settings, wait_on_rate_limit=wait_on_rate_limit))
 
     @classmethod
     def over(
@@ -67,9 +72,17 @@ class AniListSource:
         transport: httpx.AsyncBaseTransport,
         *,
         url: str = "http://anilist.test/graphql",
+        wait_on_rate_limit: bool = True,
     ) -> AniListSource:
         """A source over a mock transport, for tests and fixture servers."""
-        return cls(AniListClient(url=url, min_interval=0.0, transport=transport))
+        return cls(
+            AniListClient(
+                url=url,
+                min_interval=0.0,
+                transport=transport,
+                wait_on_rate_limit=wait_on_rate_limit,
+            )
+        )
 
     @property
     def configured(self) -> bool:

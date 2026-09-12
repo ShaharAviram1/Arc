@@ -1,0 +1,874 @@
+{
+  "cast": [],
+  "crew": [
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2825235,
+      "known_for_department": "Visual Effects",
+      "name": "Toru Iwazawa",
+      "original_name": "岩澤亨",
+      "popularity": 0.4536,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "652957fe629b2c00ffef5599",
+          "job": "Director",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "649db5ad091e62012d9e4452",
+          "job": "Action Director",
+          "episode_count": 38
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 39
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2574299,
+      "known_for_department": "Visual Effects",
+      "name": "Keiichiro Saito",
+      "original_name": "斎藤圭一郎",
+      "popularity": 0.6877,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65fec17b770700016309973b",
+          "job": "Director",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "640838569f51af0081debb70",
+          "job": "Series Director",
+          "episode_count": 38
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 39
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2174468,
+      "known_for_department": "Directing",
+      "name": "Tomoya Kitagawa",
+      "original_name": "北川朋哉",
+      "popularity": 0.6257,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "68693c02f2cd5874466e7aaa",
+          "job": "Series Director",
+          "episode_count": 10
+        },
+        {
+          "credit_id": "65170ed49b8616011c488947",
+          "job": "Director",
+          "episode_count": 4
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 14
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3036073,
+      "known_for_department": "Visual Effects",
+      "name": "Kota Mori",
+      "original_name": "森公太",
+      "popularity": 0.5574,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6520560607216600c56a2c4b",
+          "job": "Director",
+          "episode_count": 3
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 3
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3990896,
+      "known_for_department": "Directing",
+      "name": "Kazumasa Isokawa",
+      "original_name": "礒川和正",
+      "popularity": 0.4431,
+      "profile_path": "/kblfNDZ2b0GLh7ta5bBm9f3V0MW.jpg",
+      "jobs": [
+        {
+          "credit_id": "654e6bbd29383543f48598a7",
+          "job": "Director",
+          "episode_count": 3
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 3
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2905415,
+      "known_for_department": "Directing",
+      "name": "Kento Matsui",
+      "original_name": "松井健人",
+      "popularity": 0.3684,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65170f4193bd6900c4de7674",
+          "job": "Director",
+          "episode_count": 3
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 3
+    },
+    {
+      "adult": false,
+      "gender": 0,
+      "id": 5993726,
+      "known_for_department": "Directing",
+      "name": "Kentarou Hori",
+      "original_name": "堀健太郎",
+      "popularity": 0.2819,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6987d0b4f9799eaa17f80ded",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1961977,
+      "known_for_department": "Visual Effects",
+      "name": "Nobuhiro Muto",
+      "original_name": "武藤信宏",
+      "popularity": 0.7182,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6976014a018f5cfc31eaf131",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1962869,
+      "known_for_department": "Visual Effects",
+      "name": "Keisuke Kojima",
+      "original_name": "小嶋慶祐",
+      "popularity": 0.6975,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6532bf166f8d9500c928d8b9",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1535389,
+      "known_for_department": "Directing",
+      "name": "Takahiro Natori",
+      "original_name": "名取孝浩",
+      "popularity": 0.6332,
+      "profile_path": "/aF16e0RoSgKSzha9IJzFSiXp3C8.jpg",
+      "jobs": [
+        {
+          "credit_id": "656b3bf20859b400c53655d2",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2649253,
+      "known_for_department": "Visual Effects",
+      "name": "Kouki Fujimoto",
+      "original_name": "藤本航己",
+      "popularity": 1.1453,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "654507441ac29200c495ef59",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3126439,
+      "known_for_department": "Directing",
+      "name": "Yohei Tsuchiya",
+      "original_name": "圡屋陽平",
+      "popularity": 0.3354,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "697e145e1a943190901bbc33",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3022009,
+      "known_for_department": "Visual Effects",
+      "name": "Hayato Kakita",
+      "original_name": "柿木田隼人",
+      "popularity": 0.4051,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65450926fd4f8000c7fb65d4",
+          "job": "Co-Director",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "65d8da52d55c3d017fdb0c1c",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2376504,
+      "known_for_department": "Directing",
+      "name": "Yoshiki Kawasaki",
+      "original_name": "川崎芳樹",
+      "popularity": 0.4737,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6560d4dca6c10400c4093624",
+          "job": "Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 2
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2137652,
+      "known_for_department": "Directing",
+      "name": "Hirotaka Mori",
+      "original_name": "森大貴",
+      "popularity": 0.6819,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65eb6469fcadb4017ca355ed",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 4382340,
+      "known_for_department": "Directing",
+      "name": "Kunio Fujii",
+      "original_name": "藤井邦雄",
+      "popularity": 0.2364,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6557a9e922931a011c963fc6",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1819861,
+      "known_for_department": "Directing",
+      "name": "Shinya Iino",
+      "original_name": "飯野慎也",
+      "popularity": 0.6515,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65736edf9a358d00e3efcd71",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3125865,
+      "known_for_department": "Visual Effects",
+      "name": "Daiki Harashina",
+      "original_name": "原科大樹",
+      "popularity": 0.459,
+      "profile_path": "/3l5rU2dZNjraF9rCrzraXSjmgo0.jpg",
+      "jobs": [
+        {
+          "credit_id": "65170f159b861600ff68ca43",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3156277,
+      "known_for_department": "Visual Effects",
+      "name": "Hiroyuki Kobashi",
+      "original_name": "小橋弘侑",
+      "popularity": 0.3607,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "699079f6d070fa1121efaaf9",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 137703,
+      "known_for_department": "Directing",
+      "name": "Morio Asaka",
+      "original_name": "浅香守生",
+      "popularity": 0.9262,
+      "profile_path": "/rJ0bls6YNx4ZPW8MtX8gUtkiXUv.jpg",
+      "jobs": [
+        {
+          "credit_id": "657f02f4394a87080b73cf6b",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 2379419,
+      "known_for_department": "Directing",
+      "name": "Lim Ka-hee",
+      "original_name": "임가희",
+      "popularity": 5.6637,
+      "profile_path": "/ptoo26xTHJoZiLF8UA2CJ3EIUYo.jpg",
+      "jobs": [
+        {
+          "credit_id": "65f475935b950801851c4253",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 3048057,
+      "known_for_department": "Visual Effects",
+      "name": "Ayaka Tsuji",
+      "original_name": "辻彩夏",
+      "popularity": 0.5572,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "6517029c93bd690138fd031d",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 934636,
+      "known_for_department": "Directing",
+      "name": "Ken Ando",
+      "original_name": "安藤健",
+      "popularity": 0.6865,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65a169704ba5220128e6d617",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 0,
+      "id": 3076126,
+      "known_for_department": "Directing",
+      "name": "Aimi Yamauchi",
+      "original_name": "山内愛弥",
+      "popularity": 0.3519,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "69ac23af302ed8842aca9799",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 3229499,
+      "known_for_department": "Visual Effects",
+      "name": "Haruka Yutoku",
+      "original_name": "湯徳遥",
+      "popularity": 0.3722,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "65993b2b6e938a01a49de774",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1675247,
+      "known_for_department": "Directing",
+      "name": "Taku Kimura",
+      "original_name": "木村拓",
+      "popularity": 0.4644,
+      "profile_path": "/u3V2K8xSkJtPuxXwTiYRefQSCwx.jpg",
+      "jobs": [
+        {
+          "credit_id": "65993a511d1bf4014d231050",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2954951,
+      "known_for_department": "Visual Effects",
+      "name": "Nobuhide Kariya",
+      "original_name": "刈谷暢秀",
+      "popularity": 0.406,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "654e6bb72866fa10928c37c4",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 2044719,
+      "known_for_department": "Visual Effects",
+      "name": "Izumi Seguchi",
+      "original_name": "瀬口泉",
+      "popularity": 0.4003,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "657f02a9ea84c7165eb83d21",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 1481800,
+      "known_for_department": "Visual Effects",
+      "name": "Fumie Muroi",
+      "original_name": "室井ふみえ",
+      "popularity": 0.7651,
+      "profile_path": "/R4WdjJzXHbQxIUw67d4x4BSawH.jpg",
+      "jobs": [
+        {
+          "credit_id": "65aab07eb0cd20013617ec67",
+          "job": "Director",
+          "episode_count": 1
+        }
+      ],
+      "department": "Directing",
+      "total_episode_count": 1
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2020130,
+      "known_for_department": "Sound",
+      "name": "Evan Call",
+      "original_name": "Evan Call",
+      "popularity": 0.7065,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "640838845e1200009fb0e4f2",
+          "job": "Original Music Composer",
+          "episode_count": 38
+        }
+      ],
+      "department": "Sound",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 3103464,
+      "known_for_department": "Visual Effects",
+      "name": "Reiko Nagasawa",
+      "original_name": "長澤礼子",
+      "popularity": 0.6569,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "640838769f51af007c71e63a",
+          "job": "Character Designer",
+          "episode_count": 38
+        },
+        {
+          "credit_id": "65170ee99b861600ff68ca35",
+          "job": "Supervising Animation Director",
+          "episode_count": 26
+        },
+        {
+          "credit_id": "651702a1967cc700e29c55e4",
+          "job": "Animation Director",
+          "episode_count": 4
+        }
+      ],
+      "department": "Visual Effects",
+      "total_episode_count": 68
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 2804583,
+      "known_for_department": "Visual Effects",
+      "name": "Maru Takase",
+      "original_name": "高瀬丸",
+      "popularity": 1.1231,
+      "profile_path": "/gpnoeDM4Ewm7rbjSfhODlXzBlwZ.jpg",
+      "jobs": [
+        {
+          "credit_id": "68693c52d3d9dd5c3eed50d2",
+          "job": "Character Designer",
+          "episode_count": 10
+        },
+        {
+          "credit_id": "65c692e1ce6c4c017cb7e28a",
+          "job": "Supervising Animation Director",
+          "episode_count": 2
+        },
+        {
+          "credit_id": "65295819544c410dd2a8423e",
+          "job": "Animation Director",
+          "episode_count": 4
+        }
+      ],
+      "department": "Visual Effects",
+      "total_episode_count": 16
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1962869,
+      "known_for_department": "Visual Effects",
+      "name": "Keisuke Kojima",
+      "original_name": "小嶋慶祐",
+      "popularity": 0.6975,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "697601bb0953df167beaf1db",
+          "job": "Animation Director",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "6532beed6d9fe80138cacf79",
+          "job": "Key Animation",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "69a2ddfcefcf3404eec4ad95",
+          "job": "Supervising Animation Director",
+          "episode_count": 3
+        },
+        {
+          "credit_id": "68693c8a851c55761953f903",
+          "job": "Character Designer",
+          "episode_count": 10
+        }
+      ],
+      "department": "Visual Effects",
+      "total_episode_count": 15
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 3211050,
+      "known_for_department": "Visual Effects",
+      "name": "Yuri Fujinaka",
+      "original_name": "藤中友里",
+      "popularity": 0.4115,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "68693ca3a722d3894b1030b4",
+          "job": "Character Designer",
+          "episode_count": 10
+        },
+        {
+          "credit_id": "65c69314a93d2501634a7793",
+          "job": "Supervising Animation Director",
+          "episode_count": 1
+        },
+        {
+          "credit_id": "65f47706a313b80185282913",
+          "job": "Animation Director",
+          "episode_count": 2
+        }
+      ],
+      "department": "Visual Effects",
+      "total_episode_count": 13
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 1458361,
+      "known_for_department": "Writing",
+      "name": "Tomohiro Suzuki",
+      "original_name": "鈴木智尋",
+      "popularity": 0.6446,
+      "profile_path": "/szG3tQCshCgpHns0JnpNQk8MOQQ.jpg",
+      "jobs": [
+        {
+          "credit_id": "65170292967cc700e29c55df",
+          "job": "Writer",
+          "episode_count": 37
+        },
+        {
+          "credit_id": "6408386b9f51af0099128330",
+          "job": "Series Composition",
+          "episode_count": 38
+        }
+      ],
+      "department": "Writing",
+      "total_episode_count": 75
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3699160,
+      "known_for_department": "Writing",
+      "name": "Kanehito Yamada",
+      "original_name": "山田鐘人",
+      "popularity": 0.341,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "63206ab74350110082874b32",
+          "job": "Comic Book",
+          "episode_count": 38
+        }
+      ],
+      "department": "Writing",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 2032170,
+      "known_for_department": "Art",
+      "name": "Sawako Takagi",
+      "original_name": "高木佐和子",
+      "popularity": 0.5139,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "649db5b23e6f2b00c536ca10",
+          "job": "Art Direction",
+          "episode_count": 38
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3699161,
+      "known_for_department": "Art",
+      "name": "Tsukasa Abe",
+      "original_name": "アベツカサ",
+      "popularity": 0.2447,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "650b1d3212c60400c4eae03b",
+          "job": "Original Series Design",
+          "episode_count": 38
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 2053590,
+      "known_for_department": "Art",
+      "name": "Seiko Yoshioka",
+      "original_name": "吉岡誠子",
+      "popularity": 0.4726,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "649db59e3e6f2b00e2dd6c7c",
+          "job": "Concept Artist",
+          "episode_count": 38
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 2536494,
+      "known_for_department": "Art",
+      "name": "Shinji Sugiyama",
+      "original_name": "杉山晋史",
+      "popularity": 0.4793,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "649db5c0c9dbf90148ce9be1",
+          "job": "Art Designer",
+          "episode_count": 38
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 38
+    },
+    {
+      "adult": false,
+      "gender": 2,
+      "id": 3845124,
+      "known_for_department": "Art",
+      "name": "Noriyoshi Doi",
+      "original_name": "土井則良",
+      "popularity": 0.3646,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "68ac326b6f28d8c39d8d25cb",
+          "job": "Background Designer",
+          "episode_count": 22
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 22
+    },
+    {
+      "adult": false,
+      "gender": 1,
+      "id": 3845135,
+      "known_for_department": "Art",
+      "name": "Junko Araki",
+      "original_name": "荒木淳子",
+      "popularity": 0.3148,
+      "profile_path": null,
+      "jobs": [
+        {
+          "credit_id": "68790e3077af8586edbbe266",
+          "job": "Background Designer",
+          "episode_count": 15
+        }
+      ],
+      "department": "Art",
+      "total_episode_count": 15
+    }
+  ],
+  "id": 209867
+}

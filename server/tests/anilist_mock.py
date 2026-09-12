@@ -132,6 +132,7 @@ class FakeAniList:
         seasons: dict[tuple[int, str], list[dict[str, Any]]] | None = None,
         search_fn: Callable[[str, int], dict[str, Any]] | None = None,
         disabled: bool = False,
+        rate_limited: bool = False,
     ) -> None:
         self.media = media or {}
         self.search = search or {}
@@ -142,6 +143,11 @@ class FakeAniList:
         #: exactly what the live API did all day on 2026-09-06. Flip it back to
         #: false mid-test to play AniList coming back.
         self.disabled = disabled
+        #: When true every query answers 429 with a ``Retry-After``. Unlike
+        #: :attr:`disabled` this is a burst limit, not an outage: a client
+        #: built with ``wait_on_rate_limit`` waits it out, an interactive one
+        #: gives up on the spot.
+        self.rate_limited = rate_limited
         #: An optional generic search, consulted before :attr:`search`. Takes
         #: the (already lower-cased) term and the page number and returns a
         #: whole response body. :func:`match_catalogue_fake` uses it to answer
@@ -170,6 +176,9 @@ class FakeAniList:
         if self.disabled:
             self.calls.append(("disabled", variables))
             return httpx.Response(DISABLED_STATUS, json=DISABLED_BODY)
+        if self.rate_limited:
+            self.calls.append(("rate_limited", variables))
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={})
         if "seasonYear" in variables:
             self.calls.append(("season", variables))
             return httpx.Response(200, json=self._season_page(variables))
@@ -240,7 +249,7 @@ class FakeAniList:
             }
         }
 
-    def client(self) -> AniListClient:
+    def client(self, *, wait_on_rate_limit: bool = True) -> AniListClient:
         """A real :class:`AniListClient` wired to this fake.
 
         ``min_interval=0``: the pacing is tested on its own, and paying 700 ms
@@ -250,11 +259,12 @@ class FakeAniList:
             url="http://anilist.test/graphql",
             min_interval=0.0,
             transport=httpx.MockTransport(self.handle),
+            wait_on_rate_limit=wait_on_rate_limit,
         )
 
-    def source(self) -> AniListSource:
+    def source(self, *, wait_on_rate_limit: bool = True) -> AniListSource:
         """The same fake behind the :class:`CatalogSource` interface."""
-        return AniListSource(self.client())
+        return AniListSource(self.client(wait_on_rate_limit=wait_on_rate_limit))
 
 
 def frieren_fake() -> FakeAniList:

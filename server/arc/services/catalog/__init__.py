@@ -57,6 +57,7 @@ from arc.services.catalog.source import (
     MediaTitle,
     SearchPage,
     SourceNotFound,
+    SourceRateLimited,
     SourceUnavailable,
 )
 
@@ -76,6 +77,7 @@ __all__ = [
     "MediaTitle",
     "SearchPage",
     "SourceNotFound",
+    "SourceRateLimited",
     "SourceState",
     "SourceUnavailable",
     "StatusRequired",

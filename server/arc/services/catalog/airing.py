@@ -11,10 +11,29 @@ reasonably recent seasons, MAL synthesises nothing for a show with a partial
 start date, and a fetch can simply have failed. Reading each null as "not yet"
 would mark episode 300 of a running show unaired while 301 airs on Sunday, and
 would tell a user they are behind by nothing on a show they have not started.
+
+A published date is not a statement either, when the rest of the list
+contradicts it. Two sanity rules therefore sit over the stored times, because
+both sources publish dates that cannot be true (architecture.md §5, cache rule
+3: estimated vs published):
+
+1. **A ``FINISHED`` show has no future episodes.** The status is the source's
+   own summary of the whole run; an episode of it dated next month is a typo,
+   not a broadcast, and "will air 27 Sep" between two episodes that aired in
+   August is the bug this rule exists for.
+2. **Air times do not go backwards.** An episode dated *after* a
+   higher-numbered one is non-monotonic, and the later sibling is the better
+   evidence: the episode is treated as having aired by the earlier of the two
+   dates and is flagged estimated, so the client badges it "est.".
+
+Neither rule invents a date. The stored ``air_at`` is left exactly as the
+source published it — only the derived aired-ness and the estimated flag
+change — so the next refresh can still correct it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,6 +95,44 @@ def next_airing_estimated(blob: dict[str, Any] | None) -> bool:
     return bool(_fields(blob).get("estimated"))
 
 
+def effective_air_at(episodes: Iterable[Episode]) -> dict[int, datetime]:
+    """Stored air times with the non-monotonic ones pulled back into order.
+
+    Keyed by episode number, and only for episodes that have a stored time at
+    all. An episode's effective time is the earliest time anything from it
+    onwards carries, so a date later than a higher-numbered episode's gives way
+    to that sibling and every other row is returned untouched.
+
+    Nothing is written: this is the reading of the stored column, not a
+    replacement for it. The row keeps whatever the source published, which is
+    what lets a later refresh fix the source's mistake rather than Arc's.
+    """
+    times: dict[int, datetime] = {}
+    floor: datetime | None = None
+    for episode in sorted(episodes, key=lambda row: row.number, reverse=True):
+        at = episode.air_at
+        if at is None:
+            continue
+        floor = at if floor is None else min(at, floor)
+        times[episode.number] = floor
+    return times
+
+
+def out_of_order(episodes: Sequence[Episode]) -> frozenset[int]:
+    """Episode numbers dated after a higher-numbered episode of the same show.
+
+    These are the rows the client badges "est.": Arc is showing the date the
+    source published while saying, in the same breath, that the list does not
+    support it.
+    """
+    effective = effective_air_at(episodes)
+    return frozenset(
+        episode.number
+        for episode in episodes
+        if episode.air_at is not None and effective.get(episode.number) != episode.air_at
+    )
+
+
 def aired_through(
     episodes: list[Episode],
     *,
@@ -125,14 +182,19 @@ def is_aired(
 ) -> bool:
     """Whether one episode has aired, given the list's :func:`aired_through`.
 
-    A published time decides it on its own. Without one, a finished show's
-    episodes have all aired — AniList simply does not keep dates that far
-    back — and anything else is aired if the rest of the list places it behind
-    the boundary.
+    The list is asked before the episode's own date, which is what makes the
+    two sanity rules in the module docstring one line each. A finished show's
+    episodes have all aired, whatever date any single row carries. Anything the
+    boundary already covers has aired too — the boundary is the highest
+    *dated* episode in the past, so a row below it with a future date is
+    exactly the non-monotonic case, and taking the sibling's date is what rule
+    2 asks for. Only then does a published time speak for itself.
     """
+    if anime_status == FINISHED or episode.number <= boundary:
+        return True
     if episode.air_at is not None:
         return episode.air_at <= now
-    return anime_status == FINISHED or episode.number <= boundary
+    return False
 
 
 def aired_episodes(
@@ -156,8 +218,10 @@ __all__ = [
     "RELEASING",
     "aired_episodes",
     "aired_through",
+    "effective_air_at",
     "is_aired",
     "next_airing_at",
     "next_airing_episode",
     "next_airing_estimated",
+    "out_of_order",
 ]

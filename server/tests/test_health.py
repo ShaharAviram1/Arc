@@ -38,3 +38,17 @@ async def test_the_docs_are_off_in_production(settings: Settings) -> None:
 
         # Not a blanket 404: the app itself is up.
         assert (await client.get("/api/health")).status_code == 200
+
+
+async def test_health_reports_whether_tmdb_is_configured(settings: Settings) -> None:
+    """The client reads this to decide whether to show TMDB's attribution."""
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(settings)), base_url="http://test"
+    ) as client:
+        assert (await client.get("/api/health")).json()["tmdb_enabled"] is False
+
+    with_key = settings.model_copy(update={"tmdb_api_key": "a-real-tmdb-key"})
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(with_key)), base_url="http://test"
+    ) as client:
+        assert (await client.get("/api/health")).json()["tmdb_enabled"] is True

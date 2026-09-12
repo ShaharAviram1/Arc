@@ -32,13 +32,20 @@ import { primaryButtonClass, subtleButtonClass } from '@/components/admin/styles
 import {
   adminErrorMessage,
   formatBytes,
+  formatCount,
   formatPercent,
+  formatRelativeTime,
+  offlineSourceLabel,
+  offlineVersionLabel,
   useDeleteEpisodeFiles,
+  useOfflineCatalogue,
   useRefetchEpisode,
   useRetentionDisk,
   useRetentionPreview,
   useRunSweep,
   usedFraction,
+  type OfflineCatalogue,
+  type OfflineSource,
   type RetentionDisk,
   type RetentionItem,
 } from '@/lib/admin'
@@ -51,6 +58,62 @@ const EXPLANATION =
 
 const DRY_RUN_NOTE =
   'RETENTION_DRY_RUN is on: the sweep will report this list and delete none of it.'
+
+const OFFLINE_EXPLANATION =
+  'The local copy of the anime database and the cross-id map (M15.5). Search and matching fall ' +
+  'back to it when AniList is down, which is the one moment nobody is watching it — so its age ' +
+  'is shown here rather than discovered during an outage.'
+
+const OFFLINE_SCHEDULE = 'Next run: Mondays 03:30 UTC (weekly)'
+
+const OFFLINE_NEVER = 'Never imported. The worker imports it on first start.'
+
+/** One imported source: what it is, which version, how big, how old. */
+function OfflineRow({ source }: { source: OfflineSource }) {
+  return (
+    <li className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3">
+      <span className="text-[14px] font-medium text-[var(--arc-text)]">
+        {offlineSourceLabel(source.source)}
+      </span>
+      <span className="text-[13px] tabular-nums text-[var(--arc-text-muted)]">
+        {offlineVersionLabel(source.version)} · {formatCount(source.rows)} rows · imported{' '}
+        {formatRelativeTime(source.imported_at)}
+      </span>
+    </li>
+  )
+}
+
+/** What the weekly import has loaded, and whether it is recent enough to use. */
+function OfflinePanel({ catalogue }: { catalogue: OfflineCatalogue }) {
+  return (
+    <div className={`mt-4 ${panelClass}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-[16px] font-medium text-[var(--arc-text)]">Imports</h3>
+        <p className="text-[14px] tabular-nums text-[var(--arc-text-muted)]">
+          {formatCount(catalogue.anime_rows)} anime rows · {formatCount(catalogue.id_rows)} id rows
+        </p>
+      </div>
+
+      {catalogue.sources.length === 0 ? (
+        <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">{OFFLINE_NEVER}</p>
+      ) : (
+        <ul className="mt-3 flex flex-col gap-0.5">
+          {catalogue.sources.map((source) => (
+            <OfflineRow key={source.source} source={source} />
+          ))}
+        </ul>
+      )}
+
+      <p className="mt-3 text-[13px] text-[var(--arc-text-muted)]">{OFFLINE_SCHEDULE}</p>
+      {catalogue.stale ? (
+        <p className="mt-1 text-[13px] text-[var(--arc-warn)]">
+          Import is stale (older than 14 days) — run{' '}
+          <code className="font-mono">python -m arc.cli import-catalogue</code> or wait for Monday.
+        </p>
+      ) : null}
+    </div>
+  )
+}
 
 /** How full the data disk is, in a bar and in words. */
 function DiskPanel({ disk }: { disk: RetentionDisk }) {
@@ -169,6 +232,7 @@ export function StorageTab() {
   const disk = useRetentionDisk()
   const preview = useRetentionPreview()
   const sweep = useRunSweep()
+  const offline = useOfflineCatalogue()
 
   return (
     <div>
@@ -193,6 +257,30 @@ export function StorageTab() {
       ) : (
         <DiskPanel disk={disk.data} />
       )}
+
+      <section className="mt-10">
+        <SectionHeading>Offline catalogue</SectionHeading>
+        <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+          {OFFLINE_EXPLANATION}
+        </p>
+
+        {offline.isPending ? (
+          <p role="status" className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
+            Loading the offline catalogue…
+          </p>
+        ) : offline.isError ? (
+          <ErrorState
+            className="mt-4"
+            message={adminErrorMessage(offline.error)}
+            pending={offline.isFetching}
+            onRetry={() => {
+              void offline.refetch()
+            }}
+          />
+        ) : (
+          <OfflinePanel catalogue={offline.data} />
+        )}
+      </section>
 
       <section className="mt-10">
         <div className="flex flex-wrap items-center justify-between gap-3">

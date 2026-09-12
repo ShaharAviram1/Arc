@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Artwork } from '@/components/ui/Artwork'
+import { PosterWash } from '@/components/ui/PosterWash'
 import { cx } from '@/components/ui/styles'
 
 /**
@@ -21,7 +22,9 @@ import { cx } from '@/components/ui/styles'
  *   ratio beside the title, around 180px wide on a laptop and as much as the
  *   frame's height allows below that. A poster is never scaled up to fill the
  *   frame, which is the whole point: upscaling a 230px MyAnimeList picture
- *   across 1180px is what made the hero look broken.
+ *   across 1180px is what made the hero look broken. The treatment itself
+ *   lives in `PosterWash`, because the 16:9 episode card now has the same
+ *   problem one size down (owner, 2026-09-12).
  *
  * Both images load eagerly: the hero is the largest thing above the fold on
  * both pages, and lazy-loading the one image a page is built around only
@@ -46,7 +49,7 @@ import { cx } from '@/components/ui/styles'
  * `aspect-[2/3]` lets the ratio work out the width, and the cap keeps it near
  * the 180px the design asks for once the frame is big enough to allow it.
  */
-const POSTER = 'h-full max-h-[270px] w-auto shadow-tile'
+const POSTER = 'max-h-[270px]'
 
 /** The title block's gutter. Matches the banner hero's, so the two agree. */
 const PADDING = 'p-6 sm:p-10'
@@ -67,14 +70,6 @@ function heroAspect(width: number, height: number): number {
   const clamped = Math.min(MAX_ASPECT, Math.max(MIN_ASPECT, width / height))
   return Math.round(clamped * 1000) / 1000
 }
-
-/**
- * `scale(1.15)` so the blur's transparent fringe is pushed outside the frame
- * and clipped rather than showing as a soft border; brightness and saturation
- * turn a photograph into a ground the white title survives on.
- */
-const BACKDROP =
-  'absolute inset-0 h-full w-full scale-[1.15] object-cover blur-[40px] brightness-[0.5] saturate-[1.2]'
 
 export interface HeroFrameProps {
   /** AniList's 21:9 banner, or null — the ordinary case for a MAL record. */
@@ -125,32 +120,15 @@ export function HeroFrame({ banner, poster, children, className }: HeroFrameProp
   }
 
   return (
-    <Artwork url={null} shape="hero" className={frame}>
-      {poster === null ? null : (
-        <img
-          data-hero-backdrop
-          src={poster}
-          alt=""
-          aria-hidden
-          loading="eager"
-          decoding="async"
-          className={BACKDROP}
-        />
-      )}
-      {/* After the backdrop, before the content: the wash is the ground, the
-          scrim is what keeps white type legible on whatever colour it is. */}
-      <div aria-hidden className="art-scrim absolute inset-0" />
-
-      <div className={cx('absolute inset-0 flex items-end gap-5 sm:gap-7', PADDING)}>
-        {/* No poster means no artwork at all, and a striped 2:3 box laid on a
-            striped frame says nothing twice: the title carries it alone. */}
-        {poster === null ? null : (
-          <div data-hero-poster className="flex h-full shrink-0 items-end">
-            <Artwork url={poster} shape="key" eager className={POSTER} />
-          </div>
-        )}
-        <div className="min-w-0 max-w-[620px]">{children}</div>
-      </div>
-    </Artwork>
+    <PosterWash
+      poster={poster}
+      shape="hero"
+      eager
+      padding={PADDING}
+      plateClassName={POSTER}
+      className={frame}
+    >
+      {children}
+    </PosterWash>
   )
 }

@@ -1,0 +1,677 @@
+[
+  {
+    "type": "TV",
+    "anidb_id": 69,
+    "anilist_id": 21,
+    "animecountdown_id": 38636,
+    "animenewsnetwork_id": 836,
+    "anime-planet_id": "one-piece",
+    "anisearch_id": 2227,
+    "imdb_id": [
+      "tt0388629"
+    ],
+    "kitsu_id": 12,
+    "livechart_id": 321,
+    "mal_id": 21,
+    "simkl_id": 38636,
+    "themoviedb_id": {
+      "tv": 37854
+    },
+    "tvdb_id": 81797
+  },
+  {
+    "type": "MOVIE",
+    "anidb_id": 112,
+    "anilist_id": 199,
+    "animecountdown_id": 39079,
+    "animenewsnetwork_id": 377,
+    "anime-planet_id": "spirited-away",
+    "anisearch_id": 2895,
+    "imdb_id": [
+      "tt0245429"
+    ],
+    "kitsu_id": 176,
+    "livechart_id": 3084,
+    "mal_id": 199,
+    "simkl_id": 39079,
+    "themoviedb_id": {
+      "movie": [
+        129
+      ]
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 239,
+    "anilist_id": 20,
+    "animecountdown_id": 39508,
+    "animenewsnetwork_id": 1825,
+    "anime-planet_id": "naruto",
+    "anisearch_id": 2788,
+    "imdb_id": [
+      "tt0409591"
+    ],
+    "kitsu_id": 11,
+    "livechart_id": 3585,
+    "mal_id": 20,
+    "simkl_id": 39508,
+    "themoviedb_id": {
+      "tv": 46260
+    },
+    "tvdb_id": 78857
+  },
+  {
+    "type": "TV",
+    "anidb_id": 3468,
+    "anilist_id": 918,
+    "animecountdown_id": 37474,
+    "animenewsnetwork_id": 6236,
+    "anime-planet_id": "gintama",
+    "anisearch_id": 3585,
+    "imdb_id": [
+      "tt0988818"
+    ],
+    "kitsu_id": 818,
+    "livechart_id": 3591,
+    "mal_id": 918,
+    "simkl_id": 37474,
+    "themoviedb_id": {
+      "tv": 57041
+    },
+    "tvdb_id": 79895
+  },
+  {
+    "type": "TV",
+    "anidb_id": 4563,
+    "anilist_id": 1535,
+    "animecountdown_id": 40190,
+    "animenewsnetwork_id": 6592,
+    "anime-planet_id": "death-note",
+    "anisearch_id": 3633,
+    "imdb_id": [
+      "tt0877057"
+    ],
+    "kitsu_id": 1376,
+    "livechart_id": 3437,
+    "mal_id": 1535,
+    "simkl_id": 40190,
+    "themoviedb_id": {
+      "tv": 13916
+    },
+    "tvdb_id": 79481,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 6107,
+    "anilist_id": 5114,
+    "animecountdown_id": 41586,
+    "animenewsnetwork_id": 10216,
+    "anime-planet_id": "fullmetal-alchemist-brotherhood",
+    "anisearch_id": 5048,
+    "imdb_id": [
+      "tt1355642"
+    ],
+    "kitsu_id": 3936,
+    "livechart_id": 3409,
+    "mal_id": 5114,
+    "simkl_id": 41586,
+    "themoviedb_id": {
+      "tv": 31911
+    },
+    "tvdb_id": 85249,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 7729,
+    "anilist_id": 9253,
+    "animecountdown_id": 38960,
+    "animenewsnetwork_id": 11770,
+    "anime-planet_id": "steins-gate",
+    "anisearch_id": 6332,
+    "imdb_id": [
+      "tt1910272"
+    ],
+    "kitsu_id": 5646,
+    "livechart_id": 1554,
+    "mal_id": 9253,
+    "simkl_id": 38960,
+    "themoviedb_id": {
+      "tv": 42509
+    },
+    "tvdb_id": 244061,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 8550,
+    "anilist_id": 11061,
+    "animecountdown_id": 40398,
+    "animenewsnetwork_id": 13262,
+    "anime-planet_id": "hunter-x-hunter-2011",
+    "anisearch_id": 7223,
+    "imdb_id": [
+      "tt2098220"
+    ],
+    "kitsu_id": 6448,
+    "livechart_id": 317,
+    "mal_id": 11061,
+    "simkl_id": 40398,
+    "themoviedb_id": {
+      "tv": 46298
+    },
+    "tvdb_id": 252322
+  },
+  {
+    "type": "TV",
+    "anidb_id": 9541,
+    "anilist_id": 16498,
+    "animecountdown_id": 39687,
+    "animenewsnetwork_id": 14950,
+    "anime-planet_id": "attack-on-titan",
+    "anisearch_id": 8219,
+    "imdb_id": [
+      "tt2560140"
+    ],
+    "kitsu_id": 7442,
+    "livechart_id": 38,
+    "mal_id": 16498,
+    "simkl_id": 39687,
+    "themoviedb_id": {
+      "tv": 1429
+    },
+    "tvdb_id": 267440,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "MOVIE",
+    "anidb_id": 10937,
+    "anilist_id": 20954,
+    "animecountdown_id": 436948,
+    "animenewsnetwork_id": 16661,
+    "anime-planet_id": "a-silent-voice",
+    "anisearch_id": 9981,
+    "imdb_id": [
+      "tt5323662"
+    ],
+    "kitsu_id": 10028,
+    "livechart_id": 1296,
+    "mal_id": 28851,
+    "simkl_id": 436948,
+    "themoviedb_id": {
+      "movie": [
+        378064
+      ]
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 11123,
+    "anilist_id": 21087,
+    "animecountdown_id": 478386,
+    "animenewsnetwork_id": 16840,
+    "anime-planet_id": "one-punch-man",
+    "anisearch_id": 10317,
+    "imdb_id": [
+      "tt4508902"
+    ],
+    "kitsu_id": 10740,
+    "livechart_id": 1431,
+    "mal_id": 30276,
+    "simkl_id": 478386,
+    "themoviedb_id": {
+      "tv": 63926
+    },
+    "tvdb_id": 293088,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 11739,
+    "anilist_id": 21459,
+    "animecountdown_id": 532942,
+    "animenewsnetwork_id": 17786,
+    "anime-planet_id": "my-hero-academia",
+    "anisearch_id": 10978,
+    "imdb_id": [
+      "tt5626028"
+    ],
+    "kitsu_id": 11469,
+    "livechart_id": 1895,
+    "mal_id": 31964,
+    "simkl_id": 532942,
+    "themoviedb_id": {
+      "tv": 65930
+    },
+    "tvdb_id": 305074,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "MOVIE",
+    "anidb_id": 11829,
+    "anilist_id": 21519,
+    "animecountdown_id": 543146,
+    "animenewsnetwork_id": 18171,
+    "anime-planet_id": "your-name",
+    "anisearch_id": 11005,
+    "imdb_id": [
+      "tt5311514"
+    ],
+    "kitsu_id": 11614,
+    "livechart_id": 1956,
+    "mal_id": 32281,
+    "simkl_id": 543146,
+    "themoviedb_id": {
+      "movie": [
+        372058
+      ]
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 13945,
+    "anilist_id": 101348,
+    "animecountdown_id": 784557,
+    "animenewsnetwork_id": 20778,
+    "anime-planet_id": "vinland-saga",
+    "anisearch_id": 13486,
+    "imdb_id": [
+      "tt10233448"
+    ],
+    "kitsu_id": 41084,
+    "livechart_id": 3169,
+    "mal_id": 37521,
+    "simkl_id": 784557,
+    "themoviedb_id": {
+      "tv": 88803
+    },
+    "tvdb_id": 359274,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 14107,
+    "anilist_id": 101922,
+    "animecountdown_id": 831411,
+    "animenewsnetwork_id": 21101,
+    "anime-planet_id": "demon-slayer-kimetsu-no-yaiba",
+    "anisearch_id": 13658,
+    "imdb_id": [
+      "tt9335498"
+    ],
+    "kitsu_id": 41370,
+    "livechart_id": 3311,
+    "mal_id": 38000,
+    "simkl_id": 831411,
+    "themoviedb_id": {
+      "tv": 85937
+    },
+    "tvdb_id": 348545,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 14758,
+    "anilist_id": 108465,
+    "animecountdown_id": 1059371,
+    "animenewsnetwork_id": 22589,
+    "anime-planet_id": "mushoku-tensei-jobless-reincarnation",
+    "anisearch_id": 14254,
+    "imdb_id": [
+      "tt13293588"
+    ],
+    "kitsu_id": 42323,
+    "livechart_id": 9357,
+    "mal_id": 39535,
+    "simkl_id": 1059371,
+    "themoviedb_id": {
+      "tv": 94664
+    },
+    "tvdb_id": 371310,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 15275,
+    "anilist_id": 113415,
+    "animecountdown_id": 1211265,
+    "animenewsnetwork_id": 22944,
+    "anime-planet_id": "jujutsu-kaisen",
+    "anisearch_id": 14790,
+    "imdb_id": [
+      "tt12343534"
+    ],
+    "kitsu_id": 42765,
+    "livechart_id": 9680,
+    "mal_id": 40748,
+    "simkl_id": 1211265,
+    "themoviedb_id": {
+      "tv": 95479
+    },
+    "tvdb_id": 377543,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 15449,
+    "anilist_id": 116674,
+    "animecountdown_id": 1300367,
+    "animenewsnetwork_id": 25066,
+    "anime-planet_id": "bleach-thousand-year-blood-war",
+    "anisearch_id": 15085,
+    "imdb_id": [
+      "tt0434665"
+    ],
+    "kitsu_id": 43078,
+    "livechart_id": 9844,
+    "mal_id": 41467,
+    "simkl_id": 1300367,
+    "themoviedb_id": {
+      "tv": 30984
+    },
+    "tvdb_id": 74796,
+    "season": {
+      "tvdb": 17,
+      "tmdb": 2
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 15914,
+    "anilist_id": 127230,
+    "animecountdown_id": 1498301,
+    "animenewsnetwork_id": 23843,
+    "anime-planet_id": "chainsaw-man",
+    "anisearch_id": 15808,
+    "imdb_id": [
+      "tt13616990"
+    ],
+    "kitsu_id": 43806,
+    "livechart_id": 10257,
+    "mal_id": 44511,
+    "simkl_id": 1498301,
+    "themoviedb_id": {
+      "tv": 114410
+    },
+    "tvdb_id": 397934,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 15954,
+    "anilist_id": 127720,
+    "animecountdown_id": 1524389,
+    "animenewsnetwork_id": 24164,
+    "anime-planet_id": "mushoku-tensei-jobless-reincarnation-part-ii",
+    "anisearch_id": 15862,
+    "imdb_id": [
+      "tt13293588"
+    ],
+    "kitsu_id": 43907,
+    "livechart_id": 10297,
+    "mal_id": 45576,
+    "simkl_id": 1524389,
+    "themoviedb_id": {
+      "tv": 94664
+    },
+    "tvdb_id": 371310,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    },
+    "episode_offset": {
+      "tvdb": 11,
+      "tmdb": 11
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 16054,
+    "anilist_id": 142329,
+    "animecountdown_id": 1546285,
+    "animenewsnetwork_id": 24043,
+    "anime-planet_id": "demon-slayer-kimetsu-no-yaiba-entertainment-district-arc",
+    "anisearch_id": 15986,
+    "imdb_id": [
+      "tt9335498"
+    ],
+    "kitsu_id": 44081,
+    "livechart_id": 10420,
+    "mal_id": 47778,
+    "simkl_id": 1546285,
+    "themoviedb_id": {
+      "tv": 85937
+    },
+    "tvdb_id": 348545,
+    "season": {
+      "tvdb": 3,
+      "tmdb": 3
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 16426,
+    "anilist_id": 136430,
+    "animecountdown_id": 1681241,
+    "animenewsnetwork_id": 24508,
+    "anime-planet_id": "vinland-saga-season-2",
+    "anisearch_id": 16485,
+    "imdb_id": [
+      "tt10233448"
+    ],
+    "kitsu_id": 44875,
+    "livechart_id": 10618,
+    "mal_id": 49387,
+    "simkl_id": 1681241,
+    "themoviedb_id": {
+      "tv": 88803
+    },
+    "tvdb_id": 359274,
+    "season": {
+      "tvdb": 2,
+      "tmdb": 2
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 17196,
+    "anilist_id": 145064,
+    "animecountdown_id": 1847578,
+    "animenewsnetwork_id": 25346,
+    "anime-planet_id": "jujutsu-kaisen-season-2",
+    "anisearch_id": 17085,
+    "imdb_id": [
+      "tt12343534"
+    ],
+    "kitsu_id": 45857,
+    "livechart_id": 11083,
+    "mal_id": 51009,
+    "simkl_id": 1847578,
+    "themoviedb_id": {
+      "tv": 95479
+    },
+    "tvdb_id": 377543,
+    "season": {
+      "tvdb": 2,
+      "tmdb": 2
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 17236,
+    "anilist_id": 146065,
+    "animecountdown_id": 1863030,
+    "animenewsnetwork_id": 25412,
+    "anime-planet_id": "mushoku-tensei-jobless-reincarnation-2nd-season",
+    "anisearch_id": 17184,
+    "imdb_id": [
+      "tt13293588"
+    ],
+    "kitsu_id": 45950,
+    "livechart_id": 11115,
+    "mal_id": 51179,
+    "simkl_id": 1863030,
+    "themoviedb_id": {
+      "tv": 94664
+    },
+    "tvdb_id": 371310,
+    "season": {
+      "tvdb": 2,
+      "tmdb": 2
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 17617,
+    "anilist_id": 154587,
+    "animecountdown_id": 1990194,
+    "animenewsnetwork_id": 26334,
+    "anime-planet_id": "frieren-beyond-journeys-end",
+    "anisearch_id": 17669,
+    "imdb_id": [
+      "tt22248376"
+    ],
+    "kitsu_id": 46474,
+    "livechart_id": 11376,
+    "mal_id": 52991,
+    "simkl_id": 1990194,
+    "themoviedb_id": {
+      "tv": 209867
+    },
+    "tvdb_id": 424536,
+    "season": {
+      "tvdb": 1,
+      "tmdb": 1
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 18104,
+    "anilist_id": 166873,
+    "animecountdown_id": 2204668,
+    "animenewsnetwork_id": 28953,
+    "anime-planet_id": "mushoku-tensei-jobless-reincarnation-2nd-season-part-ii",
+    "anisearch_id": 18526,
+    "imdb_id": [
+      "tt13293588"
+    ],
+    "kitsu_id": 47694,
+    "livechart_id": 12251,
+    "mal_id": 55888,
+    "simkl_id": 2204668,
+    "themoviedb_id": {
+      "tv": 94664
+    },
+    "tvdb_id": 371310,
+    "season": {
+      "tvdb": 2,
+      "tmdb": 2
+    },
+    "episode_offset": {
+      "tvdb": 12,
+      "tmdb": 12
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 18727,
+    "anilist_id": 178789,
+    "animecountdown_id": 2832226,
+    "animenewsnetwork_id": 32859,
+    "anime-planet_id": "mushoku-tensei-jobless-reincarnation-3rd-season",
+    "anisearch_id": 19443,
+    "imdb_id": [
+      "tt13293588"
+    ],
+    "kitsu_id": 49002,
+    "livechart_id": 12735,
+    "mal_id": 59193,
+    "simkl_id": 2832226,
+    "themoviedb_id": {
+      "tv": 94664
+    },
+    "tvdb_id": 371310,
+    "season": {
+      "tvdb": 3,
+      "tmdb": 3
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 19969,
+    "anilist_id": 209827,
+    "animecountdown_id": 3062558,
+    "animenewsnetwork_id": 38810,
+    "anime-planet_id": "oshi-no-ko-4th-season",
+    "anisearch_id": 21322,
+    "imdb_id": [
+      "tt21030032"
+    ],
+    "kitsu_id": 50624,
+    "livechart_id": 13569,
+    "mal_id": 63794,
+    "simkl_id": 3062558,
+    "themoviedb_id": {
+      "tv": 203737
+    },
+    "tvdb_id": 421069,
+    "season": {
+      "tvdb": 4,
+      "tmdb": 1
+    },
+    "episode_offset": {
+      "tmdb": 35
+    }
+  },
+  {
+    "type": "TV",
+    "anidb_id": 54,
+    "anilist_id": 403,
+    "animecountdown_id": 36516,
+    "animenewsnetwork_id": 505,
+    "anime-planet_id": "hanaukyo-maid-team",
+    "anisearch_id": 2252,
+    "kitsu_id": 370,
+    "livechart_id": 4742,
+    "mal_id": 403,
+    "simkl_id": 36516,
+    "tvdb_id": 80654,
+    "season": {
+      "tvdb": 1
+    }
+  }
+]

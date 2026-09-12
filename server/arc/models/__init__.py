@@ -28,6 +28,13 @@ from arc.models.job import (
 )
 from arc.models.mal import MalLink, MalWriteLog
 from arc.models.media import MediaFile, Rendition
+from arc.models.offline import (
+    OFFLINE_SEARCH_INDEX,
+    OFFLINE_SEASON_INDEX,
+    OfflineAnime,
+    OfflineId,
+    OfflineImport,
+)
 from arc.models.recs import RecRun
 from arc.models.settings import DEFAULT_SETTINGS, Setting
 from arc.models.tracking import IN_PROGRESS_INDEX, ListEntry, WatchProgress
@@ -38,6 +45,8 @@ __all__ = [
     "DEFAULT_PRIORITY",
     "DEFAULT_SETTINGS",
     "IN_PROGRESS_INDEX",
+    "OFFLINE_SEARCH_INDEX",
+    "OFFLINE_SEASON_INDEX",
     "TRANSCODE_EPISODE_INDEX",
     "Anime",
     "Base",
@@ -53,6 +62,9 @@ __all__ = [
     "MalWriteLog",
     "MalWriteStatus",
     "MediaFile",
+    "OfflineAnime",
+    "OfflineId",
+    "OfflineImport",
     "RecRun",
     "Rendition",
     "ReviewState",

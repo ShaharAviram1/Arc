@@ -278,6 +278,38 @@ describe('Player', () => {
     expect(screen.queryByText('Resumed from 12:34')).not.toBeInTheDocument()
   })
 
+  /**
+   * The notice is a receipt for something that already happened, so it does not
+   * wait to be acknowledged: five seconds and it goes on its own (owner,
+   * 2026-09-12). Dismiss, tested above, is still the way to have it sooner.
+   */
+  it('takes the resume notice away after five seconds on its own (FR-S2)', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        fireEvent.loadedMetadata(video)
+      })
+      expect(screen.getByText('Resumed from 12:34')).toBeInTheDocument()
+
+      // Still up just short of the five seconds: it is a pause, not a blink.
+      act(() => {
+        vi.advanceTimersByTime(4500)
+      })
+      expect(screen.getByText('Resumed from 12:34')).toBeInTheDocument()
+
+      act(() => {
+        vi.advanceTimersByTime(600)
+      })
+      expect(screen.queryByText('Resumed from 12:34')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('does not resume when there is nothing to resume from', async () => {
     renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_LAST } })
 

@@ -126,6 +126,7 @@ cd server
 uv run python -m arc.cli status         # users, lists, episodes, jobs, disk, source health
 uv run python -m arc.cli invite --email prof@example.edu     # prints the link, once
 uv run python -m arc.cli warm-catalogue                       # season cache + refresh sweep
+uv run python -m arc.cli import-catalogue                     # offline catalogue, now
 uv run python -m arc.cli demo-list --user-email prof@example.edu \
     --add "Sousou no Frieren" --add "Vinland Saga"
 ```
@@ -145,6 +146,11 @@ docker compose --env-file .env -f deploy/docker-compose.yml \
 - `warm-catalogue` — queues the season pre-cache (what the schedule renders
   from) and a refresh of every followed show. Without it a fresh deployment
   has an empty schedule until 03:30 UTC.
+- `import-catalogue` — downloads and imports the offline catalogue (manami's
+  anime database + Fribb's id map, ~14 MB, about half a minute) instead of
+  waiting for the weekly job on Monday at 03:30 UTC. Replaces what it imported
+  last time, and does nothing at all when neither file has changed. Exits 1 if
+  either source failed; the tables of a source that failed are untouched.
 - `demo-list` — adds shows to a user's list as *watching*, looked up by title
   through the catalogue, so a new user's first Home page is not empty. It
   prints the title it matched. A list entry is what drives acquisition, so

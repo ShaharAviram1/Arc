@@ -16,11 +16,23 @@ so that a budget running low widens the spacing before the 429 arrives.
 
 **Retries.** A 429 is slept off once, for the ``Retry-After`` AniList sent,
 capped at 60 s. When it sends no header at all the wait is
-:data:`DEFAULT_RETRY_AFTER` — a request handler is usually waiting on this,
-and guessing the ceiling would turn a momentary overrun into a minute of
-nothing. A 5xx or a transport error is retried twice with exponential backoff.
-Everything else — a GraphQL error, a 4xx — is final; there is nothing to gain
-by asking again.
+:data:`DEFAULT_RETRY_AFTER`. A 5xx or a transport error is retried twice with
+exponential backoff. Everything else — a GraphQL error, a 4xx — is final;
+there is nothing to gain by asking again.
+
+**Who may wait.** Sleeping off a 429 is right for a background job, which has
+nowhere else to go and all night to get there. It is wrong for a user's search
+or show page, which has somewhere else to go — MAL, then the offline
+catalogue — and had to sit through three seconds to find out. So
+``wait_on_rate_limit=False`` turns a 429 into :class:`AniListRateLimited`
+immediately, and records ``Retry-After`` as a per-client
+:attr:`AniListClient.rate_limited_until`: within that window the next
+interactive call fails without a request at all, rather than spending Arc's
+next slot on a request AniList has already said it will refuse. The window is
+seconds long and per process, which is why it is a plain timestamp and not the
+breaker — a burst limit is a moment, not an outage, and opening the breaker
+for five minutes would take AniList away from every other caller over one
+noisy keystroke.
 
 Logging records the operation name and the duration, never the response body:
 a media response is several kilobytes of synopsis and would drown the log.
@@ -147,6 +159,24 @@ class AniListDisabled(AniListError):
     it gets a class of its own and :class:`AniListSource` turns it into a
     ``SourceUnavailable`` with a reason a human can read.
     """
+
+
+class AniListRateLimited(AniListError):
+    """The minute's budget is spent, and this caller is not waiting for it.
+
+    Only ever raised by a client built with ``wait_on_rate_limit=False`` — the
+    interactive one. A class of its own because the answer above is different
+    in kind: a rate limit is a source that is up and will answer again in a few
+    seconds, so :class:`~arc.services.anilist.source.AniListSource` turns it
+    into a :class:`~arc.services.catalog.source.SourceRateLimited`, which falls
+    back to MAL exactly like any other unavailability and, unlike one, leaves
+    the breaker closed.
+    """
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        #: What AniList asked for, in seconds, for whoever wants to log it.
+        self.retry_after = retry_after
 
 
 #: Substrings that mark a GraphQL error as "the whole API is off", not "your
@@ -350,13 +380,21 @@ class AniListClient:
         concurrency: int = CONCURRENCY,
         timeout: float = TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
+        wait_on_rate_limit: bool = True,
     ) -> None:
         self.url = url
         self.min_interval = max(min_interval, 0.0)
+        #: Whether a 429 is slept off (a job) or raised (a request handler).
+        #: See the module docstring, "Who may wait".
+        self.wait_on_rate_limit = wait_on_rate_limit
         self._sem = asyncio.Semaphore(concurrency)
         self._pace_lock = asyncio.Lock()
         #: Monotonic time before which the next request must not be sent.
         self._next_at = 0.0
+        #: Monotonic time until which AniList has said it will refuse. Only
+        #: written when ``wait_on_rate_limit`` is false; zero means "no reason
+        #: to think so".
+        self._rate_limited_until = 0.0
         self._http = httpx.AsyncClient(
             timeout=timeout,
             transport=transport,
@@ -368,12 +406,22 @@ class AniListClient:
         )
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
+    def from_settings(cls, settings: Settings, *, wait_on_rate_limit: bool = True) -> Self:
         """Build a client from configuration (``ANILIST_*``)."""
         return cls(
             url=settings.anilist_url,
             min_interval=settings.anilist_min_interval_ms / 1000.0,
+            wait_on_rate_limit=wait_on_rate_limit,
         )
+
+    @property
+    def rate_limited_until(self) -> float:
+        """Monotonic instant before which :meth:`query` will refuse to ask.
+
+        Always zero on a client that waits out its own 429s: it has no window
+        to skip, because it never returns while one is open.
+        """
+        return self._rate_limited_until
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -436,6 +484,41 @@ class AniListClient:
             return DEFAULT_RETRY_AFTER
         return min(max(seconds, 0.0), MAX_RETRY_AFTER)
 
+    def _check_rate_limit_window(self, name: str) -> None:
+        """Fail before the request when AniList has already said it will refuse.
+
+        The window only ever exists on an interactive client (see the module
+        docstring). Cheap on purpose: one comparison, no lock. A race that
+        lets one extra request out during the window costs a request, and
+        contending a lock on every query to save it would cost more.
+        """
+        if self.wait_on_rate_limit:
+            return
+        remaining = self._rate_limited_until - time.monotonic()
+        if remaining <= 0:
+            return
+        raise AniListRateLimited(
+            f"anilist {name}: rate limited, retry in {remaining:.1f}s",
+            retry_after=remaining,
+        )
+
+    def _rate_limited(self, name: str, pause: float) -> AniListRateLimited:
+        """Note the window this 429 opened, and describe it for the caller.
+
+        ``max`` rather than a plain assignment: two interactive calls can be
+        in flight and the later response can carry the shorter header, and
+        shortening a window that another 429 has already justified would send
+        the next request straight back into it.
+        """
+        self._rate_limited_until = max(self._rate_limited_until, time.monotonic() + pause)
+        log.warning(
+            "anilist rate limited; not waiting",
+            extra={"operation": name, "retry_after_s": pause},
+        )
+        return AniListRateLimited(
+            f"anilist {name}: rate limited, retry in {pause:.1f}s", retry_after=pause
+        )
+
     # --- The one request method ---
 
     async def query(
@@ -448,9 +531,11 @@ class AniListClient:
         """Run ``document`` and return its ``data`` object.
 
         Raises :class:`AniListNotFound` when AniList answers "not found" for
-        the thing that was asked for, and :class:`AniListError` for everything
-        else that went wrong.
+        the thing that was asked for, :class:`AniListRateLimited` when this
+        client does not wait out 429s and is inside one, and
+        :class:`AniListError` for everything else that went wrong.
         """
+        self._check_rate_limit_window(name)
         body = {"query": document, "variables": variables}
         started = time.monotonic()
         attempt = 0
@@ -473,10 +558,12 @@ class AniListClient:
             await self._note_budget(response)
 
             if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+                pause = self._retry_after(response)
+                if not self.wait_on_rate_limit:
+                    raise self._rate_limited(name, pause)
                 if rate_limited_once:
                     raise AniListError(f"anilist {name}: rate limited twice, giving up")
                 rate_limited_once = True
-                pause = self._retry_after(response)
                 log.warning(
                     "anilist rate limited", extra={"operation": name, "retry_after_s": pause}
                 )

@@ -32,11 +32,16 @@ from arc.services.catalog.source import EpisodeArt
         ("director", "Director"),
         ("Chief Director", "Director"),
         ("Director (eps 1, 14)", "Director"),
+        ("Director (eps 1-12)", "Director"),
         ("Series Composition", "Series Composition"),
         ("Character Design", "Character Design"),
         ("Music", "Music"),
         ("Original Creator", "Original Creator"),
         ("Original Story", "Original Creator"),
+        ("Original Work", "Original Creator"),
+        ("Original Manga", "Original Creator"),
+        # One person, two jobs: each half is read in its own right.
+        ("Director, Series Composition", "Director"),
     ],
 )
 def test_the_six_credits_are_recognised(role: str, expected: str) -> None:
@@ -52,13 +57,20 @@ def test_the_six_credits_are_recognised(role: str, expected: str) -> None:
         "Art Director",
         "Episode Director",
         "Assistant Director",
+        "Action Director",
+        "Music Director",
+        "CG Director",
+        "3D Director",
         "Director of Photography",
         "Original Character Design",
+        "Original Work Assistance",
         "Theme Song Performance",
         "Insert Song Performance",
         "Music Producer",
         "Key Animation",
         "Producer",
+        "Title Logo Design",
+        "Design Works",
         "",
         None,
     ],
@@ -66,9 +78,10 @@ def test_the_six_credits_are_recognised(role: str, expected: str) -> None:
 def test_a_role_that_is_not_one_of_the_six_is_dropped(role: str | None) -> None:
     """A near-miss must not be promoted.
 
-    Every string here contains one of the keywords Arc matches on, which is
-    the whole reason the qualifier list exists: a substring match alone would
-    credit the sound director as the director.
+    Every string here contains one of the words Arc's six credits are spelled
+    with, which is the whole reason the role is matched whole: a substring
+    match reads the action director as the director and "Original Work
+    Assistance" as the author.
     """
     assert credit_role(role) is None
 

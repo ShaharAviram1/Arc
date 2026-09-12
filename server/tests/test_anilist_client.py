@@ -17,6 +17,7 @@ from arc.services.anilist import (
     AniListDisabled,
     AniListError,
     AniListNotFound,
+    AniListRateLimited,
     parse_media,
     strip_html,
 )
@@ -28,6 +29,7 @@ from arc.services.anilist.client import (
     SCHEDULE_PER_PAGE,
 )
 from arc.services.anilist.source import AniListSource
+from arc.services.catalog import Breaker, CatalogService
 from arc.services.catalog.source import MediaTitle, SourceNotFound, SourceUnavailable
 from tests.anilist_mock import (
     DISABLED_BODY,
@@ -43,6 +45,8 @@ from tests.anilist_mock import (
     media_payload,
     summary_of,
 )
+from tests.mal_mock import FRIEREN_MAL_ID, FakeMal
+from tests.mal_mock import load as mal_load
 
 # --- Description → plain text -----------------------------------------------
 
@@ -147,18 +151,22 @@ async def test_media_parses_the_credits_and_the_episode_art() -> None:
     assert media.cover_large_url is not None
     assert "/cover/large/" in media.cover_large_url
     assert media.credits[0] == {"role": "Studio", "name": "MADHOUSE"}
+    # The fixture's staff connection credits no composer, so the "Made by"
+    # block is five rows rather than six; a credit AniList does not publish is
+    # a row the show page leaves out, not one to fill from somewhere else.
     assert [row["role"] for row in media.credits[1:]] == [
         "Director",
         "Series Composition",
         "Character Design",
-        "Music",
-        "Original Creator",
         "Original Creator",
     ]
 
-    assert [art.number for art in media.episode_extras] == list(range(1, 9))
+    # The fixture's ``streamingEpisodes`` covers the whole run, one link per
+    # episode, and every one of them is placed by the number in its title.
+    assert [art.number for art in media.episode_extras] == list(range(1, 29))
     assert media.episode_extras[0].title == "The Journey's End"
     assert media.episode_extras[0].still_url is not None
+    assert media.episode_extras[-1].title == "It Would Be Embarrassing When We Met Again"
 
 
 async def test_a_search_result_carries_the_key_art_and_nothing_else_new() -> None:
@@ -619,3 +627,120 @@ async def test_a_transport_failure_through_the_source_is_unavailable(
 def test_the_source_needs_no_credentials() -> None:
     """Which is why it is the primary: nothing to register, nothing to expire."""
     assert frieren_fake().source().configured is True
+
+
+# --- Interactive callers do not sleep off a 429 ------------------------------
+
+
+async def test_an_interactive_client_raises_a_429_rather_than_waiting(
+    slept: list[float],
+) -> None:
+    """A user is on the other end: falling back beats a three-second pause.
+
+    The whole point is the absence of a wait, so the assertion is on the sleep
+    hook — which the ``slept`` fixture makes free, meaning a regression here
+    would otherwise pass in silence and cost three real seconds in production.
+    """
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, headers={"Retry-After": "3"}, json={})
+
+    async with AniListClient(
+        min_interval=0.0, transport=httpx.MockTransport(handle), wait_on_rate_limit=False
+    ) as client:
+        with pytest.raises(AniListRateLimited) as caught:
+            await client.search("frieren")
+
+        assert calls == [1]  # asked once, gave up, did not retry
+        assert slept == []
+        assert caught.value.retry_after == 3.0
+        # …and the window it opened is what the next call will read.
+        assert client.rate_limited_until > 0.0
+
+
+async def test_a_second_interactive_call_inside_the_window_makes_no_request(
+    slept: list[float],
+) -> None:
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, headers={"Retry-After": "30"}, json={})
+
+    async with AniListClient(
+        min_interval=0.0, transport=httpx.MockTransport(handle), wait_on_rate_limit=False
+    ) as client:
+        with pytest.raises(AniListRateLimited):
+            await client.search("frieren")
+        with pytest.raises(AniListRateLimited):
+            await client.media(FRIEREN_ID)
+
+    assert calls == [1]  # the second call never reached the transport
+    assert slept == []
+
+
+async def test_a_window_that_has_passed_lets_the_next_call_through(
+    slept: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skip is a few seconds wide, not a breaker: it expires on its own."""
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={})
+        return httpx.Response(200, json=load("media_154587"))
+
+    async with AniListClient(
+        min_interval=0.0, transport=httpx.MockTransport(handle), wait_on_rate_limit=False
+    ) as client:
+        with pytest.raises(AniListRateLimited):
+            await client.media(FRIEREN_ID)
+        monkeypatch.setattr(
+            "arc.services.anilist.client.time.monotonic",
+            lambda: client.rate_limited_until + 0.1,
+        )
+        media = await client.media(FRIEREN_ID)
+
+    assert media.anilist_id == FRIEREN_ID
+    assert len(calls) == 2
+
+
+async def test_a_job_client_still_sleeps_the_429_off(slept: list[float]) -> None:
+    """The default is unchanged, and it is the worker's."""
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={})
+        return httpx.Response(200, json=load("media_154587"))
+
+    async with AniListClient(min_interval=0.0, transport=httpx.MockTransport(handle)) as client:
+        media = await client.media(FRIEREN_ID)
+
+    assert media.anilist_id == FRIEREN_ID
+    assert slept[0] == 3.0
+    assert client.rate_limited_until == 0.0
+
+
+async def test_an_interactive_429_falls_back_to_mal_without_opening_the_breaker() -> None:
+    """FR-C6's fallback, minus the five-minute stand-down: a burst limit is a
+    moment, and skipping AniList for the next 300 s would be the real outage."""
+    fake = frieren_fake()
+    fake.rate_limited = True
+    mal = FakeMal()
+    mal.anime[FRIEREN_MAL_ID] = mal_load("anime_52991")
+    breaker = Breaker(300.0)
+    catalog = CatalogService(fake.source(wait_on_rate_limit=False), mal.source(), breaker)
+    try:
+        media = await catalog.by_mal_id(FRIEREN_MAL_ID)
+    finally:
+        await catalog.aclose()
+
+    assert media is not None
+    assert media.source == "mal"
+    assert not breaker.is_open("anilist")
+    assert catalog.status()["active"] == "anilist"

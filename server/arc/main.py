@@ -17,6 +17,7 @@ from arc.api import (
     anime,
     auth,
     catalog,
+    catalogue,
     health,
     home,
     invites,
@@ -140,7 +141,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #: lifespan because ``ASGITransport`` does not run the lifespan and the
     #: routers must still find it; the lifespan closes it. Tests swap the
     #: attribute for a service over mock transports.
-    app.state.catalog = create_catalog(settings)
+    #:
+    #: ``wait_on_rate_limit=False`` because there is a user on the other end of
+    #: every call this catalogue makes: a 429 falls straight through to MAL
+    #: rather than holding the request open for AniList's ``Retry-After``
+    #: (§6). The worker's catalogue keeps the wait.
+    app.state.catalog = create_catalog(settings, wait_on_rate_limit=False)
     #: One limiter per app, so two apps in one process (a test suite) cannot
     #: exhaust each other's login budget.
     app.state.login_rate_limiter = LoginRateLimiter(
@@ -187,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(settings_api.router)
     app.include_router(anime.router)
     app.include_router(catalog.router)
+    app.include_router(catalogue.router)
     app.include_router(list_api.router)
     app.include_router(schedule.router)
     app.include_router(home.router)

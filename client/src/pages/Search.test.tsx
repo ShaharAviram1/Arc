@@ -137,6 +137,31 @@ describe('Browse', () => {
       FRIEREN_SPECIAL,
     ])
     expect(screen.getAllByText('via MAL')).toHaveLength(1)
+    expect(screen.queryByText('via offline catalogue')).not.toBeInTheDocument()
+  })
+
+  it('tags a result the weekly offline import filled (FR-C6)', async () => {
+    mockApi({
+      'GET /api/anime/search?q=frieren&page=1': {
+        body: {
+          ...SEARCH_PAGE_1,
+          results: [FRIEREN, { ...FRIEREN_SPECIAL, source: 'offline' as const }],
+        },
+      },
+      'GET /api/schedule': { body: EMPTY_SCHEDULE },
+    })
+
+    renderSearch('/search?q=frieren')
+    await screen.findByText(FRIEREN.title.preferred)
+
+    // The offline caveat replaces the MAL one; the AniList result still says
+    // nothing, which is the normal case.
+    const caveat = await screen.findByText('via offline catalogue')
+    expect(caveat).toHaveAttribute(
+      'title',
+      'Live catalogues are unavailable; this result came from the weekly offline import',
+    )
+    expect(screen.queryByText('via MAL')).not.toBeInTheDocument()
   })
 
   it('names the outage when both catalogue sources are down', async () => {

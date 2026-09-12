@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-12 (M0–M15 done; M15.5 next; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-12 (M0–M15.5 done; M16 next; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -328,31 +328,57 @@ CLAUDE.md).
 Why: AniList suspends its third-party API during instability (this week: three
 days of 403 "temporarily disabled"), which broke search, drifted fixtures,
 degraded art through the MAL fallback and starved the redesign of key art.
-- [ ] Weekly import job of the manami `anime-offline-database` (≈ 40k shows;
+- [x] Weekly import job of the manami `anime-offline-database` (≈ 40k shows;
       titles, synonyms, type, season, episodes, picture, cross-ids for
       AniList/MAL/Kitsu/AniDB) and Fribb's `anime-lists` id map (adds TMDB
       series + season, TVDB, IMDb) into two tables; replace-on-import,
       versioned by release tag; `arc.cli import-catalogue` for a manual run
-- [ ] Search and filename matching consult the offline tables first
+- [x] Search and filename matching consult the offline tables first
       (titles + synonyms, all sources), then live AniList, then MAL; internal
       ids attached via the cross-id map so the same show never gets two rows
-- [ ] Season lists and "what airs this season" seeded from the offline
+- [x] Season lists and "what airs this season" seeded from the offline
       database when both live sources are unavailable (air times still come
       from MAL broadcast slots)
-- [ ] TMDB enrichment (`TMDB_API_KEY`): nightly job fills missing
+- [x] TMDB enrichment (`TMDB_API_KEY`): nightly job fills missing
       `banner_url` (backdrop), `cover_large_url` (poster), episode
       `still_url`/`title`, and `credits` for followed shows via the id map;
       never overwrites AniList-provided values (cache rule 3); attribution in
       the UI footer as TMDB's terms require
-- [ ] Config check warnings for a missing key / stale import (> 14 days);
-      admin Storage tab shows the import version and age
-- [ ] Re-capture AniList fixtures when the API is back; `capture_anilist.py`
-      also refreshes the offline-db fixture slice used in tests
+- [x] Config check warning for a missing key; the stale-import flag (> 14 days)
+      lives on `GET /api/catalogue/offline` and the admin Storage tab, which
+      shows the import version and age (needs the database, so not in the
+      env check)
+- [x] Re-capture AniList fixtures when the API is back (done 2026-09-12 once
+      AniList's burst limit cooled; the fresh staff list exposed the keyword
+      credit matcher — "Action Director" read as Director, "Original Story"
+      unrecognised — now replaced by whole-role matching in
+      `anilist/extras.py`). The offline-db fixture slices have their own
+      `scripts/capture_offline.py`
 - **DoD:** with AniList and MAL both blocked in a test, search for a known
   title, adding it to a list, the season page and the Show page (with art
   from TMDB) all work; the weekly import runs in production and the Show
   page of a followed show without AniList art shows a TMDB backdrop and
   stills.
+- Verified 2026-09-12 (orchestrator): full suite 2765 server / 530 client,
+  lint clean. Dev stack run with `ANILIST_URL` and `MAL_API_URL` pointed at a
+  dead port: search "jobless reincarnation" answered 200 with cached + offline
+  rows ("via offline catalogue" caveat), the offline hit was added to a list
+  (`PUT /api/list/1504` → 200), the Schedule rendered, Frieren's Show page
+  showed TMDB episode stills and titles (28/28 filled by the enrichment job;
+  AniList banner and credits untouched), Home footer carries the TMDB
+  attribution, Admin → Storage shows both imports (manami 2026-27, 41,537
+  rows; Fribb 32,281 rows) with age and next run. Real import: 37 s first
+  run, 2.4 s unchanged. Weekly job scheduled Mondays 03:30 UTC; TMDB sweep
+  nightly 04:10 UTC. Production run of the import: pending deploy.
+- Owner decisions 2026-09-12: offline-sourced records carry a quiet "via
+  offline catalogue" caveat; AniList-sourced records stay unlabelled.
+- Owner remarks 2026-09-12, all landed and verified before the deploy: airing
+  sanity rule (a finished show has no future episodes; out-of-order dates are
+  marked estimated), interactive AniList calls no longer wait out a 429, TMDB
+  art for current/next-season shows and the hero (68 Summer 2026 backdrops on
+  dev), episode cards never crop a wide banner (still → 16:9 banner → framed
+  poster), shows being watched qualify for stills, credit roles matched whole,
+  httpx logger at WARNING so the TMDB key never lands in a log.
 
 ### M16 — Quality and finish
 - [ ] Per-show overrides UI for group/resolution

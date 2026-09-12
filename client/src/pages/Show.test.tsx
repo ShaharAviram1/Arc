@@ -15,6 +15,7 @@ import {
   FRIEREN_DETAIL_NO_STATUS,
   FRIEREN_DETAIL_ON_LIST,
   FRIEREN_DETAIL_VIA_MAL,
+  FRIEREN_DETAIL_VIA_OFFLINE,
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
@@ -27,6 +28,8 @@ import { callTo, jsonBodyOf, mockApi, requestsMade, TEST_ADMIN, TEST_USER } from
 const ME = { body: TEST_USER }
 const MAL_NOTICE =
   'Catalogue data via MyAnimeList — AniList is unavailable. Air dates are estimated.'
+const OFFLINE_NOTICE =
+  'Catalogue data from the weekly offline import — live sources are unavailable. Air dates unknown until a live source answers.'
 const DETAIL_PATH = `GET /api/anime/${FRIEREN.id}`
 const LIST_PATH = `/api/list/${FRIEREN.id}`
 /** The one failed episode in the fixture, the only one with a Retry button. */
@@ -612,6 +615,7 @@ describe('Show', () => {
     await screen.findByRole('heading', { name: FRIEREN.title.preferred })
 
     expect(screen.queryByText(MAL_NOTICE)).not.toBeInTheDocument()
+    expect(screen.queryByText(OFFLINE_NOTICE)).not.toBeInTheDocument()
     expect(screen.queryAllByText('est.')).toHaveLength(0)
   })
 
@@ -624,6 +628,18 @@ describe('Show', () => {
     const estimated = screen.getAllByText('est.')
     expect(estimated).toHaveLength(FRIEREN_DETAIL_VIA_MAL.episodes.length)
     expect(estimated[0]).toHaveAttribute('title', 'Estimated from the broadcast slot')
+  })
+
+  it('flags a record the weekly offline import filled (FR-C6)', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL_VIA_OFFLINE } })
+
+    renderShow()
+
+    expect(await screen.findByText(OFFLINE_NOTICE)).toBeInTheDocument()
+    // The offline catalogue carries no air dates, so nothing is estimated
+    // either — and the MAL caveat is not what this record has.
+    expect(screen.queryByText(MAL_NOTICE)).not.toBeInTheDocument()
+    expect(screen.queryAllByText('est.')).toHaveLength(0)
   })
 
   it('links out to both catalogues when it has both ids', async () => {

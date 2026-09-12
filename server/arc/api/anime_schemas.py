@@ -41,6 +41,7 @@ from arc.services.catalog.airing import (
     is_aired,
     next_airing_at,
     next_airing_episode,
+    out_of_order,
 )
 
 
@@ -492,8 +493,11 @@ class EpisodeOut(BaseModel):
     still_url: str | None = None
     air_at: datetime | None = None
     #: True when ``air_at`` was worked out from a MAL broadcast slot rather
-    #: than published per episode (FR-C6). The client badges these as
-    #: estimated; they are replaced the next time AniList answers.
+    #: than published per episode (FR-C6), and also when the list itself
+    #: contradicts the published date (:func:`~arc.services.catalog.airing.
+    #: out_of_order`). The client badges both as estimated; the first is
+    #: replaced the next time AniList answers, the second the next time the
+    #: source fixes its own typo.
     air_at_estimated: bool = False
     #: Whether the episode has aired *now*, so the client does not have to
     #: compare against a clock the server may disagree with.
@@ -531,12 +535,20 @@ class EpisodeOut(BaseModel):
         now: datetime,
         anime_status: str | None,
         boundary: int = 0,
+        out_of_order: bool = False,
         watched: bool = False,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
     ) -> EpisodeOut:
-        """``boundary`` is the list's :func:`aired_through`; see that module."""
+        """``boundary`` is the list's :func:`aired_through`; see that module.
+
+        ``out_of_order`` is the other half the whole list knows and one row
+        cannot: whether this episode's published date falls after a
+        higher-numbered episode's. Defaulted to false for the callers that
+        render a single episode out of its list (the home page's shelves),
+        where the stored flag is the only one there is to report.
+        """
         prepare = PrepareState.from_job(transcode_job, episode.state)
         return cls(
             id=episode.id,
@@ -544,7 +556,7 @@ class EpisodeOut(BaseModel):
             title=episode.title,
             still_url=episode.still_url,
             air_at=episode.air_at,
-            air_at_estimated=episode.air_at_estimated,
+            air_at_estimated=episode.air_at_estimated or out_of_order,
             aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
             state=episode.state,
             watched=watched,
@@ -687,6 +699,7 @@ class AnimeDetail(AnimeCore):
             anime_status=anime.status,
             next_airing=anime.next_airing,
         )
+        unordered = out_of_order(episodes)
         relations = [
             relation
             for relation in (RelationOut.from_blob(raw, related) for raw in raw_relations)
@@ -727,6 +740,7 @@ class AnimeDetail(AnimeCore):
                     now=now,
                     anime_status=anime.status,
                     boundary=boundary,
+                    out_of_order=episode.number in unordered,
                     watched=episode.id in watched,
                     torrent=(torrents or {}).get(episode.id),
                     rendition=(renditions or {}).get(episode.id),
