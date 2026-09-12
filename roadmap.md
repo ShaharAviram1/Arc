@@ -381,9 +381,23 @@ degraded art through the MAL fallback and starved the redesign of key art.
   httpx logger at WARNING so the TMDB key never lands in a log.
 
 ### M16 — Quality and finish
+Scope set with the owner 2026-09-12: the demo account and the "How Arc
+works" framing move in from the demo checklist and show **only on the demo
+account**; the failure banner shows a user **their own** failures only; the
+owner uses the site daily for a few days first so the kinks surface before
+the finish work (bugs found that way are fixed inside M16).
+- [ ] Failure banner on Watch Now: a user's own failed downloads, transcodes
+      and MAL writes, dismissable per failure, linking to the episode or job
+      (admins see the same view of their own; the Admin jobs tab stays the
+      global view) — email/push remain out of scope
+- [ ] Demo account seeded by `arc.cli demo-list` (plausible list, a few ready
+      episodes, a recommendation run) so every page has content without a MAL
+      link; a "How Arc works" page with the pipeline diagram and one sentence
+      per external service (AniList, MAL, TMDB, offline catalogue, Nyaa,
+      qBittorrent, the LLM) — both visible only when the demo account is
+      signed in
+- [ ] Kinks from the owner's daily use (tracked here as they come in)
 - [ ] Per-show overrides UI for group/resolution
-- [ ] Notifications of failures in-app (banner) — email/push remain out of
-      scope
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
 - [ ] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
@@ -399,15 +413,9 @@ degraded art through the MAL fallback and starved the redesign of key art.
 Raised 2026-09-10. The reviewer does not know anime and has no MAL account,
 so the product has to explain itself. Scope to be decided with the owner
 closer to the date; candidates:
-- [ ] A demo account seeded by `arc.cli demo-list` with a plausible list, a
-      few ready episodes and a recommendation run, so every page has content
-      without a MAL link
-- [ ] Plain-language framing on each page: what the page does and which
-      external service it talks to (AniList, MAL, Nyaa, qBittorrent, Claude),
-      one sentence each — the "multiple API calls" the course asks for,
-      visible in the UI
-- [ ] A guided tour or a short "How Arc works" page with the pipeline
-      diagram (list → want → search → download → transcode → play → sync)
+- [x] Moved into M16 (2026-09-12): the demo account and the "How Arc works"
+      page with the pipeline diagram and one sentence per external service —
+      demo-account only
 - [ ] A live-status panel (jobs, integrations, VPN exit) the reviewer can open
       to see the system working, reusing the M14 admin data
 

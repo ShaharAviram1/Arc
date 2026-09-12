@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Artwork } from '@/components/ui/Artwork'
+import { AspectProbe } from '@/components/ui/AspectProbe'
 import { PosterWash } from '@/components/ui/PosterWash'
 import { cx } from '@/components/ui/styles'
 
@@ -14,32 +15,46 @@ import { cx } from '@/components/ui/styles'
  *
  * So there are two heroes, not one:
  *
- * - **Banner hero.** AniList's ~1900 px banner, cropped to the frame, with
- *   the scrim and the title block over it. What the design drew.
- * - **Poster hero.** No banner: the frame is *filled* with the poster blurred
- *   past recognition and darkened — it is a colour wash, not a picture, so its
+ * - **Banner hero.** A banner no wider than {@link MAX_BANNER_ASPECT}, cropped
+ *   to the frame, with the scrim and the title block over it. What the design
+ *   drew. A 16:9 backdrop qualifies: filling a 21:9 frame with it costs a
+ *   little off the top and bottom and nothing else.
+ * - **Poster hero.** The frame is *filled* with the poster blurred past
+ *   recognition and darkened — it is a colour wash, not a picture, so its
  *   resolution stops mattering — and the crisp poster is laid at its own 2:3
  *   ratio beside the title, around 180px wide on a laptop and as much as the
  *   frame's height allows below that. A poster is never scaled up to fill the
  *   frame, which is the whole point: upscaling a 230px MyAnimeList picture
- *   across 1180px is what made the hero look broken. The treatment itself
- *   lives in `PosterWash`, because the 16:9 episode card now has the same
- *   problem one size down (owner, 2026-09-12).
+ *   across 1180px is what made the hero look broken. This is what a show with
+ *   no banner gets, and also what a show whose only wide art is an AniList
+ *   strip gets: 1900 × 400 is 4.75:1, and `object-cover` in a 21:9 frame shows
+ *   the middle half of one. With no poster to lay over it the strip is still
+ *   the show's own artwork, so it becomes the wash. The treatment itself lives
+ *   in `PosterWash`, because the 16:9 episode card has the same problem one
+ *   size down (owner, 2026-09-12).
  *
  * Both images load eagerly: the hero is the largest thing above the fold on
  * both pages, and lazy-loading the one image a page is built around only
  * delays it.
  *
- * A banner hero also sizes its *frame* to the banner (owner, 2026-09-12: "too
- * zoomed in"). AniList's banners are about 1900 × 400 — roughly 4.75:1 — and
- * `object-fit: cover` in a 2.33:1 frame shows only the middle ~half of one.
- * So the frame takes the image's own ratio once the browser knows it, clamped
- * to between 21:9 and 3.6:1: never narrower than the hero the design drew,
- * never so wide that it becomes a letterbox strip, and wide enough that an
- * AniList banner loses a sliver rather than half of itself. A 16:9 backdrop
- * from some later source still lands on 21:9, which is the ratio the design
- * is built around.
+ * **The frame itself is always 21:9** (owner, 2026-09-12: "all heroes in the
+ * homepage need to be in the same size"). It used to take the banner's own
+ * ratio, clamped to between 21:9 and 3.6:1, which meant Watch Now's carousel
+ * changed height between slides — a 16:9 backdrop landing on 21:9 and an
+ * AniList strip on 3.6:1. One fixed frame, and the choice of treatment inside
+ * it is what absorbs the difference. The banner's ratio is measured off-frame
+ * (`AspectProbe`) so the frame never shows a strip on its way to the right
+ * answer: until the ratio is known the wash is what renders.
  */
+
+/**
+ * Wider than this and a banner cannot honestly fill a 21:9 frame: 21:9 is
+ * 2.33, so a 2.6:1 picture loses a sliver of its sides, and AniList's 4.75:1
+ * strip would lose half of itself. Matches the episode card's rule one size
+ * down, for the same reason and with a little more room, since the hero's
+ * frame is the wider of the two.
+ */
+const MAX_BANNER_ASPECT = 2.6
 
 /**
  * The poster is sized by the frame's height, not by a width of its own: a 2:3
@@ -54,25 +69,8 @@ const POSTER = 'max-h-[270px]'
 /** The title block's gutter. Matches the banner hero's, so the two agree. */
 const PADDING = 'p-6 sm:p-10'
 
-/** Never narrower than the hero the design drew: 21:9 is the floor and the default. */
-const MIN_ASPECT = 21 / 9
-
-/** And never a letterbox strip: past this a banner is cropped rather than obeyed. */
-const MAX_ASPECT = 3.6
-
-/**
- * The banner's own ratio, in the range a hero is allowed to take. Rounded to
- * three places because it is going into a style attribute and nothing on a
- * screen can tell 2.3333333333333335 from 2.333.
- */
-function heroAspect(width: number, height: number): number {
-  if (width <= 0 || height <= 0) return MIN_ASPECT
-  const clamped = Math.min(MAX_ASPECT, Math.max(MIN_ASPECT, width / height))
-  return Math.round(clamped * 1000) / 1000
-}
-
 export interface HeroFrameProps {
-  /** AniList's 21:9 banner, or null — the ordinary case for a MAL record. */
+  /** AniList's banner, or null — the ordinary case for a MAL record. */
   banner: string | null
   /** The 2:3 key visual, largest first. Both the wash and the crisp poster. */
   poster: string | null
@@ -82,36 +80,18 @@ export interface HeroFrameProps {
 }
 
 export function HeroFrame({ banner, poster, children, className }: HeroFrameProps) {
-  // Null until the banner has loaded, which is what leaves the shape's own
-  // 21:9 in charge until then; the transition carries the one step from there
-  // to the banner's ratio. Deliberately *not* reset when the banner changes:
-  // Watch Now cycles through banners that are all much the same shape, and
-  // collapsing to 21:9 and back on every slide is a worse frame than a ratio
-  // that only moves when the next banner really is a different shape.
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null)
+  // Keyed by the url it was measured from: Watch Now cycles a single frame
+  // through several shows, and the previous slide's banner says nothing about
+  // this one's. Null means "not known yet", which is the wash.
+  const [measured, setMeasured] = useState<{ url: string; aspect: number } | null>(null)
 
+  const art = banner === null || banner === '' ? null : banner
+  const aspect = measured !== null && measured.url === art ? measured.aspect : null
   const frame = cx('w-full shadow-hero', className)
 
-  if (banner !== null && banner !== '') {
+  if (art !== null && aspect !== null && aspect <= MAX_BANNER_ASPECT) {
     return (
-      <Artwork
-        url={banner}
-        shape="hero"
-        scrim
-        eager
-        aspect={size === null ? null : heroAspect(size.width, size.height)}
-        // Kept identical when the size has not actually changed, so React
-        // bails out: a ref callback is re-run on every render, and a fresh
-        // object each time would be a re-render that causes a re-render.
-        onNaturalSize={(next) => {
-          setSize((current) =>
-            current !== null && current.width === next.width && current.height === next.height
-              ? current
-              : next,
-          )
-        }}
-        className={cx(frame, 'transition-[aspect-ratio] duration-200 ease-arc')}
-      >
+      <Artwork url={art} shape="hero" scrim eager className={frame}>
         <div className={cx('absolute inset-0 flex items-end', PADDING)}>
           <div className="max-w-[620px]">{children}</div>
         </div>
@@ -120,15 +100,28 @@ export function HeroFrame({ banner, poster, children, className }: HeroFrameProp
   }
 
   return (
-    <PosterWash
-      poster={poster}
-      shape="hero"
-      eager
-      padding={PADDING}
-      plateClassName={POSTER}
-      className={frame}
-    >
-      {children}
-    </PosterWash>
+    <>
+      <PosterWash
+        poster={poster}
+        // With no poster the banner is the only artwork there is: too wide to
+        // fill the frame as a picture, fine as a ground once it is blurred.
+        ground={poster ?? art}
+        shape="hero"
+        eager
+        padding={PADDING}
+        plateClassName={POSTER}
+        className={frame}
+      >
+        {children}
+      </PosterWash>
+      {art !== null && aspect === null ? (
+        <AspectProbe
+          url={art}
+          onAspect={(next) => {
+            setMeasured({ url: art, aspect: next })
+          }}
+        />
+      ) : null}
+    </>
   )
 }

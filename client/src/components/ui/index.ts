@@ -5,6 +5,7 @@
  */
 
 export { Artwork, type ArtworkProps, type ArtworkRadius, type ArtworkShape } from './Artwork'
+export { AspectProbe, type AspectProbeProps } from './AspectProbe'
 export { Button, PlayGlyph, type ButtonProps, type ButtonVariant } from './Button'
 export { Chip, type ChipProps } from './Chip'
 export { EmptyState, type EmptyStateProps } from './EmptyState'

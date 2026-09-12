@@ -67,17 +67,9 @@ export interface ArtworkProps {
    */
   eager?: boolean
   /**
-   * Overrides the shape's ratio with a measured one, as width ÷ height. For a
-   * hero, which sizes its frame to the banner it was actually given rather
-   * than cropping every banner to a nominal 21:9. Null keeps the shape's own
-   * ratio, which is what the class already says — so the shape is still the
-   * ratio before anything has loaded.
-   */
-  aspect?: number | null
-  /**
    * Called with the image's intrinsic size once the browser knows it. The one
-   * thing a frame cannot work out from the URL, and the only reason `aspect`
-   * above has anything to be set from.
+   * thing a frame cannot work out from the URL, and what the two wide frames
+   * pick their treatment from — see `AspectProbe`.
    */
   onNaturalSize?: (size: { width: number; height: number }) => void
   /**
@@ -113,7 +105,6 @@ export function Artwork({
   progress = null,
   scrim = false,
   eager = false,
-  aspect = null,
   onNaturalSize,
   alt = '',
   className,
@@ -144,7 +135,6 @@ export function Artwork({
         rounded,
         className,
       )}
-      style={aspect === null ? undefined : { aspectRatio: String(aspect) }}
     >
       {url === null ? (
         <div

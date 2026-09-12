@@ -145,7 +145,7 @@ arc/
                                  pieces (CoverThumb, ListStatusControl, …)
         ui/                      design primitives (M15): Artwork, Button,
                                  Chip, Row, Shelf, Segmented, Eyebrow,
-                                 HeroFrame, PosterWash, Skeleton,
+                                 HeroFrame, PosterWash, AspectProbe, Skeleton,
                                  EmptyState + styles.ts
       player/                    hls.js wrapper, progress reporter
       lib/                       auth context, query hooks, media queries
@@ -200,17 +200,23 @@ focus ring is `--arc-focus`.
 poster, and the two frames that are wider than they are tall pick what to put
 in them by the *shape* of the picture, not only by its presence:
 
-- The 21:9 hero (`ui/HeroFrame.tsx`) takes AniList's `banner_url` and sizes the
-  frame to the banner's own ratio, clamped to 21:9–3.6:1; with no banner it
-  falls back to the poster treatment below.
+- The hero (`ui/HeroFrame.tsx`) is **always 21:9** — one fixed frame, so Watch
+  Now's carousel does not change height between slides (owner, 2026-09-12).
+  It fills the frame with AniList's `banner_url` **only if its natural ratio is
+  ≤ 2.6** (a 16:9 backdrop loses a little off the top and bottom; a ~4.75:1
+  AniList strip would lose half of itself); otherwise the poster treatment
+  below, using the banner itself as the wash ground when the show has no
+  poster. With no banner at all it is the poster treatment as well.
 - The 16:9 episode card on Watch Now (`EpisodeArt` in `pages/Home.tsx`) takes
   the episode's `still_url`; failing that the show's `banner_url` **only if its
-  natural ratio is ≤ 2.2** — a TMDB backdrop is 16:9 and passes, an AniList
-  banner is ~4.75:1 and does not, and `object-cover` would show a 3× zoom of a
-  sliver of it (owner, 2026-09-12); failing that, the poster treatment. The
-  ratio is learnt from `Artwork`'s `onNaturalSize` on an off-frame copy of the
-  banner, and the poster treatment is what shows until it is known, so a card
-  never flashes a zoomed strip on its way to the right answer.
+  natural ratio is ≤ 2.2** — the same rule one size down, with a tighter
+  threshold because the frame is narrower (owner, 2026-09-12); failing that,
+  the poster treatment.
+
+Both learn the ratio the same way: `ui/AspectProbe.tsx` renders an off-frame
+copy of the banner and reports `Artwork`'s `onNaturalSize` as a ratio, and the
+poster treatment is what shows until it is known — so neither frame ever
+flashes a zoomed strip on its way to the right answer.
 
 The **poster treatment** is one component (`ui/PosterWash.tsx`), shared by
 both: the poster blurred (40 px, scale 1.15, brightness 0.5, saturate 1.2) and
@@ -1625,7 +1631,8 @@ two together.
   (`/api/home`, `/api/schedule`, `/api/recs`, `/api/list`). Continue watching
   becomes its own shelf and "Up Next" narrows to ready-but-unstarted episodes,
   renamed "Ready to watch".
-- 2026-09-12 — M15 hero framing (owner: "too zoomed in"): a banner hero sizes
+- 2026-09-12 — **Superseded the same day** by the fixed-frame entry at the end
+  of this log. M15 hero framing (owner: "too zoomed in"): a banner hero sized
   its *frame* to the banner instead of cropping every banner to 21:9. AniList
   banners are ~1900 × 400 (≈4.75:1) and `object-fit: cover` in a 2.33:1 frame
   showed only the middle half of one. `HeroFrame` reads the image's intrinsic
@@ -1862,3 +1869,22 @@ two together.
   `GET /api/home` queues a full `tmdb_enrich` (bounded at 8, same dedupe key,
   before the hero's art-only pass) for each shelf card whose episode has no
   still. `lib/anime.ts::heroArt` went with it — nothing else used it.
+- 2026-09-12 — **The hero is one fixed 21:9 frame on every slide** (owner: "all
+  heroes in the homepage need to be in the same size"; §2). This reverses the
+  adaptive frame decided earlier the same day: sizing the frame to the banner's
+  own ratio (clamped to [21/9, 3.6]) meant a 16:9 backdrop landed on 21:9 and
+  an AniList strip on 3.6:1, so Watch Now's carousel changed height between
+  slides. The frame is 21:9 again, and the *treatment inside it* absorbs the
+  difference, exactly as the episode card already did: a banner with a measured
+  ratio ≤ 2.6 fills the frame with `object-cover`, anything wider takes the
+  `PosterWash` treatment (the banner itself becomes the wash ground when the
+  show has no poster). The ratio is measured off-frame, so the wash — not a
+  zoomed strip — is what holds the frame until it is known. The off-frame
+  measurement moved out of `pages/Home.tsx` into `ui/AspectProbe.tsx` and is
+  now shared by the hero and the episode card; it reports a ratio rather than a
+  size, which is a number React's state can bail out of re-rendering for.
+  `Artwork.aspect` (the inline measured ratio) had no callers left and was
+  removed with the rest of the adaptive code; `onNaturalSize` stays, since the
+  probe is what reads it. `PosterWash` gained `ground` (what to blur, when it
+  is not the poster). The show page hero keeps the same behaviour — it uses the same
+  component and has no reason to differ.

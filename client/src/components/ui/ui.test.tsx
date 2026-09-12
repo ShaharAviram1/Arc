@@ -102,17 +102,29 @@ describe('HeroFrame', () => {
     return container.firstElementChild as HTMLElement
   }
 
-  /** The measured ratio, past whatever `aspect-ratio` serialises itself as. */
-  function aspectOf(container: HTMLElement): number {
-    return Number.parseFloat(frameOf(container).style.aspectRatio)
+  /** The off-frame copy of the banner, which is what reports its shape. */
+  function probe(container: HTMLElement): HTMLImageElement {
+    return container.querySelector(`img[src="${BANNER}"]`) as HTMLImageElement
   }
 
-  it('fills the frame with the banner when AniList published one', () => {
+  /** The frame is one fixed 21:9 box; nothing may override it with a ratio. */
+  function expectFixedFrame(container: HTMLElement): void {
+    const frame = frameOf(container)
+    expect(frame).toHaveClass('aspect-[21/9]')
+    expect(frame.style.aspectRatio).toBe('')
+  }
+
+  it('fills the frame with a banner that is a 16:9 backdrop', () => {
     const { container } = render(
       <HeroFrame banner={BANNER} poster={POSTER}>
         <h1>Frieren</h1>
       </HeroFrame>,
     )
+
+    // Until the shape is known the wash holds the frame, so nothing jumps.
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+
+    load(probe(container), 1920, 1080)
 
     const images = container.querySelectorAll('img')
     expect(images).toHaveLength(1)
@@ -125,6 +137,9 @@ describe('HeroFrame', () => {
     expect(container.querySelector('[data-hero-backdrop]')).toBeNull()
     expect(container.querySelector('[data-hero-poster]')).toBeNull()
     expect(screen.getByRole('heading', { name: 'Frieren' })).toBeInTheDocument()
+    // 16:9 into 21:9 loses a little off the top and bottom, and the frame is
+    // the same 21:9 box it would be for any other show.
+    expectFixedFrame(container)
   })
 
   it('washes the poster across the frame and lays the crisp one beside the title', () => {
@@ -157,38 +172,34 @@ describe('HeroFrame', () => {
     const title = screen.getByRole('heading', { name: 'The Apothecary Diaries' })
     expect(poster.compareDocumentPosition(title)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(poster).not.toContainElement(title)
+    expectFixedFrame(container)
   })
 
-  it('takes the banner’s own ratio once it loads, rather than cropping to 21:9', () => {
-    const { container } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
-    const frame = frameOf(container)
-
-    // 21:9 until something knows better: the class is the pre-load default.
-    expect(frame).toHaveClass('aspect-[21/9]')
-    expect(frame.style.aspectRatio).toBe('')
-
-    // AniList's shape, ~4.75:1, clamped to the widest a hero may be.
-    load(container.querySelector('img') as HTMLImageElement, 1900, 400)
-    expect(aspectOf(container)).toBe(3.6)
-    expect(frame).toHaveClass('transition-[aspect-ratio]', 'duration-200')
-  })
-
-  it('gives a 16:9 backdrop the 21:9 the design was drawn around', () => {
+  it('frames the poster rather than cropping a 4.75:1 banner into the hero', () => {
     const { container } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
 
-    load(container.querySelector('img') as HTMLImageElement, 1920, 1080)
-    // Narrower than a hero, so the hero's own floor wins and it crops.
-    expect(aspectOf(container)).toBe(2.333)
+    // AniList ships ~1900×400: object-cover in a 21:9 frame shows the middle
+    // half of one, so the banner is not what fills the frame.
+    load(probe(container), 1900, 400)
+
+    expect(container.querySelector(`img[src="${BANNER}"]`)).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+    const poster = container.querySelector('[data-hero-poster]') as HTMLElement
+    expect(poster.querySelector('img')).toHaveAttribute('src', POSTER)
+    expectFixedFrame(container)
   })
 
-  it('leaves a poster hero at 21:9 whatever the cover measures', () => {
-    const { container } = render(<HeroFrame banner={null} poster={POSTER} />)
-    const frame = frameOf(container)
+  it('blurs the banner itself into the ground when there is no poster', () => {
+    const { container } = render(<HeroFrame banner={BANNER} poster={null} />)
 
-    // The backdrop is a wash filling a fixed frame; its shape says nothing.
-    load(container.querySelector('[data-hero-backdrop]') as HTMLImageElement, 460, 690)
-    expect(frame).toHaveClass('aspect-[21/9]')
-    expect(frame.style.aspectRatio).toBe('')
+    load(probe(container), 1900, 400)
+
+    // Too wide to read as a picture, fine as a colour — and it is the only
+    // artwork the show has, so it is the ground rather than nothing.
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', BANNER)
+    // No crisp plate: there is no 2:3 poster to lay over it.
+    expect(container.querySelector('[data-hero-poster]')).toBeNull()
+    expectFixedFrame(container)
   })
 
   it('keeps the frame when the catalogue has no artwork at all', () => {
@@ -196,10 +207,24 @@ describe('HeroFrame', () => {
 
     expect(container.querySelector('img')).toBeNull()
     expect(container.querySelector('.art-placeholder')).not.toBeNull()
-    expect(container.firstElementChild).toHaveClass('aspect-[21/9]')
+    expectFixedFrame(container)
     // One striped box, not a striped box laid on a striped frame.
     expect(container.querySelector('[data-hero-poster]')).toBeNull()
     expect(container.querySelectorAll('.art-placeholder')).toHaveLength(1)
+  })
+
+  it('measures each banner against its own url, not the slide before it', () => {
+    const { container, rerender } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+
+    load(probe(container), 1920, 1080)
+    expect(container.querySelectorAll('img')).toHaveLength(1)
+
+    // The next slide is a different show: its banner has to be measured
+    // before it can fill anything, whatever the last one measured.
+    const other = 'https://cdn.example/apothecary-banner.jpg'
+    rerender(<HeroFrame banner={other} poster={POSTER} />)
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+    expectFixedFrame(container)
   })
 })
 

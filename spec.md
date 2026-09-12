@@ -488,3 +488,4 @@ preparing → failed → (retry) → preparing
   search or show page falls back to MAL/offline immediately rather than paying
   `Retry-After`, and a rate limit no longer stands AniList down for five
   minutes (FR-C6). Background jobs still wait.
+- 2026-09-12 — M16 scope (owner): failure banner shows a user their own failures only; the demo account and "How Arc works" framing are part of M16 and appear only on the demo account; the owner dogfoods for a few days first.

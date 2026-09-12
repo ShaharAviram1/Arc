@@ -15,6 +15,9 @@ import { cx } from '@/components/ui/styles'
  * which `object-cover` in a 280 px card crops to a 3× zoom of a sliver of it
  * (owner, 2026-09-12, "continue watching posters need adjustment").
  *
+ * The ground is the poster by default; a caller with something else to blur —
+ * a hero holding a banner too wide to fill its frame — passes `ground`.
+ *
  * A poster is never scaled up to fill the frame, which is the whole point: the
  * wash is a ground rather than a picture, so its resolution stops mattering,
  * and the only thing shown at full size is shown at its own ratio.
@@ -34,6 +37,13 @@ export const BACKDROP =
 export interface PosterWashProps {
   /** The 2:3 key visual — both the wash and the crisp plate over it. */
   poster: string | null
+  /**
+   * What to blur into the ground, when it is not the poster. For a hero whose
+   * only artwork is a banner too wide to fill the frame: unusable as a
+   * picture, perfectly good as a colour once it is blurred. Defaults to the
+   * poster, which is the ordinary case.
+   */
+  ground?: string | null
   /** The frame's ratio: `hero` for a hero, `still` for an episode card. */
   shape: ArtworkShape
   /** Loads both copies at once. For a hero, which is above the fold. */
@@ -54,6 +64,7 @@ export interface PosterWashProps {
 
 export function PosterWash({
   poster,
+  ground,
   shape,
   eager = false,
   progress = null,
@@ -63,12 +74,14 @@ export function PosterWash({
   className,
   children,
 }: PosterWashProps) {
+  const wash = ground === undefined ? poster : ground
+
   return (
     <Artwork url={null} shape={shape} progress={progress} className={className}>
-      {poster === null ? null : (
+      {wash === null ? null : (
         <img
           data-hero-backdrop
-          src={poster}
+          src={wash}
           alt=""
           aria-hidden
           loading={eager ? 'eager' : 'lazy'}

@@ -304,6 +304,24 @@ function heroTitle(): string {
   return screen.getByRole('heading', { level: 1 }).textContent ?? ''
 }
 
+/** The one frame the hero draws, whichever treatment it landed on. */
+function heroFrame(): HTMLElement {
+  return hero().querySelector('.shadow-hero') as HTMLElement
+}
+
+/**
+ * jsdom decodes nothing, and the hero measures its banner off-frame before
+ * deciding what to do with it: the intrinsic size has to be planted on that
+ * copy and the load announced by hand. A 16:9 backdrop is the shape that
+ * fills the frame; AniList's ~1900×400 is the shape that does not.
+ */
+function loadBanner(url: string, width = 1920, height = 1080): void {
+  const image = hero().querySelector(`img[src="${url}"]`) as HTMLImageElement
+  Object.defineProperty(image, 'naturalWidth', { value: width, configurable: true })
+  Object.defineProperty(image, 'naturalHeight', { value: height, configurable: true })
+  fireEvent.load(image)
+}
+
 /**
  * The shows the carousel holds, in order, read off the dots — each of which
  * is labelled with the show it jumps to. Only meaningful for more than one
@@ -423,7 +441,9 @@ describe('Watch Now hero', () => {
     expect(
       screen.getByText('Bones · Fall 2026 · 12 episodes · Adventure, Fantasy, Romance'),
     ).toBeInTheDocument()
-    // banner → cover_large → cover, and this show has a banner.
+    // banner → cover_large → cover, and this show has a banner the frame can
+    // be filled with once its shape is known.
+    loadBanner(KAIJU.banner_url as string)
     expect(hero().querySelector('img')).toHaveAttribute('src', KAIJU.banner_url)
     expect(screen.getByRole('link', { name: 'Details' })).toHaveAttribute(
       'href',
@@ -545,32 +565,50 @@ describe('Watch Now hero', () => {
       HALF_MATCH.title.preferred,
     ])
 
-    // The banner fills the frame at its own size, and nothing is blurred.
+    // A 16:9 banner fills the frame, and nothing is blurred.
+    loadBanner(KAIJU.banner_url as string)
     expect(hero().querySelector('img')).toHaveAttribute('src', KAIJU.banner_url)
     expect(hero().querySelector('[data-hero-backdrop]')).toBeNull()
   })
 
-  it('sizes the frame to the banner rather than cropping to the middle of it', async () => {
+  it('keeps one frame of the same size on every slide', async () => {
     renderHome({
       'GET /api/home': { body: EMPTY_HOME },
-      'GET /api/schedule': { body: seasonSchedule(KAIJU) },
-      'GET /api/list': { body: MY_LIST },
+      'GET /api/schedule': { body: seasonSchedule(KAIJU, SEASON_PICK, POSTER_ONLY) },
+      'GET /api/list': { body: [] },
     })
 
     await screen.findByText('Recommended this season')
-    const image = hero().querySelector('img') as HTMLImageElement
-    const frame = image.parentElement as HTMLElement
+    const user = userEvent.setup()
+    expect(heroSlides()).toHaveLength(3)
 
-    // 21:9 while nothing knows the banner's shape.
-    expect(frame).toHaveClass('aspect-[21/9]')
-    expect(frame.style.aspectRatio).toBe('')
+    // Three shows, three treatments: a 16:9 banner that fills the frame, an
+    // AniList strip that cannot, and a show with no banner at all.
+    const shapes = new Set<string>()
+    const shows = [KAIJU, SEASON_PICK, POSTER_ONLY]
+    // AniList's strip for the season pick, a TMDB-shaped backdrop for the rest.
+    const shape = (anime: AnimeSummary): [number, number] =>
+      anime.id === SEASON_PICK.id ? [1900, 400] : [1920, 1080]
 
-    // AniList ships ~1900×400; cropping that to 21:9 shows half of it.
-    Object.defineProperty(image, 'naturalWidth', { value: 1900, configurable: true })
-    Object.defineProperty(image, 'naturalHeight', { value: 400, configurable: true })
-    fireEvent.load(image)
+    for (const title of heroSlides()) {
+      const anime = shows.find((show) => show.title.preferred === title) as AnimeSummary
+      if (anime.banner_url != null) loadBanner(anime.banner_url, ...shape(anime))
 
-    expect(Number.parseFloat(frame.style.aspectRatio)).toBe(3.6)
+      // Only the backdrop-shaped banner fills the frame; the other two are
+      // washed — and the frame is the same box in all three cases.
+      const washed = hero().querySelector('[data-hero-backdrop]') !== null
+      expect(washed).toBe(anime.id !== KAIJU.id)
+
+      const frame = heroFrame()
+      shapes.add(`${frame.className}|${frame.style.aspectRatio}`)
+      await user.click(screen.getByRole('button', { name: 'Next recommendation' }))
+    }
+
+    // One frame, one size — the owner's "all heroes need to be in the same
+    // size" (2026-09-12). Nothing overrides the 21:9 with a measured ratio.
+    expect(shapes.size).toBe(1)
+    expect([...shapes][0]).toContain('aspect-[21/9]')
+    expect([...shapes][0]).toMatch(/\|$/)
   })
 
   it('never stretches a poster across the frame when a show has no banner', async () => {

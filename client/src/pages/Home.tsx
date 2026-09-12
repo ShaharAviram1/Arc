@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import {
   Artwork,
+  AspectProbe,
   Button,
   buttonClass,
   cx,
@@ -637,27 +638,6 @@ const TILE_ART =
   'shadow-tile transition-transform duration-[240ms] ease-arc group-hover:-translate-y-[5px]'
 
 /**
- * Loads a banner off-frame so its shape can be measured before anything shows
- * it: the rule below needs the ratio of an image that has not loaded, and
- * rendering it to find out is the zoomed strip the rule exists to prevent. An
- * `Artwork` like any other — a copy the layout cannot see, reporting the one
- * thing only the browser knows.
- */
-function AspectProbe({
-  url,
-  onSize,
-}: {
-  url: string
-  onSize: (size: { width: number; height: number }) => void
-}) {
-  return (
-    <div aria-hidden className="pointer-events-none absolute h-0 w-0 overflow-hidden opacity-0">
-      <Artwork url={url} shape="free" className="h-px w-px" onNaturalSize={onSize} />
-    </div>
-  )
-}
-
-/**
  * The 16:9 art for an episode, in the order it is worth showing:
  *
  * 1. the episode's own still, which is what the card is for;
@@ -673,7 +653,7 @@ function AspectProbe({
  * from.
  */
 function EpisodeArt({ item }: { item: EpisodeItem }) {
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null)
+  const [aspect, setAspect] = useState<number | null>(null)
 
   const still = item.episode.still_url ?? null
   const banner = bannerArt(item.anime)
@@ -687,7 +667,6 @@ function EpisodeArt({ item }: { item: EpisodeItem }) {
     return <Artwork url={banner} shape="still" progress={progress} className={TILE_ART} />
   }
 
-  const aspect = size === null ? null : size.width / size.height
   if (banner !== null && aspect !== null && aspect <= MAX_TILE_ASPECT) {
     return <Artwork url={banner} shape="still" progress={progress} className={TILE_ART} />
   }
@@ -703,19 +682,7 @@ function EpisodeArt({ item }: { item: EpisodeItem }) {
         className={TILE_ART}
       />
       {banner !== null && aspect === null ? (
-        // Kept identical when the size has not actually changed, so React bails
-        // out: a ref callback is re-run on every render, and a fresh object
-        // each time would be a re-render that causes a re-render.
-        <AspectProbe
-          url={banner}
-          onSize={(next) => {
-            setSize((current) =>
-              current !== null && current.width === next.width && current.height === next.height
-                ? current
-                : next,
-            )
-          }}
-        />
+        <AspectProbe url={banner} onAspect={setAspect} />
       ) : null}
     </>
   )

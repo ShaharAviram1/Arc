@@ -127,22 +127,48 @@ describe('Show', () => {
 
     await screen.findByRole('heading', { name: FRIEREN.title.preferred })
     const frame = hero()
+
+    // The shape is measured off-frame first: a banner narrow enough to fill
+    // the hero does, a 4.75:1 AniList strip is washed instead.
+    const probe = frame.querySelector(`img[src="${banner}"]`) as HTMLImageElement
+    Object.defineProperty(probe, 'naturalWidth', { value: 1920, configurable: true })
+    Object.defineProperty(probe, 'naturalHeight', { value: 1080, configurable: true })
+    fireEvent.load(probe)
+
     expect(frame.querySelector('img')).toHaveAttribute('src', banner)
     expect(frame.querySelector('img')).toHaveAttribute('loading', 'eager')
     // Nothing has to be blurred to stand in for a banner.
     expect(frame.querySelector('[data-hero-backdrop]')).toBeNull()
 
-    // And the frame takes the banner's own shape rather than cropping to the
-    // middle half of it: AniList ships ~1900×400.
-    const image = frame.querySelector('img') as HTMLImageElement
-    const box = image.parentElement as HTMLElement
+    // The frame is the same fixed 21:9 box the show page always draws.
+    const box = (frame.querySelector('img') as HTMLImageElement).parentElement as HTMLElement
     expect(box).toHaveClass('aspect-[21/9]')
     expect(box.style.aspectRatio).toBe('')
+  })
 
-    Object.defineProperty(image, 'naturalWidth', { value: 1900, configurable: true })
-    Object.defineProperty(image, 'naturalHeight', { value: 400, configurable: true })
-    fireEvent.load(image)
-    expect(Number.parseFloat(box.style.aspectRatio)).toBe(3.6)
+  it('washes the poster when the only banner is an AniList strip', async () => {
+    const banner = 'https://example.test/frieren-banner.jpg'
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL, banner_url: banner } satisfies AnimeDetail },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const frame = hero()
+    const probe = frame.querySelector(`img[src="${banner}"]`) as HTMLImageElement
+    Object.defineProperty(probe, 'naturalWidth', { value: 1900, configurable: true })
+    Object.defineProperty(probe, 'naturalHeight', { value: 400, configurable: true })
+    fireEvent.load(probe)
+
+    // Cropping 1900×400 to 21:9 shows the middle half of it, so the frame
+    // takes the poster treatment instead — at the same 21:9.
+    expect(frame.querySelector(`img[src="${banner}"]`)).toBeNull()
+    const backdrop = frame.querySelector('[data-hero-backdrop]')
+    expect(backdrop).toHaveAttribute('src', FRIEREN_DETAIL.cover_large_url)
+    expect(backdrop?.parentElement).toHaveClass('aspect-[21/9]')
+    expect((backdrop?.parentElement as HTMLElement).style.aspectRatio).toBe('')
   })
 
   it('never stretches a poster across the hero when the show has no banner', async () => {
