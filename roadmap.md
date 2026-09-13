@@ -502,6 +502,16 @@ the finish work (bugs found that way are fixed inside M16).
         pointer gesture — fixed with one `dragstart` handler on the strip;
         a real drag then moved it 588 px, snapped, without following the
         link; 583 client tests, lint clean
+  - [x] Deployed 2026-09-13 as "M16 package 1" (commit `a02e4da`): five
+        migrations ran on the host (head `7c1d5b3ae4f2`); production then
+        reset "everything except accounts" at the owner's request —
+        torrents, files, wants, lists, progress, MAL link, write log,
+        recommendations and jobs wiped; users, invites, sessions, settings
+        and the catalogue kept. Verified by the orchestrator: health 200
+        with 0 config warnings, qBittorrent holding no torrents with the
+        queue policy applied (8/12, slow torrents not counted), Admin →
+        Acquisition all zeros, 93 GB free. The owner re-links MAL and
+        re-imports; imported entries start dormant (FR-A9)
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
