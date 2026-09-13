@@ -520,9 +520,15 @@ the finish work (bugs found that way are fixed inside M16).
         when the PUT lacks them and the indicator tolerates null; two
         regression tests. Verified 2026-09-13 (orchestrator): 119 tests in
         the two touched files, lint clean
-  - [ ] Hero shows a known backdrop immediately and pre-measures/preloads the
-        next slide, no wash flash on rotation — awaiting orchestrator
-        validation
+  - [x] Hero shows a known backdrop immediately (TMDB backdrops are 16:9,
+        no probe), pre-measures every slide's shape once into a shared cache
+        and preloads the next slide, so no wash flash on rotation; the Show
+        hero and the 16:9 cards use the same rule. Owner saw translucent
+        posters flashing on production in Safari. Verified 2026-09-13
+        (orchestrator) in Chrome on dev: all six Watch Now slides paint their
+        backdrop on the first frame with zero probe elements and the image
+        already complete; 598 client tests, lint clean. Shipped as the
+        M16 package 1 hotfix (`53b154e`) with the show-page crash fix
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
