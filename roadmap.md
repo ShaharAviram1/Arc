@@ -702,6 +702,14 @@ the finish work (bugs found that way are fixed inside M16).
         25` for S2 E1): offset from prequel episode counts via relations,
         accepted only when season agreement and the offset both hold — own
         item with a Reviewer, after this batch
+  - [x] Deployed 2026-09-14 as "M16 batch 2" (commit `621dd27`): migration
+        `4f2ab7c91d68` ran on the host, `WORKER_DRAIN_TIMEOUT` set to 10 in
+        the host env to match the 15 s stop grace, health 200 with 0
+        warnings, no job left `running` after the restart, `/api/events`
+        answers 401 without a session. Live proof of the matching fix: the
+        owner's stuck One-Room TA episodes 1–2 were re-searched right after
+        the deploy — 6 forms, ToonsHub `S01E01`/`S01E02` found and chosen,
+        both downloading
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
