@@ -149,7 +149,8 @@ arc/
         ui/                      design primitives (M15): Artwork, Button,
                                  Chip, Row, Shelf, Segmented, Eyebrow,
                                  HeroFrame, PosterWash, AspectProbe, Skeleton,
-                                 EmptyState + styles.ts
+                                 EmptyState + styles.ts, aspect.ts (the
+                                 remembered shape of every picture measured)
       player/                    hls.js wrapper, progress reporter
       lib/                       auth context, query hooks, media queries
   deploy/
@@ -216,16 +217,46 @@ in them by the *shape* of the picture, not only by its presence:
   threshold because the frame is narrower (owner, 2026-09-12); failing that,
   the poster treatment.
 - **"The show's wide art" is `backdrop_url` first, then `banner_url`**
-  (`bannerArt` in `lib/anime.ts`; owner, 2026-09-13). TMDB's backdrop is 16:9
-  and passes both tests; AniList's banner is a 1900×400 strip and passes
-  neither, so a show whose only wide art is a banner renders the poster
-  treatment however it arrived. The fallback stays for the deployment with no
-  TMDB key and for the row the enrichment has not reached yet.
+  (`heroArt` / `bannerArt` in `lib/anime.ts`; owner, 2026-09-13). TMDB's
+  backdrop is 16:9 and passes both tests; AniList's banner is a 1900×400 strip
+  and passes neither, so a show whose only wide art is a banner renders the
+  poster treatment however it arrived. The fallback stays for the deployment
+  with no TMDB key and for the row the enrichment has not reached yet.
 
-Both learn the ratio the same way: `ui/AspectProbe.tsx` renders an off-frame
-copy of the banner and reports `Artwork`'s `onNaturalSize` as a ratio, and the
-poster treatment is what shows until it is known — so neither frame ever
-flashes a zoomed strip on its way to the right answer.
+**The wash is the last resort, not the first frame** (owner, 2026-09-13, in
+Safari on production: "semi-transparent posters", flickering on every rotation
+of a season where every show has a backdrop). Shape used to be measured per
+frame and kept in that frame's own state, so each of Watch Now's six slides
+began at "shape unknown" — the wash — and swapped to the picture a moment
+later. Three rules, all in `ui/aspect.ts`, which owns everything a frame knows
+about a picture it has not drawn:
+
+1. **A known shape is never measured.** `heroArt(anime)` returns the url *and*
+   its ratio — `16/9` when the art came from `backdrop_url`, null for a banner
+   — and `HeroFrame` takes it as `bannerAspect`, filling the frame on the first
+   render with no probe and no wash; the 16:9 card (`EpisodeArt`) reads the
+   same pair against its own threshold. `trustedAspect` recognises TMDB's own
+   CDN (`image.tmdb.org/t/p/…`) for a caller that passes a bare url. Nothing
+   else is trusted: AniList serves the strip and the 2:3 cover from one host.
+2. **A measured shape is remembered for the tab.** `rememberAspect` /
+   `useKnownAspect` are a module-level `Map<url, ratio>` with subscribers, so a
+   slide coming round again, a show page opening on art Watch Now already
+   measured, a card scrolled past and back, and a second visit to Home are all
+   instant — no frame keeps a ratio in its own state any more. Watch Now probes
+   *every* slide's art once when the line-up is known (`HeroArtProbes`), not
+   one rotation at a time.
+3. **Only the unknown waits.** `ui/AspectProbe.tsx` renders an off-frame copy
+   of the art and reports `Artwork`'s `onNaturalSize` into the store (from both
+   the ref callback and `onLoad`, because Safari fires no `load` for an image
+   that was already cached), and the poster treatment is what shows until it
+   answers — so neither frame ever flashes a zoomed strip on its way to the
+   right answer, and a probe that never answers leaves the wash rather than a
+   blank frame.
+
+On top of the shapes, the carousel warms **the next slide's** pixels one
+interval ahead (`new Image().src`, the one image that slide's frame will
+paint): knowing a picture's shape is not having it, and the swap itself was
+otherwise a moment of empty frame. One slide, not all six.
 
 The **poster treatment** is one component (`ui/PosterWash.tsx`), shared by
 both: the poster blurred (40 px, scale 1.15, brightness 0.5, saturate 1.2) and
@@ -2437,3 +2468,28 @@ two together.
   later get them at once. Details in §3's client-shell section; the hero's
   glass circle moved to `styles.GLASS_CIRCLE` so the arrows and the carousel's
   ‹ › are literally the same control.
+- 2026-09-13 — **The hero shows a known backdrop immediately** (owner,
+  dogfooding in Safari on production). Every show in the season now has a TMDB
+  backdrop, and the hero still flashed the blurred-poster wash — "semi-
+  transparent posters" — on every one of its eight-second rotations. Cause:
+  shape was measured per frame (`AspectProbe`) and held in that frame's own
+  `useState`, so each slide, and each re-visit of Home, started at "shape
+  unknown", which is the wash, and swapped to the picture once the probe
+  answered. Three fixes, all client-side. **Trust the column**: `heroArt` in
+  `lib/anime.ts` returns the url *and* `16/9` when the art came from
+  `backdrop_url`, and `HeroFrame` takes it as `bannerAspect` — no probe, no
+  wash, right on the first render; `trustedAspect` recognises
+  `image.tmdb.org/t/p/…` for a caller that still passes a bare url. The show
+  page's hero and Watch Now's 16:9 episode card (`EpisodeArt`) go through the
+  same pair, so neither washes a poster for one paint over art the catalogue
+  has already described. **Remember measurements**: the per-frame `useState`
+  became a module-level `Map<url, ratio>` with subscribers (`ui/aspect.ts`,
+  read synchronously on the first render), and Watch Now probes all six slides
+  when the line-up is known rather than one per rotation. **Warm the pixels**:
+  the next slide's image is fetched an interval ahead, one slide only.
+  Rejected: dropping the probe and trusting every url's host (AniList serves
+  the 4.75:1 strip and the 2:3 cover from one host, so the strip would be
+  back in the frame), and keying the frame per slide to force a fresh mount
+  (a remount paints an empty frame, which is the flash again). The wash
+  stays the fallback for art nobody has measured and for a probe that never
+  answers — a frame is never blank. Details in §3's client-shell section.

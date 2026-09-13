@@ -173,13 +173,36 @@ describe('Show', () => {
     // The strip is not in the frame at all — not even as the off-frame probe.
     expect(frame.querySelector(`img[src="${banner}"]`)).toBeNull()
 
-    const probe = frame.querySelector(`img[src="${backdrop}"]`) as HTMLImageElement
-    Object.defineProperty(probe, 'naturalWidth', { value: 1280, configurable: true })
-    Object.defineProperty(probe, 'naturalHeight', { value: 720, configurable: true })
-    fireEvent.load(probe)
-
     expect(frame.querySelector('img')).toHaveAttribute('src', backdrop)
     expect(frame.querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+
+  it('fills the hero with a backdrop on the first render, unmeasured', async () => {
+    const backdrop = 'https://example.test/frieren-backdrop.jpg'
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: { ...FRIEREN_DETAIL, banner_url: null, backdrop_url: backdrop } satisfies AnimeDetail,
+      },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const frame = hero()
+
+    // Nothing is measured and nothing is washed: `backdrop_url` is TMDB's
+    // column and a TMDB backdrop is 16:9, so the first paint is the picture.
+    // It used to be the blurred poster for as long as a probe took, which the
+    // owner saw as "semi-transparent posters" (2026-09-13, Safari on
+    // production).
+    expect(frame.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(frame.querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(frame.querySelector('[data-hero-poster]')).toBeNull()
+
+    const images = frame.querySelectorAll('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]).toHaveAttribute('src', backdrop)
   })
 
   it('washes the poster when the only banner is an AniList strip', async () => {
@@ -823,12 +846,22 @@ describe('Show', () => {
   })
 
   describe('the MAL sync indicator (FR-M6)', () => {
-    function detailWithSync(sync: MalSync) {
+    function detailWithSync(sync: MalSync | null) {
       return {
         ...FRIEREN_DETAIL_ON_LIST,
         list_entry: { ...listEntry({ progress: 4, score: 9 }), mal_sync: sync },
       }
     }
+
+    it('renders the page when the entry carries no sync at all', async () => {
+      // A list PUT answers `mal_sync: null` and the cache patch carried it
+      // here; reading `.state` off it took the whole page down on production.
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: detailWithSync(null) } })
+      renderShow()
+
+      expect(await screen.findByRole('heading', { name: FRIEREN.title.preferred })).toBeVisible()
+      expect(screen.queryByText(/MAL:/)).not.toBeInTheDocument()
+    })
 
     it('reads as synced when the last write landed', async () => {
       mockApi({

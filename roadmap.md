@@ -512,6 +512,17 @@ the finish work (bugs found that way are fixed inside M16).
         queue policy applied (8/12, slow torrents not counted), Admin →
         Acquisition all zeros, 93 GB free. The owner re-links MAL and
         re-imports; imported entries start dormant (FR-A9)
+  - [x] Show page crashed ("null is not an object (evaluating 'e.state')")
+        after a status change on production (owner, 2026-09-13, Safari):
+        the list PUT answers `mal_sync: null` (only the show page computes
+        it) and the cache patch handed that null to the MAL indicator, which
+        guarded `undefined` only. The patch now keeps the page's own fields
+        when the PUT lacks them and the indicator tolerates null; two
+        regression tests. Verified 2026-09-13 (orchestrator): 119 tests in
+        the two touched files, lint clean
+  - [ ] Hero shows a known backdrop immediately and pre-measures/preloads the
+        next slide, no wash flash on rotation — awaiting orchestrator
+        validation
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

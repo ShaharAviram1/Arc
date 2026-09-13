@@ -12,15 +12,18 @@ import {
   FOCUS_RING,
   GLASS_CIRCLE,
   HeroFrame,
+  knownAspect,
+  MAX_BANNER_ASPECT,
   PosterWash,
   Shelf,
   Skeleton,
+  useKnownAspect,
 } from '@/components/ui'
 import {
-  bannerArt,
   catalogErrorMessage,
   episodeStateLabel,
   hasBanner,
+  heroArt,
   keyVisual,
   listErrorMessage,
   useMyList,
@@ -390,6 +393,50 @@ function recommendationMeta(anime: AnimeSummary): string {
 const CHEVRON = cx(GLASS_CIRCLE, FOCUS_RING)
 
 /**
+ * The one image a slide's frame will actually paint: the wide art when it
+ * fills the 21:9 frame, and the poster when the frame is going to wash it
+ * instead. Mirrors `HeroFrame`'s own choice, which is why it reads the same
+ * two sources of shape — the catalogue's column and the measurement store.
+ */
+function heroPixels(anime: AnimeSummary): string | null {
+  const art = heroArt(anime)
+  const aspect = art.aspect ?? knownAspect(art.url)
+  if (art.url !== null && aspect !== null && aspect <= MAX_BANNER_ASPECT) return art.url
+  return keyVisual(anime) ?? art.url
+}
+
+/**
+ * Every slide's wide art, measured off-frame as soon as the line-up is known
+ * (owner, 2026-09-13).
+ *
+ * The hero used to measure one banner at a time — the slide on screen — which
+ * meant every rotation began at "shape unknown", which is the blurred wash,
+ * and swapped to the picture once the probe answered. Six shows, six flashes,
+ * every eight seconds. Measuring the whole line-up up front costs six 0×0
+ * images once and makes every swap after the first instant, and the answers
+ * outlive the page: coming back from a show page, nothing is unknown.
+ *
+ * Only the art nobody has measured yet is probed, so a backdrop — 16:9 by
+ * construction, see `heroArt` — is never fetched twice for the sake of a
+ * question that is already answered.
+ */
+function HeroArtProbes({ items }: { items: AnimeSummary[] }) {
+  const urls = items
+    .map((anime) => heroArt(anime))
+    .filter((art) => art.aspect === null && knownAspect(art.url) === null)
+    .map((art) => art.url)
+    .filter((url): url is string => url !== null)
+
+  return (
+    <>
+      {[...new Set(urls)].map((url) => (
+        <AspectProbe key={url} url={url} />
+      ))}
+    </>
+  )
+}
+
+/**
  * The framed card at the top of Watch Now: shows of the season this viewer
  * might not have found, one at a time.
  *
@@ -423,12 +470,28 @@ function SeasonHero({ items }: { items: AnimeSummary[] }) {
     }
   }, [count, paused, reduced, position])
 
+  // The next slide's pixels, fetched an interval before the frame swaps to
+  // them. Knowing a picture's shape is not having it: the swap itself was
+  // still a moment of empty frame while the network answered. A probe brings
+  // its own copy, so what this really covers is the art no probe touches —
+  // the backdrops, which is most of a season. One slide ahead and no further:
+  // warming all six on load is the season's whole artwork for the sake of a
+  // carousel the viewer may not sit through.
+  const upcoming = count < 2 ? undefined : items[(position + 1) % count]
+  const warm = upcoming === undefined ? null : heroPixels(upcoming)
+  useEffect(() => {
+    if (warm === null) return
+    const image = new Image()
+    image.src = warm
+  }, [warm])
+
   if (anime === undefined) return null
 
   const animeId = anime.id
   const onList = anime.list_status !== null || added.includes(animeId)
   const meta = recommendationMeta(anime)
   const { native } = anime.title
+  const wide = heroArt(anime)
 
   function step(delta: number): void {
     setIndex((((position + delta) % count) + count) % count)
@@ -461,7 +524,9 @@ function SeasonHero({ items }: { items: AnimeSummary[] }) {
         setPaused(false)
       }}
     >
-      <HeroFrame banner={bannerArt(anime)} poster={keyVisual(anime)}>
+      {/* The shape travels with the url: a backdrop fills the frame on the
+          first render rather than after a measurement. */}
+      <HeroFrame banner={wide.url} bannerAspect={wide.aspect} poster={keyVisual(anime)}>
         <Eyebrow>{HERO_EYEBROW}</Eyebrow>
         <h1 className="mt-2.5 text-[clamp(30px,6vw,46px)] leading-[1.04] font-semibold tracking-[-0.03em] text-pretty text-white">
           {anime.title.preferred}
@@ -544,6 +609,8 @@ function SeasonHero({ items }: { items: AnimeSummary[] }) {
           {listErrorMessage(setEntry.error)}
         </p>
       )}
+
+      <HeroArtProbes items={items} />
     </section>
   )
 }
@@ -652,12 +719,19 @@ const TILE_ART =
  * with no poster at all keeps the old behaviour — a cropped banner is still
  * the show's own artwork, and beats a striped box on a shelf people press play
  * from.
+ *
+ * "Known" is the hero's three sources, for the hero's reason (owner,
+ * 2026-09-13): the catalogue says a `backdrop_url` is 16:9, so a card whose
+ * art is a backdrop draws it on the first render instead of washing a poster
+ * for one paint, and everything any probe has measured is remembered for the
+ * tab, so a card scrolled past and back does not ask twice.
  */
 function EpisodeArt({ item }: { item: EpisodeItem }) {
-  const [aspect, setAspect] = useState<number | null>(null)
-
   const still = item.episode.still_url ?? null
-  const banner = bannerArt(item.anime)
+  const art = heroArt(item.anime)
+  const banner = art.url
+  const measured = useKnownAspect(banner)
+  const aspect = art.aspect ?? measured
   const poster = keyVisual(item.anime)
   const progress = fractionWatched(item)
 
@@ -682,9 +756,7 @@ function EpisodeArt({ item }: { item: EpisodeItem }) {
         align="center"
         className={TILE_ART}
       />
-      {banner !== null && aspect === null ? (
-        <AspectProbe url={banner} onAspect={setAspect} />
-      ) : null}
+      {banner !== null && aspect === null ? <AspectProbe url={banner} /> : null}
     </>
   )
 }

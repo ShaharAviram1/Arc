@@ -14,6 +14,7 @@ import {
   episodeProgressPercent,
   hasActiveEpisode,
   hasBanner,
+  heroArt,
   listErrorMessage,
   listQueryKey,
   malUrl,
@@ -395,6 +396,36 @@ describe('useSetListEntry', () => {
     expect(client.getQueryState(listQueryKey())?.isInvalidated).toBe(true)
     expect(requestsMade(fetchMock)).toEqual([`PUT /api/list/${FRIEREN.id}`])
   })
+
+  it('keeps the show page-only fields a PUT answers as null', async () => {
+    // Only `GET /api/anime/{id}` computes `mal_sync`; the PUT sends null.
+    // Overwriting the cached value with that null crashed the show page on
+    // production (2026-09-13) — the indicator read `.state` off it.
+    mockApi({
+      [`PUT /api/list/${FRIEREN.id}`]: {
+        body: { ...listEntry({ status: 'watching', progress: 4 }), mal_sync: null },
+      },
+    })
+    const client = createQueryClient()
+    seedShowCache(client)
+    const sync = { state: 'synced' as const, error: null, last_write_at: '2026-09-07T08:00:00Z' }
+    client.setQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id), (current) =>
+      current === undefined
+        ? current
+        : { ...current, list_entry: { ...listEntry({ status: 'planned' }), mal_sync: sync } },
+    )
+
+    const { result } = renderHook(() => useSetListEntry(), { wrapper: wrapperFor(client) })
+    act(() => {
+      result.current.mutate({ animeId: FRIEREN.id, status: 'watching' })
+    })
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+
+    const cached = client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))
+    expect(cached?.list_entry).toMatchObject({ status: 'watching', progress: 4, mal_sync: sync })
+  })
 })
 
 describe('useRemoveListEntry', () => {
@@ -577,5 +608,35 @@ describe('bannerArt', () => {
     expect(hasBanner({ banner_url: null, backdrop_url: 'https://example.test/b.jpg' })).toBe(true)
     expect(hasBanner({ banner_url: 'https://example.test/s.jpg', backdrop_url: null })).toBe(true)
     expect(hasBanner({ banner_url: null, backdrop_url: null })).toBe(false)
+  })
+})
+
+describe('heroArt (owner, 2026-09-13)', () => {
+  it('says 16:9 for a backdrop, so the frame needs no measurement', () => {
+    expect(
+      heroArt({
+        banner_url: 'https://example.test/strip.jpg',
+        backdrop_url: 'https://example.test/backdrop.jpg',
+      }),
+    ).toEqual({ url: 'https://example.test/backdrop.jpg', aspect: 16 / 9 })
+  })
+
+  it('says nothing about a banner’s shape, which only the browser knows', () => {
+    // AniList ships ~1900×400, but the column is not a promise: the frame
+    // measures it and decides, and a null aspect is what asks it to.
+    expect(heroArt({ banner_url: 'https://example.test/strip.jpg', backdrop_url: null })).toEqual({
+      url: 'https://example.test/strip.jpg',
+      aspect: null,
+    })
+  })
+
+  it('is the url bannerArt returns, with nothing to draw when there is none', () => {
+    const both = {
+      banner_url: 'https://example.test/strip.jpg',
+      backdrop_url: 'https://example.test/backdrop.jpg',
+    }
+    expect(heroArt(both).url).toBe(bannerArt(both))
+    expect(heroArt({})).toEqual({ url: null, aspect: null })
+    expect(heroArt({ banner_url: '', backdrop_url: '' })).toEqual({ url: null, aspect: null })
   })
 })

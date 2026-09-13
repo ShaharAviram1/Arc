@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -249,6 +249,13 @@ const BOTH_KINDS_OF_ART = seasonRow(700013, 'Both Kinds of Art', {
   cover_large_url: 'https://example.test/striped-large.jpg',
   banner_url: 'https://example.test/striped-banner.jpg',
   backdrop_url: 'https://example.test/striped-backdrop.jpg',
+})
+
+/** A second enriched show, so a carousel can hold two known shapes. */
+const ALSO_ENRICHED = seasonRow(700014, 'Also Enriched', {
+  genres: KAIJU.genres,
+  cover_large_url: 'https://example.test/also-large.jpg',
+  backdrop_url: 'https://example.test/also-backdrop.jpg',
 })
 
 /** Two more in-season picks, so a run can try to claim more than its two. */
@@ -642,6 +649,125 @@ describe('Watch Now hero', () => {
     expect([...shapes][0]).toMatch(/\|$/)
   })
 
+  /*
+   * The rotation itself, which is what the owner saw break (2026-09-13, in
+   * Safari on production): "semi-transparent posters", every eight seconds, on
+   * a season where every show has a backdrop. The shape was measured per slide
+   * and held in the frame's own state, so each rotation began at "shape
+   * unknown" — the blurred wash — and swapped to the picture a moment later.
+   */
+
+  it('shows a known backdrop at once, with no wash on any rotation', async () => {
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: seasonSchedule(BOTH_KINDS_OF_ART, ALSO_ENRICHED) },
+      'GET /api/list': { body: [] },
+    })
+
+    await screen.findByText('Recommended this season')
+    const user = userEvent.setup()
+    const backdropOf = (title: string): string =>
+      [BOTH_KINDS_OF_ART, ALSO_ENRICHED].find((show) => show.title.preferred === title)
+        ?.backdrop_url as string
+
+    // Nothing is measured and nothing is washed, on this slide or the next:
+    // the catalogue said which art is a backdrop, and a backdrop is 16:9.
+    for (const title of heroSlides()) {
+      expect(heroTitle()).toBe(title)
+      expect(hero().querySelector('[data-hero-backdrop]')).toBeNull()
+      expect(hero().querySelector('[data-hero-poster]')).toBeNull()
+      expect(hero().querySelector('img')).toHaveAttribute('src', backdropOf(title))
+      expect(hero().querySelector('[data-aspect-probe]')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: 'Next recommendation' }))
+    }
+  })
+
+  it('measures every slide up front, not one rotation at a time', async () => {
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: seasonSchedule(KAIJU, SEASON_PICK) },
+      'GET /api/list': { body: [] },
+    })
+
+    await screen.findByText('Recommended this season')
+    const user = userEvent.setup()
+    const order = heroSlides()
+    const slide = (at: number): string => order[at] as string
+    const bannerOf = (title: string): string =>
+      [KAIJU, SEASON_PICK].find((show) => show.title.preferred === title)?.banner_url as string
+
+    // Both slides' banners are being measured off-frame, including the one
+    // that is not on screen — six shows used to mean six probes in a row,
+    // each starting from the wash.
+    const probed = [...hero().querySelectorAll('[data-aspect-probe] img')].map((image) =>
+      image.getAttribute('src'),
+    )
+    expect(new Set(probed)).toEqual(new Set(order.map(bannerOf)))
+
+    // So the shape of the next slide is known before it is the next slide:
+    // stepping to it lands on the picture, not on the wash.
+    loadBanner(bannerOf(slide(1)))
+    await user.click(screen.getByRole('button', { name: 'Next recommendation' }))
+
+    expect(heroTitle()).toBe(slide(1))
+    expect(hero().querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(hero().querySelector('img')).toHaveAttribute('src', bannerOf(slide(1)))
+  })
+
+  it('warms the next slide’s pixels an interval ahead, and only the next', async () => {
+    const warmed: string[] = []
+    class CountedImage {
+      set src(url: string) {
+        warmed.push(url)
+      }
+    }
+    vi.stubGlobal('Image', CountedImage)
+
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: seasonSchedule(BOTH_KINDS_OF_ART, KAIJU, POSTER_ONLY) },
+      'GET /api/list': { body: [] },
+    })
+
+    await screen.findByText('Recommended this season')
+    const order = heroSlides()
+    const slide = (at: number): string => order[at] as string
+    expect(order).toHaveLength(3)
+
+    // What each slide's frame will actually paint: the backdrop where the
+    // shape is known, the poster where the frame is going to wash an
+    // unmeasured strip or has no wide art at all.
+    const paints: Record<string, string> = {
+      [BOTH_KINDS_OF_ART.title.preferred]: BOTH_KINDS_OF_ART.backdrop_url as string,
+      [KAIJU.title.preferred]: KAIJU.cover_large_url as string,
+      [POSTER_ONLY.title.preferred]: POSTER_ONLY.cover_large_url as string,
+    }
+
+    // One slide ahead, not the whole season.
+    expect(warmed).toEqual([paints[slide(1)]])
+
+    vi.useFakeTimers()
+    try {
+      // Re-arm the rotation under the fake clock: the interval the hero is
+      // already waiting on was scheduled before the clock was swapped, and
+      // the carousel restarts it whenever a pointer leaves the card.
+      fireEvent.mouseEnter(hero())
+      fireEvent.mouseLeave(hero())
+
+      // The hero's own eight seconds (HERO_INTERVAL_MS).
+      act(() => {
+        vi.advanceTimersByTime(8000)
+      })
+      expect(heroTitle()).toBe(slide(1))
+      // The slide that just arrived was already fetched; the one after it is
+      // what is being fetched now.
+      expect(warmed).toEqual([paints[slide(1)], paints[slide(2)]])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('never stretches a poster across the frame when a show has no banner', async () => {
     renderHome({
       'GET /api/home': { body: EMPTY_HOME },
@@ -761,6 +887,33 @@ describe('the episode card’s art (owner, 2026-09-12)', () => {
     expect(images).toHaveLength(1)
     expect(images[0]).toHaveAttribute('src', FRIEREN.banner_url)
     expect(tile().querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+
+  it('draws a TMDB backdrop at once, without a poster wash first', async () => {
+    const backdrop = 'https://example.test/frieren-backdrop.jpg'
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          continue_watching: [
+            { ...CONTINUE_FRIEREN, anime: { ...FRIEREN, backdrop_url: backdrop } },
+          ],
+        },
+      },
+    })
+    await screen.findByRole('heading', { level: 2, name: 'Continue watching' })
+
+    // The card asks the same three sources the hero does (owner, 2026-09-13):
+    // `backdrop_url` is 16:9 by construction, so there is nothing to measure
+    // and nothing to wash while it waits.
+    expect(tile().querySelector('[data-aspect-probe]')).toBeNull()
+    expect(tile().querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(tile().querySelector('[data-hero-poster]')).toBeNull()
+
+    const images = tile().querySelectorAll('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]).toHaveAttribute('src', backdrop)
+    expect(tile().firstElementChild).toHaveClass('aspect-[16/9]')
   })
 })
 

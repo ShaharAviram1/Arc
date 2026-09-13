@@ -16,12 +16,12 @@ import {
 } from '@/components/ui'
 import {
   anilistUrl,
-  bannerArt,
   catalogErrorMessage,
   episodeProgressPercent,
   episodeProblem,
   episodeStateLabel,
   formatAirDate,
+  heroArt,
   keyVisual,
   listErrorMessage,
   malUrl,
@@ -623,8 +623,12 @@ function WaitingNote({ anime }: { anime: AnimeDetail }) {
  * names the error and offers the sync log, where the write can be retried or
  * put back.
  */
-function MalSyncIndicator({ sync }: { sync: MalSync | undefined }) {
-  if (sync === undefined || sync.state === 'unlinked') return null
+function MalSyncIndicator({ sync }: { sync: MalSync | null | undefined }) {
+  // `null` as well as `undefined`: a list PUT answers `mal_sync: null` (only
+  // the show page computes it), and that answer is patched into this page's
+  // cache before the refetch lands. Reading `.state` off it crashed the page
+  // on production (owner, 2026-09-13).
+  if (sync === undefined || sync === null || sync.state === 'unlinked') return null
 
   if (sync.state === 'failed') {
     const reason = sync.error === null || sync.error === '' ? null : sync.error
@@ -1062,10 +1066,14 @@ function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
   const alternatives = altTitles(anime)
   const entry = anime.list_entry
   const playable = playableEpisode(anime.episodes)
+  // The shape travels with the url: art from `backdrop_url` is 16:9, so the
+  // frame fills on the first render rather than washing the poster until a
+  // probe answers (owner, 2026-09-13).
+  const wide = heroArt(anime)
 
   return (
     <section>
-      <HeroFrame banner={bannerArt(anime)} poster={keyVisual(anime)}>
+      <HeroFrame banner={wide.url} bannerAspect={wide.aspect} poster={keyVisual(anime)}>
         <h1 className="text-[clamp(30px,6vw,44px)] leading-[1.06] font-semibold tracking-[-0.03em] text-pretty text-white">
           {anime.title.preferred}
         </h1>

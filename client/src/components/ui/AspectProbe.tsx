@@ -1,3 +1,4 @@
+import { rememberAspect } from '@/components/ui/aspect'
 import { Artwork } from '@/components/ui/Artwork'
 
 /**
@@ -9,6 +10,13 @@ import { Artwork } from '@/components/ui/Artwork'
  * in both of them rendering the picture to find out is the zoomed strip the
  * rule exists to prevent. So: an `Artwork` like any other, a copy the layout
  * cannot see, reporting the one thing only the browser knows.
+ *
+ * Every measurement is remembered for the tab (`rememberAspect`), so a probe
+ * is a question asked once: a frame that mounts later with the same url reads
+ * the answer synchronously and never shows the wash (owner, 2026-09-13). A
+ * caller that only wants the url measured — Watch Now's hero, which probes
+ * all six slides up front — can leave `onAspect` off entirely and let the
+ * store carry it.
  *
  * The ratio is reported rather than the size, so a caller can hold it in a
  * `useState` without a guard: a ref callback re-runs on every render, and a
@@ -24,20 +32,30 @@ import { Artwork } from '@/components/ui/Artwork'
 export interface AspectProbeProps {
   /** The image to measure. Fetched, never drawn anywhere a viewer can see. */
   url: string
-  /** Called with width ÷ height once the browser knows it. */
-  onAspect: (aspect: number) => void
+  /**
+   * Called with width ÷ height once the browser knows it. Optional: the
+   * measurement is remembered either way, and a frame reading the store is
+   * the ordinary consumer.
+   */
+  onAspect?: (aspect: number) => void
 }
 
 export function AspectProbe({ url, onAspect }: AspectProbeProps) {
   return (
-    <div aria-hidden className="pointer-events-none absolute h-0 w-0 overflow-hidden opacity-0">
+    <div
+      aria-hidden
+      data-aspect-probe
+      className="pointer-events-none absolute h-0 w-0 overflow-hidden opacity-0"
+    >
       <Artwork
         url={url}
         shape="free"
         eager
         className="h-px w-px"
         onNaturalSize={(size) => {
-          onAspect(size.width / size.height)
+          const aspect = size.width / size.height
+          rememberAspect(url, aspect)
+          onAspect?.(aspect)
         }}
       />
     </div>

@@ -321,7 +321,7 @@ export interface ListEntry {
    * out, and a badge that is absent must read as "nothing to say", not as
    * "synced".
    */
-  mal_sync?: MalSync
+  mal_sync?: MalSync | null
 }
 
 export interface MyListItem {
@@ -442,7 +442,25 @@ function art(url: string | null | undefined): string | null {
 }
 
 /**
- * The show's wide art, or null — never a poster in its place.
+ * 16:9 — the shape every TMDB backdrop is, which is the one thing a frame
+ * would otherwise have to load the picture to find out.
+ */
+const BACKDROP_ASPECT = 16 / 9
+
+/** A show's wide art and, when the column says so, the shape it is. */
+export interface HeroArt {
+  /** The art a 21:9 or 16:9 frame is filled with, or null. */
+  url: string | null
+  /**
+   * `16/9` for a TMDB backdrop; null for an AniList banner, whose shape only
+   * the browser can report (a ~1900×400 strip, but the column is not a
+   * promise). A frame given null measures the art and washes while it waits.
+   */
+  aspect: number | null
+}
+
+/**
+ * The show's wide art and its shape, or null — never a poster in its place.
  *
  * The one piece of art wide enough to fill a hero frame at its own size,
  * where `cover_url` is a 230–425 px picture that only looks like artwork until
@@ -457,9 +475,22 @@ function art(url: string | null | undefined): string | null {
  * fills. The fallback stays because a row the TMDB enrichment has not reached
  * (or a deployment with no key) may still have a banner narrow enough to pass
  * the frames' own test, and that is their call to make, not this function's.
+ *
+ * The ratio travels with the url because the column is the only place that
+ * knowledge exists: by the time a frame holds the string, "16:9 backdrop" and
+ * "4.75:1 strip" are two urls that look alike, and measuring is what made
+ * every rotation of Watch Now's carousel flash the wash first (owner,
+ * 2026-09-13, Safari, production).
  */
+export function heroArt(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>): HeroArt {
+  const backdrop = art(anime.backdrop_url)
+  if (backdrop !== null) return { url: backdrop, aspect: BACKDROP_ASPECT }
+  return { url: art(anime.banner_url), aspect: null }
+}
+
+/** {@link heroArt} without its shape, for a caller that only draws the url. */
 export function bannerArt(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>): string | null {
-  return art(anime.backdrop_url) ?? art(anime.banner_url)
+  return heroArt(anime).url
 }
 
 /** True when a show has art a 21:9 frame can be filled with honestly. */
@@ -903,11 +934,24 @@ function applyToRecs(client: QueryClient, animeId: number, status: ListStatus | 
 
 /** Patch every cached view of this anime so the UI never shows a stale status. */
 function applyListStatus(client: QueryClient, animeId: number, entry: ListEntry | null): void {
-  client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
-    current === undefined
-      ? current
-      : { ...current, list_entry: entry, list_status: entry?.status ?? null },
-  )
+  client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) => {
+    if (current === undefined) return current
+    // A PUT answers the entry without the show-page-only fields (`mal_sync`,
+    // the slot view): the server computes those for `GET /api/anime/{id}`
+    // alone and sends null/absent elsewhere. Keep what the page already knows
+    // rather than letting a null overwrite it — the refetch that follows
+    // replaces the whole thing a moment later.
+    const previous = current.list_entry
+    const merged: ListEntry | null =
+      entry === null
+        ? null
+        : {
+            ...previous,
+            ...entry,
+            mal_sync: entry.mal_sync ?? previous?.mal_sync,
+          }
+    return { ...current, list_entry: merged, list_status: entry?.status ?? null }
+  })
 
   client.setQueriesData<AnimeSearchResponse>(
     { queryKey: [ANIME_QUERY_KEY, 'search'] },

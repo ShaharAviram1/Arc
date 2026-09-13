@@ -229,6 +229,81 @@ describe('HeroFrame', () => {
     expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
     expectFixedFrame(container)
   })
+
+  /*
+   * The wash is the last resort, not the first frame (owner, 2026-09-13, in
+   * Safari on production): every slide of Watch Now's carousel started as the
+   * blurred poster and swapped to the backdrop a moment later, on a season
+   * where every show has one.
+   */
+
+  it('fills the frame on the first render when the caller knows the shape', () => {
+    const { container } = render(
+      <HeroFrame banner={BANNER} bannerAspect={16 / 9} poster={POSTER}>
+        <h1>Frieren</h1>
+      </HeroFrame>,
+    )
+
+    // No measurement, so nothing to wait for and nothing to flash: the art
+    // came from `backdrop_url`, and a TMDB backdrop is 16:9 by construction.
+    expect(container.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(container.querySelector('[data-hero-poster]')).toBeNull()
+
+    const images = container.querySelectorAll('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]).toHaveAttribute('src', BANNER)
+    expectFixedFrame(container)
+  })
+
+  it('recognises TMDB’s own CDN for a caller that passes a bare url', () => {
+    const backdrop = 'https://image.tmdb.org/t/p/original/frieren.jpg'
+    const { container } = render(<HeroFrame banner={backdrop} poster={POSTER} />)
+
+    expect(container.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(container.querySelector('img')).toHaveAttribute('src', backdrop)
+  })
+
+  it('still washes an AniList banner until its shape has been measured', () => {
+    const { container } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+
+    // Nothing says what shape this url is, so the frame asks — and holds the
+    // wash rather than a zoomed strip while it waits.
+    expect(container.querySelector('[data-aspect-probe]')).not.toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+
+    load(probe(container), 1920, 1080)
+    expect(container.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+
+  it('remembers a measured shape, so the next frame to draw it never washes', () => {
+    const first = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+    load(probe(first.container), 1920, 1080)
+    first.unmount()
+
+    // A second mount of the same art — the carousel coming round again, or a
+    // show page opening on what Watch Now already measured.
+    const { container } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+
+    expect(container.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toBeNull()
+    expect(container.querySelector('img')).toHaveAttribute('src', BANNER)
+  })
+
+  it('keeps the wash for art that was measured as a strip, on every mount', () => {
+    const first = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+    load(probe(first.container), 1900, 400)
+    first.unmount()
+
+    const { container } = render(<HeroFrame banner={BANNER} poster={POSTER} />)
+
+    // Remembered means remembered either way: no second probe, and no frame
+    // of the strip on the way to the answer.
+    expect(container.querySelector('[data-aspect-probe]')).toBeNull()
+    expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+  })
 })
 
 describe('CoverThumb', () => {

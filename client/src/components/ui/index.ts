@@ -4,13 +4,20 @@
  *     import { Artwork, Button, Shelf } from '@/components/ui'
  */
 
+export {
+  clearAspectCache,
+  knownAspect,
+  rememberAspect,
+  trustedAspect,
+  useKnownAspect,
+} from './aspect'
 export { Artwork, type ArtworkProps, type ArtworkRadius, type ArtworkShape } from './Artwork'
 export { AspectProbe, type AspectProbeProps } from './AspectProbe'
 export { Button, PlayGlyph, type ButtonProps, type ButtonVariant } from './Button'
 export { Chip, type ChipProps } from './Chip'
 export { EmptyState, type EmptyStateProps } from './EmptyState'
 export { Eyebrow, type EyebrowProps } from './Eyebrow'
-export { HeroFrame, type HeroFrameProps } from './HeroFrame'
+export { HeroFrame, MAX_BANNER_ASPECT, type HeroFrameProps } from './HeroFrame'
 export { PosterWash, type PosterWashProps } from './PosterWash'
 export { Row, RowGroup, type RowProps } from './Row'
 export { Segmented, type SegmentedOption, type SegmentedProps } from './Segmented'
