@@ -529,6 +529,47 @@ the finish work (bugs found that way are fixed inside M16).
         backdrop on the first frame with zero probe elements and the image
         already complete; 598 client tests, lint clean. Shipped as the
         M16 package 1 hotfix (`53b154e`) with the show-page crash fix
+  - **Batch 2 (owner, 2026-09-13, after the package-1 deploy) — to triage
+    together before building:**
+  - [ ] Episode stills missing on some Show pages. First reading: stills
+        come only from the TMDB enrichment, which reaches a show when it is
+        "watched" (list/progress/ready episode) or when Watch Now's shelves
+        or a sample press queue it; a Show page opened for an untouched or
+        unmapped show never asks. Proposal: the Show page queues the same
+        enrichment on open (gated like the sample route), and the page says
+        "no stills" honestly when the id map has no TMDB entry.
+  - [ ] Per-episode watched state on the Show page: the button should read
+        "Watched" once it is, and turn into "Unwatch" on hover; today an
+        episode counted as watched only through the MAL-imported list
+        progress shows no state at all, because the row's `watched` flag
+        comes from `watch_progress` rows alone.
+  - [ ] Marking episode N watched implies 1…N-1 watched, and Arc should
+        show it that way. Same root as the previous item: derive an
+        episode's watched state from max(list progress, completed
+        watch_progress), and let "mark watched" raise list progress to N
+        (FR-S4 already raises progress on completion; the manual mark should
+        match). Decide: does a manual mark of N create completion rows for
+        1…N-1, or only raise progress? (MAL write rules: one progress write,
+        never lowering.)
+  - [ ] A show whose progress reaches its episode count (12/12) becomes
+        `completed` automatically, in Arc and on MAL (one status write,
+        user-originated via the mark/completion). Decide the edge cases:
+        unknown episode count, still-airing shows, rewatches.
+  - [x] Clicking a show on the Catch up shelf did nothing (regression from
+        the shelf drag: pointer capture on the press retargeted the click to
+        the strip). Capture is now taken only once the 6 px drag threshold
+        is crossed; two tests pin it. Verified 2026-09-13 (orchestrator) in
+        Chrome on dev: a real click on a Catch up tile opened its series
+        page; 599 client tests, lint clean. Shipped as hotfix 2
+  - [ ] Some airing shows are missing from the Schedule: Slime Season 4
+        airs every Friday (next: episode 23, 2026-09-18 14:00 UTC) but is
+        tagged `SPRING 2026` — a two-cour show that started in spring — and
+        the schedule grid is built from the shows of the selected season
+        only. Fix: the current week's grid includes every `RELEASING` show
+        with an upcoming air time, whatever season it started in (the
+        season tag stays what the catalogue says; only the grid's membership
+        rule changes). Check the Home "Catch up"/"New this week" shelves for
+        the same season filter.
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

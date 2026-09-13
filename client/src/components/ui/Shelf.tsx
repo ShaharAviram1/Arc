@@ -160,8 +160,12 @@ export function Shelf({ title, lede, action, children, className, scrollerClassN
       startScroll: el.scrollLeft,
       moved: false,
     }
-    // So a hand that leaves the strip mid-drag keeps scrolling it.
-    el.setPointerCapture?.(event.pointerId)
+    // Deliberately NO pointer capture here. Capturing on the press retargets
+    // the release to the strip, and a browser then dispatches the click to
+    // the common ancestor of press and release — the strip — so a plain
+    // click on a tile never reached its link (Watch Now's Catch up shelf
+    // opened nothing on production, 2026-09-13). Capture is taken the moment
+    // the drag threshold is crossed, in `onPointerMove`.
   }
 
   const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
@@ -173,6 +177,8 @@ export function Shelf({ title, lede, action, children, className, scrollerClassN
     if (!state.moved) {
       if (Math.abs(travelled) < DRAG_THRESHOLD_PX) return
       state.moved = true
+      // Now it is a drag: so a hand that leaves the strip keeps scrolling it.
+      el.setPointerCapture?.(event.pointerId)
       // The few pixels before the threshold may have started a selection.
       document.getSelection()?.removeAllRanges()
       setDragging(true)

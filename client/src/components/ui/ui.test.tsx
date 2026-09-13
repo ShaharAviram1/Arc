@@ -628,6 +628,11 @@ describe('Shelf', () => {
 
   it('leaves a press that barely moved as a click', () => {
     plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    const capture = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', {
+      configurable: true,
+      value: capture,
+    })
     const onClick = vi.fn()
     const container = renderShelf(onClick)
     const scroller = scrollerIn(container)
@@ -636,8 +641,35 @@ describe('Shelf', () => {
     dragBy(scroller, 4)
 
     expect(scroller.scrollLeft).toBe(400)
+    // And no pointer capture was taken for it: capturing on the press
+    // retargets the release to the strip, and the browser then delivers the
+    // click to the strip rather than to the tile's link — which is how the
+    // Catch up shelf opened nothing on production (2026-09-13).
+    expect(capture).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Frieren' }))
     expect(onClick).toHaveBeenCalledTimes(1)
+    delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture
+  })
+
+  it('takes pointer capture only once the press has become a drag', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    const capture = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', {
+      configurable: true,
+      value: capture,
+    })
+    const container = renderShelf(vi.fn())
+    const scroller = scrollerIn(container)
+
+    fireEvent.pointerDown(scroller, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 200 })
+    expect(capture).not.toHaveBeenCalled()
+    fireEvent.pointerMove(scroller, { pointerId: 1, pointerType: 'mouse', clientX: 260 })
+    expect(capture).toHaveBeenCalledWith(1)
+    fireEvent.pointerUp(scroller, { pointerId: 1, pointerType: 'mouse', clientX: 260 })
+    // The release armed the one-shot click swallower; spend it here so it
+    // cannot eat the next test's click.
+    fireEvent.click(scroller)
+    delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture
   })
 
   it('leaves touch and pen to the platform', () => {
