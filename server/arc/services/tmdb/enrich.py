@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from arc.models import Anime, Episode
 from arc.services.catalog.credits import STUDIO_ROLE, credits_from
 from arc.services.catalog.source import EpisodeArt
+from arc.services.events import art_event, publish
 from arc.services.tmdb.client import (
     BACKDROP_SIZE,
     POSTER_SIZE,
@@ -450,6 +451,7 @@ async def apply_enrichment(session: AsyncSession, anime: Anime, plan: Enrichment
 
     Flushes, does not commit — the job runner owns the transaction.
     """
+    columns = plan.columns()
     if plan.backdrop_url is not None:
         anime.backdrop_url = plan.backdrop_url
     if plan.banner_url is not None:
@@ -480,6 +482,13 @@ async def apply_enrichment(session: AsyncSession, anime: Anime, plan: Enrichment
                 touched += 1
 
     await session.flush()
+    # A show page opened while its enrichment is still queued is a page of
+    # striped placeholders, and this is what turns it into pictures without a
+    # reload (§5.9). Announced only when something was actually written —
+    # ``plan`` may be a plan to write nothing, and an event for that would
+    # make every tab re-ask for every show the nightly sweep looked at.
+    if columns or touched:
+        publish(session, art_event(anime_id=anime.id))
     return touched
 
 

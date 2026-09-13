@@ -23,6 +23,15 @@ deliberately does not.
 4. **It gives one flat, JSON-safe shape.** ``media_files.parsed`` is JSONB and
    the review API renders straight out of it, so every field is a scalar and
    :meth:`ParsedName.as_dict` is the storage format.
+5. **It says whether the audio is a dub** (:attr:`ParsedName.dubbed`), because
+   acquisition ranks a dub below every subbed candidate (FR-A3) and "which
+   release did Arc pick, and why" has to be able to name that reason.
+
+``/`` is a **title character** as well as a path separator — *Fate/Zero*,
+*Fate/strange Fake* — and which one it is depends on where the string came
+from, not on what it looks like. So ``parse`` takes a ``path`` flag and the
+caller says: the ingest scanner and the match job pass ``path=True`` and get
+the last component; a Nyaa title is never split (:func:`basename`).
 
 The module is **pure**: no I/O, no clock, no database. Same string in, same
 dataclass out, which is what makes ``tests/fixtures/release_names.txt`` a
@@ -408,11 +417,38 @@ _TYPE_TAIL_RE = re.compile(
 #: would take the last word off *Frieren: Beyond Journey's End*.
 _END_RE = re.compile(r"\s*[\[(]?\b(?:END|FIN|FINAL|COMPLETE)\b[\])]?\s*$")
 
+#: A release that carries an **English dub** instead of the original audio:
+#: ``[English Dub]``, ``[Eng Dub]``, ``[Dubbed]``, ``(Dub)``, ``[DUB]``,
+#: ``[EN DUB]``. The word has to stand on its own, which is what keeps
+#: ``[KaiDubs]`` (a group name, read separately) and any title containing
+#: "Dubai" out of it.
+#:
+#: **``Dual Audio`` is deliberately not here.** A dual-audio release carries
+#: the original track as well, so it is an ordinary candidate that happens to
+#: be bigger; only a release with *nothing but* the dub is the one FR-A3 ranks
+#: last. The distinction is the whole reason this is a pattern rather than a
+#: search for the substring "dub".
+_DUB_RE = re.compile(r"(?:^|[\s\-_.\[\(])dub(?:bed|s)?(?:[\s\-_.\]\)]|$)", re.IGNORECASE)
+
+#: And the other way a release says it: the group's own name. ``[KaiDubs]``,
+#: ``[AnimeDub]`` — a group whose name *ends* in "dub" or "dubs" uploads
+#: nothing else, and two of the releases production picked yesterday said it
+#: this way and no other. Only the ending counts: a name merely containing the
+#: letters is not a claim about the audio.
+_DUB_GROUP_RE = re.compile(r"dubs?$", re.IGNORECASE)
+
 #: Everything that is not a letter, a digit or a space, for :func:`title_key`.
 #: Flattened to spaces rather than deleted: ``Re:Zero`` and ``Re Zero`` must
 #: produce one key, and deleting would make ``rezero`` out of one and
 #: ``re zero`` out of the other. ``\W`` is Unicode-aware here, so kana and
 #: kanji survive and only punctuation goes.
+#:
+#: This is **everything**, because both sides of every comparison go through
+#: it and a difference that survives on neither side costs nothing. The
+#: acquisition query builder's :data:`~arc.services.acquisition.nyaa.SYMBOLS`
+#: is the short, evidenced subset of the same idea: each character it strips
+#: costs an extra request to Nyaa, so it lists only the punctuation groups are
+#: known to drop (``☆``, ``!``, ``:``, ``/``) rather than all of it.
 _PUNCT_RE = re.compile(r"[\W_]+", re.UNICODE)
 
 
@@ -461,6 +497,12 @@ class ParsedName:
     year: int | None = None
     #: Lowercase, without the dot.
     extension: str | None = None
+    #: Whether the release says it carries an **English dub** rather than the
+    #: original audio with subtitles (:data:`_DUB_RE`). A ranking input for
+    #: acquisition (FR-A3: a dub ranks below every subbed candidate) and a fact
+    #: worth storing about a file that arrived anyway. ``Dual Audio`` is not a
+    #: dub: it has the original track too, so it is an ordinary candidate.
+    dubbed: bool = False
 
     @property
     def is_batch(self) -> bool:
@@ -955,6 +997,34 @@ def _episode_numbers(name: str, parsed: dict[str, Any]) -> EpisodeNumbers:
     return EpisodeNumbers(episode, episode_end, version, None)
 
 
+def basename(name: str, *, path: bool) -> str:
+    """The last path component of ``name``, or ``name`` itself.
+
+    ``/`` is **both** a path separator and a title character — *Fate/Zero*,
+    *Fate/strange Fake*, *Kizumonogatari II/III* — and nothing about the string
+    says which it is. So the **caller** says, because the caller is the only
+    one that knows:
+
+    * ``path=True`` for a string that came off the filesystem (the ingest
+      scanner, the match job). It is split on its last separator and nowhere
+      else, which is not a heuristic but a fact about filesystems: no path
+      component can contain a slash, so the last one is always the one before
+      the filename.
+    * ``path=False`` for a release *name* — a Nyaa title, a corpus line, a
+      name a person typed. It is never split, whatever it contains.
+
+    Guessing was the previous version of this, and it guessed wrong in both
+    directions: ``[SubsPlease] Fate/Zero - 12 (1080p)`` became a show called
+    ``Zero`` with no release group (so the acquisition filter rejected every
+    release of the show and the library sent every file of it to review), and a
+    ``" / "`` inside a tag looked exactly like a directory. One boolean at
+    three call sites replaces all of it.
+    """
+    if not path:
+        return name
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _group_of(name: str, stem: str, parsed: dict[str, Any]) -> str | None:
     """The release group: anitopy's, or the scene's trailing ``-GROUP``."""
     group = parsed.get("release_group")
@@ -970,16 +1040,17 @@ def _group_of(name: str, stem: str, parsed: dict[str, Any]) -> str | None:
     return None
 
 
-def parse(name: str) -> ParsedName:
+def parse(name: str, *, path: bool = False) -> ParsedName:
     """Parse one release filename. Deterministic, pure, never raises.
 
-    ``name`` may be a bare filename or a path; only the last component is
-    read. A name anitopy cannot make anything of comes back with
-    ``kind="unknown"`` and whatever title could be salvaged, which is a review
-    item, not an error.
+    ``path=True`` says ``name`` came off the filesystem, and only then is its
+    last component taken (:func:`basename`); by default a slash is part of the
+    title, because the strings that carry one are release names. A name anitopy
+    cannot make anything of comes back with ``kind="unknown"`` and whatever
+    title could be salvaged, which is a review item, not an error.
     """
     raw = name
-    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    base = basename(name, path=path)
     stem, _, extension = base.rpartition(".")
     if not stem:  # no dot at all
         stem, extension = base, ""
@@ -1049,6 +1120,10 @@ def parse(name: str) -> ParsedName:
         matched = _YEAR_RE.search(base)
         year = int(matched.group(1)) if matched else scene_year
 
+    dubbed = bool(_DUB_RE.search(f" {base} ")) or bool(
+        group and _DUB_GROUP_RE.search(group.strip(" []()_-"))
+    )
+
     return ParsedName(
         raw=raw,
         title=title,
@@ -1073,6 +1148,7 @@ def parse(name: str) -> ParsedName:
         ),
         year=year,
         extension=extension or None,
+        dubbed=dubbed,
     )
 
 
@@ -1083,6 +1159,7 @@ __all__ = [
     "VIDEO_EXTENSIONS",
     "Kind",
     "ParsedName",
+    "basename",
     "parse",
     "strip_season",
     "title_key",

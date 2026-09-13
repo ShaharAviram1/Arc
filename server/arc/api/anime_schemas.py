@@ -46,6 +46,7 @@ from arc.services.catalog.airing import (
     next_airing_episode,
     out_of_order,
 )
+from arc.services.playback.watched import WatchedSource, watched_source
 
 
 class TitleOut(BaseModel):
@@ -496,6 +497,56 @@ PROGRESS_STATES: frozenset[EpisodeState] = frozenset(
 )
 
 
+#: Episode states in which "what did the last search do?" is worth showing
+#: (FR-A7). While Arc is still looking — the episode is wanted, or a search is
+#: running — and while it has given up and is retrying daily, which is the
+#: state a person is most likely to be staring at. In every other state the
+#: file's own progress is the answer and the search is history.
+SEARCH_STATES: frozenset[EpisodeState] = frozenset(
+    {EpisodeState.WANTED, EpisodeState.SEARCHING, EpisodeState.UNAVAILABLE}
+)
+
+
+class SearchOut(BaseModel):
+    """What the last search for this episode asked and saw (FR-A7).
+
+    The show page's ``Searching · 6 forms, 0 results · next try 23:26``, and
+    the whole of the answer to "it has said Searching all day — is it broken?".
+    Three of the four fields are the stamp ``search_release`` leaves on the
+    episode; ``next_at`` is the ``run_after`` of the queued job that will look
+    again, because FR-A6's retry schedule lives in the job row and not in a
+    column.
+
+    Sent only while the episode is in one of :data:`SEARCH_STATES` and only
+    once a search has actually run: a row that has never been looked for says
+    nothing rather than "0 forms, 0 results", which would read as a failure.
+    """
+
+    #: When the last attempt ran.
+    at: datetime
+    #: How many query forms it ran (:func:`~arc.services.acquisition.nyaa.
+    #: queries`, after the dedupe and the cap).
+    forms: int
+    #: Distinct releases they returned between them, before the filter. Zero is
+    #: the interesting number: it means Nyaa has never heard of any name Arc
+    #: asked by, which is a query problem rather than a filter problem.
+    results: int
+    #: When the next attempt is queued for, or null when none is.
+    next_at: datetime | None = None
+
+
+def _search_out(episode: Episode, next_at: datetime | None) -> SearchOut | None:
+    """:class:`SearchOut` for an episode Arc is still looking for, or ``None``."""
+    if episode.state not in SEARCH_STATES or episode.last_search_at is None:
+        return None
+    return SearchOut(
+        at=episode.last_search_at,
+        forms=episode.last_search_forms or 0,
+        results=episode.last_search_results or 0,
+        next_at=next_at,
+    )
+
+
 class EpisodeOut(BaseModel):
     """One row of the show page's episode list."""
 
@@ -518,9 +569,18 @@ class EpisodeOut(BaseModel):
     #: compare against a clock the server may disagree with.
     aired: bool
     state: EpisodeState
-    #: Whether the caller finished it: ``watch_progress.completed`` for this
-    #: (user, episode), set at 90 % or by the manual mark (FR-S4, FR-W3).
+    #: Whether the caller has watched it (FR-W5). *Either* a completion row of
+    #: Arc's own — 90 % or the manual mark (FR-S4, FR-W3) — *or* an episode
+    #: number at or below their ``list_entries.progress``, which is how a list
+    #: imported from MyAnimeList at episode 9 marks nine episodes watched with
+    #: no completion rows behind them. :func:`~arc.services.playback.progress.
+    #: watched_source` is the rule; this is every renderer's copy of it.
     watched: bool = False
+    #: Which of those two it was, or null when the episode is not watched
+    #: (FR-W5). The show page's control reads it: ``arc`` is a mark it can take
+    #: back ("Unwatch"), ``progress`` is the list's word and un-marking it
+    #: would do nothing, so the control says "Watched" and is not a button.
+    watched_source: WatchedSource | None = None
     #: 0..1 while the episode is downloading, null otherwise (FR-A7). A
     #: fraction rather than a percentage: the client formats it, and a server
     #: that already rounded has thrown away the difference between 99.4 % and
@@ -529,6 +589,10 @@ class EpisodeOut(BaseModel):
     #: Why the search gave up, in a sentence (FR-A6, FR-A7). Only ever set
     #: while the state is ``unavailable``.
     unavailable_reason: str | None = None
+    #: What the last search asked and saw, while Arc is still looking
+    #: (:class:`SearchOut`, :data:`SEARCH_STATES`). Null everywhere else, and
+    #: null until the first attempt has run.
+    search: SearchOut | None = None
     #: The release Arc picked, once it has picked one.
     release: ReleaseOut | None = None
     #: 0..1 while the episode is ``preparing``, null otherwise (FR-P4). Zero
@@ -551,10 +615,12 @@ class EpisodeOut(BaseModel):
         anime_status: str | None,
         boundary: int = 0,
         out_of_order: bool = False,
-        watched: bool = False,
+        completed: bool = False,
+        list_progress: int = 0,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
+        next_search_at: datetime | None = None,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -563,8 +629,17 @@ class EpisodeOut(BaseModel):
         higher-numbered episode's. Defaulted to false for the callers that
         render a single episode out of its list (the home page's shelves),
         where the stored flag is the only one there is to report.
+
+        ``completed`` and ``list_progress`` are the caller's two halves of
+        FR-W5, and **this is the only place that combines them**: a show page,
+        a home tile and the player all render the same flag, and a second
+        implementation of "watched" is how the show page's tick and the tile's
+        come to disagree about episode 6. Both default to the values of a user
+        who has no list entry and no completion, which is what "not watched"
+        is made of.
         """
         prepare = PrepareState.from_job(transcode_job, episode.state)
+        source = watched_source(episode.number, completed=completed, list_progress=list_progress)
         return cls(
             id=episode.id,
             number=episode.number,
@@ -574,13 +649,15 @@ class EpisodeOut(BaseModel):
             air_at_estimated=episode.air_at_estimated or out_of_order,
             aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
             state=episode.state,
-            watched=watched,
+            watched=source is not None,
+            watched_source=source,
             download_progress=(
                 torrent.progress
                 if torrent is not None and episode.state in PROGRESS_STATES
                 else None
             ),
             unavailable_reason=episode.unavailable_reason,
+            search=_search_out(episode, next_search_at),
             release=ReleaseOut.from_torrent(torrent) if torrent is not None else None,
             prepare_progress=prepare.progress,
             failure_reason=prepare.failure_reason,
@@ -802,6 +879,13 @@ class AnimeDetail(AnimeCore):
     #: TMDB's 16:9 backdrop, or null — the same field ``AnimeSummary`` carries,
     #: and what the show page's hero prefers over the banner strip above it.
     backdrop_url: str | None = None
+    #: Whether the offline cross-id map can reach this show on TMDB at all
+    #: (§5.8's ``_mapped``). Not a claim that pictures exist — it is the
+    #: difference between "the stills are on their way" and "there are none to
+    #: come", which is the only honest thing an episode list with striped
+    #: placeholders can say, and it is what keeps the client from polling a
+    #: show TMDB has never heard of (owner, 2026-09-13).
+    tmdb_mapped: bool = False
     next_airing: NextAiringOut | None = None
     relations: list[RelationOut] = Field(default_factory=list)
     list_entry: ListEntryOut | None = None
@@ -818,13 +902,15 @@ class AnimeDetail(AnimeCore):
         now: datetime,
         list_entry: ListEntry | None = None,
         mal_sync: MalSyncOut | None = None,
-        watched: frozenset[int] = frozenset(),
+        completed: frozenset[int] = frozenset(),
         related: dict[tuple[str, int], RelatedAnime] | None = None,
         torrents: dict[int, Torrent] | None = None,
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
+        next_searches: dict[int, datetime] | None = None,
         sample: SampleOut | None = None,
         slots: SlotView | None = None,
+        tmdb_mapped: bool = False,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -866,6 +952,7 @@ class AnimeDetail(AnimeCore):
             credits=credits,
             banner_url=anime.banner_url,
             backdrop_url=anime.backdrop_url,
+            tmdb_mapped=tmdb_mapped,
             next_airing=NextAiringOut.from_blob(anime.next_airing),
             relations=relations,
             list_entry=_entry_out(list_entry, mal_sync, anime_status=anime.status, slots=slots),
@@ -877,10 +964,15 @@ class AnimeDetail(AnimeCore):
                     anime_status=anime.status,
                     boundary=boundary,
                     out_of_order=episode.number in unordered,
-                    watched=episode.id in watched,
+                    # FR-W5's two halves: Arc's own completions, and the
+                    # progress the list carries — which this method already
+                    # holds, so the watched marks cost no query of their own.
+                    completed=episode.id in completed,
+                    list_progress=list_entry.progress if list_entry is not None else 0,
                     torrent=(torrents or {}).get(episode.id),
                     rendition=(renditions or {}).get(episode.id),
                     transcode_job=(transcode_jobs or {}).get(episode.id),
+                    next_search_at=(next_searches or {}).get(episode.id),
                 )
                 for episode in episodes
             ],
@@ -908,6 +1000,7 @@ __all__ = [
     "PROGRESS_STATES",
     "NextAiringOut",
     "PrepareState",
+    "SearchOut",
     "RelatedAnime",
     "RelationOut",
     "ReleaseOut",

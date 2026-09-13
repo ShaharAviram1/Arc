@@ -82,6 +82,16 @@ export interface ScheduleEntry {
   /** True when the show is on the viewer's list in a following status. */
   following: boolean
   list_status: ListStatus | null
+  /**
+   * True when the show is in this week because it is on air, not because it
+   * carries the season being shown: a two-cour show that started last season,
+   * or a long-runner the catalogue tags with no season at all. Only the
+   * *current* season's grid takes such rows — a prev/next view is a catalogue
+   * browse and stays "the shows of that season" — so this is always false
+   * there. The page turns it into a "Since Spring 2026" line, read off
+   * `anime.season`/`anime.season_year`.
+   */
+  carried_over: boolean
 }
 
 export interface ScheduleDay {

@@ -16,7 +16,10 @@ more often than you would think: progress imported from MAL knows about
 episodes watched before Arc existed, and Arc's own completions know about
 episodes MAL has not been told about yet. Taking the smaller of the two would
 re-fetch something the user has already seen, which is the one mistake a
-"fetch the next N" rule must not make.
+"fetch the next N" rule must not make. That ``max`` is FR-W5's own boundary and
+is taken from :func:`~arc.services.playback.watched.watched_through`, so the
+window and the watched marks on a show page are one rule rather than two
+copies of it.
 
 "Aired" is :mod:`arc.services.catalog.airing`'s rule, read from there rather
 than re-derived — a home page that says "behind by 2" while acquisition thinks
@@ -205,6 +208,7 @@ from arc.services.acquisition.slots import SETTLED, SlotShow, assign_slots
 from arc.services.acquisition.states import transition
 from arc.services.catalog.airing import RELEASING, aired_through, is_aired
 from arc.services.jobs.queue import enqueue
+from arc.services.playback.watched import watched_through
 from arc.services.retention.rules import unwatched_period
 
 log = logging.getLogger(__name__)
@@ -608,8 +612,13 @@ async def _plan_wants(
     furthest = await _completed_through(
         session, {(entry.user_id, entry.anime_id) for entry, _ in entries}
     )
+    # FR-W5's boundary, and the *same* function the watched marks are derived
+    # from (:func:`~arc.services.playback.watched.watched_through`), so "how
+    # far has this user got" cannot come to mean two things. Its docstring has
+    # the one state in which it and the per-episode ``watched_source`` are
+    # deliberately allowed to differ.
     progress_of = {
-        (entry.user_id, entry.anime_id): max(
+        (entry.user_id, entry.anime_id): watched_through(
             entry.progress, furthest.get((entry.user_id, entry.anime_id), 0)
         )
         for entry, _ in entries

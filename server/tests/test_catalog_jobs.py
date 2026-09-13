@@ -312,6 +312,31 @@ async def test_only_states_that_still_generate_wants_are_swept(
     assert bool(await queued(db_session, REFRESH)) is expected
 
 
+async def test_the_daily_sweep_is_not_season_scoped(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """The Slime case (owner, 2026-09-13).
+
+    A two-cour show is tagged with the season it *started* in, and since the
+    current week's grid now carries such rows (FR-C3), their airing data has to
+    stay as fresh as any other row's. Neither half of this sweep's rule looks
+    at ``season``, and this pins that: the show is picked up for being followed
+    *and* for being ``RELEASING``, which is also why a long-runner nobody
+    follows is swept too.
+    """
+    user = await make_user(db_session, "two-cour@arc.test")
+    followed = await add_anime(
+        db_session, 800110, status="RELEASING", season="SPRING", season_year=2026
+    )
+    long_runner = await add_anime(db_session, 800111, status="RELEASING")
+    await follow(db_session, user, followed, ListStatus.WATCHING)
+
+    await catalog_jobs.catalog_refresh_all(context(db_session, settings, REFRESH_ALL))
+
+    jobs = await queued(db_session, REFRESH)
+    assert [job.payload["anime_id"] for job in jobs] == [followed.id, long_runner.id]
+
+
 async def test_the_daily_sweep_queues_one_job_per_show_across_users(
     db_session: AsyncSession, settings: Settings
 ) -> None:
@@ -423,6 +448,28 @@ async def test_the_pre_air_sweep_picks_what_airs_soon_or_just_did(
 
     jobs = await queued(db_session, REFRESH)
     assert {job.payload["anime_id"] for job in jobs} == {soon.id, just_aired.id}
+
+
+async def test_the_pre_air_sweep_reaches_a_followed_show_from_an_earlier_season(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """FR-C5's within-an-hour rule, for a row the season grid now carries."""
+    user = await make_user(db_session, "pre-air-two-cour@arc.test")
+    now = datetime.now(UTC)
+    followed = await add_anime(
+        db_session,
+        801101,
+        status="RELEASING",
+        season="SPRING",
+        season_year=2026,
+        next_airing_at=now + timedelta(minutes=30),
+    )
+    await follow(db_session, user, followed, ListStatus.WATCHING)
+
+    await catalog_jobs.catalog_pre_air(context(db_session, settings, PRE_AIR))
+
+    jobs = await queued(db_session, REFRESH)
+    assert [job.payload["anime_id"] for job in jobs] == [followed.id]
 
 
 async def test_the_pre_air_sweep_shares_the_dedupe_key_with_the_daily_one(

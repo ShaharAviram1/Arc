@@ -297,12 +297,23 @@ def _guard(change: QueuedWrite, old: Any) -> str | None:
     """The FR-M4 guards for one field, from *that field's* cause.
 
     Returns the reason the field must not be sent, or ``None`` to send it.
+
+    The progress guard is the load-bearing one, and since 2026-09-13 it is also
+    the thing that lets the explicit un-mark work. FR-M4 forbids an
+    **automatic** event from lowering MyAnimeList's progress, not a person: a
+    ``watch`` row whose value is below MAL's own is refused here and logged
+    ``skipped``, while the ``manual`` row that ``DELETE …/watched`` queues
+    (:func:`arc.services.playback.progress._retreat_list`) goes out. The cause
+    is per row rather than per job precisely so that this stays a decision
+    about *which event asked*, and no caller can launder an automatic write
+    into an explicit one without writing a row that says ``manual`` — which is
+    what ``tests/test_mal_guard.py`` polices.
     """
     if old == change.value:
         return SKIP_ALREADY
     if change.cause is not MalWriteCause.WATCH:
-        # An explicit edit or a revert is a statement about what the user
-        # wants; neither guard applies to one.
+        # An explicit edit, an un-mark or a revert is a statement about what
+        # the user wants; neither guard applies to one.
         return None
     if change.field == FIELD_PROGRESS and int(change.value or 0) < int(old or 0):
         return SKIP_LOWERS_PROGRESS

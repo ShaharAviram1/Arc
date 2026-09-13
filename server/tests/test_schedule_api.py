@@ -46,6 +46,11 @@ FRIDAY_1400Z = datetime(2026, 11, 6, 14, 0, tzinfo=UTC)
 SATURDAY_1600Z = datetime(2026, 11, 7, 16, 0, tzinfo=UTC)
 MONDAY_1000Z = datetime(2026, 10, 26, 10, 0, tzinfo=UTC)
 
+#: Two days before :data:`NOW`, so an episode dated here is inside the week the
+#: carried-over rule looks at (:data:`~arc.services.catalog.schedule.
+#: AIRING_WINDOW`) while ``MONDAY_1000Z`` above — nine days back — is not.
+LAST_MONDAY_1000Z = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
+
 MONDAY = 0
 FRIDAY = 4
 SATURDAY = 5
@@ -413,6 +418,216 @@ async def test_another_users_list_does_not_leak_into_the_schedule(
     body = (await user_client.get("/api/schedule")).json()
 
     assert body["days"][FRIDAY]["entries"][0]["following"] is False
+
+
+# --- Shows carried into the current week from another season -----------------
+#
+# The Slime case (owner, 2026-09-13): a two-cour show tagged with the season it
+# started in, still airing every Friday, absent from the grid the owner looks
+# at. The current week's membership is "what is on", not "what started when".
+
+
+async def add_two_cour(
+    factory: SessionFactory,
+    *,
+    title: str = "Second Cour",
+    anilist_id: int = 900020,
+    status: str | None = "RELEASING",
+    format: str | None = "TV",
+    season: str | None = "SPRING",
+    season_year: int | None = 2026,
+    next_at: datetime | None = FRIDAY_1400Z,
+    next_episode: int | None = 23,
+) -> int:
+    """A show tagged with an earlier season than the one being rendered."""
+    return await add_anime(
+        factory,
+        title=title,
+        anilist_id=anilist_id,
+        status=status,
+        format=format,
+        season=season,
+        season_year=season_year,
+        episodes=24,
+        next_at=next_at,
+        next_episode=next_episode,
+    )
+
+
+async def test_a_two_cour_show_from_an_earlier_season_is_on_the_current_week(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    await add_two_cour(api_factory)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert (body["year"], body["season"]) == (2026, "FALL")
+    # Both air at 14:00, so the day's order is by title.
+    assert titles(body["days"][FRIDAY]) == ["Friday Night Show", "Second Cour"]
+    carried = body["days"][FRIDAY]["entries"][1]
+    assert carried["carried_over"] is True
+    assert carried["air_time_local"] == "14:00"
+    assert carried["next_episode"] == 23
+    # The season tag is untouched: the grid's membership changed, not the row.
+    assert (carried["anime"]["season"], carried["anime"]["season_year"]) == ("SPRING", 2026)
+    # And a row that is here because of its own season is not marked.
+    assert body["days"][FRIDAY]["entries"][0]["carried_over"] is False
+
+
+async def test_a_carried_over_show_is_placed_in_the_users_own_week(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory, season: dict[str, int]
+) -> None:
+    """Same timezone rule as every other row: Saturday 16:00Z is Sunday in Tokyo."""
+    await add_two_cour(api_factory, next_at=SATURDAY_1600Z)
+    await set_timezone(api_factory, user, "Asia/Tokyo")
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "Second Cour" not in titles(body["days"][SATURDAY])
+    assert titles(body["days"][SUNDAY]) == ["Saturday Late Show", "Second Cour"]
+    assert body["days"][SUNDAY]["entries"][1]["air_time_local"] == "01:00"
+
+
+async def test_a_long_runner_with_no_season_at_all_is_on_the_current_week(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """One Piece-style: ``season`` and ``season_year`` both null, still on air."""
+    await add_two_cour(
+        api_factory, title="The Long Runner", season=None, season_year=None, next_episode=1140
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "The Long Runner" in titles(body["days"][FRIDAY])
+    entry = next(
+        row
+        for row in body["days"][FRIDAY]["entries"]
+        if row["anime"]["title"]["preferred"] == "The Long Runner"
+    )
+    assert entry["carried_over"] is True
+    assert entry["anime"]["season"] is None
+
+
+async def test_a_followed_carried_over_show_is_still_highlighted(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory, season: dict[str, int]
+) -> None:
+    anime_id = await add_two_cour(api_factory)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    carried = body["days"][FRIDAY]["entries"][1]
+    assert carried["following"] is True
+    assert carried["list_status"] == "watching"
+
+
+async def test_an_episode_dated_this_week_carries_a_slotless_show_in(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """No ``next_airing`` blob, but an episode dated inside the window."""
+    anime_id = await add_two_cour(api_factory, title="Undated Slot Show", next_at=None)
+    await add_episodes(
+        api_factory, anime_id, count=3, first_at=LAST_MONDAY_1000Z - timedelta(weeks=2)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert titles(body["days"][MONDAY]) == ["Monday Rerun", "Undated Slot Show"]
+    assert body["days"][MONDAY]["entries"][1]["carried_over"] is True
+
+
+async def test_a_finished_show_from_the_previous_season_is_not_carried_in(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """It aired two days ago and is over; it is not on this week."""
+    anime_id = await add_two_cour(
+        api_factory, title="Summer, Over", status="FINISHED", season="SUMMER", next_at=None
+    )
+    await add_episodes(
+        api_factory, anime_id, count=12, first_at=LAST_MONDAY_1000Z - timedelta(weeks=11)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "Summer, Over" not in [
+        entry["anime"]["title"]["preferred"] for day in body["days"] for entry in day["entries"]
+    ]
+    assert "Summer, Over" not in [
+        entry["anime"]["title"]["preferred"] for entry in body["unscheduled"]
+    ]
+
+
+async def test_an_airing_show_with_no_air_time_anywhere_is_not_carried_in(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """Nothing places it on a weekday, and it is not this season's unscheduled."""
+    await add_two_cour(api_factory, title="On Air, Somewhere", next_at=None)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "On Air, Somewhere" not in [
+        entry["anime"]["title"]["preferred"] for entry in body["unscheduled"]
+    ]
+    assert sum(len(day["entries"]) for day in body["days"]) == 3
+
+
+async def test_an_airing_show_of_this_season_with_no_air_time_stays_unscheduled(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """The rule that did not change: its own season still lists it (FR-C7)."""
+    await add_two_cour(api_factory, title="Cached, Unplaced", season="FALL", next_at=None)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    unscheduled = sorted(entry["anime"]["title"]["preferred"] for entry in body["unscheduled"])
+    assert unscheduled == ["A Film", "Announced Only", "Cached, Unplaced"]
+    assert body["unscheduled"][0]["carried_over"] is False
+
+
+async def test_a_broadcast_a_month_out_is_not_this_week(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """A show on a long break is still ``RELEASING``; it is not on this week."""
+    await add_two_cour(api_factory, title="On Hiatus", next_at=NOW + timedelta(days=30))
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "On Hiatus" not in [
+        entry["anime"]["title"]["preferred"] for day in body["days"] for entry in day["entries"]
+    ]
+
+
+async def test_only_the_weekly_formats_are_carried_in(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """A film's premiere is a date, not a slot, and this is not its season."""
+    await add_two_cour(api_factory, title="A Premiere", format="MOVIE")
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    titles_everywhere = [
+        entry["anime"]["title"]["preferred"]
+        for day in [*body["days"], {"entries": body["unscheduled"]}]
+        for entry in day["entries"]
+    ]
+    assert "A Premiere" not in titles_everywhere
+
+
+async def test_another_seasons_view_takes_no_airing_rows_from_elsewhere(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """Prev/next are a catalogue browse: exactly the shows of that season."""
+    await add_two_cour(api_factory, title="Spring Only")
+
+    body = (
+        await user_client.get("/api/schedule", params={"year": 2026, "season": "SPRING"})
+    ).json()
+
+    assert titles(body["days"][FRIDAY]) == ["Spring Only"]
+    assert body["days"][FRIDAY]["entries"][0]["carried_over"] is False
+    # None of FALL's own airing rows leaked in.
+    assert sum(len(day["entries"]) for day in body["days"]) == 1
+    assert body["unscheduled"] == []
 
 
 async def test_an_empty_season_is_seven_empty_days(user_client: AsyncClient) -> None:

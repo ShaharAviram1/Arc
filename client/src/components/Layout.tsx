@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from
 import { cx, FOCUS_RING } from '@/components/ui/styles'
 import { useAcquisitionStatus } from '@/lib/acquisition'
 import { useLogout, useMe } from '@/lib/auth'
+import { useLiveEvents } from '@/lib/events'
 import { useIsPhone } from '@/lib/media'
 import { useReviewSummary } from '@/lib/review'
 
@@ -667,6 +668,12 @@ export function Layout() {
   const account = useAccountMenu()
   const location = useLocation()
   const [moreOpen, setMoreOpen] = useState(false)
+
+  // One `EventSource` for the tab, here because this is the one component that
+  // is mounted exactly once for the whole signed-in app (§5.9). It renders
+  // nothing: its only effect is that the queries the pages below already have
+  // go stale the moment the server says they should.
+  useLiveEvents()
 
   // A sheet that survives the page it was opened from is a trapdoor, and one
   // that survives a resize to desktop widths is a sheet with no way to close

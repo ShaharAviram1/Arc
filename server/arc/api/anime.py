@@ -32,7 +32,12 @@ title.
 
 Reading a show is the opposite: cache first, upstream only when the row is
 missing, older than a day, or filled from MAL while AniList is healthy again
-(FR-C5, FR-C6).
+(FR-C5, FR-C6). It also queues the show's TMDB enrichment on the way past
+(§5.8, owner 2026-09-13): a show page is opened for shows nothing else on the
+server asks about, so before this the episode rows of an untouched series kept
+their striped placeholders until the nightly sweep happened to reach them. The
+route waits for nothing — it answers with the art it already holds and tells
+the client whether more is possible (``tmdb_mapped``).
 
 The two ``/{id}/sample`` routes are the show page's "try episode 1" (FR-A8):
 the one way a user can cause a download without a list change. They are thin
@@ -99,6 +104,7 @@ from arc.services.jobs import enqueue
 from arc.services.mal.names import is_linked
 from arc.services.mal.writelog import SyncState, sync_state
 from arc.services.playback.progress import completed_episode_ids
+from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
 
 log = logging.getLogger(__name__)
 
@@ -303,13 +309,31 @@ async def detail(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=CATALOGUE_UNAVAILABLE
         ) from exc
+
+    # Whether TMDB can be reached for this show at all — one lookup in the
+    # offline cross-id map, the row-level twin of §5.8's ``_mapped``. The
+    # answer is on the response either way: it is what tells an episode list
+    # of striped placeholders "the pictures are coming" from "there are none
+    # to come" (owner, 2026-09-13).
+    tmdb_mapped = (await tmdb_ids_for(session, anime)) is not None
+    if tmdb_mapped:
+        # The fourth on-demand trigger for the enrichment (§5.8). A show page
+        # is opened for shows nothing else asks about — not watched, on no Home
+        # shelf, never sampled — and until now their stills arrived with the
+        # nightly sweep or not at all, which is the placeholder the owner saw
+        # on several series pages. Gated exactly as the other three are (a key,
+        # and a hole left to fill), so a page whose art is complete queues
+        # nothing; waited for by nothing, so the page renders what it has.
+        await enqueue_show_enrichment(session, anime.id, settings=settings)
+    # One commit for the refreshed row and the queued enrichment together.
     await session.commit()
 
     episodes = await episodes_for(session, anime.id)
     entry = await session.get(ListEntry, (user.id, anime.id))
-    # The download percentage, the preparing percentage, the failure sentence
-    # and the rendition all live outside ``episodes`` (FR-A7, FR-P1, FR-P4);
-    # three queries for the whole list rather than three per episode.
+    # The download percentage, the preparing percentage, the failure sentence,
+    # the rendition and the next search's time all live outside ``episodes``
+    # (FR-A7, FR-P1, FR-P4); four queries for the whole list rather than four
+    # per episode.
     episode_ids = [episode.id for episode in episodes]
     extras = await episode_extras(session, episode_ids)
     # The caller's own "try episode 1" want, if they have one (FR-A8). The
@@ -343,19 +367,25 @@ async def detail(
             )
         ),
         # One query for the whole list: which of these the caller has finished
-        # (FR-S4). The tick on a show page is per user, so it cannot come from
-        # the episode row.
-        watched=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
+        # in Arc (FR-S4). The tick on a show page is per user, so it cannot
+        # come from the episode row — and it is only half of FR-W5's rule: the
+        # other half is ``entry.progress``, which ``build`` reads off the entry
+        # above rather than asking for again.
+        completed=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
         related=await _related_anime(session, anime),
         torrents=extras.torrents,
         renditions=extras.renditions,
         transcode_jobs=extras.transcode_jobs,
+        # When Arc will look again, for the rows that are still being looked
+        # for (FR-A7): the retry schedule is a job row, not a column.
+        next_searches=extras.next_searches,
         sample=(
             SampleOut.build(want, by_id[want.episode_id])
             if want is not None and want.episode_id in by_id
             else None
         ),
         slots=slots,
+        tmdb_mapped=tmdb_mapped,
     )
 
 

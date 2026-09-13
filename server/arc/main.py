@@ -18,6 +18,7 @@ from arc.api import (
     auth,
     catalog,
     catalogue,
+    events,
     health,
     home,
     invites,
@@ -91,6 +92,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # The live-event listener (arc/api/events.py) is built by the first
+        # stream, so it is usually absent — and when it is there it owns a
+        # Postgres connection and a supervising task, both of which have to go
+        # before the loop does. Closed here rather than left to the process so
+        # that ``uvicorn --reload`` cannot accumulate one listener per reload.
+        broker = getattr(app.state, events.BROKER_ATTR, None)
+        if broker is not None:
+            await broker.aclose()
         await app.state.catalog.aclose()
         # Built lazily by the recommendations router, so it is usually absent.
         recs_model = getattr(app.state, "recs_model", None)
@@ -186,6 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(events.router)
     app.include_router(auth.router)
     app.include_router(invites.router)
     app.include_router(users.router)

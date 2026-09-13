@@ -1,12 +1,13 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/lib/api'
 import {
   ACQUISITION_POLL_MS,
   anilistUrl,
   animeQueryKey,
+  awaitingStills,
   bannerArt,
   catalogErrorMessage,
   episodeDetailLine,
@@ -21,6 +22,9 @@ import {
   releaseLine,
   renditionLine,
   sampleErrorMessage,
+  searchSummary,
+  STILL_POLL_MS,
+  STILL_POLL_WINDOW_MS,
   useAnime,
   useAnimeSearch,
   useCancelSample,
@@ -38,13 +42,16 @@ import {
   EMPTY_HOME,
   FRIEREN,
   FRIEREN_DETAIL,
+  FRIEREN_DETAIL_AWAITING_STILLS,
   FRIEREN_DETAIL_ON_LIST,
   FRIEREN_DETAIL_SETTLED,
+  FRIEREN_DETAIL_UNMAPPED,
+  FRIEREN_DETAIL_WITH_STILLS,
   FRIEREN_SAMPLE,
   listEntry,
   SEARCH_PAGE_1,
 } from '@/test/animeFixtures'
-import { mockApi, requestsMade } from '@/test/apiMock'
+import { mockApi, requestsMade, type MockRoutes } from '@/test/apiMock'
 
 function wrapperFor(client: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -181,6 +188,62 @@ describe('episodeProgressPercent', () => {
     expect(
       episodeProgressPercent(episode({ state: 'preparing', prepare_progress: null })),
     ).toBeNull()
+  })
+})
+
+describe('searchSummary', () => {
+  const at = '2026-09-14T17:20:00Z'
+  /** The viewer's own clock is what "today" and "23:26" are measured against. */
+  const clock = (iso: string, options: Intl.DateTimeFormatOptions): string =>
+    new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC' }).format(new Date(iso))
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(at))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('says how many forms ran, how many came back, and when the next try is', () => {
+    const next = '2026-09-14T23:26:00Z'
+
+    expect(
+      searchSummary(
+        episode({ state: 'searching', search: { at, forms: 6, results: 0, next_at: next } }),
+        'UTC',
+      ),
+    ).toBe('6 forms, 0 results · next try 23:26')
+  })
+
+  it('names the day when the next try is not today', () => {
+    const next = '2026-09-16T09:05:00Z'
+
+    const line = searchSummary(
+      episode({ state: 'wanted', search: { at, forms: 8, results: 3, next_at: next } }),
+      'UTC',
+    )
+
+    expect(line).toContain('8 forms, 3 results · next try')
+    expect(line).toContain(clock(next, { day: 'numeric', month: 'short' }))
+  })
+
+  it('singularises one of each, and drops the clause when nothing is queued', () => {
+    expect(
+      searchSummary(
+        episode({ state: 'searching', search: { at, forms: 1, results: 1, next_at: null } }),
+        'UTC',
+      ),
+    ).toBe('1 form, 1 result')
+  })
+
+  it('is null once Arc has stopped looking, and before it has started', () => {
+    const search = { at, forms: 6, results: 0, next_at: null }
+    expect(searchSummary(episode({ state: 'ready', search }), 'UTC')).toBeNull()
+    expect(searchSummary(episode({ state: 'unavailable', search }), 'UTC')).toBeNull()
+    expect(searchSummary(episode({ state: 'searching' }), 'UTC')).toBeNull()
+    expect(searchSummary(episode({ state: 'searching', search: null }), 'UTC')).toBeNull()
   })
 })
 
@@ -326,6 +389,126 @@ describe('useAnime', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('re-asks while a mapped show is still missing its episode stills (§5.8)', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = mockApi({ [detailPath]: { body: FRIEREN_DETAIL_AWAITING_STILLS } })
+      const client = createQueryClient()
+
+      renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+      expect(detailCalls(fetchMock)).toBe(1)
+
+      // Faster than the acquisition poll: the enrichment the open queued is
+      // three requests on a worker, not a download.
+      await settle(STILL_POLL_MS)
+      expect(detailCalls(fetchMock)).toBe(2)
+
+      await settle(STILL_POLL_MS)
+      expect(detailCalls(fetchMock)).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops the moment the stills arrive', async () => {
+    vi.useFakeTimers()
+    try {
+      // The routes object is read per request, so changing it here is the
+      // enrichment landing between two polls.
+      const routes: MockRoutes = { [detailPath]: { body: FRIEREN_DETAIL_AWAITING_STILLS } }
+      const fetchMock = mockApi(routes)
+      const client = createQueryClient()
+
+      renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+      expect(detailCalls(fetchMock)).toBe(1)
+
+      routes[detailPath] = { body: FRIEREN_DETAIL_WITH_STILLS }
+      await settle(STILL_POLL_MS)
+
+      // The cache rather than the hook's result: what ends the polling is the
+      // answer the poll wrote, and an observer nothing has read `data` off is
+      // not re-rendered by it.
+      expect(client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))).toEqual(
+        FRIEREN_DETAIL_WITH_STILLS,
+      )
+      expect(detailCalls(fetchMock)).toBe(2)
+
+      await settle(STILL_POLL_MS * 4)
+      expect(detailCalls(fetchMock)).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up after the still window rather than asking for ever', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = mockApi({ [detailPath]: { body: FRIEREN_DETAIL_AWAITING_STILLS } })
+      const client = createQueryClient()
+
+      renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+
+      // Half a minute at five seconds: the first answer plus six tries. A
+      // show TMDB has no stills for would otherwise be polled for as long as
+      // its page stayed open.
+      await settle(STILL_POLL_WINDOW_MS)
+      expect(detailCalls(fetchMock)).toBe(1 + STILL_POLL_WINDOW_MS / STILL_POLL_MS)
+
+      await settle(STILL_POLL_WINDOW_MS)
+      expect(detailCalls(fetchMock)).toBe(1 + STILL_POLL_WINDOW_MS / STILL_POLL_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never polls a show TMDB cannot be reached for', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = mockApi({ [detailPath]: { body: FRIEREN_DETAIL_UNMAPPED } })
+      const client = createQueryClient()
+
+      renderHook(() => useAnime(FRIEREN.id), { wrapper: wrapperFor(client) })
+      await settle()
+      expect(detailCalls(fetchMock)).toBe(1)
+
+      await settle(STILL_POLL_WINDOW_MS * 2)
+      expect(detailCalls(fetchMock)).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('awaitingStills', () => {
+  it('is true for a mapped show with an aired episode that has no still', () => {
+    expect(awaitingStills(FRIEREN_DETAIL_AWAITING_STILLS)).toBe(true)
+  })
+
+  it('is false once every aired episode has one', () => {
+    expect(awaitingStills(FRIEREN_DETAIL_WITH_STILLS)).toBe(false)
+  })
+
+  it('is false for a show the cross-id map cannot reach', () => {
+    expect(awaitingStills(FRIEREN_DETAIL_UNMAPPED)).toBe(false)
+  })
+
+  it('makes no claim when the answer says nothing about TMDB', () => {
+    expect(awaitingStills(FRIEREN_DETAIL_SETTLED)).toBe(false)
+    expect(awaitingStills(undefined)).toBe(false)
+  })
+
+  it('ignores an episode that has not aired: there is no still to publish', () => {
+    expect(
+      awaitingStills({
+        ...FRIEREN_DETAIL_AWAITING_STILLS,
+        episodes: [episode({ aired: false, still_url: null })],
+      }),
+    ).toBe(false)
   })
 })
 

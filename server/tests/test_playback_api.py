@@ -79,8 +79,16 @@ async def add_show(
     count: int = 12,
     ready: tuple[int, ...] = (11,),
     duration: float | None = DURATION,
+    status: str = "RELEASING",
+    episode_count: int | None = -1,
 ) -> tuple[int, dict[int, int]]:
-    """A show whose ``ready`` episodes have renditions; ``number → episode id``."""
+    """A show whose ``ready`` episodes have renditions; ``number → episode id``.
+
+    ``status`` and ``episode_count`` are FR-W5's auto-complete conditions: the
+    default is a show still airing with a known count, and the sentinel ``-1``
+    means "the same as ``count``" so that only a test that cares about the
+    difference has to say anything.
+    """
     async with factory() as session:
         anime = Anime(
             anilist_id=anilist_id,
@@ -88,8 +96,8 @@ async def add_show(
             detail_source="anilist",
             title_romaji=title,
             format="TV",
-            status="RELEASING",
-            episodes=count,
+            status=status,
+            episodes=count if episode_count == -1 else episode_count,
         )
         session.add(anime)
         await session.flush()
@@ -583,10 +591,15 @@ async def test_finishing_a_show_off_your_list_adds_it_as_watching(
     assert entry.mal_dirty is True
 
 
-async def test_finishing_the_last_episode_leaves_the_status_alone(
+async def test_finishing_the_last_episode_of_an_airing_show_leaves_the_status_alone(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:
-    """FR-W2 gives "completed" to the user; Arc only ever moves progress."""
+    """FR-W5's first edge: a ``RELEASING`` show is never auto-completed.
+
+    Its episode count is a projection — episode 13 of a "12-episode" season is
+    an ordinary occurrence — so completing it would be a status Arc has to take
+    back next Friday.
+    """
     anime_id, ids = await add_show(api_factory, anilist_id=950017, count=2, ready=(2,))
     await follow(api_factory, user, anime_id, progress=1)
 
@@ -859,10 +872,16 @@ async def test_marking_an_episode_watched_twice_only_moves_things_once(
     assert second.json() == {"completed": True, "newly_completed": False, "list_progress": None}
 
 
-async def test_un_marking_clears_the_flag_and_keeps_the_position(
+async def test_un_marking_clears_the_flag_keeps_the_position_and_lowers_the_list(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:
-    """The list and MAL are deliberately not rolled back (FR-M4)."""
+    """FR-S4 as the owner revised it on 2026-09-13.
+
+    Watching episode 11 raised the list to 11; taking the mark back lowers it
+    to 10, because otherwise FR-W5 would keep calling the episode watched and
+    the button would change nothing anybody could see. The position stays: this
+    is "I had not finished it after all", not "I never opened it".
+    """
     anime_id, ids = await add_show(api_factory, anilist_id=950033)
     await follow(api_factory, user, anime_id, progress=10)
     await post_progress(client, ids[11], DURATION * 0.95)
@@ -870,7 +889,7 @@ async def test_un_marking_clears_the_flag_and_keeps_the_position(
     response = await client.delete(f"/api/episodes/{ids[11]}/watched")
 
     assert response.status_code == 200
-    assert response.json() == {"completed": False, "newly_completed": False, "list_progress": None}
+    assert response.json() == {"completed": False, "newly_completed": False, "list_progress": 10}
     row = await progress_of(api_factory, user, ids[11])
     assert row is not None
     assert row.completed is False
@@ -878,8 +897,101 @@ async def test_un_marking_clears_the_flag_and_keeps_the_position(
     assert row.position_s == pytest.approx(DURATION * 0.95)
     entry = await entry_of(api_factory, user, anime_id)
     assert entry is not None
-    assert entry.progress == 11
+    assert entry.progress == 10
+    assert entry.updated_by is UpdatedBy.ARC
     assert entry.mal_dirty is True
+
+
+async def test_un_marking_an_episode_the_list_alone_vouches_for_still_lowers_it(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The case the revision exists for: an imported list, no completion rows.
+
+    Nine episodes watched according to MyAnimeList and nothing of Arc's own to
+    clear. Under the old rule there was no way to correct that at all.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950042, ready=())
+    await follow(api_factory, user, anime_id, progress=9)
+
+    body = (await client.delete(f"/api/episodes/{ids[9]}/watched")).json()
+
+    assert body["list_progress"] == 8
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.progress == 8
+    # Nothing was fabricated on the way: there is still no row for episode 9.
+    assert await progress_rows(api_factory, user, ids[9]) == []
+    # The window moved back onto it, so the reconciliation is queued (FR-T3).
+    assert len(await wants_jobs(api_factory)) == 1
+
+
+@pytest.mark.parametrize(("progress", "number", "expected"), [(9, 4, 9), (9, 11, 9)])
+async def test_un_marking_anything_but_the_latest_leaves_the_list_alone(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    user: User,
+    progress: int,
+    number: int,
+    expected: int,
+) -> None:
+    """One episode from the top, and only from the top.
+
+    Below it, taking back episode 4 of a list that says 9 would have to claim
+    something about 5…9 the viewer never said; above it there is nothing to
+    lower. Both still clear whatever row Arc holds.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950043 + number, ready=())
+    await follow(api_factory, user, anime_id, progress=progress)
+    await set_progress(
+        api_factory, user, ids[number], position_s=0.0, duration_s=0.0, completed=True
+    )
+
+    body = (await client.delete(f"/api/episodes/{ids[number]}/watched")).json()
+
+    assert body["list_progress"] is None
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.progress == expected
+    assert entry.mal_dirty is False
+    row = await progress_of(api_factory, user, ids[number])
+    assert row is not None and row.completed is False
+
+
+async def test_un_marking_the_last_episode_leaves_a_completed_show_completed(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-W5's auto-complete is not undone by FR-S4's rollback (owner).
+
+    The progress goes back to 1; the status stays ``completed``, because
+    "completed" is a word the viewer owns (FR-W2) and Arc taking it off a show
+    they still consider finished would be a claim nobody made.
+    """
+    anime_id, ids = await add_show(
+        api_factory, anilist_id=950050, count=2, ready=(2,), status="FINISHED"
+    )
+    await follow(api_factory, user, anime_id, progress=1)
+    await post_progress(client, ids[2], DURATION * 0.99)
+    assert (await entry_of(api_factory, user, anime_id)) is not None
+
+    body = (await client.delete(f"/api/episodes/{ids[2]}/watched")).json()
+
+    assert body["list_progress"] == 1
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.progress == 1
+    assert entry.status is ListStatus.COMPLETED
+
+
+async def test_un_marking_on_a_show_off_your_list_creates_nothing(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The un-mark never *adds* a list entry: there is no number to lower."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950051, ready=())
+
+    body = (await client.delete(f"/api/episodes/{ids[4]}/watched")).json()
+
+    assert body["list_progress"] is None
+    assert await entry_of(api_factory, user, anime_id) is None
 
 
 async def test_un_marking_something_never_watched_is_still_a_200(
@@ -933,16 +1045,207 @@ async def test_an_id_below_one_is_a_422_as_well(client: AsyncClient, bad: str) -
 async def test_the_show_page_shows_the_tick_after_completion(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:
-    """``EpisodeOut.watched`` is per user and comes from ``watch_progress``."""
+    """``EpisodeOut.watched`` is per user, and FR-W5 is both of its halves.
+
+    Marking 11 watched on a list that said 10 raises the progress to 11, so
+    everything up to it is watched too — episode 10 by the list's word and
+    episode 11 by Arc's own completion row. The episode above stays clear.
+    """
     anime_id, ids = await add_show(api_factory, anilist_id=950035)
     await follow(api_factory, user, anime_id, progress=10)
     await client.post(f"/api/episodes/{ids[11]}/watched")
 
     detail = (await client.get(f"/api/anime/{anime_id}")).json()
 
-    watched = {row["number"]: row["watched"] for row in detail["episodes"]}
-    assert watched[11] is True
-    assert watched[10] is False
+    rows = {row["number"]: row for row in detail["episodes"]}
+    assert rows[11]["watched"] is True
+    assert rows[11]["watched_source"] == "arc"
+    assert rows[10]["watched"] is True
+    assert rows[10]["watched_source"] == "progress"
+    assert rows[12]["watched"] is False
+    assert rows[12]["watched_source"] is None
+    # And no rows were fabricated for 1..10: progress already says it.
+    assert await progress_rows(api_factory, user, ids[10]) == []
+
+
+# --- What "watched" means (FR-W5) --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("progress", "completed", "number", "expected"),
+    [
+        (0, False, 4, None),  # neither
+        (0, True, 4, "arc"),  # a completion under an untouched list
+        (3, True, 4, "arc"),  # above the line, on Arc's own row
+        (3, False, 4, None),  # above the line with nothing to say so
+        (4, False, 4, "arc"),  # *at* the line: the un-mark lowers it to 3
+        (4, True, 4, "arc"),  # …the completion row changes nothing here
+        (7, False, 4, "progress"),  # under the line: watched, no undo
+        (7, True, 4, "progress"),  # …and still no undo, row or no row
+    ],
+)
+async def test_the_watched_matrix(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    user: User,
+    progress: int,
+    completed: bool,
+    number: int,
+    expected: str | None,
+) -> None:
+    """The owner's rule of 2026-09-13 (revised the same day), as a table.
+
+    ``arc`` is the value that means "actionable": at or above the list's
+    progress, where the un-mark has either a row to clear or a number to lower.
+    Under the progress it is ``progress`` whatever ``watch_progress`` holds,
+    because the un-mark moves the line by one from the top and nothing there
+    would change.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=960000 + progress * 10 + number)
+    if progress or completed:
+        await follow(api_factory, user, anime_id, progress=progress)
+    if completed:
+        await set_progress(api_factory, user, ids[number], position_s=DURATION, completed=True)
+
+    detail = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    row = next(item for item in detail["episodes"] if item["number"] == number)
+    assert row["watched_source"] == expected
+    assert row["watched"] is (expected is not None)
+
+
+async def test_the_player_reads_the_same_definition(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-W5 in one place: ``/play`` must not have its own idea of watched."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950037)
+    # Twelve, so episode 11 is *under* the line and reads as the half with no
+    # undo — the case the player has to render as a word rather than a toggle.
+    await follow(api_factory, user, anime_id, progress=12)
+
+    body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+
+    assert body["episode"]["watched"] is True
+    assert body["episode"]["watched_source"] == "progress"
+
+
+async def test_marking_an_episode_below_progress_never_lowers_it(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-M4 through FR-W3's door: the manual mark is FR-S4's path exactly."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950038, ready=(3, 11))
+    await follow(api_factory, user, anime_id, progress=7)
+
+    body = (await client.post(f"/api/episodes/{ids[3]}/watched")).json()
+
+    assert body == {"completed": True, "newly_completed": True, "list_progress": 7}
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.progress == 7
+    # Nothing moved, so nothing is owed to MyAnimeList.
+    assert entry.mal_dirty is False
+
+
+# --- Auto-complete (FR-W5) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "episode_count", "before", "expected"),
+    [
+        # The whole point: a finished show whose last episode just landed.
+        ("FINISHED", 2, ListStatus.WATCHING, ListStatus.COMPLETED),
+        # Still airing: the count is a projection, so it is not an end.
+        ("RELEASING", 2, ListStatus.WATCHING, ListStatus.WATCHING),
+        # No count at all: there is no end to reach.
+        ("FINISHED", None, ListStatus.WATCHING, ListStatus.WATCHING),
+        # Already completed: nothing to claim, and nothing changes.
+        ("FINISHED", 2, ListStatus.COMPLETED, ListStatus.COMPLETED),
+        # On hold, and finished anyway — the progress is the statement.
+        ("FINISHED", 2, ListStatus.ON_HOLD, ListStatus.COMPLETED),
+        # And dropped (owner, 2026-09-13): watching the last episode of a show
+        # you had dropped is the clearest thing anybody says about an entry,
+        # and "dropped at 12/12" would be Arc keeping a state they moved past.
+        ("FINISHED", 2, ListStatus.DROPPED, ListStatus.COMPLETED),
+    ],
+)
+async def test_the_auto_complete_matrix(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    user: User,
+    status: str,
+    episode_count: int | None,
+    before: ListStatus,
+    expected: ListStatus,
+) -> None:
+    """FR-W5's edges, decided by the owner on 2026-09-13."""
+    anime_id, ids = await add_show(
+        api_factory,
+        anilist_id=961000 + abs(hash((status, episode_count, before.value))) % 9000,
+        count=2,
+        ready=(2,),
+        status=status,
+        episode_count=episode_count,
+    )
+    await follow(api_factory, user, anime_id, status=before, progress=1)
+
+    await post_progress(client, ids[2], DURATION * 0.99)
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.status is expected
+    assert entry.progress == 2
+
+
+async def test_a_partial_show_is_not_completed(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """Nine of twelve is not twelve, whatever the show's status says."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950039, ready=(9,), status="FINISHED")
+    await follow(api_factory, user, anime_id, progress=8)
+
+    await post_progress(client, ids[9], DURATION * 0.99)
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.status is ListStatus.WATCHING
+
+
+async def test_a_rewatch_of_the_last_episode_completes_nothing_new(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """Already at 2/2 and already completed: the mark must claim nothing."""
+    anime_id, ids = await add_show(
+        api_factory, anilist_id=950040, count=2, ready=(2,), status="FINISHED"
+    )
+    await follow(api_factory, user, anime_id, status=ListStatus.COMPLETED, progress=2)
+
+    await client.post(f"/api/episodes/{ids[2]}/watched")
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.status is ListStatus.COMPLETED
+    assert entry.progress == 2
+    # Nothing advanced, so nothing is dirty and nothing is owed to MAL.
+    assert entry.mal_dirty is False
+
+
+async def test_marking_the_last_episode_of_a_finished_show_completes_it(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-W3 and FR-W5 together: the manual mark completes a show too."""
+    anime_id, ids = await add_show(
+        api_factory, anilist_id=950041, count=2, ready=(), status="FINISHED"
+    )
+    await follow(api_factory, user, anime_id, progress=1)
+
+    await client.post(f"/api/episodes/{ids[2]}/watched")
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.status is ListStatus.COMPLETED
+    assert entry.progress == 2
+    assert entry.updated_by is UpdatedBy.ARC
+    assert entry.mal_dirty is True
 
 
 async def test_another_users_completion_is_not_on_my_show_page(

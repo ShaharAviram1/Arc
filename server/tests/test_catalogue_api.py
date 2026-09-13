@@ -26,6 +26,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arc.api.deps import ADMIN_REQUIRED, NOT_AUTHENTICATED
+from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import (
     Anime,
@@ -33,6 +34,7 @@ from arc.models import (
     Job,
     ListEntry,
     ListStatus,
+    OfflineId,
     Setting,
     UpdatedBy,
     User,
@@ -40,6 +42,8 @@ from arc.models import (
 )
 from arc.services.acquisition.wants import compute_wants
 from arc.services.catalog import Breaker, CatalogService
+from arc.services.tmdb.names import TMDB_ENRICH
+from arc.services.tmdb.names import dedupe_key as tmdb_dedupe_key
 from tests.anilist_mock import (
     FRIEREN_ID,
     FROZEN_NOW,
@@ -816,6 +820,165 @@ async def test_detail_of_an_unknown_id_is_a_404(user_client: AsyncClient) -> Non
 
 async def test_detail_needs_a_session(anon_client: AsyncClient) -> None:
     assert (await anon_client.get("/api/anime/1")).status_code == 401
+
+
+# --- The show page's own TMDB enrichment (§5.8, owner 2026-09-13) ------------
+#
+# What the owner hit: episode rows showing the striped placeholder on several
+# series pages. Stills come only from the TMDB enrichment, and until now the
+# only things that asked for one were the nightly sweep, the Home shelves and
+# the sample button — none of which reaches a series nobody follows.
+
+#: A key that is never used to reach anything: these tests assert on the job
+#: rows the route writes, and the handler that would spend the key is not run.
+TMDB_KEY = "tmdb-test-key"
+
+
+@pytest.fixture
+def tmdb_app(catalogue_app: FastAPI, settings: Settings) -> FastAPI:
+    """The catalogue app as a deployment that has a ``TMDB_API_KEY``.
+
+    On ``app.state`` rather than through the module's ``settings`` fixture,
+    because the keyless case is a test of its own down the page and the two
+    must be able to stand side by side.
+    """
+    catalogue_app.state.settings = settings.model_copy(update={"tmdb_api_key": TMDB_KEY})
+    return catalogue_app
+
+
+@pytest.fixture
+async def tmdb_user_client(
+    tmdb_app: FastAPI, api_factory: SessionFactory
+) -> AsyncIterator[AsyncClient]:
+    """A signed-in user on a deployment with a TMDB key."""
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+    async with api_transport(tmdb_app) as client:
+        yield await login(client, USER_EMAIL, USER_PASSWORD)
+
+
+async def seed_show_page_show(
+    factory: SessionFactory,
+    *,
+    anilist_id: int = 970200,
+    mapped: bool = True,
+    art_complete: bool = False,
+) -> int:
+    """One cached show with one aired episode, as a show page finds it.
+
+    ``refreshed_at`` is set so the route serves the row instead of refreshing
+    it against the AniList fake — whose fixture carries a still for every
+    episode, which would fill the very hole these tests are about.
+    ``art_complete`` fills the three art columns and the episode's still: the
+    show TMDB has nothing left to add to.
+    """
+    moment = datetime.now(UTC)
+    filled = "https://image.tmdb.example/filled.jpg"
+    async with factory() as session:
+        anime = Anime(
+            anilist_id=anilist_id,
+            title_romaji=f"Show Page {anilist_id}",
+            status="FINISHED",
+            episodes=1,
+            detail_source="anilist",
+            summary_source="anilist",
+            refreshed_at=moment,
+            backdrop_url=filled if art_complete else None,
+            banner_url=filled if art_complete else None,
+            cover_large_url=filled if art_complete else None,
+        )
+        session.add(anime)
+        await session.flush()
+        session.add(
+            Episode(
+                anime_id=anime.id,
+                number=1,
+                air_at=moment - timedelta(days=1),
+                still_url=filled if art_complete else None,
+            )
+        )
+        if mapped:
+            session.add(OfflineId(anilist_id=anilist_id, tmdb_tv_id=anilist_id, type="TV"))
+        await session.commit()
+        return int(anime.id)
+
+
+async def enrichments(factory: SessionFactory) -> list[Job]:
+    async with factory() as session:
+        rows = await session.scalars(select(Job).where(Job.type == TMDB_ENRICH).order_by(Job.id))
+        return list(rows.all())
+
+
+async def test_opening_a_show_page_queues_the_stills_it_is_missing(
+    tmdb_user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """One full enrichment, for the show whose page is on screen."""
+    anime_id = await seed_show_page_show(api_factory)
+
+    body = (await tmdb_user_client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["tmdb_mapped"] is True
+    # The page renders what it holds; the still is not waited for.
+    assert body["episodes"][0]["still_url"] is None
+
+    jobs = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in jobs] == [anime_id]
+    # A still is the whole point, and an art-only run fetches none.
+    assert "art_only" not in jobs[0].payload
+    assert jobs[0].payload["dedupe_key"] == tmdb_dedupe_key(anime_id)
+
+
+async def test_reopening_a_show_page_queues_nothing_more(
+    tmdb_user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Every open calls this; the queue must not grow with the page views."""
+    anime_id = await seed_show_page_show(api_factory)
+
+    await tmdb_user_client.get(f"/api/anime/{anime_id}")
+    await tmdb_user_client.get(f"/api/anime/{anime_id}")
+
+    assert len(await enrichments(api_factory)) == 1
+
+
+async def test_a_show_page_whose_art_is_complete_queues_nothing(
+    tmdb_user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """No hole, no job: the gate is the same one every other caller uses."""
+    anime_id = await seed_show_page_show(api_factory, art_complete=True)
+
+    body = (await tmdb_user_client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["tmdb_mapped"] is True
+    assert await enrichments(api_factory) == []
+
+
+async def test_a_show_the_id_map_cannot_reach_says_so_and_queues_nothing(
+    tmdb_user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """``tmdb_mapped`` false is what lets the page say "no episode pictures"."""
+    anime_id = await seed_show_page_show(api_factory, mapped=False)
+
+    body = (await tmdb_user_client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["tmdb_mapped"] is False
+    assert await enrichments(api_factory) == []
+
+
+async def test_a_show_page_on_a_keyless_deployment_queues_nothing(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """``user_client``, whose app has no key: the row would only log a skip.
+
+    The gate itself is tested in ``tests.test_tmdb_jobs``; this is the one
+    assertion that the show page is behind it.
+    """
+    anime_id = await seed_show_page_show(api_factory)
+
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+
+    # Still mapped — the id map does not depend on the key — so the page does
+    # not go on to claim there are no pictures for this show.
+    assert body["tmdb_mapped"] is True
+    assert await enrichments(api_factory) == []
 
 
 # --- The slot cap on a show page (FR-A10) -----------------------------------

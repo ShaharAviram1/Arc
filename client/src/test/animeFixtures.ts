@@ -181,6 +181,8 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       aired: true,
       state: 'ready',
       watched: true,
+      /** A completion of Arc's own, so the row offers "Unwatch" (FR-W5). */
+      watched_source: 'arc',
       download_progress: null,
       prepare_progress: null,
       failure_reason: null,
@@ -367,6 +369,38 @@ export const FRIEREN_DETAIL_SETTLED: AnimeDetail = {
   })),
 }
 
+/** The URL TMDB's stills come back as, once an enrichment has run (§5.8). */
+export const STILL_URL = 'https://image.tmdb.example/still.jpg'
+
+/**
+ * The same settled show with its episode stills still on their way: the id map
+ * reaches it (`tmdb_mapped`), nothing is in flight, and no aired episode has a
+ * `still_url` — which is the page as it looks the moment it queued its own
+ * TMDB enrichment (§5.8, owner 2026-09-13).
+ */
+export const FRIEREN_DETAIL_AWAITING_STILLS: AnimeDetail = {
+  ...FRIEREN_DETAIL_SETTLED,
+  tmdb_mapped: true,
+}
+
+/** The same show a few seconds later: the stills have landed. */
+export const FRIEREN_DETAIL_WITH_STILLS: AnimeDetail = {
+  ...FRIEREN_DETAIL_AWAITING_STILLS,
+  episodes: FRIEREN_DETAIL_AWAITING_STILLS.episodes.map((episode) => ({
+    ...episode,
+    still_url: episode.aired ? STILL_URL : null,
+  })),
+}
+
+/**
+ * A show TMDB cannot be reached for at all: the cross-id map has no entry, so
+ * the stripes are permanent and the page says so rather than waiting.
+ */
+export const FRIEREN_DETAIL_UNMAPPED: AnimeDetail = {
+  ...FRIEREN_DETAIL_SETTLED,
+  tmdb_mapped: false,
+}
+
 export function listEntry(overrides: Partial<ListEntry> = {}): ListEntry {
   return {
     anime_id: FRIEREN.id,
@@ -421,6 +455,7 @@ export function scheduleEntry(
     next_at_estimated: false,
     following: false,
     list_status: anime.list_status,
+    carried_over: false,
     ...overrides,
   }
 }

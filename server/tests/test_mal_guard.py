@@ -35,14 +35,18 @@ from arc.services.mal.writelog import assert_write_cause
 ARC = Path(__file__).resolve().parent.parent / "arc"
 
 #: The only modules that may queue a MyAnimeList write, and the user-originated
-#: event each of them represents (spec §4.7 FR-M4, FR-M7).
+#: event each of them represents (spec §4.7 FR-M4, FR-M7). Four events now: a
+#: list edit, a watch completion, an explicit un-mark and a revert.
 #: The definition itself is not in the set: ``names.py`` declares the function
 #: and never calls it, and a matcher that counted a definition as a call would
 #: also count the next module that merely imports it.
 ALLOWED_ENQUEUERS = {
     # An explicit list edit or removal — FR-W2's status/score, and a removal.
     "services/catalog/lists.py",
-    # Watching an episode to the end — FR-S4's completion, and nothing else.
+    # Watching an episode to the end — FR-S4's completion — and, since the
+    # owner's revision of 2026-09-13, the explicit un-mark that takes it back
+    # (the one write in Arc that lowers MyAnimeList's progress, allowed because
+    # a person pressed it). Nothing else in this module queues anything.
     "services/playback/progress.py",
     # An explicit revert — FR-M5.
     "api/mal.py",

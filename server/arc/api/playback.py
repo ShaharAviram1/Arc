@@ -55,7 +55,7 @@ from arc.api.deps import CurrentUser, EpisodeId, SessionDep
 from arc.api.episode_extras import episode_extras, renditions_for
 from arc.api.media_stream import playlist_url
 from arc.api.playback_schemas import EpisodeRef, PlayInfo, ProgressIn, ProgressOut
-from arc.models import Anime, Episode, EpisodeState, Rendition, WatchProgress
+from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, WatchProgress
 from arc.services.catalog import episodes_for
 from arc.services.catalog.airing import aired_through, out_of_order
 from arc.services.playback.progress import (
@@ -133,6 +133,10 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
     extras = await episode_extras(session, [episode.id])
     rendition = extras.renditions.get(episode.id)
     progress = await session.get(WatchProgress, (user.id, episode.id))
+    # FR-W5's other half: an episode at or below the caller's list progress is
+    # watched whether or not Arc has a completion row for it. One primary-key
+    # read, on a route that already does four.
+    entry = await session.get(ListEntry, (user.id, episode.anime_id))
     duration = rendition.duration if rendition is not None and rendition.duration else 0.0
 
     at = now()
@@ -146,7 +150,8 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
                 siblings, now=at, anime_status=anime.status, next_airing=anime.next_airing
             ),
             out_of_order=episode.number in out_of_order(siblings),
-            watched=progress is not None and progress.completed,
+            completed=progress is not None and progress.completed,
+            list_progress=entry.progress if entry is not None else 0,
             torrent=extras.torrents.get(episode.id),
             rendition=rendition,
             transcode_job=extras.transcode_jobs.get(episode.id),
@@ -305,16 +310,34 @@ async def mark_watched(
     responses={404: {"description": EPISODE_NOT_FOUND}},
 )
 async def unmark(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) -> ProgressOut:
-    """Clear the flag, keep the position, leave the list and MAL alone.
+    """Clear the flag, keep the position, and lower the list by one if it stood here.
+
+    The one path on which Arc lowers MyAnimeList's progress, and it does so
+    only because somebody pressed it (FR-S4 as revised by the owner on
+    2026-09-13; the rules and the reasoning are in
+    :func:`~arc.services.playback.progress.unmark_watched`). ``list_progress``
+    comes back when the number moved, so the client can render the new one
+    without waiting for the refetch.
 
     Idempotent: un-marking an episode that was never marked is a 200 saying it
     is not completed, because that is a true description of the state the
-    caller asked for.
+    caller asked for. It is *not* a no-op in that case — an episode the list
+    vouches for with no completion row of its own is exactly the mark this
+    route exists to take back.
     """
     episode = await _episode(session, episode_id)
-    await unmark_watched(session, user_id=user.id, episode_id=episode.id, now=now())
+    outcome = await unmark_watched(session, user_id=user.id, episode=episode, now=now())
     await session.commit()
-    return ProgressOut(completed=False, newly_completed=False, list_progress=None)
+    if outcome.list_progress is not None:
+        log.info(
+            "watched mark taken back",
+            extra={
+                "user_id": user.id,
+                "episode_id": episode.id,
+                "list_progress": outcome.list_progress,
+            },
+        )
+    return ProgressOut(completed=False, newly_completed=False, list_progress=outcome.list_progress)
 
 
 __all__ = ["BAD_JSON", "EPISODE_NOT_FOUND", "NOT_PLAYABLE", "now", "router"]

@@ -82,7 +82,10 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Final
 
+from sqlalchemy.orm import object_session
+
 from arc.models import Episode, EpisodeState
+from arc.services.events import episode_state_event, publish
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +180,19 @@ def transition(
             "to": new_state.value,
             "reason": reason,
         },
+    )
+
+    # One writer means one place to announce it (§5.9). Staged on the session
+    # this episode belongs to and sent by the commit that persists the row, so
+    # a browser is never told about a state a rolled-back job invented. An
+    # episode with no session — one a unit test built by hand — publishes
+    # nothing, which is what :func:`~arc.services.events.publish` says in the
+    # log rather than raising.
+    publish(
+        object_session(episode),
+        episode_state_event(
+            anime_id=episode.anime_id, episode_id=episode.id, state=new_state.value
+        ),
     )
     return True
 

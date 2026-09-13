@@ -6,14 +6,22 @@ caller's timezone, with prev/next links.
 **The cache is the only source.** Nothing here calls AniList or MyAnimeList,
 and that is the point of FR-C7: the season pre-cache writes the rows overnight
 so that a day when both sources are down costs the freshness of the airing
-times and not the page. It also keeps the endpoint fast — a season is two
-queries and no network — and means an open schedule tab cannot pace a hundred
-requests at AniList.
+times and not the page. It also keeps the endpoint fast — a season is a handful
+of queries and no network — and means an open schedule tab cannot pace a
+hundred requests at AniList.
 
 The router is thin, as everything in ``arc/api`` is: it turns query parameters
-into a season, fetches the rows, and hands them to
-:func:`arc.services.catalog.schedule.place_entries`, which owns every decision
-about where a show lands.
+into a season, runs the statements
+:mod:`arc.services.catalog.schedule` builds, and hands the rows to
+:func:`~arc.services.catalog.schedule.place_entries`. Which shows are in the
+week and where each lands are both decided there.
+
+One asymmetry is worth naming here, because it is the only thing this module
+does with the season it was asked for: the **current** season's grid takes a
+second set of rows — everything on air this week, whatever season it carries
+(:func:`~arc.services.catalog.schedule.airing_this_week`) — and the prev/next
+views do not. The current week is a calendar and the others are a catalogue
+browse; see the service's module docstring.
 """
 
 from __future__ import annotations
@@ -31,8 +39,10 @@ from arc.services.catalog import list_status_for
 from arc.services.catalog.schedule import (
     ScheduleRow,
     adjacent_seasons,
+    airing_this_week,
     current_season,
     place_entries,
+    season_members,
     user_timezone,
 )
 
@@ -77,16 +87,22 @@ async def schedule(
     target_year = year if year is not None else default_year
     target_season = season if season is not None else SeasonName(default_season)
 
-    rows = list(
-        (
-            await session.scalars(
-                select(Anime)
-                .where(Anime.season == target_season.value, Anime.season_year == target_year)
-                .order_by(Anime.id)
-            )
-        ).all()
-    )
-    anime_ids = [row.id for row in rows]
+    rows = list((await session.scalars(season_members(target_year, target_season.value))).all())
+    # The current week is a calendar, so it also holds every show that is on
+    # air now, whatever season it was tagged with: a two-cour show that started
+    # in spring is still on a Friday in summer, and a long-runner is tagged
+    # with no season at all (owner, 2026-09-13). Merged by id, the season's own
+    # row winning — it is the same row either way, and the one already in hand
+    # is not marked as carried in.
+    carried: list[Anime] = []
+    if (target_year, target_season.value) == (default_year, default_season):
+        seen = {row.id for row in rows}
+        carried = [
+            row
+            for row in (await session.scalars(airing_this_week(now=at))).all()
+            if row.id not in seen
+        ]
+    anime_ids = [row.id for row in rows] + [row.id for row in carried]
 
     # The air time of the *highest-numbered* episode that has one, per show:
     # what places a season that has finished airing on the weekday it used to
@@ -114,9 +130,13 @@ async def schedule(
     placement = place_entries(
         [
             ScheduleRow(
-                anime=row, latest_air_at=latest.get(row.id), list_status=statuses.get(row.id)
+                anime=row,
+                latest_air_at=latest.get(row.id),
+                list_status=statuses.get(row.id),
+                carried_over=carried_over,
             )
-            for row in rows
+            for source, carried_over in ((rows, False), (carried, True))
+            for row in source
         ],
         tz=timezone,
         now=at,

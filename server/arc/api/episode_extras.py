@@ -1,13 +1,14 @@
-"""The three side lookups an :class:`~arc.api.anime_schemas.EpisodeOut` needs.
+"""The four side lookups an :class:`~arc.api.anime_schemas.EpisodeOut` needs.
 
 An episode row on a page is more than the ``episodes`` row behind it: the
 download percentage comes from ``torrents`` (FR-A7), the preparing percentage
 and the failure sentence from the latest ``transcode`` job's payload (FR-P4),
-and the duration and track languages from ``renditions`` (FR-P1). Three tables,
-none of them joinable into the episode query without turning one row into
-several.
+the duration and track languages from ``renditions`` (FR-P1), and *when Arc
+will look again* from the pending ``search_release`` job's ``run_after``
+(FR-A7, 2026-09-14). Four tables, none of them joinable into the episode query
+without turning one row into several.
 
-So they are three queries, each taking *every* episode id on the page at once.
+So they are four queries, each taking *every* episode id on the page at once.
 That is the whole content of this module and the reason it exists rather than
 living in one of the two routers: the show page and the home page render the
 same episode shape, and a helper that only the show page had is how the home
@@ -20,17 +21,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job, Rendition, Torrent
+from arc.models import Job, JobStatus, Rendition, Torrent
+from arc.services.acquisition.names import SEARCH_RELEASE
 from arc.services.media.names import latest_transcode_jobs
+
+#: The payload key both job types happen to spell the same way.
+EPISODE_KEY = "episode_id"
 
 
 @dataclass(frozen=True, slots=True)
 class EpisodeExtras:
-    """Everything the three lookups found, keyed by episode id.
+    """Everything the four lookups found, keyed by episode id.
 
     Plain dictionaries with ``.get``: an episode with no torrent, no rendition
     and no transcode job is the ordinary case for anything that has not aired
@@ -40,6 +47,11 @@ class EpisodeExtras:
     torrents: dict[int, Torrent] = field(default_factory=dict)
     renditions: dict[int, Rendition] = field(default_factory=dict)
     transcode_jobs: dict[int, Job] = field(default_factory=dict)
+    #: ``episode_id → when the next search runs``, for the episodes that have
+    #: a ``search_release`` job waiting (FR-A7). The retry schedule lives in
+    #: the job row rather than in a column (FR-A6), so this is the only place
+    #: "next try at 23:26" can be read from.
+    next_searches: dict[int, datetime] = field(default_factory=dict)
 
 
 async def torrents_for(session: AsyncSession, episode_ids: Sequence[int]) -> dict[int, Torrent]:
@@ -71,15 +83,59 @@ async def renditions_for(session: AsyncSession, episode_ids: Sequence[int]) -> d
     return {rendition.episode_id: rendition for rendition in rows.all()}
 
 
+async def next_searches_for(
+    session: AsyncSession, episode_ids: Sequence[int]
+) -> dict[int, datetime]:
+    """``episode_id → run_after`` of the soonest pending search (FR-A7).
+
+    FR-A6's retry schedule is a job row and not a column — a search that found
+    nothing requeues itself with a delay — so the only record of "Arc will look
+    again at 23:26" is the ``run_after`` of that queued job, and a row that
+    says ``Searching`` with no idea when is the thing an owner watched for a day
+    this week.
+
+    One query for the whole page, keyed on ``payload->>'episode_id'`` the way
+    :func:`~arc.services.media.names.latest_transcode_jobs` is. ``pending``
+    only: a *running* job is the search happening now, which the row already
+    says by being in ``searching``, and a finished one is in the past.
+    Soonest-first, because a paused requeue and a retry can both be queued at
+    once and the earlier of the two is when something will actually happen.
+    """
+    if not episode_ids:
+        return {}
+    wanted = {str(episode_id) for episode_id in episode_ids}
+    key = cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
+    rows = await session.execute(
+        select(key, Job.run_after)
+        .where(Job.type == SEARCH_RELEASE, Job.status == JobStatus.PENDING, key.in_(wanted))
+        .distinct(key)
+        .order_by(key, Job.run_after.asc())
+    )
+    found: dict[int, datetime] = {}
+    for raw, run_after in rows.all():
+        try:
+            found[int(raw)] = run_after
+        except TypeError, ValueError:  # pragma: no cover - a hand-written row
+            continue
+    return found
+
+
 async def episode_extras(session: AsyncSession, episode_ids: Sequence[int]) -> EpisodeExtras:
-    """All three lookups for one page's worth of episodes, in three queries."""
+    """All four lookups for one page's worth of episodes, in four queries."""
     if not episode_ids:
         return EpisodeExtras()
     return EpisodeExtras(
         torrents=await torrents_for(session, episode_ids),
         renditions=await renditions_for(session, episode_ids),
         transcode_jobs=await latest_transcode_jobs(session, episode_ids),
+        next_searches=await next_searches_for(session, episode_ids),
     )
 
 
-__all__ = ["EpisodeExtras", "episode_extras", "renditions_for", "torrents_for"]
+__all__ = [
+    "EpisodeExtras",
+    "episode_extras",
+    "next_searches_for",
+    "renditions_for",
+    "torrents_for",
+]

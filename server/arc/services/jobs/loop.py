@@ -9,9 +9,15 @@ Shutdown is cooperative: setting ``stop`` stops the claiming, in-flight jobs
 are given ``WORKER_DRAIN_TIMEOUT`` seconds to finish, and anything still
 running after that is cancelled. A cancelled job is put straight back to
 ``pending`` on the way out, so it is picked up by the next worker rather than
-waiting out ``WORKER_STALE_AFTER`` for
-:func:`arc.services.jobs.runner.requeue_stale` — which stays the backstop for
-the case this cannot cover, a worker that is killed outright.
+waiting for a sweep.
+
+That timeout is therefore a deployment figure as much as a runtime one: it
+must fit inside the ``stop_grace_period`` Compose gives the container
+(deploy/docker-compose.yml), or Docker's ``SIGKILL`` arrives first and none of
+this runs. What covers the case none of it can cover — a worker killed
+outright — is
+:func:`arc.services.jobs.runner.requeue_orphans`, which the next worker runs
+at start-up and which does not wait for a lock to age.
 """
 
 from __future__ import annotations
@@ -84,6 +90,16 @@ async def run_worker_loop(
     while not stop.is_set():
         if not await _acquire_unless_stopped(semaphore, stop, poll_interval):
             continue
+
+        # Asked again with the slot in hand: SIGTERM may have arrived while
+        # this was waiting for one, and claiming a job after the signal means
+        # starting work the drain is about to requeue. The shutdown budget is
+        # small (``WORKER_DRAIN_TIMEOUT``, and Compose's `stop_grace_period`
+        # behind it), so every job not started is one the deploy need not
+        # interrupt.
+        if stop.is_set():
+            semaphore.release()
+            break
 
         try:
             async with factory() as session:

@@ -162,7 +162,7 @@ async def ingest_file(
     if existing is not None:
         return None
 
-    parsed = parse(path.name)
+    parsed = parse(path.name, path=True)
     payload = parsed.as_dict()
     if probe:
         summary = await probe_summary(path)

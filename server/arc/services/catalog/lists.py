@@ -286,12 +286,40 @@ async def list_status_for(
     return {anime_id: status for anime_id, status in rows.all()}
 
 
+async def list_progress_for(
+    session: AsyncSession, *, user_id: int, anime_ids: list[int]
+) -> dict[int, int]:
+    """``anime_id → the user's progress`` for the shows they have an entry for.
+
+    FR-W5's other half, for the pages that render episodes of many shows at
+    once: an episode is watched when its number is at or below this number or
+    Arc has a completion for it, and the home page needs the first of those
+    for every show on it. One query for the whole page, for the same reason
+    :func:`list_status_for` is one — a shelf of thirty tiles is not thirty
+    round trips. A show with no entry is simply absent, which reads as zero.
+
+    Separate from :func:`list_status_for` rather than folded into it because
+    three of that function's four callers render cards and not episodes, and
+    widening the row it selects would make them all pay for a column they
+    never look at.
+    """
+    if not anime_ids:
+        return {}
+    rows = await session.execute(
+        select(ListEntry.anime_id, ListEntry.progress).where(
+            ListEntry.user_id == user_id, ListEntry.anime_id.in_(anime_ids)
+        )
+    )
+    return {anime_id: progress for anime_id, progress in rows.all()}
+
+
 __all__ = [
     "MAX_SCORE",
     "MIN_SCORE",
     "ListEntryError",
     "StatusRequired",
     "get_my_list",
+    "list_progress_for",
     "list_status_for",
     "remove_list_entry",
     "set_list_entry",

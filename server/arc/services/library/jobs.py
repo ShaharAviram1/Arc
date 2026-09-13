@@ -95,9 +95,11 @@ def _parsed_of(media_file: MediaFile) -> ParsedName:
     The **basename**, not the stored absolute path, so that this and the parse
     ingest stored produce the same :class:`ParsedName` — including its ``raw``
     field, which would otherwise carry the whole path here and the filename
-    there.
+    there. ``path=True`` because this string came off the filesystem: a slash
+    in it is a separator, which is the opposite of what it means in a Nyaa
+    title (:func:`~arc.services.library.parser.basename`).
     """
-    return parse(Path(media_file.path).name)
+    return parse(Path(media_file.path).name, path=True)
 
 
 def _ignore(media_file: MediaFile, reason: str) -> None:

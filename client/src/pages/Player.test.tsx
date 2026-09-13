@@ -885,6 +885,34 @@ describe('Player controls', () => {
     )
   })
 
+  it('offers no undo for an episode under the latest watched one (FR-W5)', async () => {
+    // The tick is filled because the viewer has watched it, and this is not
+    // the episode the un-mark would move: it lowers the list by one from the
+    // top (FR-S4, revised 2026-09-13), so there is nothing here to press.
+    const byList: PlayInfo = {
+      ...PLAY_INFO,
+      episode: { ...PLAY_INFO.episode, watched: true, watched_source: 'progress' },
+    }
+    const { fetchMock } = renderPlayer({
+      [PLAY_PATH]: { body: byList },
+      'DELETE /api/episodes/9001/watched': {
+        body: { completed: false, newly_completed: false, list_progress: 1 },
+      },
+    })
+
+    const pill = await screen.findByRole('button', { name: 'Watched' })
+    expect(pill).toHaveAttribute('aria-pressed', 'true')
+    expect(pill).toHaveAttribute('aria-disabled', 'true')
+    expect(pill).toHaveAttribute('title', 'Unwatch from the latest watched episode down')
+    expect(screen.queryByRole('button', { name: 'Unmark watched' })).not.toBeInTheDocument()
+
+    await userEvent.click(pill)
+
+    expect(requestsMade(fetchMock)).not.toContain('DELETE /api/episodes/9001/watched')
+    // The glyph stays filled: the viewer has watched it either way.
+    expect(pill.querySelector('circle')).toHaveClass('fill-current')
+  })
+
   /**
    * The words came off the bar; none of them came off the page. Every glyph
    * still says what it is to a screen reader and to a hover.

@@ -40,7 +40,7 @@ from arc.api.schedule_schemas import (
     HomePage,
     NewEpisodeEntry,
 )
-from arc.services.catalog import list_status_for
+from arc.services.catalog import list_progress_for, list_status_for
 from arc.services.catalog.progress import behind_for_user, new_this_week
 from arc.services.playback.progress import completed_episode_ids, continue_watching
 from arc.services.tmdb.jobs import enqueue_episode_stills, enqueue_hero_art
@@ -70,12 +70,17 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # caller's list by construction, but which state they are in is what the
     # badge says.
     statuses = await list_status_for(session, user_id=user.id, anime_ids=anime_ids)
+    # And one for FR-W5's other half: an episode at or below the viewer's list
+    # progress is watched, which on a list imported from MyAnimeList is most
+    # of this page. Per show rather than per episode, so it is one query for
+    # every shelf at once.
+    progress = await list_progress_for(session, user_id=user.id, anime_ids=anime_ids)
     extras = await episode_extras(session, episode_ids)
     # Only "new this week" needs this: a continue-watching row carries its own
     # ``completed`` out of the query that found it (a rewatch left half-way is
     # on that shelf and is watched), so asking again would be a second query
     # for an answer already in hand.
-    watched = await completed_episode_ids(
+    completed = await completed_episode_ids(
         session, user_id=user.id, episode_ids=[row.episode.id for row in fresh]
     )
 
@@ -106,6 +111,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 row,
                 now=at,
                 list_status=statuses.get(row.anime.id),
+                list_progress=progress.get(row.anime.id, 0),
                 torrent=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
@@ -118,7 +124,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 row,
                 now=at,
                 list_status=statuses.get(row.anime.id),
-                watched=row.episode.id in watched,
+                completed=row.episode.id in completed,
+                list_progress=progress.get(row.anime.id, 0),
                 torrent=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),

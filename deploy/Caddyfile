@@ -16,7 +16,16 @@
 	# JavaScript, SVG — so the HLS playlist (application/vnd.apple.mpegurl) and
 	# the fMP4 segments (video/mp4) are passed through byte for byte, which is
 	# what keeps Range requests exact.
-	encode zstd gzip
+	#
+	# The one exception is the event stream (architecture.md §5.9). Its content
+	# type is `text/event-stream`, which *is* in that default list, and a
+	# compressor sitting on a response that never ends is the one place where
+	# "encode it" and "send it now" are in tension. Excluded by path rather
+	# than trusted to flush: the whole feature is a frame arriving the moment
+	# it is written, and it fails silently — a page that looks configured and
+	# updates only on reload.
+	@compressible not path /api/events
+	encode @compressible zstd gzip
 
 	# Response headers for everything below, static and proxied alike.
 	header {
@@ -57,6 +66,19 @@
 	# segments precisely because those responses are per-user authorised
 	# (arc/api/media_stream.py), and overriding that would put one viewer's
 	# episode in a shared cache.
+	# The live event stream (architecture.md §5.9): one long-lived response
+	# that writes a frame whenever something changes and a comment line every
+	# 25 s in between. `flush_interval -1` means "write every chunk straight
+	# through, buffer nothing" — Caddy infers that for `text/event-stream` on
+	# its own, and it is spelled out here because the cost of it being wrong is
+	# a feature that looks deployed and never updates a page. A more specific
+	# path than the block below, so this wins the match.
+	handle /api/events {
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
 	handle /api/* {
 		reverse_proxy api:8000
 	}

@@ -14,6 +14,21 @@ on how the episode stopped being wanted:
   moment the episode was finished, and never moved again (FR-T1 in
   :class:`arc.models.WatchProgress`), so the grace runs from the *last*
   completion — the second user to finish it is the one who decides.
+* somebody's **list progress passed it** (FR-W5, owner 2026-09-13). An episode
+  at or below a user's ``list_entries.progress`` is watched by that user
+  whether or not Arc has a completion row for it: marking episode 9 watched
+  writes one row and raises progress to 9, and the eight episodes under it
+  must not sit on the disk for ever waiting for rows that were deliberately
+  not written. The anchor is the **list entry's** ``updated_at``, which is an
+  approximation on purpose — the column moves for any change to the row, a
+  score or a six-hourly import that found something new included, and no
+  column records "when progress passed episode 4". It errs late, which for a
+  deletion is the right direction to err, and at G = 7 days the error is a
+  day or two on an episode nobody is going to watch. It is also **clamped to
+  the age of the bytes** (:attr:`_Facts.progress_anchor`): an imported
+  ``updated_at`` can be months older than a file an admin re-fetched this
+  morning, and without the clamp the next hourly sweep would delete that file
+  before anybody could play it.
 * the wants were dropped — as stale (FR-T2), or because the show stopped being
   watching/planned (FR-W4). ``wants.dropped_at`` is that moment, and the last
   drop is what counts, for the same reason.
@@ -27,6 +42,14 @@ any bytes to be careful about — it is a row that says "playable" over an empty
 directory, and every second it stays that way is a show page offering a play
 button that 404s. The sweep deletes nothing for it and resets it to
 ``not_wanted``, which is exactly what lets acquisition fetch it again.
+
+**The "every user who wanted it has completed it" half of FR-T1 needs no
+separate test**, and that is worth stating because it looks like an omission:
+the reconciler deletes a live want the moment the user's progress — which is
+itself ``max(list progress, completions)`` there
+(:mod:`arc.services.acquisition.wants`) — passes the episode. So "no live
+want" already means "everybody who wanted it is done with it", by both halves
+of FR-W5's rule, and this module only has to decide *when* that happened.
 
 Completions are counted from ``watch_progress`` rather than from the ``wants``
 rows, and that is not an oversight. A want is **deleted** the moment the user
@@ -65,7 +88,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, MediaFile, Rendition, Torrent, Want, WatchProgress
+from arc.models import (
+    Episode,
+    EpisodeState,
+    ListEntry,
+    MediaFile,
+    Rendition,
+    Torrent,
+    Want,
+    WatchProgress,
+)
 from arc.services.media.names import output_dir_for
 from arc.services.retention.rules import grace_period
 
@@ -369,6 +401,11 @@ class _Facts:
     active_wants: int = 0
     last_dropped: datetime | None = None
     last_completed: datetime | None = None
+    #: The latest ``list_entries.updated_at`` of a user whose progress covers
+    #: this episode (FR-W5). Watched, on the list's word rather than on a
+    #: completion row's — see the module docstring for why the column is an
+    #: approximation and why erring late is the right way to err.
+    last_progress: datetime | None = None
     rendition: Rendition | None = None
     media_files: list[MediaFile] = field(default_factory=list)
     torrents: list[Torrent] = field(default_factory=list)
@@ -380,6 +417,10 @@ class _Facts:
             (moment, reason)
             for moment, reason in (
                 (self.last_completed, REASON_WATCHED),
+                # Also "watched": FR-W5 makes the two one fact, and a preview
+                # that distinguished them would be telling an admin about
+                # Arc's table layout rather than about the episode.
+                (self.progress_anchor, REASON_WATCHED),
                 (self.last_dropped, REASON_DROPPED),
             )
             if moment is not None
@@ -387,6 +428,29 @@ class _Facts:
         if not moments:
             return None
         return max(moments, key=lambda pair: pair[0])
+
+    @property
+    def progress_anchor(self) -> datetime | None:
+        """:attr:`last_progress`, but never earlier than the bytes themselves.
+
+        The clamp is the difference between a rule and a trap. A list imported
+        from MyAnimeList stamps ``updated_at`` once and then sits there, so on
+        an episode at or below that progress the raw anchor is *months* old —
+        and an admin who re-fetched that episode (FR-T3, FR-T4) would watch the
+        next hourly sweep delete it before anybody could play it. Taking the
+        later of the two says what was actually meant: the grace period is time
+        to change your mind about *this file*, and a file that landed an hour
+        ago has not had it yet.
+
+        Only the progress anchor needs this. A completion and a drop are
+        moments in the life of the episode a user was looking at, and both are
+        rewritten when the episode comes back; a list entry's timestamp is
+        about the show.
+        """
+        if self.last_progress is None:
+            return None
+        aged = self.file_age_from
+        return self.last_progress if aged is None else max(self.last_progress, aged)
 
     @property
     def file_age_from(self) -> datetime | None:
@@ -445,6 +509,21 @@ async def _facts(session: AsyncSession) -> dict[int, _Facts]:
     )
     for episode_id, moment in completed.all():
         facts[episode_id].last_completed = moment
+
+    # FR-W5's half of "watched": every episode at or below somebody's list
+    # progress, anchored on that entry's own ``updated_at``. The join is on
+    # the show and the number rather than on the episode id — there is no row
+    # anywhere saying "this user watched episode 4", which is exactly the
+    # point of the rule — and it is one query for the whole sweep like every
+    # other fact here.
+    passed = await session.execute(
+        select(Episode.id, func.max(ListEntry.updated_at))
+        .join(ListEntry, ListEntry.anime_id == Episode.anime_id)
+        .where(Episode.id.in_(retained), Episode.number <= ListEntry.progress)
+        .group_by(Episode.id)
+    )
+    for episode_id, moment in passed.all():
+        facts[episode_id].last_progress = moment
 
     for rendition in (
         await session.scalars(select(Rendition).where(Rendition.episode_id.in_(retained)))

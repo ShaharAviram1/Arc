@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-13 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-14 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -531,45 +531,177 @@ the finish work (bugs found that way are fixed inside M16).
         M16 package 1 hotfix (`53b154e`) with the show-page crash fix
   - **Batch 2 (owner, 2026-09-13, after the package-1 deploy) — to triage
     together before building:**
-  - [ ] Episode stills missing on some Show pages. First reading: stills
+  - [x] Episode stills missing on some Show pages. First reading: stills
         come only from the TMDB enrichment, which reaches a show when it is
         "watched" (list/progress/ready episode) or when Watch Now's shelves
         or a sample press queue it; a Show page opened for an untouched or
-        unmapped show never asks. Proposal: the Show page queues the same
-        enrichment on open (gated like the sample route), and the page says
-        "no stills" honestly when the id map has no TMDB entry.
-  - [ ] Per-episode watched state on the Show page: the button should read
-        "Watched" once it is, and turn into "Unwatch" on hover; today an
-        episode counted as watched only through the MAL-imported list
-        progress shows no state at all, because the row's `watched` flag
-        comes from `watch_progress` rows alone.
-  - [ ] Marking episode N watched implies 1…N-1 watched, and Arc should
-        show it that way. Same root as the previous item: derive an
-        episode's watched state from max(list progress, completed
-        watch_progress), and let "mark watched" raise list progress to N
-        (FR-S4 already raises progress on completion; the manual mark should
-        match). Decide: does a manual mark of N create completion rows for
-        1…N-1, or only raise progress? (MAL write rules: one progress write,
-        never lowering.)
-  - [ ] A show whose progress reaches its episode count (12/12) becomes
-        `completed` automatically, in Arc and on MAL (one status write,
-        user-originated via the mark/completion). Decide the edge cases:
-        unknown episode count, still-airing shows, rewatches.
+        unmapped show never asks. `GET /api/anime/{id}` now queues
+        `enqueue_show_enrichment` behind the same three gates (key, id map,
+        a hole left to fill) in the commit it already makes, and answers
+        `tmdb_mapped`; the client polls the detail every 5 s for 30 s while a
+        mapped show has an aired still-less episode, never polls an unmapped
+        one, and the episode list carries one muted "No episode pictures for
+        this show" where `tmdb_mapped` is false or `/api/health` reports no
+        key. Verified 2026-09-13 (orchestrator): 232 catalogue/TMDB/home/sample
+        tests and 620 client tests green, lint clean; on dev, opening
+        Victoria of Many Faces (mapped, 0 stills) queued one `tmdb_enrich`,
+        all 9 stills landed, and the page picked them up through its short
+        poll within 15 s with no reload
+  - [x] Nyaa queries also ask in the `SxxEyy` form (One-Room TA on production
+        found nothing under "- 01") — `queries()` gains
+        `<season-stripped base> S<kk>E<nn>` for both titles, third and fourth
+        in the order, and `MAX_QUERIES` rises 6 → 8; the parser already read
+        the ToonsHub singles as episodes of season 1 and both Nyaa batches as
+        batches, and the four production names joined the corpus (251 names,
+        100 % on episode+kind and title_key). 470 tests on the four touched
+        modules green, lint clean. Verified 2026-09-14 (orchestrator): One-Room TA now asks
+        `One-Room TA S01E01` (the ToonsHub naming Nyaa actually carries);
+        parser reads the ToonsHub singles and rejects both batches; 581
+        query/parser/corpus/matcher tests green, corpus 251/251
+  - [x] Per-episode watched state on the Show page (FR-W5): `EpisodeOut`
+        derives `watched` from the list progress as well as Arc's own
+        completion rows, and carries `watched_source`, which doubles as "is
+        this a button?" — `arc` at or above the list's progress offers
+        "Unwatch" (one control, reading "✓ Watched" until hover), and
+        `progress` below it is a non-actionable "Watched" with the tooltip
+        "Unwatch from the latest watched episode down". The Player toggle
+        follows the same field. Verified 2026-09-13 (orchestrator): 556 server tests on the
+        touched modules and 605 client tests green, lint clean; on dev,
+        Hell's Paradise (imported, progress 7) shows episodes 1–6 as
+        non-actionable "✓ Watched" pills with the tooltip, episode 7 as the
+        actionable pill with "Unwatch" on hover, 8+ as "Mark watched", meta
+        line "7 watched"; the Reviewer's retention-anchor clamp landed
+  - [x] Marking episode N watched implies 1…N-1 watched, and Arc shows it
+        that way (FR-W5): the manual mark goes down FR-S4's own path, raising
+        list progress to N with one MAL progress write that never lowers, and
+        writes **no** synthetic completion rows for 1…N-1 — retention instead
+        anchors those episodes on the list entry's `updated_at`, clamped to the
+        age of the bytes so a re-fetch is not swept within the hour, so their
+        files go on the same G-day schedule. Its undo (owner, 2026-09-13,
+        superseding the 2026-09-07 clarification): an explicit un-mark of the
+        latest watched episode lowers progress to N−1 with one logged `manual`
+        progress write — the only lowering write Arc sends, with the FR-M4
+        guard still refusing every automatic one — while the auto-completed
+        status is never rolled back. Verified 2026-09-13 (orchestrator): 556 server tests on the
+        touched modules and 605 client tests green, lint clean; on dev,
+        Hell's Paradise (imported, progress 7) shows episodes 1–6 as
+        non-actionable "✓ Watched" pills with the tooltip, episode 7 as the
+        actionable pill with "Unwatch" on hover, 8+ as "Mark watched", meta
+        line "7 watched"; the Reviewer's retention-anchor clamp landed
+  - [x] A show whose progress reaches its episode count (12/12) becomes
+        `completed` automatically, in Arc and on MAL (FR-W5): one logged
+        status write with cause `watch`, in the same transaction and the same
+        PATCH as the progress. Only on an advance, only on a FINISHED show
+        with a known count, and from **any** status — `on_hold` and `dropped`
+        complete too (owner, 2026-09-13); airing shows, unknown counts,
+        already-completed entries and rewatches change nothing. Verified 2026-09-13 (orchestrator): 556 server tests on the
+        touched modules and 605 client tests green, lint clean; on dev,
+        Hell's Paradise (imported, progress 7) shows episodes 1–6 as
+        non-actionable "✓ Watched" pills with the tooltip, episode 7 as the
+        actionable pill with "Unwatch" on hover, 8+ as "Mark watched", meta
+        line "7 watched"; the Reviewer's retention-anchor clamp landed
   - [x] Clicking a show on the Catch up shelf did nothing (regression from
         the shelf drag: pointer capture on the press retargeted the click to
         the strip). Capture is now taken only once the 6 px drag threshold
         is crossed; two tests pin it. Verified 2026-09-13 (orchestrator) in
         Chrome on dev: a real click on a Catch up tile opened its series
         page; 599 client tests, lint clean. Shipped as hotfix 2
-  - [ ] Some airing shows are missing from the Schedule: Slime Season 4
+  - [x] Some airing shows are missing from the Schedule: Slime Season 4
         airs every Friday (next: episode 23, 2026-09-18 14:00 UTC) but is
         tagged `SPRING 2026` — a two-cour show that started in spring — and
         the schedule grid is built from the shows of the selected season
-        only. Fix: the current week's grid includes every `RELEASING` show
-        with an upcoming air time, whatever season it started in (the
-        season tag stays what the catalogue says; only the grid's membership
-        rule changes). Check the Home "Catch up"/"New this week" shelves for
-        the same season filter.
+        only. The current week's grid now includes every `RELEASING`
+        weekly-format show with an air time inside 7 days, whatever season it
+        is tagged with (`airing_this_week`, merged with the season's own
+        rows); the season tag is untouched and the card says "Since Spring
+        2026". Prev/next views are unchanged — a catalogue browse, not a
+        calendar. Home's "Catch up"/"New this week" needed no change (both
+        are list-driven) and a test pins that; the daily and pre-air refresh
+        sweeps were already season-blind, also now pinned. Verified 2026-09-13 (orchestrator): 205 schedule/catalogue/home
+        tests and 608 client tests green, lint clean; on dev the Summer
+        2026 grid now carries 27 airing shows tagged earlier seasons
+        (Re:ZERO S4, Pokémon Horizons, LIAR GAME, …), each with a quiet
+        "Since Spring 2026" line; prev/next season views unchanged
+  - [x] The "New this week" shelf no longer labels tiles with an acquisition
+        state (FR-W1, owner 2026-09-13): the card is the broadcast day, the
+        time and the episode, plus a "✓ Watched" line when FR-W5 says the
+        viewer has seen it — which on an imported list is most of them. The
+        Show page keeps FR-A7's per-episode state in full. Verified 2026-09-13 (orchestrator): 556 server tests on the
+        touched modules and 605 client tests green, lint clean; on dev,
+        Hell's Paradise (imported, progress 7) shows episodes 1–6 as
+        non-actionable "✓ Watched" pills with the tooltip, episode 7 as the
+        actionable pill with "Unwatch" on hover, 8+ as "Mark watched", meta
+        line "7 watched"; the Reviewer's retention-anchor clamp landed
+  - [x] A deploy (worker restart) mid-transcode orphaned the job (owner hit
+        it 2026-09-13 after hotfix 2; job 927 requeued by hand). Cause: the
+        worker's own 30 s drain never ran because the compose service had no
+        `stop_grace_period` and Docker killed it at 10 s. Fixed two ways: the
+        worker requeues every `running` job locked by another identity at
+        start-up (one worker per deployment, so any such job is orphaned),
+        and the drain (`WORKER_DRAIN_TIMEOUT`, now 10 s) is paired with a
+        15 s `stop_grace_period`, with a test that reads the compose file so
+        they cannot drift. Verified 2026-09-13 (orchestrator): 206 job,
+        worker, transcode and config tests green, lint clean
+  - [x] The site should update itself when an episode becomes ready (and as
+        acquisition states move) — no manual refresh to see a new tile on
+        "Ready to watch" or a row flip to Ready on the Show page. First
+        reading: today Watch Now and the Show page refetch on focus and on a
+        fixed interval only. Built (architecture.md §5.9): Postgres
+        `LISTEN`/`NOTIFY` on `arc_events`, published from inside the
+        committing transaction by `transition()` and by the TMDB enrichment's
+        apply step, fanned out by `GET /api/events` (server-sent events, one
+        asyncpg `LISTEN` connection per api process, 100 streams each, 25 s
+        heartbeat) and read by one `EventSource` per tab in `lib/events.ts`,
+        mounted in `Layout.tsx`; events carry ids only and the client
+        invalidates Watch Now, the show detail and (for admins) the
+        acquisition status, coalesced over 300 ms, with a hidden tab dropping
+        the stream after 60 s and catching up on return. Every existing
+        polling interval is untouched as the fallback. Caddy proxies the
+        stream with `flush_interval -1` and excludes it from `encode`. No push
+        notifications, no sound: the page just stays true. Verified 2026-09-14 (orchestrator): 368 events/auth/acquisition/
+        catalogue tests and 638 client tests green, lint clean; on dev the
+        app opens one stream per tab, Postgres shows a single LISTEN backend
+        and no idle transaction behind an open stream (the Reviewer's
+        blocker), and a sample request/cancel arrived as `wanted` then
+        `not_wanted` events within a second
+  - [x] Matching robustness (owner: "failing on this matching is kinda
+        embarrassing", 2026-09-13; dealer's choice on scope): movies, OVAs
+        and specials are searched by bare title and accepted without an
+        episode number; a symbol-stripped query variant (☆ ♪ ! ? : ~);
+        the slash-title parser bug (`Fate/Zero` read as "Zero"); dub
+        releases parsed and ranked below subs, never chosen over a sub;
+        one query per stored synonym (capped); a **query corpus** fixture
+        (real entries → real Nyaa names that must be found, run offline);
+        and the episode row shows the last search ("searched 6 forms, 0
+        results, next try 23:26") instead of a bare "Searching". Landed
+        2026-09-14: all seven pieces — films/OVAs asked for by bare title and
+        accepted only when the release says it is one (`movie`/`special` kind,
+        a strict title comparison that forgives only the type word, year within
+        one where both sides have one), a symbol-stripped variant of the two
+        full titles at the *end* of the list (`MAX_QUERIES` 8 → 10, the slash
+        added to the symbol set, and the whole list reordered so the cap cuts
+        speculative forms rather than a marked entry's short forms), the
+        slash-title parser fix (an explicit `parse(..., path=)` flag: ingest
+        and the match job pass `path=True`, a Nyaa title is never split),
+        `ParsedName.dubbed` ranking ahead of all four FR-A3 rules with a log
+        line when a dub is taken for lack of anything else, up to two synonym
+        queries counted last against the cap and floored at "must be a name",
+        `tests/fixtures/query_corpus.txt` + `test_query_corpus.py` (17 real
+        cases, offline: forms required, forms forbidden, releases accepted and
+        rejected, ranking preferred), and `episodes.last_search_{at,forms,
+        results}` (migration `4f2ab7c91d68`) behind `EpisodeOut.search` and the
+        row's "Searching · 6 forms, 0 results · next try 23:26". Reviewer's two
+        blockers (series packs accepted as films; the basename heuristic) and
+        four should-fixes applied the same day. Verified 2026-09-14 (orchestrator): Reviewer's two blockers fixed
+        (BD series packs no longer accepted as films — single mode requires
+        a movie/special marker and scores strict subsets strictly; slash
+        titles split only on real filesystem paths via an explicit flag);
+        parser corpus 259/259, query corpus 17 cases; 828 matching tests,
+        full client 644 and lint green; migration `4f2ab7c91d68` on dev
+  - [ ] Absolute episode numbering on sequels (SubsPlease `Jujutsu Kaisen -
+        25` for S2 E1): offset from prequel episode counts via relations,
+        accepted only when season agreement and the offset both hold — own
+        item with a Reviewer, after this batch
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

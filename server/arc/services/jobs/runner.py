@@ -29,9 +29,9 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import CursorResult, Select, func, select, update
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -244,6 +244,100 @@ async def _finish(
         setattr(job, field, value)
 
 
+#: What a job reclaimed by :func:`requeue_orphans` is left saying. Read by a
+#: human in the admin queue view, so it names the cause rather than the rule.
+ORPHAN_NOTE = "worker restarted while the job was running"
+
+
+async def _reclaim(
+    session: AsyncSession, predicate: tuple[Any, ...], note: str
+) -> tuple[list[int], list[int]]:
+    """Take ``running`` rows matching ``predicate`` off their lock.
+
+    Returns ``(requeued ids, failed ids)``. A job with attempts left goes back
+    to ``pending`` and is due at once; one whose attempts are already spent is
+    failed instead, so that a job which kills its worker every time cannot
+    cycle for ever. The attempt the interrupted run burned is not given back —
+    the same bargain the drain makes in :mod:`arc.services.jobs.loop`.
+
+    ``RETURNING id`` rather than a row count, because both callers log *which*
+    jobs they moved: a count alone is no help to whoever is reading the log
+    after a deploy wondering what happened to an episode.
+    """
+    now = datetime.now(UTC)
+    failed = await session.scalars(
+        update(Job)
+        .where(*predicate, Job.attempts >= Job.max_attempts)
+        .values(
+            status=JobStatus.FAILED,
+            locked_by=None,
+            locked_at=None,
+            finished_at=now,
+            last_error=note,
+        )
+        .returning(Job.id)
+        .execution_options(synchronize_session=False)
+    )
+    failed_ids = sorted(failed.all())
+    requeued = await session.scalars(
+        update(Job)
+        .where(*predicate, Job.attempts < Job.max_attempts)
+        .values(
+            status=JobStatus.PENDING,
+            locked_by=None,
+            locked_at=None,
+            run_after=now,
+            last_error=note,
+        )
+        .returning(Job.id)
+        .execution_options(synchronize_session=False)
+    )
+    requeued_ids = sorted(requeued.all())
+    await session.commit()
+    return requeued_ids, failed_ids
+
+
+async def requeue_orphans(session: AsyncSession, identity: str) -> int:
+    """Reclaim ``running`` jobs whose lock belongs to another worker identity.
+
+    Run once at worker start-up, **before the first claim**, and the reason it
+    ignores ``locked_at`` entirely: Arc runs exactly one worker per deployment
+    (architecture.md §8), so a ``running`` row locked by anything other than
+    this process is a job whose worker no longer exists. Age says nothing about
+    that. A container replaced by a deploy takes its ffmpeg with it and leaves
+    a lock seconds old held by nobody, which is how a transcode came to sit in
+    ``preparing`` for the two hours of ``WORKER_STALE_AFTER`` (2026-09-13).
+
+    This is therefore the one place in the queue that is *not* safe with two
+    workers: a second live worker's in-flight jobs would be requeued underneath
+    it. :func:`requeue_stale` stays the age-based backstop, and it is the one
+    that covers a crash of *this* worker's own in-process task.
+
+    A ``running`` row with no ``locked_by`` at all is reclaimed too. It should
+    not exist, and nothing else would ever pick it up: :func:`requeue_stale`
+    requires a ``locked_at`` to compare.
+    """
+    mine = identity[:WORKER_ID_MAX]
+    orphaned = (
+        Job.status == JobStatus.RUNNING,
+        or_(Job.locked_by.is_(None), Job.locked_by != mine),
+    )
+
+    requeued, failed = await _reclaim(session, orphaned, ORPHAN_NOTE)
+    total = len(requeued) + len(failed)
+    if total:
+        log.warning(
+            "reclaimed jobs orphaned by a previous worker",
+            extra={
+                "count": total,
+                "worker_id": mine,
+                "requeued": requeued,
+                "failed": failed,
+            },
+        )
+    return total
+
+
 async def requeue_stale(
     session: AsyncSession, older_than: timedelta = timedelta(minutes=10)
 ) -> int:
@@ -258,47 +352,22 @@ async def requeue_stale(
     ``older_than`` must comfortably exceed the longest a real job takes, or a
     slow transcode will be requeued underneath itself. Handlers are
     idempotent, so the worst case is duplicated work, not corruption.
+
+    This is the periodic backstop. The case it exists for is the *current*
+    worker's in-process task dying without the loop noticing; a worker that has
+    been restarted no longer waits for it, because
+    :func:`requeue_orphans` runs at start-up and does not consult the clock.
     """
     cutoff = datetime.now(UTC) - older_than
     stale = (Job.status == JobStatus.RUNNING, Job.locked_at.is_not(None), Job.locked_at < cutoff)
-    now = datetime.now(UTC)
     note = f"worker lock expired: no result within {older_than}"
 
-    exhausted = cast(
-        CursorResult[Any],
-        await session.execute(
-            update(Job)
-            .where(*stale, Job.attempts >= Job.max_attempts)
-            .values(
-                status=JobStatus.FAILED,
-                locked_by=None,
-                locked_at=None,
-                finished_at=now,
-                last_error=note,
-            )
-        ),
-    )
-    requeued = cast(
-        CursorResult[Any],
-        await session.execute(
-            update(Job)
-            .where(*stale, Job.attempts < Job.max_attempts)
-            .values(
-                status=JobStatus.PENDING,
-                locked_by=None,
-                locked_at=None,
-                run_after=now,
-                last_error=note,
-            )
-        ),
-    )
-    await session.commit()
-
-    total = max(requeued.rowcount, 0) + max(exhausted.rowcount, 0)
+    requeued, failed = await _reclaim(session, stale, note)
+    total = len(requeued) + len(failed)
     if total:
         log.warning(
             "requeued stale jobs",
-            extra={"requeued": requeued.rowcount, "failed": exhausted.rowcount},
+            extra={"requeued": requeued, "failed": failed},
         )
     return total
 
@@ -308,10 +377,12 @@ __all__ = [
     "MAX_BACKOFF",
     "MAX_BACKOFF_STEPS",
     "MAX_ERROR_CHARS",
+    "ORPHAN_NOTE",
     "backoff",
     "claim_one",
     "claim_statement",
     "format_error",
+    "requeue_orphans",
     "requeue_stale",
     "run_job",
 ]

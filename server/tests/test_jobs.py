@@ -31,6 +31,7 @@ from arc.services.jobs import (
     claim_statement,
     enqueue,
     register,
+    requeue_orphans,
     requeue_stale,
     run_job,
     run_worker_loop,
@@ -497,6 +498,188 @@ async def test_requeue_stale_fails_a_job_with_no_attempts_left(
     assert "lock expired" in stored.last_error
 
 
+# --- Restart recovery: reclaiming by identity -------------------------------
+#
+# The rule ``requeue_stale`` cannot express. A deploy replaces the worker
+# container; its ffmpeg dies with it; the row it was holding is locked by an
+# identity that no longer exists but was locked *seconds* ago, so the age-based
+# sweep leaves it alone for the two hours of WORKER_STALE_AFTER. With one
+# worker per deployment (architecture.md §8), "not my lock" is enough to know
+# the job is orphaned.
+
+
+async def _running_since(
+    factory: SessionFactory,
+    job_id: int,
+    *,
+    locked_by: str | None,
+    locked_at: datetime,
+    attempts: int = 1,
+) -> None:
+    """Put a job row into the state a worker holding it would leave."""
+    async with factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        row.status = JobStatus.RUNNING
+        row.locked_by = locked_by
+        row.locked_at = locked_at
+        row.attempts = attempts
+        await session.commit()
+
+
+async def test_a_restart_reclaims_another_workers_lock_however_fresh(
+    jobs_factory: SessionFactory,
+) -> None:
+    """One second old is still orphaned: the process that took it is gone."""
+    orphaned = await _enqueued(jobs_factory, "noop")
+    mine = await _enqueued(jobs_factory, "noop")
+
+    a_moment_ago = datetime.now(UTC) - timedelta(seconds=1)
+    await _running_since(
+        jobs_factory, orphaned.id, locked_by="old-container:1", locked_at=a_moment_ago
+    )
+    await _running_since(jobs_factory, mine.id, locked_by=WORKER, locked_at=a_moment_ago)
+
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, WORKER) == 1
+
+    recovered = await _reload(jobs_factory, orphaned.id)
+    assert recovered.status is JobStatus.PENDING
+    assert recovered.locked_by is None
+    assert recovered.locked_at is None
+    assert recovered.attempts == 1, "the interrupted attempt still counts"
+    assert recovered.run_after <= datetime.now(UTC), "it is claimable at once"
+    assert recovered.last_error is not None
+    assert "worker restarted" in recovered.last_error
+
+    # And the age-based sweep would have done nothing at all for it.
+    still_running = await _reload(jobs_factory, mine.id)
+    assert still_running.status is JobStatus.RUNNING, "this worker's own job is not its own orphan"
+    assert still_running.locked_by == WORKER
+
+
+async def test_the_age_sweep_would_have_left_that_job_for_two_hours(
+    jobs_factory: SessionFactory, settings: Settings
+) -> None:
+    """The regression, stated as the difference between the two rules."""
+    orphaned = await _enqueued(jobs_factory, "noop")
+    await _running_since(
+        jobs_factory,
+        orphaned.id,
+        locked_by="old-container:1",
+        locked_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    async with jobs_factory() as session:
+        assert await requeue_stale(session, timedelta(seconds=settings.worker_stale_after)) == 0
+    assert (await _reload(jobs_factory, orphaned.id)).status is JobStatus.RUNNING
+
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, WORKER) == 1
+    assert (await _reload(jobs_factory, orphaned.id)).status is JobStatus.PENDING
+
+
+async def test_reclaiming_fails_an_orphan_with_no_attempts_left(
+    jobs_factory: SessionFactory,
+) -> None:
+    """Same bargain as the sweep: a job that kills its worker must stop."""
+    job = await _enqueued(jobs_factory, "noop", max_attempts=2)
+    await _running_since(
+        jobs_factory,
+        job.id,
+        locked_by="old-container:1",
+        locked_at=datetime.now(UTC),
+        attempts=2,
+    )
+
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, WORKER) == 1
+
+    stored = await _reload(jobs_factory, job.id)
+    assert stored.status is JobStatus.FAILED, "attempts were spent; there is nothing to retry"
+    assert stored.locked_by is None
+    assert stored.locked_at is None
+    assert stored.finished_at is not None
+    assert stored.last_error is not None
+    assert "worker restarted" in stored.last_error
+
+
+async def test_reclaiming_touches_nothing_that_is_not_running(
+    jobs_factory: SessionFactory,
+) -> None:
+    """Only ``running`` rows have a lock to take; the rest are somebody's record."""
+    pending = await _enqueued(jobs_factory, "noop")
+    done = await _enqueued(jobs_factory, "noop")
+    failed = await _enqueued(jobs_factory, "noop")
+    cancelled = await _enqueued(jobs_factory, "noop")
+
+    finished = {
+        done.id: JobStatus.DONE,
+        failed.id: JobStatus.FAILED,
+        cancelled.id: JobStatus.CANCELLED,
+    }
+    async with jobs_factory() as session:
+        for job_id, status in finished.items():
+            row = await session.get(Job, job_id)
+            assert row is not None
+            row.status = status
+            # A finished row keeps no lock, but it was claimed by the worker
+            # that has since been replaced, and its `locked_by` is not what
+            # decides anything here.
+            row.attempts = 1
+        await session.commit()
+
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, WORKER) == 0
+
+    assert (await _reload(jobs_factory, pending.id)).status is JobStatus.PENDING
+    for job_id, status in finished.items():
+        assert (await _reload(jobs_factory, job_id)).status is status
+
+
+async def test_a_running_row_with_no_lock_at_all_is_reclaimed(
+    jobs_factory: SessionFactory,
+) -> None:
+    """Nothing else would ever pick it up: the age sweep needs a ``locked_at``."""
+    job = await _enqueued(jobs_factory, "noop")
+    await _running_since(jobs_factory, job.id, locked_by=None, locked_at=datetime.now(UTC))
+    async with jobs_factory() as session:
+        row = await session.get(Job, job.id)
+        assert row is not None
+        row.locked_at = None
+        await session.commit()
+
+    async with jobs_factory() as session:
+        assert await requeue_stale(session, timedelta(seconds=0)) == 0, "no locked_at to compare"
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, WORKER) == 1
+
+    assert (await _reload(jobs_factory, job.id)).status is JobStatus.PENDING
+
+
+async def test_a_long_worker_identity_still_matches_its_own_lock(
+    jobs_factory: SessionFactory,
+) -> None:
+    """``locked_by`` is 64 chars; the claim truncates, so the reclaim must too.
+
+    Otherwise a host with a long name would reclaim its *own* running jobs on
+    every start-up, which with one worker means every deploy requeueing work
+    that was about to be requeued correctly anyway — and, worse, the same
+    mismatch inside a running deployment's sweep.
+    """
+    long_identity = f"{'a' * 80}:1"
+    job = await _enqueued(jobs_factory, "noop")
+
+    async with jobs_factory() as session:
+        claimed = await claim_one(session, long_identity)
+    assert claimed is not None
+
+    async with jobs_factory() as session:
+        assert await requeue_orphans(session, long_identity) == 0
+
+    assert (await _reload(jobs_factory, job.id)).status is JobStatus.RUNNING
+
+
 # --- Shutdown ---------------------------------------------------------------
 
 
@@ -523,16 +706,25 @@ async def test_drain_waits_for_an_in_flight_job(
 async def test_drain_timeout_cancels_and_requeues(
     jobs_factory: SessionFactory, settings: Settings
 ) -> None:
-    """A job too slow for the drain goes back to pending, not to the sweep."""
+    """A job too slow for the drain goes back to pending, not to the sweep.
+
+    And it happens *inside the grace*, which is the half that matters to a
+    deploy: Docker's ``stop_grace_period`` starts counting at the SIGTERM, and
+    a requeue that lands after the SIGKILL does not land at all.
+    """
     job = await _enqueued(jobs_factory, SLEEPS_FOREVER)
-    impatient = settings.model_copy(update={"worker_drain_timeout": 0.3})
+    grace = 0.3
+    impatient = settings.model_copy(update={"worker_drain_timeout": grace})
 
     stop = asyncio.Event()
     worker = _worker(jobs_factory, impatient, stop)
+    loop = asyncio.get_running_loop()
     try:
         await _wait_for_status(jobs_factory, job.id, JobStatus.RUNNING)
+        signalled = loop.time()
         stop.set()
         await asyncio.wait_for(worker, timeout=5)
+        shutdown_took = loop.time() - signalled
     finally:
         stop.set()
 
@@ -543,6 +735,31 @@ async def test_drain_timeout_cancels_and_requeues(
     assert stored.attempts == 1, "the interrupted attempt still counts"
     assert stored.last_error is not None
     assert stored.run_after <= datetime.now(UTC), "it is claimable at once"
+    # Generous, because this asserts the shape of the shutdown rather than the
+    # speed of the machine: the drain waits the grace and then stops waiting.
+    assert shutdown_took < grace + 2.0, f"the drain overran its grace ({shutdown_took:.2f}s)"
+
+
+async def test_nothing_new_is_claimed_once_the_stop_signal_has_arrived(
+    jobs_factory: SessionFactory, settings: Settings
+) -> None:
+    """A job started after SIGTERM is a job the drain has to interrupt.
+
+    The loop used to take a semaphore slot and then claim without asking again,
+    so a signal that arrived while it was waiting for the slot still bought one
+    more job — begun with only the shutdown grace left to finish it.
+    """
+    first = await _enqueued(jobs_factory, "noop")
+    second = await _enqueued(jobs_factory, "noop")
+
+    stop = asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(_worker(jobs_factory, settings, stop), timeout=5)
+
+    for job in (first, second):
+        stored = await _reload(jobs_factory, job.id)
+        assert stored.status is JobStatus.PENDING, "a stopped loop must claim nothing"
+        assert stored.attempts == 0
 
 
 # --- API --------------------------------------------------------------------

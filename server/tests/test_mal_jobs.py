@@ -1734,6 +1734,205 @@ async def test_finishing_an_episode_queues_a_watch_row_but_a_rewatch_does_not(
     assert len(await log_rows(api_factory, user.id)) == 1
 
 
+async def _finished_show(factory: SessionFactory, *, mal_id: int, count: int) -> int:
+    """A show the catalogue calls ``FINISHED``, with a known episode count.
+
+    FR-W5's auto-complete needs both; :func:`make_anime` leaves ``status``
+    null, which is deliberately the shape that must *not* auto-complete.
+    """
+    anime_id = await make_anime(factory, mal_id=mal_id)
+    async with factory() as session:
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.status = "FINISHED"
+        anime.episodes = count
+        await session.commit()
+    return anime_id
+
+
+async def test_a_manual_mark_queues_one_progress_write_and_never_lowers(
+    api_factory: SessionFactory, settings: Settings, user: User
+) -> None:
+    """FR-W3 is FR-S4's path, FR-W5's manual half (owner, 2026-09-13).
+
+    Marking episode 9 on a list at 4 is one progress write; marking episode 3
+    on a list at 7 is none at all, because nothing moved — and the eight
+    episodes under 9 get no write and no rows of their own, because the one
+    number is what says they were watched.
+    """
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=52991)
+    await make_entry(api_factory, user_id=user.id, anime_id=anime_id, progress=4)
+    async with api_factory() as session:
+        session.add_all(
+            [
+                Episode(anime_id=anime_id, number=number, state=EpisodeState.READY)
+                for number in (3, 9)
+            ]
+        )
+        await session.commit()
+
+    async def mark(number: int) -> None:
+        async with api_factory() as session:
+            episode = await session.scalar(
+                select(Episode).where(Episode.anime_id == anime_id, Episode.number == number)
+            )
+            assert episode is not None
+            await record_progress(
+                session,
+                user_id=user.id,
+                episode=episode,
+                position_s=0.0,
+                duration_s=0.0,
+                force_complete=True,
+            )
+            await session.commit()
+
+    await mark(9)
+    assert [
+        (row.field, row.old_value, row.new_value, row.cause)
+        for row in await log_rows(api_factory, user.id)
+    ] == [("progress", 4, 9, MalWriteCause.WATCH)]
+
+    # Now the mark the owner's list makes ordinary: an episode below the
+    # number. It is a new completion, so it writes a ``watch_progress`` row —
+    # and it moves nothing, so MyAnimeList is owed nothing.
+    await mark(3)
+    assert len(await log_rows(api_factory, user.id)) == 1
+    assert len(await jobs_of(api_factory, PUSH)) == 1
+    entry = await entry_of(api_factory, user_id=user.id, anime_id=anime_id)
+    assert entry is not None and entry.progress == 9
+
+
+async def test_an_unmark_queues_one_manual_row_that_lowers_and_it_is_sent(
+    api_factory: SessionFactory, settings: Settings, user: User, mal: FakeMalApi
+) -> None:
+    """FR-S4 as revised on 2026-09-13, all the way to the wire.
+
+    The one write in Arc that lowers MyAnimeList's progress. It is allowed to
+    because a person pressed the button, and the row says so: cause ``manual``,
+    which is the value :func:`decide_push`'s guard lets through and the value
+    no automatic path writes for a progress change.
+    """
+    from arc.services.playback.progress import unmark_watched
+
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=52991)
+    await make_entry(api_factory, user_id=user.id, anime_id=anime_id, progress=9)
+    async with api_factory() as session:
+        session.add(Episode(anime_id=anime_id, number=9, state=EpisodeState.READY))
+        await session.commit()
+        episode = await session.scalar(
+            select(Episode).where(Episode.anime_id == anime_id, Episode.number == 9)
+        )
+        assert episode is not None
+        await unmark_watched(session, user_id=user.id, episode=episode)
+        await session.commit()
+
+    assert [
+        (row.field, row.old_value, row.new_value, row.cause)
+        for row in await log_rows(api_factory, user.id)
+    ] == [("progress", 9, 8, MalWriteCause.MANUAL)]
+    assert len(await jobs_of(api_factory, PUSH)) == 1
+    mal.statuses[52991] = {"status": "watching", "score": 0, "num_episodes_watched": 9}
+
+    assert await run(api_factory, settings, PUSH, push(user.id, anime_id)) is JobStatus.DONE
+
+    assert mal.patch_form(52991) == {"num_watched_episodes": "8"}
+    logged = {row.field: row for row in await log_rows(api_factory, user.id)}
+    assert logged["progress"].status is MalWriteStatus.OK
+    assert logged["progress"].old_value == 9
+
+
+async def test_an_unmark_below_the_progress_queues_nothing(
+    api_factory: SessionFactory, settings: Settings, user: User
+) -> None:
+    """Only the latest watched episode moves the number, so only it writes."""
+    from arc.services.playback.progress import unmark_watched
+
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=52991)
+    await make_entry(api_factory, user_id=user.id, anime_id=anime_id, progress=9)
+    async with api_factory() as session:
+        session.add(Episode(anime_id=anime_id, number=4, state=EpisodeState.READY))
+        await session.commit()
+        episode = await session.scalar(
+            select(Episode).where(Episode.anime_id == anime_id, Episode.number == 4)
+        )
+        assert episode is not None
+        await unmark_watched(session, user_id=user.id, episode=episode)
+        await session.commit()
+
+    assert await log_rows(api_factory, user.id) == []
+    assert await jobs_of(api_factory, PUSH) == []
+
+
+async def test_reaching_the_end_of_a_finished_show_pushes_status_and_progress(
+    api_factory: SessionFactory, settings: Settings, user: User, mal: FakeMalApi
+) -> None:
+    """FR-W5's auto-complete, all the way to the wire: one PATCH, two fields."""
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await _finished_show(api_factory, mal_id=52991, count=12)
+    await make_entry(api_factory, user_id=user.id, anime_id=anime_id, progress=11)
+    async with api_factory() as session:
+        session.add(Episode(anime_id=anime_id, number=12, state=EpisodeState.READY))
+        await session.commit()
+        episode = await session.scalar(
+            select(Episode).where(Episode.anime_id == anime_id, Episode.number == 12)
+        )
+        assert episode is not None
+        await record_progress(
+            session, user_id=user.id, episode=episode, position_s=1400.0, duration_s=1420.0
+        )
+        await session.commit()
+
+    assert [
+        (row.field, row.old_value, row.new_value, row.cause)
+        for row in await log_rows(api_factory, user.id)
+    ] == [
+        ("progress", 11, 12, MalWriteCause.WATCH),
+        ("status", "watching", "completed", MalWriteCause.WATCH),
+    ]
+    # One job, so one PATCH: a status write that arrived a round trip after the
+    # progress would show up on MyAnimeList as two changes to one show.
+    assert len(await jobs_of(api_factory, PUSH)) == 1
+    mal.statuses[52991] = {"status": "watching", "score": 0, "num_episodes_watched": 11}
+
+    assert await run(api_factory, settings, PUSH, push(user.id, anime_id)) is JobStatus.DONE
+
+    assert mal.patch_form(52991) == {"status": "completed", "num_watched_episodes": "12"}
+    entry = await entry_of(api_factory, user_id=user.id, anime_id=anime_id)
+    assert entry is not None
+    assert entry.status is ListStatus.COMPLETED
+
+
+async def test_an_airing_show_at_its_episode_count_queues_no_status(
+    api_factory: SessionFactory, settings: Settings, user: User
+) -> None:
+    """The edge the owner named: a ``RELEASING`` show is never completed."""
+    await link_user(api_factory, settings, user_id=user.id)
+    anime_id = await make_anime(api_factory, mal_id=52991)
+    async with api_factory() as session:
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.status = "RELEASING"
+        await session.commit()
+    await make_entry(api_factory, user_id=user.id, anime_id=anime_id, progress=11)
+    async with api_factory() as session:
+        session.add(Episode(anime_id=anime_id, number=12, state=EpisodeState.READY))
+        await session.commit()
+        episode = await session.scalar(
+            select(Episode).where(Episode.anime_id == anime_id, Episode.number == 12)
+        )
+        assert episode is not None
+        await record_progress(
+            session, user_id=user.id, episode=episode, position_s=1400.0, duration_s=1420.0
+        )
+        await session.commit()
+
+    assert [row.field for row in await log_rows(api_factory, user.id)] == ["progress"]
+
+
 async def test_a_watch_completion_for_an_unlinked_user_queues_nothing(
     api_factory: SessionFactory, settings: Settings, user: User
 ) -> None:

@@ -64,7 +64,11 @@ export interface ProgressResult {
   completed: boolean
   /** True only on the write that crossed the threshold; drives the overlay. */
   newly_completed: boolean
-  /** The viewer's list progress after the write, when it advanced. */
+  /**
+   * The viewer's list progress after the write, when the write moved it —
+   * up for a completion (FR-S4) and down by one for an un-mark of the latest
+   * watched episode (FR-S4 as revised 2026-09-13). Null when nothing moved.
+   */
   list_progress: number | null
 }
 
@@ -79,6 +83,15 @@ export interface WatchedInput {
   /** The show whose page to refresh; not sent to the server. */
   animeId: number
 }
+
+/**
+ * Why an episode *under* the latest watched one offers nothing to press
+ * (FR-W5). The un-mark moves the list by one episode from the top, so taking
+ * back episode 4 of a list that says 9 is not something the viewer can ask
+ * for. Shared by the show page's row control and the player's toggle, so the
+ * one explanation Arc has for "this tick has no undo" is written once.
+ */
+export const WATCHED_BY_PROGRESS_HINT = 'Unwatch from the latest watched episode down'
 
 /** Below this a resume is not worth doing; above it the episode is over (FR-S2). */
 export const RESUME_MIN_SECONDS = 10
@@ -178,7 +191,13 @@ export function useMarkWatched(): UseMutationResult<ProgressResult, Error, Watch
   })
 }
 
-/** Undo a mark. The list progress the server rolls back is its own business. */
+/**
+ * Undo a mark (FR-W3, FR-W5). It clears Arc's own completion row and, when the
+ * episode is the latest the viewer has watched, lowers list progress by one —
+ * the single place Arc lowers MyAnimeList's progress, and only because the
+ * viewer pressed it (FR-S4, revised 2026-09-13). Offered only where
+ * `watched_source` is `arc`, which is exactly where it would change something.
+ */
 export function useUnmarkWatched(): UseMutationResult<ProgressResult, Error, WatchedInput> {
   const client = useQueryClient()
 

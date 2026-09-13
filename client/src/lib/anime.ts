@@ -20,6 +20,7 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query'
+import { useEffect, useRef } from 'react'
 import { ApiError, apiFetch } from '@/lib/api'
 import { errorDetail } from '@/lib/auth'
 // Type-only, and erased under `verbatimModuleSyntax`: `mal.ts` imports values
@@ -191,6 +192,36 @@ export interface EpisodeRendition {
   audio_lang: string | null
 }
 
+/**
+ * What the last search for an episode asked and saw (FR-A7, 2026-09-14).
+ *
+ * The server sends it only while Arc is still looking — `wanted`, `searching`,
+ * or `unavailable` and retrying daily — and only once a search has actually
+ * run. `forms` is how many query forms it built and `results` how many
+ * distinct releases they returned between them before the filter, which is the
+ * pair that tells a viewer which half is stuck: no results at all means Nyaa
+ * has never heard of any name Arc asked by. `next_at` is when the queued
+ * retry runs, or null when none is queued.
+ */
+export interface EpisodeSearch {
+  at: string
+  forms: number
+  results: number
+  next_at: string | null
+}
+
+/**
+ * Where an episode's watched mark came from — and, folded into the same value,
+ * whether the viewer can take it back (FR-W5, owner 2026-09-13).
+ *
+ * `arc` is a mark Arc can undo: the un-mark clears a completion row of its own
+ * or lowers the list past this episode, and either way the tick goes. So `arc`
+ * means "this pill is a button". `progress` is an episode *under* the latest
+ * watched one — watched on the list's word, with nothing to undo, because the
+ * un-mark only ever moves the line by one.
+ */
+export type WatchedSource = 'arc' | 'progress'
+
 /** Arc's own per-episode state machine (spec §6). */
 export interface EpisodeOut {
   id: number
@@ -210,7 +241,20 @@ export interface EpisodeOut {
   air_at_estimated: boolean
   aired: boolean
   state: string
+  /**
+   * Whether the viewer has watched it (FR-W5): either Arc holds a completion
+   * row for them, or the episode's number is at or below their list progress
+   * — which is how a list imported from MyAnimeList at episode 9 marks nine
+   * episodes watched. The server decides; nothing here recomputes it.
+   */
   watched: boolean
+  /**
+   * Which of the two said so, or null when the episode is not watched — and
+   * therefore whether the control is actionable. Only `arc` can be taken back,
+   * so a `progress` episode's control is a word rather than a button. Optional
+   * on the wire so a cached payload from before FR-W5 still parses.
+   */
+  watched_source?: WatchedSource | null
   /**
    * How far the transfer has got, 0–1, while the episode is `downloading` or
    * `downloaded`; null in every other state (FR-A7).
@@ -225,6 +269,12 @@ export interface EpisodeOut {
   failure_reason: string | null
   /** Why the retry window closed without a release; set only for `unavailable` (FR-A6). */
   unavailable_reason: string | null
+  /**
+   * What the last search asked and saw, while Arc is still looking (FR-A7).
+   * Null everywhere else and until the first attempt has run; optional on the
+   * wire so a cached payload from before 2026-09-14 still parses.
+   */
+  search?: EpisodeSearch | null
   /** The chosen release, once there is one (FR-A3). */
   release: EpisodeRelease | null
   /** What the transcode produced; sent once the episode is `ready` (FR-P3). */
@@ -378,6 +428,15 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   banner_url: string | null
   /** TMDB's 16:9 backdrop, or null. What the show page's hero prefers. */
   backdrop_url: string | null
+  /**
+   * Whether the offline cross-id map can reach this show on TMDB at all
+   * (§5.8). Not a promise of pictures: it is what separates "the stills are on
+   * their way" — opening the page queues the enrichment — from "there are none
+   * to come", which is the only honest thing the episode list can say about a
+   * row of striped placeholders. Optional on the wire, and an answer that does
+   * not carry it makes neither claim: the page does not poll and says nothing.
+   */
+  tmdb_mapped?: boolean
   next_airing: NextAiring | null
   relations: AnimeRelation[]
   list_entry: ListEntry | null
@@ -621,6 +680,37 @@ export function hasActiveEpisode(anime: AnimeDetail | undefined): boolean {
   return anime !== undefined && anime.episodes.some((episode) => isEpisodeActive(episode.state))
 }
 
+/**
+ * How often the show page re-asks while episode stills are still on their way.
+ * Faster than the acquisition poll because the wait is seconds, not minutes:
+ * opening the page queues the show's TMDB enrichment (§5.8) and a worker takes
+ * three requests to answer it.
+ */
+export const STILL_POLL_MS = 5_000
+
+/**
+ * How long it keeps asking. Six tries at five seconds — after half a minute
+ * the pictures are not arriving from this page load, and the next open will
+ * find whatever did land. A window rather than a counter because it is the
+ * viewer's wait that is bounded, and because a show TMDB simply has no stills
+ * for must not be polled for ever.
+ */
+export const STILL_POLL_WINDOW_MS = 30_000
+
+/**
+ * Whether a show has an aired episode whose still might yet arrive (§5.8).
+ *
+ * Both halves matter. Only *aired* episodes have a still to publish, and only
+ * a show the id map reaches can gain one at all — polling an unmapped show
+ * would be asking the server the same question six times knowing it cannot
+ * answer. `tmdb_mapped` missing counts as "no claim", so nothing is polled on
+ * the strength of an answer that never spoke about TMDB.
+ */
+export function awaitingStills(anime: AnimeDetail | undefined): boolean {
+  if (anime === undefined || anime.tmdb_mapped !== true) return false
+  return anime.episodes.some((episode) => episode.aired && (episode.still_url ?? null) === null)
+}
+
 function clampFraction(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(1, Math.max(0, value))
@@ -738,6 +828,75 @@ export function episodeDetailLine(episode: EpisodeOut): string | null {
   return parts.length === 0 ? null : parts.join(' · ')
 }
 
+/** The states in which a search summary is worth reading (FR-A7). */
+const SEARCHING_STATES: readonly string[] = ['wanted', 'searching']
+
+/**
+ * A clock time in the viewer's own zone, or the day and the time when it is
+ * not today. "next try 23:26" is what somebody checks against their own
+ * evening, so the time alone is right for today and misleading for tomorrow.
+ *
+ * 24-hour whatever the browser's locale prefers, because that is the clock
+ * the rest of Arc writes: the schedule's own `air_time_local` is an `HH:MM`
+ * string from the server, and one page saying 23:26 while another says
+ * 11:26 PM is a difference with nothing behind it.
+ */
+function formatSearchTime(iso: string, tz?: string): string | null {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return null
+  const time: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }
+  const day: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short', ...time }
+  const options = isToday(at, tz) ? time : day
+  if (tz !== undefined && tz !== '') options.timeZone = tz
+  try {
+    return new Intl.DateTimeFormat(undefined, options).format(at)
+  } catch {
+    return new Intl.DateTimeFormat(undefined, { ...options, timeZone: undefined }).format(at)
+  }
+}
+
+function isToday(at: Date, tz?: string): boolean {
+  const options: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit' }
+  const withZone = tz === undefined || tz === '' ? {} : { timeZone: tz }
+  try {
+    const format = new Intl.DateTimeFormat('en-CA', { ...options, ...withZone })
+    return format.format(at) === format.format(new Date())
+  } catch {
+    const format = new Intl.DateTimeFormat('en-CA', options)
+    return format.format(at) === format.format(new Date())
+  }
+}
+
+/**
+ * `6 forms, 0 results · next try 23:26` — what Arc has actually been doing
+ * about an episode it has not found (FR-A7, 2026-09-14).
+ *
+ * Only while it is still looking: `wanted` and `searching` are the states in
+ * which "it has said Searching all day, is it broken?" is the question, and
+ * this is the answer — six queries asked, nothing at all came back, and the
+ * next attempt is at 23:26. An `unavailable` row keeps its own reason instead
+ * (`episodeProblem`), which is a sentence rather than a pair of counts.
+ *
+ * Null when the server sent nothing: an episode nobody has searched for yet
+ * has nothing to report, and "0 forms, 0 results" would read as a failure.
+ */
+export function searchSummary(episode: EpisodeOut, tz?: string): string | null {
+  const search = episode.search
+  if (search === null || search === undefined) return null
+  if (!SEARCHING_STATES.includes(episode.state)) return null
+  const parts = [
+    `${String(search.forms)} form${search.forms === 1 ? '' : 's'}`,
+    `${String(search.results)} result${search.results === 1 ? '' : 's'}`,
+  ]
+  const line = parts.join(', ')
+  const next = search.next_at === null ? null : formatSearchTime(search.next_at, tz)
+  return next === null ? line : `${line} · next try ${next}`
+}
+
 /**
  * Weekday + date in the browser's locale, plus the time for anything still to
  * come (a past air date only needs the day; an upcoming one is a countdown a
@@ -789,17 +948,48 @@ export function useAnimeSearch(q: string, page = 1): UseQueryResult<AnimeSearchR
 }
 
 export function useAnime(id: number): UseQueryResult<AnimeDetail, Error> {
+  // When this page was opened, for the still window below. Stamped in an
+  // effect and read from the interval callback, which is the only place a
+  // clock belongs: a hook body must be pure, and `Date.now()` is not. Keyed
+  // on the id because moving from one show to another starts that show's wait
+  // over — the client keeps this component mounted across the navigation —
+  // and it is a ref rather than state because nothing renders from it.
+  const openedAt = useRef<number | null>(null)
+  useEffect(() => {
+    openedAt.current = Date.now()
+  }, [id])
+
   return useQuery<AnimeDetail, Error>({
     queryKey: animeQueryKey(id),
     queryFn: () => apiFetch<AnimeDetail>(`/api/anime/${id}`),
     enabled: Number.isInteger(id) && id > 0,
     retry: false,
-    // Acquisition advances on the server's clock, not on anything the viewer
-    // does, so the page re-asks itself while an episode is still being fetched
-    // or prepared and goes quiet the moment they have all settled (FR-A7).
-    // Reading `query.state.data` rather than closing over a render's copy keeps
-    // the decision on the freshest answer, including the one that ends polling.
-    refetchInterval: (query) => (hasActiveEpisode(query.state.data) ? ACQUISITION_POLL_MS : false),
+    // Two reasons to re-ask, both on the server's clock rather than on
+    // anything the viewer does; whichever wants the sooner answer wins, and
+    // the page goes quiet when neither does.
+    //
+    // Acquisition advances while an episode is being fetched or prepared, so
+    // the page follows it until they have all settled (FR-A7). And opening
+    // the page queues the show's TMDB enrichment (§5.8), so for the first
+    // half-minute it also watches for the episode stills that job lands —
+    // which is what turns a page of striped placeholders into pictures
+    // without a reload (owner, 2026-09-13).
+    //
+    // Reading `query.state.data` rather than closing over a render's copy
+    // keeps the decision on the freshest answer, including the one that ends
+    // polling.
+    refetchInterval: (query) => {
+      const intervals: number[] = []
+      if (hasActiveEpisode(query.state.data)) intervals.push(ACQUISITION_POLL_MS)
+      if (
+        awaitingStills(query.state.data) &&
+        openedAt.current !== null &&
+        Date.now() - openedAt.current < STILL_POLL_WINDOW_MS
+      ) {
+        intervals.push(STILL_POLL_MS)
+      }
+      return intervals.length === 0 ? false : Math.min(...intervals)
+    },
   })
 }
 

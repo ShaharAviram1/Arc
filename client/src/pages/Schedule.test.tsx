@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
-import { scheduleQueryKey } from '@/lib/schedule'
+import type { AnimeSummary } from '@/lib/anime'
+import { scheduleQueryKey, type SchedulePage } from '@/lib/schedule'
 import { Schedule } from '@/pages/Schedule'
 import {
   APOTHECARY,
@@ -13,6 +14,7 @@ import {
   FRIEREN_SPECIAL,
   listEntry,
   SCHEDULE_PAGE,
+  scheduleEntry,
 } from '@/test/animeFixtures'
 import {
   callTo,
@@ -67,6 +69,36 @@ function mockApiHoldingRefetch(path: string, routes: MockRoutes) {
 
 function dayColumn(label: string): HTMLElement {
   return screen.getByRole('region', { name: label })
+}
+
+/**
+ * The Tuesday column holding one show the server pulled into this week because
+ * it is on air, not because it is tagged Fall 2026 (`carried_over`, owner
+ * 2026-09-13). The override is the season the show *started* in, which is what
+ * the caveat names.
+ */
+function carriedOverPage(anime: Partial<AnimeSummary>): SchedulePage {
+  return {
+    ...SCHEDULE_PAGE,
+    days: SCHEDULE_PAGE.days.map((day) =>
+      day.weekday === 1
+        ? {
+            ...day,
+            entries: [
+              scheduleEntry(
+                { ...FRIEREN, season_year: 2026, ...anime },
+                {
+                  air_time_local: '18:30',
+                  next_episode: 5,
+                  next_at: '2026-09-08T16:30:00Z',
+                  carried_over: true,
+                },
+              ),
+            ],
+          }
+        : day,
+    ),
+  }
 }
 
 beforeEach(() => {
@@ -140,6 +172,43 @@ describe('Schedule', () => {
     // Frieren's time came from AniList, so it stays plain.
     expect(within(dayColumn('Tuesday')).queryByText('est.')).not.toBeInTheDocument()
     expect(within(dayColumn('Tuesday')).getByRole('listitem')).toHaveTextContent('18:30 · Ep 5')
+  })
+
+  it('says which season a carried-over show started in', async () => {
+    mockApi({ 'GET /api/schedule': { body: carriedOverPage({ season: 'SPRING' }) } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    const tuesday = within(dayColumn('Tuesday'))
+    expect(tuesday.getByText(FRIEREN.title.preferred)).toBeInTheDocument()
+    expect(tuesday.getByText('Since Spring 2026')).toBeInTheDocument()
+    // The slot is unchanged: the caveat is a line of its own, not a suffix.
+    expect(tuesday.getByText('18:30 · Ep 5')).toBeInTheDocument()
+  })
+
+  it('leaves the ordinary rows of the season without a caveat', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    // Frieren is tagged Fall 2023 in the fixtures and `carried_over` is false,
+    // so the page says nothing: the flag is the server's answer, not a
+    // comparison the client makes for itself.
+    expect(screen.queryByText(/^Since /)).not.toBeInTheDocument()
+  })
+
+  it('says nothing about a show the catalogue gives no season', async () => {
+    mockApi({
+      'GET /api/schedule': { body: carriedOverPage({ season: null, season_year: null }) },
+    })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    expect(within(dayColumn('Tuesday')).getByText(FRIEREN.title.preferred)).toBeInTheDocument()
+    expect(screen.queryByText(/^Since /)).not.toBeInTheDocument()
   })
 
   it('highlights today in the schedule’s timezone, not the browser’s', async () => {

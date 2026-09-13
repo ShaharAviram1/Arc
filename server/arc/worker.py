@@ -12,7 +12,11 @@ One process, two things running side by side (architecture.md §2):
   library scan that finds new files on disk (M5). M6+ hangs the rest (Nyaa
   polling, MAL re-import, retention) off the same scheduler.
 
-More than one worker may run at once; ``SKIP LOCKED`` is what makes that safe.
+The *claim* is safe with more than one worker — that is what ``SKIP LOCKED``
+buys — but the deployment runs exactly one (architecture.md §8), and the
+start-up reclaim below depends on it: it takes back every ``running`` job
+locked by an identity other than this process's, which with two live workers
+would mean requeueing the other one's work underneath it.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ from arc.services.catalog.names import CATALOG_PRIORITY
 from arc.services.catalog.offline import jobs as offline_jobs  # noqa: F401  (registers handlers)
 from arc.services.catalog.offline.names import IMPORT_OFFLINE, OFFLINE_PRIORITY
 from arc.services.catalog.seasons import current_season
-from arc.services.jobs import enqueue, requeue_stale, run_worker_loop
+from arc.services.jobs import enqueue, requeue_orphans, requeue_stale, run_worker_loop
 
 # Re-exported: the liveness file is written here and read by ``--check`` and by
 # ``GET /api/jobs/summary`` (arc/services/jobs/heartbeat.py), so it lives in the
@@ -191,6 +195,23 @@ def worker_id() -> str:
 def _heartbeat(settings: Settings) -> None:
     touch_heartbeat(settings)
     log.info("worker heartbeat", extra={"at": datetime.now(UTC).isoformat()})
+
+
+async def _reclaim_orphans(factory: SessionFactory, identity: str) -> None:
+    """Take back what the *previous* worker was running when it was replaced.
+
+    Runs once, before the claim loop starts, and reclaims by identity rather
+    than by age: with one worker per deployment (architecture.md §8) a
+    ``running`` row locked by another identity is a job whose process is gone,
+    however recently it took the lock. A deploy is the ordinary case — the
+    container is replaced, its ffmpeg dies with it, and the row would otherwise
+    wait out ``WORKER_STALE_AFTER`` with an episode stuck in ``preparing``.
+    """
+    try:
+        async with factory() as session:
+            await requeue_orphans(session, identity)
+    except Exception:  # pragma: no cover - a failure here must not kill the worker
+        log.exception("orphaned job reclaim failed")
 
 
 async def _sweep_stale(factory: SessionFactory, older_than: timedelta) -> None:
@@ -352,7 +373,10 @@ async def run(settings: Settings) -> None:
     stale_after = timedelta(seconds=settings.worker_stale_after)
 
     # Before claiming anything, take back whatever a previous run of this
-    # worker (or another one) died holding.
+    # worker died holding: first everything locked by an identity that is not
+    # this process's — a deploy, and the row may be seconds old — and then the
+    # age-based sweep, which from here on is the periodic backstop.
+    await _reclaim_orphans(factory, identity)
     await _sweep_stale(factory, stale_after)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -529,6 +553,7 @@ async def run(settings: Settings) -> None:
             "heartbeat_s": HEARTBEAT_SECONDS,
             "stale_after_s": settings.worker_stale_after,
             "stale_sweep_s": STALE_SWEEP_SECONDS,
+            "drain_timeout_s": settings.worker_drain_timeout,
             "session_purge_s": SESSION_PURGE_SECONDS,
             "library_scan_s": settings.library_scan_interval_seconds,
             "compute_wants_s": COMPUTE_WANTS_SECONDS,

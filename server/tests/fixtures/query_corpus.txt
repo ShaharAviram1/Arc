@@ -1,0 +1,293 @@
+# Nyaa query corpus (FR-A4, architecture.md §6, §10).
+#
+# One **block** per real case, blocks separated by blank lines, `#` lines
+# ignored. Every block is a catalogue entry Arc had trouble with, the episode
+# it was looking for, the queries it must ask, and real nyaa.si release names
+# it must accept and reject. `tests/test_query_corpus.py` asserts all of it
+# offline: `queries()` and `acceptable()` are pure functions of an `anime` row,
+# so this corpus needs no network and no database.
+#
+# Fields, one per line, `name: value`:
+#
+#   case       an id for the failure message. Required, unique.
+#   romaji     the entry's `title_romaji`. Required.
+#   english    its `title_english`. Omit where the catalogue has none.
+#   native     its `title_native`. Omit where it does not matter.
+#   synonym    one of its `synonyms`; repeat the line for more.
+#   format     its `format`: TV, MOVIE, OVA, ONA, SPECIAL. Required.
+#   episodes   its episode count, or `null`.
+#   year       its `season_year`, or omit. Only a single (a film, or a
+#              one-episode OVA/ONA) compares it with a release's own year.
+#   prequel    `yes` when the catalogue says something comes *before* this
+#              entry, which is what withholds the bare-head query forms.
+#              Defaults to no.
+#   number     the episode being searched for. Required.
+#   query      a query form `queries()` MUST build for it; repeat the line.
+#   absent     a form it must NOT build — a bare head that would return the
+#              first season of an unmarked sequel. Repeat the line.
+#   accept     a release name `acceptable()` MUST accept, optionally with
+#              `@seeders=N` for the ranking assertion below. Repeat the line.
+#   reject     a release name it MUST reject: a batch, another season, a
+#              dubbed-only upload of the wrong show, the wrong film.
+#              Repeat the line.
+#   prefer     which of the accepted releases `rank()` must put first. One
+#              line, and the point of it is the dub rule: a dub with four
+#              thousand seeders still ranks below a sub with twelve.
+#
+# **Why the file exists.** Every case here was a show that sat in `searching`
+# on production, retrying every six hours against queries that could not
+# match: nine words of catalogue title where the group writes two, a season
+# marker written five ways, an episode number written `S01E07`, a star in the
+# title, a slash read as a directory, a film asked for as `- 01`. None of them
+# was a filter problem, and none of them is visible in a unit test of one
+# helper. A query form is a claim about what release groups write, and this is
+# where the claims are written down.
+
+case: rakudai-head
+# AniList 190123. Nine words of catalogue title in both languages and no
+# season marker anywhere, so every form built from a whole title returned 0 on
+# 2026-09-12 while `Rakudai Kenja no Gakuin Musou 01` returned 9.
+romaji: Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku
+english: From Overshadowed to Overpowered: Second Reincarnation of a Talentless Sage
+format: TV
+episodes: 12
+number: 1
+query: Rakudai Kenja no Gakuin Musou - 01
+query: From Overshadowed to Overpowered - 01
+accept: [SubsPlease] Rakudai Kenja no Gakuin Musou - 01 (1080p) [ABCD1234].mkv
+accept: [Erai-raws] Rakudai Kenja no Gakuin Musou - 01 [1080p][Multiple Subtitle].mkv
+reject: [Erai-raws] Rakudai Kenja no Gakuin Musou - 01 ~ 12 [1080p][Multiple Subtitle]
+
+case: mushoku-s3-short-forms
+# AniList 178789. The season marker sits before the subtitle, so the
+# catalogue's title and SubsPlease's name diverge completely.
+romaji: Mushoku Tensei III: Isekai Ittara Honki Dasu
+english: Mushoku Tensei: Jobless Reincarnation Season 3
+synonym: Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season
+format: TV
+episodes: 14
+number: 11
+query: Mushoku Tensei S3 - 11
+query: Mushoku Tensei III - 11
+query: Mushoku Tensei - 11
+query: Mushoku Tensei S03E11
+accept: [SubsPlease] Mushoku Tensei S3 - 11 (1080p) [4492A492].mkv
+accept: [Erai-raws] Mushoku Tensei III - Isekai Ittara Honki Dasu - 11 [1080p][Multiple Subtitle]
+reject: [SubsPlease] Mushoku Tensei - 11 (1080p) [4492A493].mkv
+reject: [Erai-raws] Mushoku Tensei S3 - 01 ~ 12 [1080p][Multiple Subtitle]
+
+case: frieren-s1
+romaji: Sousou no Frieren
+english: Frieren: Beyond Journey's End
+format: TV
+episodes: 28
+number: 7
+query: Sousou no Frieren - 07
+query: Frieren Beyond Journey's End - 07
+query: Frieren - 07
+accept: [SubsPlease] Sousou no Frieren - 07 (1080p) [42D46236].mkv
+reject: [Erai-raws] Sousou no Frieren 2nd Season - 07 [1080p][Multiple Subtitle].mkv
+reject: [Erai-raws] Sousou no Frieren - 01 ~ 07 [1080p][Multiple Subtitle]
+
+case: frieren-s2
+# The same franchise one row later: a marked sequel, whose own episode 7 the
+# first season's entry must not take and vice versa.
+romaji: Sousou no Frieren 2nd Season
+english: Frieren: Beyond Journey's End Season 2
+format: TV
+episodes: 24
+number: 7
+query: Sousou no Frieren S2 - 07
+query: Sousou no Frieren II - 07
+query: Sousou no Frieren S02E07
+accept: [Erai-raws] Sousou no Frieren 2nd Season - 07 [1080p][Multiple Subtitle].mkv
+accept: [SubsPlease] Sousou no Frieren S2 - 07 (1080p) [42D46237].mkv
+reject: [SubsPlease] Sousou no Frieren - 07 (1080p) [42D46236].mkv
+
+case: one-room-ta-sxxeyy
+# AniList 205068. Every group that has it writes the number the Western way,
+# so `One-Room TA - 02` and `One-Room TA 02` both returned 0 and
+# `One-Room TA` returned 9.
+romaji: Wollum Jogyonim
+english: One-Room TA
+format: TV
+episodes: 7
+number: 2
+query: One-Room TA S01E02
+query: Wollum Jogyonim S01E02
+accept: [ToonsHub] One-Room TA S01E02 1080p VIKI WEB-DL AAC2.0 H.264 (Wollum Jogyonim, Multi-Subs)
+reject: [Doomdos] - One-Room TA - S01E01-03 [1080p VIKI WEB-DL BATCH]
+reject: [geckyzz] One-Room TA - S01 (원룸 조교님; One Room Jogyo-nim) [VIKI.WEB-DL 1080P AVC, AAC, M-SUB][BATCH]
+
+case: dagashi-kashi-2-batch
+# The 6.3 GB season pack production fetched and transcoded twelve times over
+# for the one episode somebody wanted (2026-09-13).
+romaji: Dagashi Kashi 2
+english: Dagashi Kashi 2
+format: TV
+episodes: 12
+number: 1
+query: Dagashi Kashi 2 - 01
+accept: [Erai-raws] Dagashi Kashi 2 - 01 [1080p][Multiple Subtitle].mkv
+reject: [Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]
+reject: [Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [720p][Multiple Subtitle]
+
+case: made-in-abyss-s2-no-head
+# AniList 97986. The one entry a bare head query must not be asked for: its
+# title names an arc rather than a season, so nothing on either side marks a
+# season and `[SubsPlease] Made in Abyss - 07` — season one's episode 7 —
+# passes the filter with a title score of 1.00. The *query* is the only thing
+# that can prevent it, which is what `absent` pins.
+romaji: Made in Abyss: Retsujitsu no Ougonkyou
+english: Made in Abyss - The Golden City of the Scorching Sun
+format: TV
+episodes: 12
+prequel: yes
+number: 7
+query: Made in Abyss: Retsujitsu no Ougonkyou - 07
+query: Made in Abyss Retsujitsu no Ougonkyou - 07
+absent: Made in Abyss - 07
+absent: Made in Abyss S01E07
+accept: [SubsPlease] Made in Abyss - Retsujitsu no Ougonkyou - 07 (1080p) [A1B2C3D4].mkv
+
+case: cowboy-bebop-year-pair
+# `1998-1999` is when it aired, not what the torrent holds — and the name
+# carries no episode number at all, so nothing in it is episode 5.
+romaji: Cowboy Bebop
+english: Cowboy Bebop
+format: TV
+episodes: 26
+number: 5
+query: Cowboy Bebop - 05
+accept: [HorribleSubs] Cowboy Bebop - 05 [1080p].mkv
+reject: [Kametsu] Cowboy Bebop 1998-1999 [BD 1080p]
+reject: [Kametsu] Cowboy Bebop Complete Series [BD 1080p FLAC]
+
+case: yarichin-symbol
+# The star is one token to Nyaa and nothing on the site holds it.
+romaji: Yarichin☆Bitch-bu
+english: Yarichin Bitch Club
+format: OVA
+episodes: 4
+number: 1
+query: Yarichin☆Bitch-bu - 01
+query: Yarichin Bitch-bu - 01
+accept: [HorribleSubs] Yarichin☆Bitch-bu - 01 [1080p].mkv
+accept: [HorribleSubs] Yarichin Bitch-bu - 01 [1080p].mkv
+
+case: love-live-superstar-symbol
+# Trailing exclamation marks, which are also this franchise's season marker.
+romaji: Love Live! Superstar!!
+format: TV
+episodes: 12
+number: 3
+query: Love Live Superstar - 03
+accept: [SubsPlease] Love Live! Superstar!! - 03 (1080p) [1234ABCD].mkv
+
+case: fate-zero-slash
+# The slash was read as a path separator, so the parser reported a show called
+# "Zero" and the filter rejected every release of the show.
+romaji: Fate/Zero
+english: Fate/Zero
+format: TV
+episodes: 13
+number: 12
+query: Fate/Zero - 12
+query: Fate Zero - 12
+accept: [SubsPlease] Fate/Zero - 12 (1080p) [ABCD1234].mkv
+accept: [Coalgirls] Fate Zero 12 (1920x1080 Blu-ray FLAC) [DEADBEEF].mkv
+
+case: sword-art-online-dub-vs-sub
+# Both of these are episode 7 and both are acceptable; the dub had four
+# thousand seeders and was what production picked on 2026-09-13, which is the
+# ranking rule this pins rather than the filter.
+romaji: Sword Art Online
+english: Sword Art Online
+format: TV
+episodes: 25
+number: 7
+query: Sword Art Online - 07
+accept: [Yameii] Sword Art Online - S01E07 [English Dub] [CR WEB-DL 1080p] [F00DBABE].mkv @seeders=4000
+accept: [SubsPlease] Sword Art Online - 07 (1080p) [A1B2C3D4].mkv @seeders=12
+prefer: [SubsPlease] Sword Art Online - 07 (1080p) [A1B2C3D4].mkv
+
+case: bofuri-dub-group
+# `[KaiDubs]` says nothing about its audio except in its own name.
+romaji: Itai no wa Iya nano de Bougyoryoku ni Kyokufuri Shitai to Omoimasu
+english: BOFURI: I Don't Want to Get Hurt, so I'll Max Out My Defense
+format: TV
+episodes: 12
+number: 7
+query: BOFURI I Don't Want to Get Hurt, so I'll Max Out My Defense - 07
+accept: [KaiDubs] BOFURI I Don't Want to Get Hurt, so I'll Max Out My Defense - 07 [1080p].mkv @seeders=900
+accept: [SubsPlease] BOFURI - 07 (1080p) [A1B2C3D4].mkv @seeders=12
+prefer: [SubsPlease] BOFURI - 07 (1080p) [A1B2C3D4].mkv
+
+case: servamp-movie
+# One of the three films that sat in `searching` for a day because every query
+# Arc built carried `- 01`, which no film release on Nyaa names.
+romaji: Servamp Movie: Alice in the Garden
+english: Servamp Movie: Alice in the Garden
+format: MOVIE
+episodes: 1
+year: 2018
+number: 1
+query: Servamp Movie: Alice in the Garden
+query: Servamp Movie Alice in the Garden
+absent: Servamp Movie: Alice in the Garden - 01
+accept: [Erai-raws] Servamp Movie - Alice in the Garden [1080p][Multiple Subtitle].mkv
+reject: [Judas] Servamp Movie - Alice in the Garden [BD 1080p][HEVC x265 10bit][BATCH]
+# The whole-series Blu-ray pack. It names no episode, no range and no batch
+# marker, so "an episode-less single" accepted it — and its title is a strict
+# subset of the film's, which the ordinary asymmetric comparison scores 1.00.
+# Two rules reject it now: it never says it is a film, and a single's title
+# comparison forgives only the type word itself.
+reject: [Coalgirls] Servamp (1920x1080 Blu-ray FLAC)
+reject: [Judas] Servamp Movie [BD 1080p]
+
+case: royal-tutor-movie
+romaji: Oushitsu Kyoushi Haine Movie
+english: The Royal Tutor Movie
+format: MOVIE
+episodes: 1
+year: 2019
+number: 1
+query: The Royal Tutor Movie
+accept: [Moozzi2] The Royal Tutor Movie [BD 1920x1080 x264 FLAC].mkv
+
+case: sao-progressive-movie-year
+# Two films with one name, told apart by the year the release writes.
+romaji: Sword Art Online Movie: Progressive - Hoshi Naki Yoru no Aria
+english: Sword Art Online the Movie: Progressive - Aria of a Starless Night
+format: MOVIE
+episodes: 1
+year: 2021
+prequel: yes
+number: 1
+query: Sword Art Online the Movie: Progressive - Aria of a Starless Night
+query: Sword Art Online the Movie Progressive - Aria of a Starless Night
+accept: [Judas] Sword Art Online the Movie - Progressive - Aria of a Starless Night [BD 1080p]
+reject: [Judas] Sword Art Online the Movie - Progressive - Aria of a Starless Night [BD 1080p] (2016)
+reject: [Judas] Sword Art Online [BD 1080p][HEVC x265]
+
+case: kizumonogatari-franchise-siblings
+# Three films, one name, no episode number and no year on any of the rips:
+# `kizumonogatari` is a strict subset of all three parts and scored 1.00
+# against every one of them, so whichever the ranker liked best was "the film".
+# The strict title rule is the whole margin here — the year check has nothing
+# to work with, which is the ordinary case for a film — and it costs the bare
+# `[Coalgirls] Kizumonogatari` rip, which is honestly not distinguishable from
+# a series pack by anything in its name.
+romaji: Kizumonogatari III: Reiketsu-hen
+english: Kizumonogatari Part 3: Reiketsu
+format: MOVIE
+episodes: 1
+year: 2017
+prequel: yes
+number: 1
+query: Kizumonogatari III: Reiketsu-hen
+query: Kizumonogatari III Reiketsu-hen
+accept: [Moozzi2] Kizumonogatari III Reiketsu-hen Movie [BD 1920x1080 x264 FLAC]
+reject: [Coalgirls] Kizumonogatari I Tekketsu-hen Movie [BD 1080p FLAC]
+reject: [Coalgirls] Kizumonogatari II Nekketsu-hen Movie [BD 1080p FLAC]
+reject: [Coalgirls] Kizumonogatari [BD 1080p]

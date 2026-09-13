@@ -478,6 +478,42 @@ async def test_a_temporary_directory_a_killed_worker_left_is_swept_up(
     assert staging_dirs(settings, episode.id) == []
 
 
+async def test_the_same_job_rerun_after_a_deploy_reuses_its_own_staging_name(
+    api_factory: SessionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphaned-job case (M16): the same row runs again, id and all.
+
+    A deploy interrupts a transcode; the next worker reclaims the row by
+    identity and it is claimed again — the *same* job id, so the staging
+    directory it wants is the one the killed container was half-way through
+    filling. ``STAGING_GLOB`` matches every ``.tmp-*`` for the episode rather
+    than only other job ids, which is what keeps this from being an encode
+    into a directory with somebody else's segments in it.
+    """
+    settings = acquisition_settings(tmp_path)
+    install_fake_ffmpeg(tmp_path / "bin", monkeypatch, segments=2)
+    async with api_factory() as session:
+        episode = await a_matched_episode(session, settings, anilist_id=970114)
+        job = await a_job(session, episode.id)
+
+        # What the interrupted run left: this job's own staging directory,
+        # with a partial encode in it.
+        interrupted = settings.renditions_dir / f"{episode.id}.tmp-{job.id}"
+        interrupted.mkdir(parents=True)
+        (interrupted / "seg_00000.m4s").write_bytes(b"half an episode")
+        (interrupted / "index.m3u8").write_text("#EXTM3U\n# truncated\n")
+
+        await transcode_episode(context(session, settings, job))
+
+    output = settings.renditions_dir / str(episode.id)
+    assert (output / "index.m3u8").exists(), "the re-run must produce a rendition"
+    assert "truncated" not in (output / "index.m3u8").read_text(), "the leftovers were reused"
+    assert staging_dirs(settings, episode.id) == []
+    async with api_factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None and row.state is EpisodeState.READY
+
+
 # --- Failure ----------------------------------------------------------------
 
 

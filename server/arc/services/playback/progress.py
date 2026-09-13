@@ -10,7 +10,10 @@ player reports every ten seconds, and a user who finishes an episode and then
 scrubs back to the opening would otherwise un-watch it — and, with the list
 advance below, would have Arc argue with MyAnimeList about an episode they
 plainly watched. Only the explicit ``DELETE …/watched`` (:func:`unmark_watched`)
-takes it back.
+takes it back — and that one, since the owner's revision of 2026-09-13, also
+lowers the list by one episode, which makes it the single path in Arc that
+lowers MyAnimeList's progress. It is allowed to because a person pressed it;
+:func:`_retreat_list` has the argument.
 
 **Completion is also the only automatic thing that moves a list entry.** The
 first time it flips true, ``list_entries.progress`` advances to this episode's
@@ -18,9 +21,27 @@ number if the number is higher, ``updated_by`` becomes ``arc`` and
 ``mal_dirty`` becomes true — which is M9's cue and the *only* automatic one
 (architecture.md §5.5 step 2). Never downwards: FR-M4 says progress written
 from an automatic event never decreases, and the ``>`` below is where that is
-true. Status is left alone even when progress reaches the last episode — FR-W2
-gives "completed" to the user to set, and a show marked completed by a rewatch
-of episode 12 would be Arc making a claim nobody made.
+true.
+
+**And the advance is what "watched" means from here on** (FR-W5, owner
+2026-09-13). An episode counts as watched for a user when its number is at or
+below their ``list_entries.progress`` *or* they have a completion row for it,
+so a list imported from MyAnimeList at episode 9 marks nine episodes watched
+without Arc having nine rows to show for it. :func:`~arc.services.playback.watched.watched_source`
+is that rule and the only definition of it; nothing here writes synthetic completion
+rows for 1…N-1, because progress already says it and eight fabricated rows
+would be eight lies about when somebody watched something.
+
+**Progress reaching the end of a finished show completes it** (FR-W5). That
+used to be deliberately untrue — FR-W2 gives "completed" to the user, and a
+show marked completed by a rewatch of episode 12 would be Arc making a claim
+nobody made. The owner's answer on 2026-09-13 narrows it to the case where the
+claim is not a guess: the count is known, the source says ``FINISHED``, and
+the number just *moved* to the end. An airing show is never completed (episode
+13 may exist next week), an unknown count has no end to reach, and a rewatch
+does not advance anything so it triggers nothing. :func:`_auto_completes` is
+that condition, and the status change is logged like any other so the push
+sends status and progress together.
 
 **Every progress report is a touch, though** (FR-A9). ``activated_at`` on an
 existing list entry is stamped on the *first* report of an episode, not on the
@@ -77,8 +98,9 @@ from arc.models import (
 from arc.models.enums import MalWriteCause
 from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.catalog.airing import FINISHED
 from arc.services.mal.names import enqueue_mal_push, is_linked
-from arc.services.mal.writelog import FIELD_PROGRESS, record_pending
+from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pending
 
 #: Watched at ninety per cent (FR-S4). Ends run about that long past the last
 #: thing anybody watches for.
@@ -292,8 +314,18 @@ async def _advance_list(
     Never downwards (FR-M4): a rewatch of episode 3 on a list that says 11
     leaves the 11 alone, and leaves ``mal_dirty`` alone with it, so nothing is
     pushed to MAL for a change that did not happen.
+
+    And when the advance lands on the last episode of a show that has finished
+    airing, the entry becomes ``completed`` in this same transaction (FR-W5,
+    :func:`_auto_completes`), with its own logged write so the push sends the
+    status and the progress together rather than in two rounds.
     """
     entry = await session.get(ListEntry, (user_id, episode.anime_id))
+    # ``None`` rather than ``watching`` for a row this function is about to
+    # create: the write log's ``old_value`` is what the user had before, and
+    # for a create that is nothing at all — the same convention
+    # :mod:`arc.services.catalog.lists` uses for its own snapshot.
+    status_was = entry.status.value if entry is not None else None
     if entry is None:
         entry = ListEntry(
             user_id=user_id,
@@ -314,6 +346,7 @@ async def _advance_list(
 
     was = entry.progress
     advanced = episode.number > entry.progress
+    finished = False
     if advanced:
         entry.progress = episode.number
         entry.updated_by = UpdatedBy.ARC
@@ -322,10 +355,15 @@ async def _advance_list(
         # does: §5.5 step 4 resolves a MAL conflict by comparing this against
         # MAL's own timestamp, so it has to move whenever Arc changed anything.
         entry.updated_at = now
-    # Status is deliberately untouched, even when progress reaches the episode
-    # count: FR-W2 makes "completed" the user's word, and a show that marked
-    # itself completed would be Arc writing a status change to MAL that nobody
-    # asked for (FR-M7).
+        # FR-W5's auto-complete, in the same transaction as the advance that
+        # earned it. Only ever on an advance: a rewatch of the last episode of
+        # a show already at 12/12 moves nothing and must therefore claim
+        # nothing, which is also what keeps an already-completed entry as it
+        # is.
+        anime = await session.get(Anime, episode.anime_id)
+        finished = anime is not None and _auto_completes(entry, anime)
+        if finished:
+            entry.status = ListStatus.COMPLETED
 
     await session.flush()
     if advanced and await is_linked(session, user_id):
@@ -348,26 +386,114 @@ async def _advance_list(
             new_value=entry.progress,
             cause=MalWriteCause.WATCH,
         )
+        if finished:
+            # FR-W5's status write. Cause ``watch`` because that is the event
+            # that asked for it — finishing the last episode of a finished
+            # show is as user-originated as an event gets (FR-M7) — and the
+            # FR-M4 guards that cause carries are about progress and score,
+            # neither of which this is. One row, so the push sends one PATCH
+            # with both fields on it.
+            await record_pending(
+                session,
+                user_id=user_id,
+                anime_id=episode.anime_id,
+                field=FIELD_STATUS,
+                old_value=status_was,
+                new_value=entry.status.value,
+                cause=MalWriteCause.WATCH,
+            )
         await enqueue_mal_push(session, user_id=user_id, anime_id=episode.anime_id)
     return entry.progress
 
 
+def _auto_completes(entry: ListEntry, anime: Anime) -> bool:
+    """Whether this advance finished the show (FR-W5, owner 2026-09-13).
+
+    Three conditions, and each of them is one of the edges the owner decided:
+
+    * the **count is known**. A show airing without one has no end to reach,
+      and "12/None" is not 12/12.
+    * the source says **FINISHED**. A ``RELEASING`` show's count is a
+      projection — episode 13 of a "12-episode" season is a weekly
+      occurrence — and completing a show that is still airing would be a
+      status write Arc has to take back next Friday.
+    * the entry is **not already completed**. A rewatch of a completed show
+      stays completed and writes nothing; the caller's ``advanced`` guard
+      covers most of that, and this covers the rest (progress edited below the
+      count on a completed entry, then watched back up).
+
+    **Every other status completes**, including ``on_hold`` and ``dropped``
+    (owner, 2026-09-13). Watching the last episode of a show you had dropped is
+    the clearest statement anybody makes about a list entry, and leaving it
+    "dropped at 12/12" would be Arc preserving a state the viewer has plainly
+    moved past. The status write is logged like any other, so the log says what
+    it came from and the revert can put it back.
+
+    ``>=`` rather than ``==`` because a stale episode count is the ordinary
+    case: a user whose progress already passed a count the catalogue later
+    revised downwards has finished the show by any reading of it.
+    """
+    if entry.status is ListStatus.COMPLETED:
+        return False
+    if anime.status != FINISHED:
+        return False
+    count = anime.episodes
+    if not count:
+        return False
+    return entry.progress >= int(count)
+
+
+@dataclass(frozen=True, slots=True)
+class UnmarkOutcome:
+    """What one un-mark changed.
+
+    ``cleared`` is whether there was a completion row to take back at all;
+    ``list_progress`` is the number the list now reads, and is ``None``
+    whenever the un-mark did not move it — which is every un-mark except one of
+    the viewer's latest watched episode.
+    """
+
+    cleared: bool
+    list_progress: int | None = None
+
+
 async def unmark_watched(
-    session: AsyncSession, *, user_id: int, episode_id: int, now: datetime | None = None
-) -> bool:
-    """Clear ``completed`` for one (user, episode); ``False`` if there was no row.
+    session: AsyncSession, *, user_id: int, episode: Episode, now: datetime | None = None
+) -> UnmarkOutcome:
+    """Take back one watched mark, and the list progress if it was the latest.
 
     The position is kept — un-marking is "I had not finished this after all",
     not "I never opened it", and the episode should reappear in continue
-    watching where the user left it. ``completed_at`` is cleared with the flag
-    so retention's grace window (FR-T1) is not still counting down on an
-    episode nobody has finished.
+    watching where the user left it. ``completed_at`` is cleared with the flag,
+    which takes this user's completion out of retention's grace window (FR-T1).
 
-    **The list entry and MAL are not rolled back.** Arc has, by this point,
-    possibly told MyAnimeList that episode 11 is watched; silently lowering
-    progress here would be an automatic write that lowers progress, which
-    FR-M4 forbids outright. A user who wants the number back sets it from the
-    show page, which is a change they made and can therefore be pushed.
+    **The list entry is rolled back by exactly one episode** (FR-S4, revised by
+    the owner on 2026-09-13; the 2026-09-07 clarification said it never was).
+    Since FR-W5 derives the watched marks from ``list_entries.progress``, the
+    old rule left the viewer no way to correct a mark at all: clearing the
+    completion row of episode 9 on a list that says 9 changed nothing anybody
+    could see. So an un-mark of the *latest* watched episode lowers progress to
+    ``N-1``, with ``updated_by = arc``, ``mal_dirty`` and one logged progress
+    write carrying the previous value.
+
+    That write's cause is ``manual``, not ``watch``, and the distinction is the
+    whole of FR-M4 here. **This is the one path on which Arc lowers
+    MyAnimeList's progress**, and it may only because a person pressed the
+    button: :func:`arc.services.mal.sync._guard` refuses a *lowering* progress
+    write whose cause is ``watch`` — every automatic one — and lets an explicit
+    edit through. A rewatch, a scrub back, a second beacon: none of them reach
+    this function, and none of them could lower anything if they did.
+
+    Lower, and nothing else. **The status is untouched**, even when the episode
+    was the last one of a show FR-W5 auto-completed: "completed" is a word the
+    viewer owns (FR-W2), and Arc taking it back off a show they still consider
+    finished would be Arc making a claim nobody made — the mirror image of the
+    argument that lets the auto-complete set it in the first place.
+
+    Two un-marks that are no-ops for the list, deliberately: one of an episode
+    *below* the progress (taking back episode 4 of a list that says 9 would
+    have to say something about 5…9 that nobody said), and one of an episode
+    *above* it (there is nothing to lower). Both still clear the row.
     """
     at = now or datetime.now(UTC)
     # ``RETURNING`` rather than ``rowcount``: it is the same round trip, and it
@@ -376,12 +502,63 @@ async def unmark_watched(
         update(WatchProgress)
         .where(
             WatchProgress.user_id == user_id,
-            WatchProgress.episode_id == episode_id,
+            WatchProgress.episode_id == episode.id,
         )
         .values(completed=False, completed_at=None, updated_at=at)
         .returning(WatchProgress.episode_id)
     )
-    return touched.first() is not None
+    cleared = touched.first() is not None
+    lowered = await _retreat_list(session, user_id=user_id, episode=episode, now=at)
+    return UnmarkOutcome(cleared=cleared, list_progress=lowered)
+
+
+async def _retreat_list(
+    session: AsyncSession, *, user_id: int, episode: Episode, now: datetime
+) -> int | None:
+    """Lower ``list_entries.progress`` to ``N-1``, if ``N`` is where it stands.
+
+    The mirror of :func:`_advance_list`, and narrower on purpose: it moves the
+    number by one and only from the episode the viewer actually pressed, which
+    is what makes it a correction rather than an edit. ``None`` when there is
+    no entry, when the number is somewhere else, or when the list is already at
+    zero — in each case nothing moved, so nothing is dirty and MyAnimeList is
+    owed nothing.
+
+    An un-mark is also one of FR-A9's touches: it is a progress change the user
+    made in Arc. And it moves the acquisition window back onto the episode, so
+    the reconciliation is queued — FR-T3's "if a user later rewinds … it is
+    re-acquired" is precisely this.
+    """
+    entry = await session.get(ListEntry, (user_id, episode.anime_id))
+    if entry is None or entry.progress <= 0 or entry.progress != episode.number:
+        return None
+
+    was = entry.progress
+    entry.progress = was - 1
+    entry.updated_by = UpdatedBy.ARC
+    entry.mal_dirty = True
+    # Set explicitly for the same reason the advance does: §5.5 step 4 resolves
+    # a MAL conflict by comparing this against MAL's own timestamp.
+    entry.updated_at = now
+    activate(entry, now=now)
+    await session.flush()
+
+    await enqueue_compute_wants(session)
+    if await is_linked(session, user_id):
+        # Cause ``manual``: a person pressed this, which is what allows the one
+        # progress write in Arc that goes *down* (FR-M4, and
+        # :func:`arc.services.mal.sync._guard`).
+        await record_pending(
+            session,
+            user_id=user_id,
+            anime_id=episode.anime_id,
+            field=FIELD_PROGRESS,
+            old_value=was,
+            new_value=entry.progress,
+            cause=MalWriteCause.MANUAL,
+        )
+        await enqueue_mal_push(session, user_id=user_id, anime_id=episode.anime_id)
+    return entry.progress
 
 
 async def completed_episode_ids(
@@ -494,6 +671,7 @@ __all__ = [
     "RESUME_MIN_S",
     "ContinueRow",
     "ProgressOutcome",
+    "UnmarkOutcome",
     "completed_episode_ids",
     "continue_watching",
     "is_completed",

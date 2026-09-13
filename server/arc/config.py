@@ -433,8 +433,20 @@ class Settings(BaseSettings):
     worker_concurrency: int = Field(default=2, ge=1)
     #: Seconds to wait before asking for work again when the queue was empty.
     worker_poll_interval: float = Field(default=1.0, gt=0)
-    #: On shutdown, how long to let in-flight jobs finish before cancelling.
-    worker_drain_timeout: float = Field(default=30.0, ge=0)
+    #: On shutdown, how long to let in-flight jobs finish before they are
+    #: cancelled and put back on the queue — the worker's shutdown grace.
+    #:
+    #: **It must stay below the container's ``stop_grace_period``** (15 s in
+    #: deploy/docker-compose.yml). Docker sends ``SIGTERM``, waits that long,
+    #: then sends ``SIGKILL``; a drain that outlives the grace is a drain that
+    #: never finishes, and the row it was about to requeue stays ``running``
+    #: under a dead lock. That is exactly what happened on 2026-09-13, with
+    #: this value at 30 s and no ``stop_grace_period`` set at all (Docker's own
+    #: default being 10 s). Ten seconds is chosen against that ceiling rather
+    #: than against how long a job takes: a transcode will not finish inside
+    #: any plausible grace, and everything else in the queue finishes in
+    #: about a second.
+    worker_drain_timeout: float = Field(default=10.0, ge=0)
     #: Seconds a job may sit ``running`` **without saying anything** before the
     #: sweep assumes the worker holding it died and puts the row back. It is a
     #: bound on silence rather than on work: a job longer than this is safe as
@@ -442,6 +454,11 @@ class Settings(BaseSettings):
     #: exceed these two hours. A job that does *not* heartbeat must finish
     #: inside this window or it will be requeued underneath itself
     #: (:mod:`arc.services.media.jobs` is the one that does).
+    #:
+    #: It is only the *backstop*, and deliberately generous because of what it
+    #: risks interrupting. A worker restart no longer waits for it: the next
+    #: worker reclaims by identity at start-up
+    #: (:func:`arc.services.jobs.runner.requeue_orphans`).
     worker_stale_after: float = Field(default=7200.0, gt=0)
 
     # --- Feature flags ---------------------------------------------------

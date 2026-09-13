@@ -26,6 +26,7 @@ import {
   listErrorMessage,
   malUrl,
   sampleErrorMessage,
+  searchSummary,
   useAnime,
   useCancelSample,
   useRequestSample,
@@ -39,8 +40,9 @@ import {
   type ListEntry,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
+import { useHealth } from '@/lib/health'
 import type { MalSync } from '@/lib/mal'
-import { useMarkWatched, useUnmarkWatched } from '@/lib/playback'
+import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
 
 /**
  * The show page (spec §5, §4.6 FR-W2, roadmap M3, restyled for M15).
@@ -82,6 +84,18 @@ const FALLBACK_NOTICES: Partial<Record<CatalogSource, string>> = {
 const UNLINKED_RELATION_HINT = 'Not in the catalogue yet'
 
 const NO_EPISODES = 'No episodes known yet. Arc fills them in as the catalogue answers.'
+
+/**
+ * Why every row shows the stripe (§5.8, owner 2026-09-13).
+ *
+ * Episode stills come from TMDB alone, reached by id through the offline
+ * cross-id map — so a show the map cannot reach, or a deployment with no TMDB
+ * key, has none and never will. Said once, above the list, rather than
+ * fourteen times beside identical placeholders; and said *only* then, because
+ * on a mapped show the pictures are on their way and a caption promising
+ * otherwise would be wrong a second later.
+ */
+const NO_STILLS = 'No episode pictures for this show'
 
 /** What the primary action says when there is nothing playable to offer. */
 const NOTHING_READY = 'Nothing ready yet'
@@ -144,7 +158,9 @@ function altTitles(anime: AnimeDetail): string {
  * Deliberately no fallback to the show's own art: the same banner cropped
  * fourteen times down a list of episodes reads as fourteen identical pictures
  * of nothing, where the stripe placeholder reads as "no still for this one"
- * and lets the row's words carry it.
+ * and lets the row's words carry it. What the stripe cannot say is whether a
+ * picture is coming; :data:`NO_STILLS` above the list says that once, and only
+ * where the answer is no.
  */
 function stillArt(episode: EpisodeOut): string | null {
   return episode.still_url ?? null
@@ -152,6 +168,20 @@ function stillArt(episode: EpisodeOut): string | null {
 
 function watchedCount(episodes: EpisodeOut[]): number {
   return episodes.filter((episode) => episode.watched).length
+}
+
+/**
+ * The number in "Watched 9 / 12" (FR-W5).
+ *
+ * The episodes' own flags rather than the list's number alone, so that an
+ * episode watched in Arc above a progress the list has not caught up with —
+ * a rewatch, an episode finished while MyAnimeList was unreachable — is
+ * counted. Never *below* the list's progress: Arc has no episode rows for a
+ * show the catalogue has not filled in yet, and a page that answered
+ * "Watched 0 / 12" to a list saying 9 would be arguing with itself.
+ */
+function watchedThrough(anime: AnimeDetail, progress: number): number {
+  return Math.max(progress, watchedCount(anime.episodes))
 }
 
 /**
@@ -183,6 +213,10 @@ function metaLine(anime: AnimeDetail): string {
  * has not been watched, else the first that has arrived at all — a show
  * already finished still has something to play. Null when nothing is ready,
  * which is what turns the button into the disabled notice.
+ *
+ * "Watched" here is FR-W5's flag, which is the whole reason this reads right
+ * on an imported list: a viewer at episode 9 on MyAnimeList is offered 10,
+ * not the first episode Arc happens to hold a file for.
  */
 function playableEpisode(episodes: EpisodeOut[]): EpisodeOut | null {
   const ready = episodes.filter((episode) => episode.state === 'ready')
@@ -239,6 +273,12 @@ interface EpisodeState {
  * names six of them; the rest of Arc's lifecycle (spec §6) falls through to
  * its own label in the muted tone, which is what "a resting state is never
  * error-coloured" means in practice.
+ *
+ * **It no longer says "Watched"** (FR-W5, owner 2026-09-13). The control at the
+ * end of the row is the watched indicator now, so this column says what Arc has
+ * done about the *file* — Ready to play, Not fetched, Searching — which is a
+ * second fact rather than the same one twice. Work in flight still outranks
+ * everything, as it always did.
  */
 function episodeState(episode: EpisodeOut, tz?: string): EpisodeState {
   const quiet = { tone: 'muted' as StateTone, percent: null, progressLabel: '' }
@@ -251,8 +291,8 @@ function episodeState(episode: EpisodeOut, tz?: string): EpisodeState {
       progressLabel: '',
     }
   }
-  // Work in flight outranks everything else the row could say, watched
-  // included: it is the only part of the line that is still changing.
+  // Work in flight outranks everything else the row could say: it is the only
+  // part of the line that is still changing.
   const percent = episodeProgressPercent(episode)
   if (percent !== null) {
     return {
@@ -262,14 +302,29 @@ function episodeState(episode: EpisodeOut, tz?: string): EpisodeState {
       progressLabel: episode.state === 'preparing' ? 'Preparing' : 'Acquisition progress',
     }
   }
-  if (episode.watched) return { label: 'Watched', ...quiet }
   if (!episode.aired) {
     return airsToday(episode.air_at, tz)
       ? { label: 'Airs tonight', tone: 'ember', percent: null, progressLabel: '' }
       : { label: 'Not yet aired', ...quiet }
   }
   if (episode.state === 'ready') {
-    return { label: 'Ready to play', tone: 'bright', percent: null, progressLabel: '' }
+    // Bright only while it is an offer. On a watched row the file being here
+    // is a fact, not an invitation, and the control beside it already says the
+    // viewer has seen it.
+    return {
+      label: 'Ready to play',
+      tone: episode.watched ? 'muted' : 'bright',
+      percent: null,
+      progressLabel: '',
+    }
+  }
+  // "Searching · 6 forms, 0 results · next try 23:26" (FR-A7, 2026-09-14).
+  // A row that says only "Searching" for six hours says nothing; this is what
+  // Arc has actually been doing, and it is the difference between a query that
+  // matches nothing and a filter that keeps nothing.
+  const summary = searchSummary(episode, tz)
+  if (summary !== null) {
+    return { label: `${restingLabel(episode.state)} · ${summary}`, ...quiet }
   }
   return { label: restingLabel(episode.state), ...quiet }
 }
@@ -707,6 +762,11 @@ function RetryTranscode({ animeId, episodeId }: { animeId: number; episodeId: nu
   )
 }
 
+/** What the row's watched control says in each of its three states (FR-W5). */
+const WATCHED = 'Watched'
+const UNWATCH = 'Unwatch'
+const MARK_WATCHED = 'Mark watched'
+
 /**
  * Marking an episode watched by hand (FR-W3), and taking the mark off again.
  *
@@ -714,6 +774,24 @@ function RetryTranscode({ animeId, episodeId }: { animeId: number; episodeId: nu
  * whole point of the manual mark is the episode watched somewhere else, which
  * is exactly the case where Arc has no file. Unaired episodes get nothing,
  * since there is nothing yet to have watched.
+ *
+ * **One control, three states** (FR-W5, owner 2026-09-13), built like the
+ * sample toggle above: unwatched it offers "Mark watched"; watched it *is* the
+ * row's watched indicator — a pressed pill reading "✓ Watched" — and, where
+ * there is a mark to take back, hovering or focusing it offers "Unwatch"
+ * instead, from `group-hover` markup rather than from React state.
+ *
+ * The third state is an episode *under* the latest watched one. The un-mark
+ * moves the list by one episode from the top (FR-S4, revised 2026-09-13), so
+ * taking back episode 4 of a list that says 9 is not something the viewer can
+ * ask for — it would have to claim something about 5…9 that nobody said. That
+ * pill is the same pill and is not a control: `aria-disabled`, no hover swap,
+ * and the tooltip says where the undo actually is. The server decides which
+ * of the three this is, in `watched_source`; `arc` means "actionable", so the
+ * client asks one question and not two.
+ *
+ * Because the pill carries the word, the row's state column does not: see
+ * :func:`episodeState`.
  */
 function WatchedControl({ animeId, episode }: { animeId: number; episode: EpisodeOut }) {
   const mark = useMarkWatched()
@@ -723,20 +801,51 @@ function WatchedControl({ animeId, episode }: { animeId: number; episode: Episod
 
   if (!episode.watched && !episode.aired) return null
 
+  // A payload with no `watched_source` at all predates FR-W5, and back then
+  // `watched` could only have been a completion row — so the absent value
+  // reads as `arc` and keeps its undo, rather than silently losing it.
+  if (episode.watched && episode.watched_source === 'progress') {
+    return (
+      <Button
+        variant="chip"
+        pressed
+        aria-disabled
+        title={WATCHED_BY_PROGRESS_HINT}
+        className="px-4 text-[13px]"
+      >
+        <CheckGlyph />
+        {WATCHED}
+      </Button>
+    )
+  }
+
   return (
     <span className="flex flex-col items-end gap-1.5">
-      <button
-        type="button"
+      <Button
+        variant="chip"
+        pressed={episode.watched}
         disabled={pending}
+        aria-label={episode.watched ? UNWATCH : undefined}
+        title={episode.watched ? UNWATCH : undefined}
+        className={cx('px-4 text-[13px]', episode.watched && 'group')}
         onClick={() => {
           const input = { episodeId: episode.id, animeId }
           if (episode.watched) unmark.mutate(input)
           else mark.mutate(input)
         }}
-        className={buttonClass('chip', 'px-4 text-[13px]')}
       >
-        {episode.watched ? 'Unmark' : 'Mark watched'}
-      </button>
+        {episode.watched ? (
+          <>
+            <span className="inline-flex items-center gap-[8px] group-hover:hidden group-focus-visible:hidden">
+              <CheckGlyph />
+              {WATCHED}
+            </span>
+            <span className="hidden group-hover:inline group-focus-visible:inline">{UNWATCH}</span>
+          </>
+        ) : (
+          MARK_WATCHED
+        )}
+      </Button>
       {failed ? (
         <span role="alert" className="text-[13px] text-[var(--arc-error)]">
           {WATCHED_FAILED}
@@ -808,7 +917,7 @@ function EpisodeRow({
       </div>
 
       <div className="flex w-[132px] shrink-0 flex-col items-end gap-1.5 text-right text-[14px]">
-        <span className={TONE_CLASS[state.tone]}>
+        <span className={TONE_CLASS[state.tone]} title={state.label}>
           <span>{state.label}</span>
           {problem === null ? null : <ProblemHint label={problem.label} reason={problem.reason} />}
         </span>
@@ -851,11 +960,21 @@ function Episodes({
   isAdmin: boolean
   timezone?: string
 }) {
+  const { data: health } = useHealth()
+  // Two ways for the stripes to be permanent: TMDB cannot be reached for this
+  // show, or this deployment has no key at all and reaches TMDB for nothing.
+  // Either is worth one line; a `true` and an unanswered health check are not,
+  // because then the pictures are simply not here yet.
+  const noStills = anime.tmdb_mapped === false || health?.tmdb_enabled === false
+
   return (
     <section className="mt-14">
       <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
         Episodes
       </h2>
+      {noStills ? (
+        <p className="mt-1.5 text-[13px] text-[var(--arc-text-muted)]">{NO_STILLS}</p>
+      ) : null}
       {anime.episodes.length === 0 ? (
         <EmptyState className="mt-5" message={NO_EPISODES} />
       ) : (
@@ -1128,7 +1247,7 @@ function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
       {entry === null ? null : (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
           <p className="text-[14px] text-[var(--arc-text-muted)]">
-            {`Watched ${String(entry.progress)} / ${anime.episode_count === null ? '?' : String(anime.episode_count)}`}
+            {`Watched ${String(watchedThrough(anime, entry.progress))} / ${anime.episode_count === null ? '?' : String(anime.episode_count)}`}
           </p>
           <MalSyncIndicator sync={entry.mal_sync} />
         </div>

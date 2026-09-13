@@ -239,7 +239,7 @@ class TestBatches:
         directory = "[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]"
         for number in (1, 10, 12):
             name = f"{directory}/[Erai-raws] Dagashi Kashi 2 - {number:02d} [1080p].mkv"
-            parsed = parse(name)
+            parsed = parse(name, path=True)
             assert (parsed.kind, parsed.episode, parsed.episode_end) == ("episode", number, None)
 
 
@@ -387,11 +387,119 @@ class TestJapaneseEpisodeMarkers:
         assert parsed.episode == 7
 
 
+class TestSlashTitles:
+    """``/`` is a title character as well as a path separator (2026-09-14).
+
+    ``rsplit("/", 1)`` made ``[SubsPlease] Fate/Zero - 12 (1080p)`` a show
+    called ``Zero`` with no release group — a title no catalogue entry and no
+    query can match, so every release of the show was rejected by the
+    acquisition filter and every file of it went to review.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "expected_key", "episode"),
+        [
+            ("[SubsPlease] Fate/Zero - 12 (1080p) [ABCD1234].mkv", "fate zero", 12),
+            ("[Judas] Fate/strange Fake - 01 [1080p].mkv", "fate strange fake", 1),
+            ("Fate/Zero - 12.mkv", "fate zero", 12),
+        ],
+    )
+    def test_a_slash_between_two_words_is_part_of_the_name(
+        self, name: str, expected_key: str, episode: int
+    ) -> None:
+        parsed = parse(name)
+        assert parsed.title_key == expected_key
+        assert parsed.episode == episode
+
+    def test_the_release_group_survives_a_slash_title(self) -> None:
+        """The other half of the same bug: the group was inside the "directory"."""
+        assert parse("[SubsPlease] Fate/Zero - 12 (1080p) [ABCD1234].mkv").group == "SubsPlease"
+
+    def test_a_real_path_is_cut_at_its_last_separator(self) -> None:
+        """``path=True``, and the caller is the only one that knows."""
+        ingest = "/data/downloads/77/[SubsPlease] Fate Zero - 12 (1080p).mkv"
+        assert parse(ingest, path=True).title_key == "fate zero"
+        assert parse(ingest, path=True).group == "SubsPlease"
+        assert parse(
+            "/data/downloads/Fate Zero/[G] Fate Zero - 03 [1080p].mkv", path=True
+        ).group == ("G")
+
+    def test_a_directory_full_of_brackets_and_spaces_is_still_a_directory(self) -> None:
+        nested = (
+            "/data/manual/[Anime Time] Dagashi Kashi (Season 1 + 2) [BD 1080p]"
+            "/Season 2/[Anime Time] Dagashi Kashi 2 - 03 [1080p][HEVC].mkv"
+        )
+        parsed = parse(nested, path=True)
+        assert parsed.title_key == "dagashi kashi 2"
+        assert (parsed.episode, parsed.kind) == (3, "episode")
+
+    def test_a_nyaa_title_is_never_split_however_many_slashes_it_holds(self) -> None:
+        """``path=False`` is the default, because a title is the common case.
+
+        ``[BD 1080p / FLAC]`` is the shape that made the old heuristic guess:
+        a slash with spaces around it, inside a tag, in a name that ends in a
+        video extension.
+        """
+        parsed = parse("[Judas] Fate/Zero - 12 [BD 1080p / FLAC].mkv")
+        assert parsed.title_key == "fate zero"
+        assert parsed.episode == 12
+        assert parsed.group == "Judas"
+
+    def test_a_path_that_could_not_exist_is_cut_where_a_filesystem_would_cut_it(self) -> None:
+        """The one case the flag cannot rescue, asserted so it is not a surprise.
+
+        No filesystem holds a component with a slash in it, so a torrent named
+        ``[SubsPlease] Fate/Zero - 12`` lands on disk as a *directory*
+        ``[SubsPlease] Fate`` holding a file ``Zero - 12``, and that is what
+        ingest passes. The episode goes to review with the title it really has;
+        the acquisition filter, which sees the Nyaa title and passes
+        ``path=False``, is where the show's name survives.
+        """
+        on_disk = "/data/downloads/77/[SubsPlease] Fate/Zero - 12 (1080p).mkv"
+
+        assert parse(on_disk, path=True).title_key == "zero"
+        # The name the same release carries on Nyaa, read as a name, keeps the
+        # show — which is the half that decides what Arc downloads.
+        assert parse("[SubsPlease] Fate/Zero - 12 (1080p).mkv").title_key == "fate zero"
+
+
+class TestDubs:
+    """Whether the audio is a dub, which is what FR-A3 ranks last."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[Yameii] Sword Art Online - S01E07 [English Dub] [CR WEB-DL 1080p] [F00DBABE]",
+            "[G] Show - 07 [Eng Dub][1080p].mkv",
+            "[G] Show - 07 [Dubbed].mkv",
+            "[G] Show - 07 (Dub).mkv",
+            "[G] Show - 07 [DUB].mkv",
+            "[G] Show - 07 [EN DUB].mkv",
+            "[KaiDubs] Bofuri - 07 [1080p].mkv",
+        ],
+    )
+    def test_a_dub_is_recognised(self, name: str) -> None:
+        assert parse(name).dubbed is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[SubsPlease] Show - 07 (1080p) [ABCD1234].mkv",
+            "[Judas] Show - 07 [BD 1080p][Dual-Audio].mkv",
+            "[Anime Time] Show - 07 [1080p][Dual Audio][AAC].mkv",
+            "[G] Dubai Diaries - 07 [1080p].mkv",
+            "[DubsFree] Show - 07 [1080p].mkv",
+        ],
+    )
+    def test_everything_else_is_not(self, name: str) -> None:
+        assert parse(name).dubbed is False
+
+
 class TestRobustness:
     def test_a_path_is_reduced_to_its_basename(self) -> None:
         long = "/data/downloads/[G] Show/[G] Show - 03 [1080p].mkv"
-        assert parse(long).title_key == "show"
-        assert parse(long).raw == long
+        assert parse(long, path=True).title_key == "show"
+        assert parse(long, path=True).raw == long
 
     @pytest.mark.parametrize("name", ["", ".", "....", "   ", "[]", "[][][]", "x" * 400])
     def test_nonsense_does_not_raise(self, name: str) -> None:

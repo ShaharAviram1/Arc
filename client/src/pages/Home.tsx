@@ -21,7 +21,6 @@ import {
 } from '@/components/ui'
 import {
   catalogErrorMessage,
-  episodeStateLabel,
   hasBanner,
   heroArt,
   keyVisual,
@@ -787,37 +786,31 @@ interface Appointment {
   weekday: number
   time: string
   episode: string
-  /** What Arc has done about it, in words. */
-  state: string
-  /** True when the file is here; the line brightens rather than changing hue. */
-  ready: boolean
+  /** True once the viewer has watched this week's episode (FR-W5). */
+  watched: boolean
   tonight: boolean
 }
 
 /**
- * What Arc will do, or has done, about this week's episode of a show.
+ * Whether the viewer has already watched this week's episode of a show.
  *
- * The home aggregate carries the episodes that actually aired in the last
- * seven days with their state, so a show that already has its file says so.
- * For one still to come, the broadcast time *is* the answer — Arc searches
- * once an episode has aired — and a show with neither gets the honest
- * "waiting", never a guess.
+ * **This shelf carries no acquisition state** (owner, 2026-09-13). It used to
+ * label every tile with the episode's state, which meant most of a following
+ * read "Not fetched" — Arc's resting state, which says "nobody has asked for
+ * this yet" to Arc and "something is wrong" to a person, and which is
+ * acquisition jargon nobody outside the Show page needs. An appointment card
+ * is a broadcast time; what Arc is doing about the file belongs on the Show
+ * page, where FR-A7's per-episode state still lives in full.
+ *
+ * What is left is the one fact a viewer wants from a week's calendar: have I
+ * seen it? The home aggregate carries the episodes that aired in the last
+ * seven days with FR-W5's watched flag on each, so an episode covered only by
+ * an imported list progress ticks too — which on the owner's own list is most
+ * of them.
  */
-function acquisitionState(
-  home: HomePage,
-  animeId: number,
-  airTime: string | null,
-  upcoming: boolean,
-): { state: string; ready: boolean } {
+function watchedThisWeek(home: HomePage, animeId: number): boolean {
   const found = home.new_this_week.find((entry) => entry.anime.id === animeId)
-  if (found !== undefined) {
-    if (found.episode.state === 'ready') return { state: 'Ready', ready: true }
-    return { state: episodeStateLabel(found.episode.state), ready: false }
-  }
-  if (upcoming && airTime !== null && airTime !== '') {
-    return { state: `Arc will search at ${airTime}`, ready: false }
-  }
-  return { state: 'Waiting for a release', ready: false }
+  return found !== undefined && found.episode.watched
 }
 
 /**
@@ -837,7 +830,6 @@ function appointments(schedule: SchedulePage, home: HomePage, today: number): Ap
     if (day === undefined) continue
     for (const entry of day.entries) {
       if (!entry.following) continue
-      const upcoming = entry.next_at !== null && Date.parse(entry.next_at) > Date.now()
       cards.push({
         anime: entry.anime,
         weekday,
@@ -845,7 +837,7 @@ function appointments(schedule: SchedulePage, home: HomePage, today: number): Ap
         episode:
           entry.next_episode === null ? 'Next episode' : `Episode ${String(entry.next_episode)}`,
         tonight: weekday === today,
-        ...acquisitionState(home, entry.anime.id, entry.air_time_local, upcoming),
+        watched: watchedThisWeek(home, entry.anime.id),
       })
     }
   }
@@ -887,14 +879,12 @@ function AppointmentCard({ card }: { card: Appointment }) {
         </div>
       </div>
 
-      <p
-        className={cx(
-          'mt-3 text-[13px]',
-          card.ready ? 'text-[var(--arc-text)]' : 'text-[var(--arc-text-muted)]',
-        )}
-      >
-        {card.state}
-      </p>
+      {card.watched ? (
+        <p className="mt-3 flex items-center gap-1.5 text-[13px] text-[var(--arc-text-muted)]">
+          <span aria-hidden>✓</span>
+          Watched
+        </p>
+      ) : null}
     </Link>
   )
 }

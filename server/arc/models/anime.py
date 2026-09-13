@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -212,3 +213,15 @@ class Episode(Base):
     )
     #: Why the search gave up, shown to the user (FR-A6, FR-A7).
     unavailable_reason: Mapped[str | None] = mapped_column(Text)
+    #: When ``search_release`` last asked Nyaa about this episode, and what it
+    #: got: how many query forms ran and how many distinct releases they
+    #: returned between them, before the filter (FR-A7, 2026-09-14). Three
+    #: columns rather than a blob because all three are rendered on the episode
+    #: row of the show page — "Searching · 6 forms, 0 results · next try 23:26"
+    #: — and an owner watching a row say ``Searching`` for six hours has no
+    #: other way to tell a query that finds nothing from a filter that keeps
+    #: nothing. Null until the first search; never backfilled, and never
+    #: cleared, so the numbers outlive the state that produced them.
+    last_search_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    last_search_forms: Mapped[int | None] = mapped_column(SmallInteger)
+    last_search_results: Mapped[int | None] = mapped_column(SmallInteger)

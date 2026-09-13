@@ -192,9 +192,31 @@ def test_a_watch_event_never_lowers_progress() -> None:
 
 @pytest.mark.parametrize("cause", [MalWriteCause.MANUAL, MalWriteCause.REVERT])
 def test_an_explicit_edit_may_lower_progress(cause: MalWriteCause) -> None:
-    """A user typing a smaller number is a statement; a rewatch is not."""
+    """A user typing a smaller number is a statement; a rewatch is not.
+
+    Since 2026-09-13 the ``manual`` half of this is also how ``DELETE
+    …/watched`` works: the un-mark queues a ``manual`` progress row carrying
+    ``N-1``, which is the one write in Arc that lowers MyAnimeList's progress.
+    """
     result = decide_push([queued(FIELD_PROGRESS, 2, cause)], remote(progress=9))
     assert sent(result) == [(FIELD_PROGRESS, 9, 2)]
+
+
+def test_the_unmark_lowers_progress_and_an_automatic_event_still_cannot() -> None:
+    """The FR-M4 line, drawn between two rows that differ only in their cause.
+
+    Same field, same value, same remote number: the explicit un-mark goes out
+    and the watch event is refused and logged. Nothing about the guard was
+    relaxed to let the first one through — the cause on the row is what decides,
+    which is why no automatic path can reach this outcome without writing a row
+    that claims to be a user's edit (``tests/test_mal_guard.py``).
+    """
+    unmark = decide_push([queued(FIELD_PROGRESS, 8, MalWriteCause.MANUAL)], remote(progress=9))
+    automatic = decide_push([queued(FIELD_PROGRESS, 8, MalWriteCause.WATCH)], remote(progress=9))
+
+    assert sent(unmark) == [(FIELD_PROGRESS, 9, 8)]
+    assert sent(automatic) == []
+    assert plans(automatic) == [(FIELD_PROGRESS, 9, 8, sync.SKIP_LOWERS_PROGRESS)]
 
 
 def test_a_watch_event_never_clears_a_score() -> None:

@@ -1020,21 +1020,54 @@ describe('Watch Now shelves', () => {
     expect(week.getByText(WEEKDAY_LABELS[(TODAY + 2) % 7] as string)).toBeInTheDocument()
     expect(week.getByText('20:00')).toBeInTheDocument()
     expect(week.getByText('Episode 12')).toBeInTheDocument()
-    // Still to come, so Arc says when it will go looking.
-    expect(week.getByText('Arc will search at 20:00')).toBeInTheDocument()
     // A show the viewer does not follow keeps no appointment.
     expect(week.queryByText('Unfollowed')).not.toBeInTheDocument()
     expect(week.getByRole('link', { name: 'Full schedule' })).toHaveAttribute('href', '/schedule')
   })
 
-  it('says an episode is ready when the week’s aggregate has the file', async () => {
+  it('carries no acquisition state at all (owner, 2026-09-13)', async () => {
+    // The shelf used to label every tile with the episode's state, which on a
+    // real list read "Not fetched" — Arc's resting state, and jargon nobody
+    // outside the Show page needs. A broadcast time and the episode is the
+    // whole card now.
     renderHome({
       'GET /api/home': { body: { ...READY_ONLY, continue_watching: [] } },
       'GET /api/schedule': { body: weekSchedule() },
     })
 
     await screen.findByRole('heading', { level: 2, name: 'This week' })
-    expect(within(shelf('This week')).getByText('Ready')).toBeInTheDocument()
+    const week = within(shelf('This week'))
+
+    expect(week.queryByText('Ready')).not.toBeInTheDocument()
+    expect(week.queryByText('Not fetched')).not.toBeInTheDocument()
+    expect(week.queryByText('Arc will search at 20:00')).not.toBeInTheDocument()
+    expect(week.queryByText('Waiting for a release')).not.toBeInTheDocument()
+    expect(week.queryByText('Watched')).not.toBeInTheDocument()
+    // …and what is left is still the appointment.
+    expect(week.getByText('20:00')).toBeInTheDocument()
+    expect(week.getByText('Episode 12')).toBeInTheDocument()
+  })
+
+  it('ticks a week’s episode the viewer has watched (FR-W5)', async () => {
+    // Watched through the list's progress alone, which on the owner's own
+    // imported list is how most of this shelf is watched.
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...READY_ONLY,
+          new_this_week: [
+            {
+              anime: FRIEREN,
+              episode: readyEpisode({ watched: true, watched_source: 'progress' }),
+            },
+          ],
+        },
+      },
+      'GET /api/schedule': { body: weekSchedule() },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'This week' })
+    expect(within(shelf('This week')).getByText('Watched')).toBeInTheDocument()
   })
 
   it('counts what has piled up in prose, with no badge on the artwork', async () => {

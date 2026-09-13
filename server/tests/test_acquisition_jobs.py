@@ -400,6 +400,57 @@ async def test_every_release_taken_is_the_same_as_no_release(
     assert len(await queued(db_session, SEARCH_RELEASE)) == 1, "the retry schedule, as with no hit"
 
 
+# --- The search diagnostic on the episode row (FR-A7, 2026-09-14) -----------
+
+
+async def test_a_search_stamps_what_it_asked_and_saw_on_the_episode(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Seven forms for this entry; the one stubbed feed answers twenty items."""
+    before = datetime.now(UTC)
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962030, email="stamp@arc.test"
+    )
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert episode.last_search_forms == len(wired.nyaa.queries) == 7
+    assert episode.last_search_results == 20, "the merged pool, before the filter"
+    assert episode.last_search_at is not None and episode.last_search_at >= before
+
+
+async def test_a_search_that_finds_nothing_stamps_the_zero(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The case the row exists for: "6 forms, 0 results" is a query problem."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962031, email="stamp0@arc.test", feed=None
+    )
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert episode.state is EpisodeState.SEARCHING
+    assert episode.last_search_forms == 7
+    assert episode.last_search_results == 0
+    assert episode.last_search_at is not None
+
+
+async def test_a_paused_search_stamps_nothing_because_it_asked_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962032, email="stampoff@arc.test"
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries == []
+    assert episode.last_search_at is None
+    assert episode.last_search_forms is None
+    assert episode.last_search_results is None
+
+
 # --- No candidate: the retry schedule (FR-A6) -------------------------------
 
 

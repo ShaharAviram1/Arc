@@ -32,10 +32,19 @@ of the wrong season ends up on disk, and a wrong file is worse than no file:
 the matcher's own prior would then link it to the episode Arc asked for and it
 would play as though it were right.
 
+**A film is a different question entirely** (:func:`is_single`). A ``MOVIE``
+entry, or an OVA/ONA the catalogue gives one episode, has no episode number for
+a query to carry and none for the filter to compare: the query is the bare
+title and the check is "is this one release of this title", with the year as
+the tie-break. Until 2026-09-14 Arc asked Nyaa for ``Servamp Movie: Alice in
+the Garden - 01``.
+
 **Ranking is FR-A3's four rules in order**: preferred group, then resolution,
-then seeders, then Nyaa's trusted flag. Each pick records the reasons it won,
-because "why did it choose that release?" is the first question anybody asks
-of an acquisition system and a score with no explanation cannot answer it.
+then seeders, then Nyaa's trusted flag — behind one rule that comes first, an
+**English dub ranks below every subbed candidate** and is only ever chosen for
+lack of anything else. Each pick records the reasons it won, because "why did
+it choose that release?" is the first question anybody asks of an acquisition
+system and a score with no explanation cannot answer it.
 """
 
 from __future__ import annotations
@@ -118,12 +127,105 @@ TITLE_THRESHOLD: Final[float] = 0.90
 
 #: Most queries a single search makes, however many the builder produced.
 #: **Every one of them runs**, so this is the budget one episode's search may
-#: spend: six × 2 s of spacing, and rather less in practice because the cache
-#: is shared and the broad forms repeat from episode to episode. Six rather
-#: than the original five so that a title with a subtitle and no season marker
-#: keeps its bare form *behind* the two head forms (:func:`queries`); the
-#: dedupe keeps a typical show at two or three regardless.
-MAX_QUERIES: Final[int] = 6
+#: spend: ten × 2 s of spacing, and rather less in practice because the cache
+#: is shared and the broad forms repeat from episode to episode. Five
+#: originally; six so that a title with a subtitle and no season marker keeps
+#: its bare form *behind* the two head forms; eight so that the two ``SxxEyy``
+#: forms (:func:`queries`) do not push the season short forms off the end of a
+#: marked entry's list; ten for the symbol-stripped variants
+#: (:func:`strip_symbols`), which sit behind the form they are derived from and
+#: would otherwise push a marked entry's english short forms off the end. The
+#: dedupe keeps a typical show at three or four regardless.
+MAX_QUERIES: Final[int] = 10
+
+#: Punctuation a release group drops and a catalogue keeps. Every one of these
+#: either glues two words into one token (``Yarichin☆Bitch-bu``) or hangs off
+#: the end of one (``Love Live! Superstar!!``), and Nyaa's search ANDs *tokens*
+#: — so ``Yarichin☆Bitch-bu - 01`` finds nothing while ``Yarichin Bitch-bu -
+#: 01`` finds the show. The ordinary hyphen is **not** here: it is what
+#: separates the episode number from the title in almost every query form.
+#: The slash is, because a franchise written with one is written both ways —
+#: *Fate/Zero* and *Fate Zero* are the same show on Nyaa.
+#:
+#: **Not** the same set as the parser's
+#: :data:`~arc.services.library.parser._PUNCT_RE`, and deliberately so: that
+#: one flattens *every* non-alphanumeric character on both sides of a
+#: comparison, which is right for a comparison and wrong for a query. This set
+#: is the punctuation a release group is known to drop from a name it types,
+#: and each character here costs a real request to Nyaa — so it is a short,
+#: evidenced list rather than "everything that is not a letter". A title whose
+#: punctuation differs only in ways *this* set does not cover is still matched
+#: by the filter, because the filter compares ``title_key``s.
+SYMBOLS: Final[str] = "☆★♪♥!?:;~〜～·・—/"
+_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(f"[{re.escape(SYMBOLS)}]+")
+
+#: Formats that have **one** thing to fetch and no episode number to ask for.
+#: ``MOVIE`` whatever its episode count (a two-part film is still asked for by
+#: name), and the short forms only when the catalogue says there is exactly one
+#: episode: an OVA *series* of four is four numbered releases like any other.
+SINGLE_FORMATS: Final[frozenset[str]] = frozenset({"OVA", "ONA", "SPECIAL"})
+
+#: The parser kinds a **single** may be (:func:`acceptable`). A film names
+#: itself one (``Movie``, ``Gekijouban``) and a bonus episode names itself the
+#: other; a release with *no episode number and no marker at all* is neither,
+#: and that is the point of the list. ``[Judas] Sword Art Online [BD 1080p]``,
+#: ``[Coalgirls] Servamp (1920x1080 Blu-ray FLAC)`` and ``[Coalgirls]
+#: Kizumonogatari [BD 1080p]`` are whole-series Blu-ray packs: they parse as
+#: ``kind=unknown`` with no number, no range and no batch marker, so before
+#: 2026-09-14 each of them was "an episode-less single" — 20 GB of a franchise
+#: offered as one film, with a *shorter* title than the entry's and therefore a
+#: perfect score under the ordinary asymmetric comparison.
+SINGLE_KINDS: Final[frozenset[str]] = frozenset({"movie", "special"})
+
+#: The only words a release may drop from a single's title and still be it
+#: (:func:`title_score`'s ``strict`` mode). The parser takes a trailing type
+#: marker off the title it reports — ``[Moozzi2] The Royal Tutor Movie`` parses
+#: as ``the royal tutor`` — while the catalogue keeps it, so the *type* word is
+#: a difference that means nothing. Every other missing word means the release
+#: named a different film of the franchise.
+TYPE_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "movie",
+        "movies",
+        "gekijouban",
+        "gekijoban",
+        "film",
+        "ova",
+        "oav",
+        "ona",
+        "special",
+        "specials",
+        "the",
+    }
+)
+
+#: How far a release's year may sit from the entry's ``season_year`` and still
+#: be the same thing (:func:`acceptable`, singles only). One: a film that
+#: premiered in December is a BD in January, and a group writes whichever year
+#: it has in mind.
+YEAR_SLACK: Final[int] = 1
+
+#: The floor a synonym has to clear to earn a query of its own: two words, or
+#: six characters. The list is somebody else's free-text field and it holds
+#: entries like ``"2"`` — which is not a query for this show but a query for a
+#: quarter of Nyaa, and it would cost a slot one of the title forms could have
+#: had.
+MIN_SYNONYM_WORDS: Final[int] = 2
+MIN_SYNONYM_CHARS: Final[int] = 6
+
+#: What a synonym may not consist of: a season marker and nothing else.
+#: Matched against the whole of the synonym, so ``"Season 2"``, ``"Part 2"``
+#: and ``"S2"`` are dropped while ``"Overlord Season 2"`` is not.
+_SEASON_ONLY_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:season|series|part|cour|s|ep|episode)\b|\d+(?:st|nd|rd|th)?|\b[IVX]+\b",
+    re.IGNORECASE,
+)
+
+#: Most synonyms that may earn a query of their own (FR-A4). Two, and they are
+#: counted against :data:`MAX_QUERIES` **last**: a synonym is a name somebody
+#: once wrote for this show, and the manami vocabulary carries five or six of
+#: them for a popular franchise.
+MAX_SYNONYM_QUERIES: Final[int] = 2
 
 #: Season numbers as a release group writes them in a title. Only up to 5:
 #: past that nobody uses numerals, and ``I`` is never written at all.
@@ -419,6 +521,41 @@ def anime_titles(anime: Anime) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def strip_symbols(text: str) -> str:
+    """``"Yarichin☆Bitch-bu - 01"`` → ``"Yarichin Bitch-bu - 01"``.
+
+    Every character of :data:`SYMBOLS` becomes a space and the runs collapse,
+    which is the right answer for both shapes the problem takes: a symbol
+    *between* two words has to become a separator (``Yarichin☆Bitch-bu``, and
+    the same for ``Re:Zero``), and one *after* a word simply goes (``Love
+    Live! Superstar!!``). Nyaa ANDs the tokens of a query, so a title Arc asks
+    for with the star in it matches only the uploads that wrote the star.
+    """
+    return " ".join(_SYMBOL_RE.sub(" ", text).split())
+
+
+def is_single(anime: Anime) -> bool:
+    """Whether this entry is **one** release with no episode number (FR-A4).
+
+    A film, an OVA or an ONA that the catalogue gives exactly one episode. It
+    is the question the query builder and the filter both have to ask, because
+    every form and every check below them is written for a numbered weekly
+    release and none of them is true of a film:
+    ``Servamp Movie: Alice in the Garden - 01`` is a query with no answer, and
+    *Servamp Movie: Alice in the Garden* is one with nine. Three entries sat in
+    ``searching`` for a day on production for exactly that reason.
+
+    ``episodes == 1`` guards the OVA half only. A ``MOVIE`` entry is a single
+    whatever its count — a two-part film is two rows in the catalogue and each
+    of them is asked for by name — while an OVA *series* of four is four
+    numbered releases like any other show.
+    """
+    fmt = (anime.format or "").strip().upper()
+    if fmt == "MOVIE":
+        return True
+    return fmt in SINGLE_FORMATS and anime.episodes == 1
+
+
 def anime_season(anime: Anime) -> int | None:
     """The season this catalogue entry's own titles name, if any of them do."""
     for name in (anime.title_romaji, anime.title_english):
@@ -452,6 +589,42 @@ def _short_forms(name: str, season: int, padded: str) -> list[str]:
         built.append(f"{base} {roman} - {padded}")
     built.append(f"{base} - {padded}")
     return built
+
+
+def _sxxexx_form(name: str, season: int, number: int) -> str:
+    """``"One-Room TA S01E01"`` — the way a Western-style group writes it.
+
+    The third thing Nyaa's word-ANDing breaks, after the season marker
+    (:func:`_short_forms`) and the subtitle (:func:`head_of`), and the one that
+    is not a *title* problem at all: ToonsHub, geckyzz, the dub groups and
+    Erai-raws' alternate naming write the number as ``S01E02`` rather than as
+    ``- 02``, and ``01`` is not a word of ``S01E02``. So ``One-Room TA - 01``
+    and ``One-Room TA 01`` each returned nothing on 2026-09-13 while
+    ``One-Room TA`` returned nine releases, seven of them the episodes Arc was
+    looking for.
+
+    Built from the season-stripped base for the same reason the short forms
+    are — ``Mushoku Tensei III: Isekai Ittara Honki Dasu`` asks ``Mushoku
+    Tensei S03E11`` — and the season is the one the entry's own title names, or
+    1 when it names none, which is the same reading :func:`acceptable` applies
+    on both sides.
+
+    The episode is padded to **two** digits here rather than through
+    :func:`pad`: ``SxxEyy`` is a scene convention with its own width, and a
+    long show writes ``S01E1089`` (One Piece), never ``S01E089``.
+
+    Unlike the head forms this needs no :func:`has_prequel` gate, and for two
+    reasons. It is built from the *base* rather than the head, so a subtitled
+    sequel is asked for by its whole name (``Made in Abyss: Retsujitsu no
+    Ougonkyou S01E07``) and cannot reach the first season's releases at all;
+    and where the base *is* bare — a marked entry, ``Sousou no Frieren
+    S02E07`` — the form carries the season explicitly, which is exactly what
+    :func:`acceptable`'s season check reads.
+    """
+    base = strip_season(name).base
+    if not base:
+        return ""
+    return f"{base} S{season:02d}E{number:02d}"
 
 
 def has_prequel(anime: Anime) -> bool:
@@ -504,31 +677,124 @@ def head_of(name: str) -> str:
     return head if len(head) < len(name) else ""
 
 
+def _synonym_forms(anime: Anime) -> list[str]:
+    """Up to :data:`MAX_SYNONYM_QUERIES` synonyms worth a query of their own.
+
+    AniList's ``synonyms`` are where a show's *other* real names live — the
+    Japanese-market abbreviation, the streaming service's title, the name the
+    manga was licensed under — and a release group writes one of those as often
+    as it writes the catalogue's romaji. They come last and they are few,
+    because the list is also where a dozen transliterations of the same three
+    words live, and each one costs two seconds of Nyaa's patience.
+
+    A synonym is only kept when it says something the title forms have not
+    already said: its season-stripped name and its head
+    (:func:`head_of`) are both compared against the same two forms of the
+    romaji and english titles, so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd
+    Season* — whose head is the ``Mushoku Tensei`` the short forms already ask
+    for — earns nothing.
+
+    And it has to be a **name** (:data:`MIN_SYNONYM_WORDS`,
+    :data:`MIN_SYNONYM_CHARS`). The synonym list is a free-text field in
+    somebody else's database and it carries entries like ``"Season 2"``,
+    ``"2"`` and ``"Part 2"`` — a query for none of which is a query for this
+    show, and one of which is a query for a quarter of Nyaa. Two words, or six
+    characters, and never something :func:`~arc.services.library.parser.
+    strip_season` reads as nothing but a season marker. The floor also drops a
+    short native-script name (``進撃の巨人`` is five characters), which is the
+    same decision :func:`queries` already makes about ``title_native``: it is
+    one of the names the *filter* compares against (:func:`anime_titles`) and
+    not one of the names Arc asks the english-translated category for.
+    """
+    covered: set[str] = set()
+    for name in (anime.title_romaji, anime.title_english):
+        if not name:
+            continue
+        base = strip_season(name).base or name
+        for form in (name, base, head_of(base)):
+            key = title_key(form)
+            if key:
+                covered.add(key)
+
+    kept: list[str] = []
+    for synonym in anime.synonyms or ():
+        if not isinstance(synonym, str) or not synonym.strip():
+            continue
+        marked = strip_season(synonym.strip())
+        base = marked.base or marked.title
+        if not base:
+            # Nothing but a season marker: ``strip_season("Season 2")`` keeps
+            # the words (there is no head for the marker to hang off) but
+            # ``"2"`` and ``"II"`` reduce to nothing at all.
+            continue
+        if len(base.split()) < MIN_SYNONYM_WORDS and len(base) < MIN_SYNONYM_CHARS:
+            continue
+        if not title_key(_SEASON_ONLY_RE.sub(" ", base)):
+            # ``"Season 2"``, ``"Part 2"``, ``"S2"``: a season and nothing to
+            # attach it to.
+            continue
+        head = head_of(base)
+        keys = {title_key(base)} | ({title_key(head)} if head else set())
+        if not any(keys) or keys & covered:
+            continue
+        covered |= keys
+        kept.append(base)
+        if len(kept) == MAX_SYNONYM_QUERIES:
+            break
+    return kept
+
+
 def queries(anime: Anime, number: int) -> list[str]:
     """What to ask Nyaa for, best first, at most :data:`MAX_QUERIES`.
 
-    In order, and the order is the whole of the ranking between them:
+    **A film, an OVA or an ONA with one episode** (:func:`is_single`) is a
+    different list and a short one: the bare titles, their symbol-stripped
+    variants and up to two synonyms, with no number attached to any of them.
+    Nothing on Nyaa writes ``Servamp Movie: Alice in the Garden - 01``, so
+    every numbered form was a query with no answer and three films sat in
+    ``searching`` for a day on production because of it.
+
+    Otherwise, in order — and **the order is what the cap cuts**, so it runs
+    from the form a group is likeliest to have written to the most speculative:
 
     1. ``"<romaji> - 07"``, because that is how almost every group writes a
        weekly release, and because the dash is what keeps the query from
        matching a batch.
     2. ``"<english> - 07"``, the same for the english title.
-    3. For an entry whose own title names a season, the short forms of
-       :func:`_short_forms` — a later season is where the catalogue's title and
-       the release's name diverge most.
-    4. ``"<head of romaji> - 07"`` and 5. ``"<head of english> - 07"``, where
+    3. ``"<romaji> S01E07"`` (:func:`_sxxexx_form`), the same title with the
+       number written the Western way — which is what ToonsHub, geckyzz, the
+       dub groups and Erai-raws' alternate naming write, and which the ``- 07``
+       forms cannot find because Nyaa ANDs the words of a query and ``07`` is
+       not a word of ``S01E07``. Third rather than last: a show whose groups
+       name it this way has *nothing* under the two forms in front of it.
+    4. For an entry whose own title names a season, the **romaji** short forms
+       of :func:`_short_forms` — a later season is where the catalogue's title
+       and the release's name diverge most, and romaji is what groups write.
+    5. ``"<head of romaji> - 07"`` and ``"<head of english> - 07"``, where
        :func:`head_of` found a subtitle to drop **and** :func:`has_prequel`
        found nothing in front of the entry. A group names a show by its head:
        nothing on Nyaa spells *… Musou: Nidome no Tensei, S-Rank Cheat
        Majutsushi Bouken-roku* out, so every query built from the whole title
-       returns zero results and the episode goes on the retry schedule while
-       nine releases sit there under the head. Derived from the season-stripped
-       title exactly as the short forms are, which is why *Mushoku Tensei III:
-       Isekai Ittara Honki Dasu* adds nothing here — its base is already
-       ``Mushoku Tensei`` and the dedupe drops the repeat.
-    6. ``"<romaji> 07"``, the bare form, for the groups that write no dash. Only
-       for an entry with no season marker: a marked one spends its budget on
-       the short forms, which are broader and likelier.
+       returns zero results while nine releases sit there under the head.
+    6. ``"<romaji> 07"``, the bare form, for the groups that write no dash.
+       Only for an entry with no season marker: a marked one has spent its
+       budget on the short forms, which are broader and likelier.
+    7. Then the **english** ``SxxEyy`` form and the english short forms. Same
+       two ideas as 3 and 4 in the language a group writes second.
+    8. Then the **symbol-stripped variants of the two full titles** (
+       :func:`strip_symbols`): ``Yarichin☆Bitch-bu - 01`` is followed by
+       ``Yarichin Bitch-bu - 01``, ``Love Live! Superstar!! - 03`` by ``Love
+       Live Superstar - 03`` and ``Fate/Zero - 12`` by ``Fate Zero - 12``,
+       because a symbol glued between two words makes one token out of both and
+       Nyaa matches tokens. Only the *full* forms earn one: a variant of an
+       abbreviation is a guess about a guess, and those slots are better spent
+       on the short forms above — which is exactly what the first version of
+       this got wrong, putting each variant beside its own form and cutting
+       *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*'s short forms off
+       the end of the list.
+    9. ``"<synonym> - 07"`` for up to :data:`MAX_SYNONYM_QUERIES` of the
+       entry's other names (:func:`_synonym_forms`), last because a synonym is
+       a name somebody once wrote rather than a name a group writes.
 
     A broad head query is safe because of what happens *after* it: the release
     name still has to parse as this episode, agree about the season, and reach
@@ -545,36 +811,89 @@ def queries(anime: Anime, number: int) -> list[str]:
     english = anime.title_english
     padded = pad(number, total_episodes=anime.episodes)
     season = anime_season(anime)
+    single = is_single(anime)
 
     built: list[str] = []
-    if romaji:
-        built.append(f"{romaji} - {padded}")
-    if english and english != romaji:
-        built.append(f"{english} - {padded}")
-    if season is not None:
+
+    def add(query: str) -> None:
+        """One form, normalised, in the order it was asked for."""
+        normalised = " ".join(query.split())
+        if normalised:
+            built.append(normalised)
+
+    def add_variant(query: str) -> None:
+        """The same form with its symbols taken out, when that changes it."""
+        stripped = strip_symbols(" ".join(query.split()))
+        if stripped and stripped != " ".join(query.split()):
+            add(stripped)
+
+    if single:
+        # No cap pressure here — two titles and two synonyms — so the variant
+        # stays beside the form it comes from, which is also where it does the
+        # most good: ``Servamp Movie Alice in the Garden`` is the query that
+        # finds the film, and the colon is the only reason the first one did
+        # not.
         for name in (romaji, english):
             if name:
-                built.extend(_short_forms(name, season, padded))
-    if not has_prequel(anime):
-        for name in (romaji, english):
-            if not name:
-                continue
-            head = head_of(strip_season(name).base)
-            if head:
-                built.append(f"{head} - {padded}")
-    if season is None and romaji:
-        built.append(f"{romaji} {padded}")
+                add(name)
+                add_variant(name)
+        for synonym in _synonym_forms(anime):
+            add(synonym)
+            add_variant(synonym)
+    else:
+        # **The order is the cap**, so the forms that a group is likeliest to
+        # have written come first and the speculative ones are what falls off
+        # the end (2026-09-14). Romaji leads every pair: it is what release
+        # groups write. A marked, subtitled title — *Kimetsu no Yaiba:
+        # Katanakaji no Sato-hen 2nd Season* — has fourteen forms and ten
+        # slots, and the four it must not lose are the romaji short forms.
+        if romaji:
+            add(f"{romaji} - {padded}")
+        if english and english != romaji:
+            add(f"{english} - {padded}")
+        if romaji:
+            add(_sxxexx_form(romaji, season or 1, number))
+        if season is not None and romaji:
+            for form in _short_forms(romaji, season, padded):
+                add(form)
+        if not has_prequel(anime):
+            for name in (romaji, english):
+                if not name:
+                    continue
+                head = head_of(strip_season(name).base)
+                if head:
+                    add(f"{head} - {padded}")
+        if season is None and romaji:
+            add(f"{romaji} {padded}")
+        if english and english != romaji:
+            add(_sxxexx_form(english, season or 1, number))
+            if season is not None:
+                for form in _short_forms(english, season, padded):
+                    add(form)
+        # Then the symbol-stripped variants of the two full titles, which is
+        # the one speculative form worth a slot: a star or a colon glued
+        # between two words makes one token out of both and Nyaa matches
+        # tokens. Only the *full* forms get one — a variant of a variant of an
+        # abbreviation is a guess about a guess, and the cap is better spent on
+        # the short forms above.
+        if romaji:
+            add_variant(f"{romaji} - {padded}")
+        if english and english != romaji:
+            add_variant(f"{english} - {padded}")
+        for synonym in _synonym_forms(anime):
+            add(f"{synonym} - {padded}")
+            add_variant(f"{synonym} - {padded}")
 
     seen: dict[str, None] = {}
     for query in built:
-        seen.setdefault(" ".join(query.split()), None)
+        seen.setdefault(query, None)
     return list(seen)[:MAX_QUERIES]
 
 
 # --- Filtering --------------------------------------------------------------
 
 
-def title_score(parsed_key: str, titles: Iterable[str]) -> float:
+def title_score(parsed_key: str, titles: Iterable[str], *, strict: bool = False) -> float:
     """How close a parsed release title is to one of a show's titles, 0..1.
 
     Both sides have their season markers stripped and their punctuation
@@ -605,6 +924,18 @@ def title_score(parsed_key: str, titles: Iterable[str]) -> float:
     title followed by the english one. So the leftover tokens are checked
     against the entry's own titles and synonyms first, and if one of them
     accounts for all of them the release is this show after all.
+
+    ``strict`` closes the *other* direction, and is used for a single
+    (:func:`acceptable`, 2026-09-14). A shorter release name is normal for an
+    episode — the episode number is what pins it down — and it is how the wrong
+    *film* gets downloaded, because a film has no number at all: ``servamp`` is
+    a subset of every token of *Servamp Movie: Alice in the Garden*, and
+    ``kizumonogatari`` is a subset of all three parts of *Kizumonogatari*. So
+    in strict mode a release that names **less** than the entry is scored by
+    ``token_sort_ratio`` too, and only the type marker itself
+    (:data:`TYPE_WORDS`) is forgiven — the parser strips a trailing ``Movie``
+    from the title it reports and the catalogue keeps it, which is a difference
+    that means nothing, unlike a missing ``Alice in the Garden``.
     """
     if not parsed_key:
         return 0.0
@@ -618,6 +949,12 @@ def title_score(parsed_key: str, titles: Iterable[str]) -> float:
             return 1.0
         if other_tokens < parsed_tokens and not any(
             (parsed_tokens - other_tokens) <= tokens for tokens in own_tokens
+        ):
+            score = fuzz.token_sort_ratio(parsed_key, other)
+        elif (
+            strict
+            and parsed_tokens < other_tokens
+            and not ((other_tokens - parsed_tokens) <= TYPE_WORDS)
         ):
             score = fuzz.token_sort_ratio(parsed_key, other)
         else:
@@ -642,6 +979,11 @@ class Candidate:
     def resolution(self) -> str | None:
         return self.parsed.resolution
 
+    @property
+    def dubbed(self) -> bool:
+        """Whether the release carries an English dub instead of the original."""
+        return self.parsed.dubbed
+
 
 def _rejected(item: NyaaItem, reason: str) -> None:
     """Log why one result is not the file.
@@ -660,8 +1002,46 @@ def acceptable(
     number: int,
     season: int | None,
     threshold: float = TITLE_THRESHOLD,
+    single: bool = False,
+    year: int | None = None,
 ) -> Candidate | None:
     """``item`` as a :class:`Candidate`, or ``None`` with a reason logged.
+
+    **A single** (``single=True``: a film, or an OVA/ONA the catalogue gives
+    one episode — :func:`is_single`) is a different question, because the two
+    things this function is otherwise built on are both absent. A film's
+    release carries no episode number at all (``[Erai-raws] Servamp Movie -
+    Alice in the Garden [1080p]``) and no season. So three other things are
+    asked instead, and the *order* of them is the fix of 2026-09-14:
+
+    * The release must **say what it is**: :data:`SINGLE_KINDS`, which is the
+      parser's ``movie`` or ``special``. "No episode number" was the first
+      version of this test and it let three whole-series Blu-ray packs through
+      — ``[Judas] Sword Art Online [BD 1080p]`` names no episode, no range and
+      no batch marker, so it was "an episode-less single" and it is 20 GB of
+      the franchise. A release with no number *and* no marker is not a film.
+    * Its title must reach the threshold under the **strict** comparison
+      (:func:`title_score`), which is the half the kind check cannot do: a
+      release that names *less* than the entry is the ordinary case for an
+      episode and the wrong film for a single, because ``kizumonogatari`` is a
+      subset of all three parts of *Kizumonogatari* and scored 1.00 against
+      every one of them. Only the type marker is forgiven
+      (:data:`TYPE_WORDS`), since the parser takes a trailing ``Movie`` off the
+      title it reports and the catalogue keeps it.
+    * And the **year**, when both sides have one: a franchise reboot carries
+      the original's name exactly, and a December premiere is a January disc,
+      so they must agree within :data:`YEAR_SLACK`. A missing year on either
+      side is **no evidence, not agreement** — most releases carry none, which
+      is exactly why the strict title rule above is unconditional rather than a
+      fallback for the ones that do.
+
+    It is then episode 1, which is the row the catalogue holds for it. A batch
+    is still a batch (a franchise's three films in one torrent is exactly the
+    6 GB download FR-A4 forbids), a creditless opening is still ignored, and a
+    *numbered* release is refused unless the parser read it as the film itself:
+    ``[SubsPlease] Yuru Camp - 01`` under a one-episode *special* entry is the
+    television series' first episode, which is the wrong file with a very
+    plausible name.
 
     A **batch is rejected first**, before the episode number is even compared,
     because it is the rejection that matters most and the one whose reason has
@@ -692,6 +1072,8 @@ def acceptable(
         # (``nyaa:seeders``), so this costs nothing but an ``if``.
         _rejected(item, "no seeders")
         return None
+    # ``path=False``: this is a Nyaa title, so a slash in it is part of the
+    # name (``Fate/Zero``) and never a directory separator.
     parsed = parse(item.title)
     if parsed.is_batch or parsed.episode_end is not None:
         span = parsed.episode_span
@@ -704,6 +1086,30 @@ def acceptable(
             covered = ""
         _rejected(item, f"batch release{covered}, not a single episode")
         return None
+    if single and number == 1:
+        if parsed.kind not in SINGLE_KINDS:
+            # The release has to *say* it is one thing (:data:`SINGLE_KINDS`).
+            # "No episode number" is not the same claim: a whole-series Blu-ray
+            # pack says nothing at all, and three of them were accepted as
+            # films before 2026-09-14.
+            _rejected(item, f"parsed as {parsed.kind}, not a film or a one-off")
+            return None
+        if parsed.kind != "movie" and parsed.episode not in (None, number):
+            _rejected(item, f"episode {parsed.episode}, and this entry is one release")
+            return None
+        if year is not None and parsed.year is not None and abs(parsed.year - year) > YEAR_SLACK:
+            _rejected(item, f"year {parsed.year}, not {year}")
+            return None
+        # ``strict``: a release that names *less* of this film's title than the
+        # catalogue does is another film of the franchise, not an abbreviation
+        # (:func:`title_score`). This is what the year check cannot do — most
+        # releases carry no year, and a missing year on either side is no
+        # evidence rather than agreement.
+        similarity = title_score(parsed.title_key, titles, strict=True)
+        if similarity < threshold:
+            _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+            return None
+        return Candidate(item=item, parsed=parsed, title_similarity=similarity)
     if parsed.kind != "episode":
         _rejected(item, f"parsed as {parsed.kind}, not a single episode")
         return None
@@ -739,12 +1145,20 @@ def filter_items(
     number: int,
     season: int | None,
     threshold: float = TITLE_THRESHOLD,
+    single: bool = False,
+    year: int | None = None,
 ) -> list[Candidate]:
     """Every acceptable item, in the order the feed gave them."""
     kept = []
     for item in items:
         candidate = acceptable(
-            item, titles=titles, number=number, season=season, threshold=threshold
+            item,
+            titles=titles,
+            number=number,
+            season=season,
+            threshold=threshold,
+            single=single,
+            year=year,
         )
         if candidate is not None:
             kept.append(candidate)
@@ -770,9 +1184,33 @@ class Ranked:
         return self.candidate.item
 
     @property
-    def sort_key(self) -> tuple[int, int, int, int]:
-        """FR-A3's four rules, in the order the spec lists them."""
-        return (self.group_rank, self.resolution_rank, -self.seeders, 0 if self.trusted else 1)
+    def dubbed(self) -> bool:
+        return self.candidate.dubbed
+
+    @property
+    def sort_key(self) -> tuple[int, int, int, int, int]:
+        """A dub last, then FR-A3's four rules in the order the spec lists them.
+
+        **The dub comes before the group**, which is to say it outranks every
+        other preference: a dubbed release is not a worse copy of the episode,
+        it is the episode in the wrong language, and no ordering of groups or
+        resolutions should be able to promote one over a subbed file that
+        exists. Production picked ``[Yameii] … [English Dub]`` for *Sword Art
+        Online* and ``[KaiDubs] …`` for *BOFURI* on 2026-09-13 because both
+        were the most seeded upload of their episode, which is exactly what
+        FR-A3's third rule says to do and exactly the wrong answer.
+
+        It is a ranking and not a filter, because a dub is still the episode:
+        when nothing else was found, a file somebody can watch beats fourteen
+        days of ``searching`` (``_pick`` logs the choice when it happens).
+        """
+        return (
+            1 if self.dubbed else 0,
+            self.group_rank,
+            self.resolution_rank,
+            -self.seeders,
+            0 if self.trusted else 1,
+        )
 
 
 def _reasons(
@@ -796,6 +1234,8 @@ def _reasons(
         reasons.append(f"{resolution} is neither preferred nor fallback")
 
     reasons.append(f"{candidate.item.seeders} seeders")
+    if candidate.dubbed:
+        reasons.append("english dub, so ranked below every subbed release")
     if candidate.item.trusted:
         reasons.append("trusted uploader")
     if rules.overridden:
@@ -823,6 +1263,31 @@ def rank(candidates: Iterable[Candidate], rules: Rules) -> list[Ranked]:
     return ranked
 
 
+@dataclass(frozen=True, slots=True)
+class Search:
+    """What one episode's search asked, saw and kept (FR-A7).
+
+    ``ranked`` is the answer; ``forms`` and ``results`` are the *diagnostic*,
+    and they are here because they are the two numbers that tell an owner
+    looking at a stuck row which half is broken. "Six forms, zero results" is a
+    query problem — Nyaa has never heard of any name Arc asked by, which is
+    what every case in ``tests/fixtures/query_corpus.txt`` was before it was
+    fixed. "Two forms, forty results, nothing kept" is a filter problem, and
+    the rejection log names the sentence behind each one. Without the pair, a
+    row that says ``Searching`` for six hours says nothing at all.
+    """
+
+    ranked: list[Ranked]
+    #: How many query forms ran (:func:`queries`, after the dedupe and the cap).
+    forms: int
+    #: Distinct releases they returned between them, before the filter.
+    results: int
+
+    @property
+    def kept(self) -> int:
+        return len(self.ranked)
+
+
 async def search_for_episode(
     client: NyaaClient,
     anime: Anime,
@@ -830,7 +1295,7 @@ async def search_for_episode(
     rules: Rules,
     *,
     threshold: float = TITLE_THRESHOLD,
-) -> list[Ranked]:
+) -> Search:
     """Run **every** :func:`queries` form, merge by info hash, filter and rank.
 
     This used to stop at the first query that produced any candidate, on the
@@ -873,7 +1338,13 @@ async def search_for_episode(
         )
 
     candidates = filter_items(
-        merged.values(), titles=titles, number=number, season=season, threshold=threshold
+        merged.values(),
+        titles=titles,
+        number=number,
+        season=season,
+        threshold=threshold,
+        single=is_single(anime),
+        year=anime.season_year,
     )
     ranked = rank(candidates, rules)
     log.info(
@@ -889,7 +1360,7 @@ async def search_for_episode(
             "reasons": list(ranked[0].reasons) if ranked else [],
         },
     )
-    return ranked
+    return Search(ranked=ranked, forms=len(counts), results=len(merged))
 
 
 def as_dict(ranked: Ranked) -> dict[str, Any]:
@@ -910,17 +1381,24 @@ __all__ = [
     "CACHE_TTL",
     "CATEGORY",
     "MAX_QUERIES",
+    "MAX_SYNONYM_QUERIES",
     "MIN_INTERVAL",
     "MIN_SEEDERS",
     "NYAA_NS",
     "ROMAN_SEASONS",
+    "SINGLE_FORMATS",
+    "SYMBOLS",
     "TITLE_THRESHOLD",
     "TRACKERS",
+    "YEAR_SLACK",
     "Candidate",
     "NyaaClient",
     "NyaaItem",
     "NyaaUnavailable",
     "Ranked",
+    "SINGLE_KINDS",
+    "Search",
+    "TYPE_WORDS",
     "acceptable",
     "anime_season",
     "anime_titles",
@@ -929,6 +1407,7 @@ __all__ = [
     "filter_items",
     "has_prequel",
     "head_of",
+    "is_single",
     "pad",
     "parse_feed",
     "queries",
@@ -936,5 +1415,6 @@ __all__ = [
     "reset_shared_client",
     "search_for_episode",
     "shared_client",
+    "strip_symbols",
     "title_score",
 ]

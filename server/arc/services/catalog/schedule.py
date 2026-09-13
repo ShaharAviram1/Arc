@@ -4,9 +4,25 @@ The schedule reads the **local cache only**. No catalogue source is called
 while a schedule page renders: the season pre-cache (FR-C7) is what fills the
 rows, and a day when both sources are down must cost the freshness of the
 airing times, not the page. That is also why every function here is pure —
-rows in, placement out — with the querying left to the router.
+rows in, placement out, statements built and never executed — with the session
+left to the router.
 
-Two decisions live here.
+Three decisions live here.
+
+**Which shows are in the week.** The catalogue's own answer is
+``anime.season``, and for a season being *browsed* — the prev/next views — that
+is the whole rule: those pages are "the shows of Spring 2026", a catalogue
+listing that happens to be laid out as a week. The **current** season's grid is
+a calendar instead, and a calendar is about what is on, not about what started
+when: a two-cour show that began in spring is still on air on a Friday in
+summer, and so is a long-runner that belongs to no season at all. So the
+current week takes a second source — every ``RELEASING`` show with a known air
+time inside :data:`AIRING_WINDOW` of now (:func:`airing_this_week`) — merged
+into the season's own rows by id. The season tag on the row is untouched; the
+entry says it was carried in (:attr:`ScheduleEntry.carried_over` over the wire)
+so the card can name the season the show started in. Found on production: That
+Time I Got Reincarnated as a Slime Season 4 airs every Friday, is tagged
+``SPRING 2026``, and was absent from the Summer 2026 grid (owner, 2026-09-13).
 
 **Which instant places a show.** A row that is still airing carries
 ``next_airing`` (AniList's ``nextAiringEpisode``, or the slot Arc synthesises
@@ -32,8 +48,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from arc.models import Anime, ListStatus
+from sqlalchemy import Integer, Select, and_, exists, or_, select
+
+from arc.models import Anime, Episode, ListStatus
 from arc.services.catalog.airing import (
+    RELEASING,
     next_airing_at,
     next_airing_episode,
     next_airing_estimated,
@@ -64,6 +83,15 @@ FOLLOWING_STATUSES = frozenset({ListStatus.WATCHING, ListStatus.PLANNED, ListSta
 #: episode that never came, and the last episode with a real air time is better
 #: evidence.
 STALE_NEXT_AIRING = timedelta(days=7)
+
+#: How far either side of the present an air time may fall and still count as
+#: "on this week" for :func:`airing_this_week`. A week each way, because a week
+#: is the grid's own period: a weekly show refreshed just after a broadcast
+#: points up to seven days ahead, and one refreshed just before points up to
+#: seven days back. The trailing edge is deliberately the same seven days as
+#: :data:`STALE_NEXT_AIRING`, so a row can never be pulled into the week for a
+#: slot that :func:`place_entries` then throws away as stale.
+AIRING_WINDOW = timedelta(days=7)
 
 #: The timezone anything unparseable falls back to. Arc works in UTC
 #: throughout, so a broken ``users.timezone`` costs an offset, not a page.
@@ -100,6 +128,11 @@ class ScheduleRow:
     anime: Anime
     latest_air_at: datetime | None = None
     list_status: ListStatus | None = None
+    #: True when the row is in this week because it is on air, not because it
+    #: carries the season being shown — a two-cour show from an earlier season,
+    #: or a long-runner tagged with none. Carried through to the entry so the
+    #: card can say which season the show started in.
+    carried_over: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +152,9 @@ class PlacedEntry:
     #: rather than a published time (FR-C6). Always false when there is no
     #: ``next_at`` to qualify: an absent time is not an estimated one.
     next_at_estimated: bool = False
+    #: Whether the show was pulled into this week by being on air rather than
+    #: by its season tag (see the module docstring).
+    carried_over: bool = False
 
     @property
     def following(self) -> bool:
@@ -150,6 +186,59 @@ class WeekPlacement:
     )
     #: Movies, OVAs, specials, and anything with no air time at all.
     unscheduled: list[PlacedEntry] = field(default_factory=list)
+
+
+def season_members(year: int, season: str) -> Select[tuple[Anime]]:
+    """Every show tagged with one season — the catalogue's own answer.
+
+    The whole membership rule for a season being browsed, and the first half of
+    it for the current one.
+    """
+    return select(Anime).where(Anime.season == season, Anime.season_year == year).order_by(Anime.id)
+
+
+def airing_this_week(*, now: datetime) -> Select[tuple[Anime]]:
+    """Every show on air within :data:`AIRING_WINDOW` of ``now``, any season.
+
+    The second half of the current week's membership (see the module
+    docstring). Three conditions, and each of them earns its place:
+
+    * ``status = RELEASING``. A finished show from last season is not on this
+      week whatever dates it carries, and an announced one is not on yet.
+    * A known air time in the window: the cached ``next_airing`` slot, whose
+      ``airingAt`` is compared as epoch seconds in SQL rather than by
+      converting every row in Python (the same arithmetic
+      :func:`~arc.services.catalog.jobs.catalog_pre_air` does), or — only where
+      the row has no slot at all — an episode dated inside the window. A
+      ``RELEASING`` row with no air time anywhere is not carried in: it has
+      nothing to place it on a weekday, and its own season's grid already lists
+      it as unscheduled.
+    * A weekly format. :func:`place_entries` would put anything else in
+      ``unscheduled``, and the current season's unscheduled list is its own
+      films and OVAs — a releasing ONA from two seasons ago belongs on a
+      weekday or nowhere.
+    """
+    lower = int((now - AIRING_WINDOW).timestamp())
+    upper = int((now + AIRING_WINDOW).timestamp())
+    airing_at = Anime.next_airing["airingAt"].astext.cast(Integer)
+    published = and_(Anime.next_airing.isnot(None), airing_at >= lower, airing_at <= upper)
+    dated_episode = and_(
+        Anime.next_airing.is_(None),
+        exists().where(
+            Episode.anime_id == Anime.id,
+            Episode.air_at >= now - AIRING_WINDOW,
+            Episode.air_at <= now + AIRING_WINDOW,
+        ),
+    )
+    return (
+        select(Anime)
+        .where(
+            Anime.status == RELEASING,
+            Anime.format.in_(sorted(SCHEDULED_FORMATS)),
+            or_(published, dated_episode),
+        )
+        .order_by(Anime.id)
+    )
 
 
 def _next_airing(row: ScheduleRow, *, now: datetime) -> tuple[int | None, datetime | None, bool]:
@@ -186,6 +275,7 @@ def place_entries(rows: list[ScheduleRow], *, tz: tzinfo, now: datetime) -> Week
             next_episode=next_episode,
             next_at=next_at,
             next_at_estimated=next_estimated,
+            carried_over=row.carried_over,
         )
         if local is None:
             placement.unscheduled.append(entry)
@@ -199,6 +289,7 @@ def place_entries(rows: list[ScheduleRow], *, tz: tzinfo, now: datetime) -> Week
 
 
 __all__ = [
+    "AIRING_WINDOW",
     "DAYS_IN_WEEK",
     "DEFAULT_TIMEZONE",
     "FOLLOWING_STATUSES",
@@ -208,9 +299,11 @@ __all__ = [
     "ScheduleRow",
     "WeekPlacement",
     "adjacent_seasons",
+    "airing_this_week",
     "current_season",
     "next_season",
     "place_entries",
     "prev_season",
+    "season_members",
     "user_timezone",
 ]

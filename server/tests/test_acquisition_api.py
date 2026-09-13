@@ -226,6 +226,107 @@ async def test_an_unavailable_episode_carries_its_reason(
     assert episode["unavailable_reason"] == "no acceptable release found"
 
 
+# --- The search diagnostic (FR-A7, 2026-09-14) ------------------------------
+
+
+async def test_a_searching_episode_carries_what_the_last_search_asked_and_saw(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """The row's own sentence — "6 forms, 0 results, next try 23:26" — as JSON.
+
+    ``next_at`` is the queued job's ``run_after`` and not a column: FR-A6's
+    retry schedule lives in the job row, so a row that says ``Searching`` has
+    nothing else to read "Arc will look again at" off.
+    """
+    searched_at = datetime(2026, 9, 14, 17, 20, tzinfo=UTC)
+    next_at = datetime(2026, 9, 14, 23, 26, tzinfo=UTC)
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=963010)
+        episodes = await make_episodes(session, anime, 4, aired_through=4)
+        episode = episodes[1]
+        episode.state = EpisodeState.SEARCHING
+        episode.last_search_at = searched_at
+        episode.last_search_forms = 6
+        episode.last_search_results = 0
+        session.add(
+            Job(
+                type=SEARCH_RELEASE,
+                payload={"episode_id": episode.id},
+                run_after=next_at,
+            )
+        )
+        await session.commit()
+        anime_id, episode_id = anime.id, episode.id
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    row = next(item for item in body["episodes"] if item["id"] == episode_id)
+    assert row["search"]["forms"] == 6
+    assert row["search"]["results"] == 0
+    assert row["search"]["at"].startswith("2026-09-14T17:20")
+    assert row["search"]["next_at"].startswith("2026-09-14T23:26")
+    others = [item for item in body["episodes"] if item["id"] != episode_id]
+    assert all(item["search"] is None for item in others), "never searched, so nothing to say"
+
+
+async def test_a_ready_episode_says_nothing_about_its_old_search(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """The file is here: what the search did three days ago is history."""
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=963011)
+        episodes = await make_episodes(session, anime, 4, aired_through=4)
+        episode = episodes[1]
+        episode.state = EpisodeState.READY
+        episode.last_search_at = datetime(2026, 9, 11, 9, 0, tzinfo=UTC)
+        episode.last_search_forms = 8
+        episode.last_search_results = 20
+        await session.commit()
+        anime_id, episode_id = anime.id, episode.id
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    row = next(item for item in body["episodes"] if item["id"] == episode_id)
+    assert row["search"] is None
+
+
+async def test_an_unavailable_episode_keeps_its_search_summary(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """The state somebody is most likely to be staring at (FR-A6's daily retry)."""
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=963012)
+        episodes = await make_episodes(session, anime, 4, aired_through=4)
+        episode = episodes[1]
+        episode.state = EpisodeState.UNAVAILABLE
+        episode.unavailable_reason = "no acceptable release found"
+        episode.last_search_at = datetime(2026, 9, 14, 6, 0, tzinfo=UTC)
+        episode.last_search_forms = 10
+        episode.last_search_results = 3
+        await session.commit()
+        anime_id, episode_id = anime.id, episode.id
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    row = next(item for item in body["episodes"] if item["id"] == episode_id)
+    assert row["search"] == {
+        "at": row["search"]["at"],
+        "forms": 10,
+        "results": 3,
+        "next_at": None,
+    }
+    assert row["unavailable_reason"] == "no acceptable release found"
+
+
 # --- Admin endpoints --------------------------------------------------------
 
 

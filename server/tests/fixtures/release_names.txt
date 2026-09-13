@@ -321,3 +321,51 @@ Solo.Leveling.S02E12.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG.mkv	{"episode": 12, "gro
 [Doki] Ore no Imouto ga Konnani Kawaii Wake ga Nai - 12.5 (1280x720 Hi10P AAC) [ABCD1234].mkv	{"episode": 12, "group": "Doki", "kind": "special", "season": null, "title_key": "ore no imouto ga konnani kawaii wake ga nai", "version": null}
 [Zero-Raws] Sousou no Frieren 第3話 (MX 1280x720 x264 AAC).mp4	{"episode": 3, "group": "Zero-Raws", "kind": "episode", "season": null, "title_key": "sousou no frieren", "version": null}
 [Zero-Raws] 葬送のフリーレン 第03話 (MX 1280x720 x264 AAC).mp4	{"episode": 3, "group": "Zero-Raws", "kind": "episode", "season": null, "title_key": "葬送のフリーレン", "version": null}
+
+# Added 2026-09-13 with the Nyaa SxxEyy query form: the four real names of
+# "One-Room TA" (AniList 205068, romaji "Wollum Jogyonim"), which is the case
+# that showed the Western naming matters. ToonsHub, geckyzz and Doomdos all
+# write the number as S01E02 rather than "- 02" — so `One-Room TA - 01` and
+# `One-Room TA 01` each returned 0 on nyaa.si while `One-Room TA` returned 9 —
+# and the parser has to read all three the same way: the two singles as
+# episodes of season 1, the range and the season pack as batches. The
+# parenthetical that carries the show's *other* title ("Wollum Jogyonim,
+# Multi-Subs") must not end up in the title; the filter's 0.90 threshold is
+# measured against it.
+[ToonsHub] One-Room TA S01E02 1080p VIKI WEB-DL AAC2.0 H.264 (Wollum Jogyonim, Multi-Subs)	{"episode": 2, "group": "ToonsHub", "kind": "episode", "season": 1, "title_key": "one room ta", "version": null}
+[ToonsHub] One-Room TA S01E07 1080p VIKI WEB-DL AAC2.0 H.264 (Multi-Subs)	{"episode": 7, "group": "ToonsHub", "kind": "episode", "season": 1, "title_key": "one room ta", "version": null}
+[Doomdos] - One-Room TA - S01E01-03 [1080p VIKI WEB-DL BATCH]	{"episode": 1, "group": "Doomdos", "kind": "batch", "season": 1, "title_key": "one room ta", "version": null}
+[geckyzz] One-Room TA - S01 (원룸 조교님; One Room Jogyo-nim) [VIKI.WEB-DL 1080P AVC, AAC, M-SUB][BATCH]	{"episode": null, "group": "geckyzz", "kind": "batch", "season": 1, "title_key": "one room ta", "version": null}
+
+# Added 2026-09-14 with the matching-robustness batch (FR-A4, §5.2a).
+#
+#   * A **slash is a title character**. `rsplit("/", 1)` read
+#     "[SubsPlease] Fate/Zero - 12" as a show called "Zero" with no release
+#     group, which matched no catalogue entry and no query: every release of
+#     the show was rejected by the acquisition filter and every file of it
+#     went to review. A string is only a path when it holds a separator a
+#     title would not: `parse()` takes a `path` flag, the ingest scanner and
+#     the match job pass `path=True` and get the last component, and a release
+#     *name* — every line of this file — is never split. (The "[Coalgirls]
+#     Toradora!" directory line above reads the same either way; the flag
+#     itself is asserted in test_parser.py.)
+#   * A **dub** is now read off the name (`ParsedName.dubbed`, not pinned
+#     here) and ranks below every subbed candidate (FR-A3). These are the two
+#     releases production picked on 2026-09-13 because they were the most
+#     seeded upload of their episode, with the SubsPlease file that should
+#     have won instead. "Dual Audio" is not a dub: it has the original track.
+#   * A **film** parses as `kind=movie` with no episode number, which is what
+#     "Servamp Movie: Alice in the Garden" needed: the entry is one release
+#     and Arc had been asking Nyaa for "- 01" of it.
+#   * A **symbol** a group does not write is why two forms of the query exist
+#     now; the parser already flattened them, and these two names are the
+#     evidence that the *title* half was never the problem.
+
+[SubsPlease] Fate/Zero - 12 (1080p) [ABCD1234].mkv	{"episode": 12, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "fate zero", "version": null}
+[Judas] Fate/strange Fake - Whispers of Dawn - 01 [1080p][HEVC x265 10bit][Multi-Subs].mkv	{"episode": 1, "group": "Judas", "kind": "episode", "season": null, "title_key": "fate strange fake whispers of dawn", "version": null}
+[Yameii] Sword Art Online - S01E07 [English Dub] [CR WEB-DL 1080p] [F00DBABE].mkv	{"episode": 7, "group": "Yameii", "kind": "episode", "season": 1, "title_key": "sword art online", "version": null}
+[SubsPlease] Sword Art Online - 07 (1080p) [F00DBABE].mkv	{"episode": 7, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "sword art online", "version": null}
+[KaiDubs] BOFURI I Don't Want to Get Hurt, so I'll Max Out My Defense - 07 [1080p].mkv	{"episode": 7, "group": "KaiDubs", "kind": "episode", "season": null, "title_key": "bofuri i don t want to get hurt so i ll max out my defense", "version": null}
+[Erai-raws] Servamp Movie - Alice in the Garden [1080p][Multiple Subtitle].mkv	{"episode": null, "group": "Erai-raws", "kind": "movie", "season": null, "title_key": "servamp movie alice in the garden", "version": null}
+[HorribleSubs] Yarichin☆Bitch-bu - 01 [1080p].mkv	{"episode": 1, "group": "HorribleSubs", "kind": "episode", "season": null, "title_key": "yarichin bitch bu", "version": null}
+[SubsPlease] Love Live! Superstar!! - 03 (1080p) [1234ABCD].mkv	{"episode": 3, "group": "SubsPlease", "kind": "episode", "season": 2, "title_key": "love live superstar", "version": null}

@@ -75,6 +75,16 @@ class ScheduleEntry(BaseModel):
     #: both are sent so the client can render a badge without repeating the
     #: rule.
     list_status: ListStatus | None = None
+    #: Whether the show is in this week because it is on air rather than
+    #: because it carries the season being shown — a two-cour show that started
+    #: last season, or a long-runner tagged with none (owner, 2026-09-13). The
+    #: client turns it into a quiet "Spring 2026" caveat under the slot, read
+    #: off ``anime.season``/``anime.season_year``, which is why the flag says
+    #: *that it was carried in* and not which season it came from: the season is
+    #: already on the summary, and comparing the two client-side would answer
+    #: the wrong question on a row the catalogue has no season for. Always false
+    #: on a prev/next season view, which takes no such rows.
+    carried_over: bool = False
 
     @classmethod
     def from_placed(cls, entry: PlacedEntry) -> ScheduleEntry:
@@ -86,6 +96,7 @@ class ScheduleEntry(BaseModel):
             next_at_estimated=entry.next_at_estimated,
             following=entry.following,
             list_status=entry.list_status,
+            carried_over=entry.carried_over,
         )
 
 
@@ -199,7 +210,8 @@ class NewEpisodeEntry(BaseModel):
         *,
         now: datetime,
         list_status: ListStatus | None = None,
-        watched: bool = False,
+        completed: bool = False,
+        list_progress: int = 0,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
@@ -210,7 +222,12 @@ class NewEpisodeEntry(BaseModel):
                 row.episode,
                 now=now,
                 anime_status=row.anime.status,
-                watched=watched,
+                # FR-W5's two halves, both per viewer: Arc's own completion row
+                # and the progress this show's list entry carries. Most of this
+                # shelf is watched by the second on a list imported from
+                # MyAnimeList, which is the case the owner hit on production.
+                completed=completed,
+                list_progress=list_progress,
                 torrent=torrent,
                 rendition=rendition,
                 transcode_job=transcode_job,
@@ -244,6 +261,7 @@ class ContinueWatchingEntry(BaseModel):
         *,
         now: datetime,
         list_status: ListStatus | None = None,
+        list_progress: int = 0,
         torrent: Torrent | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
@@ -258,8 +276,11 @@ class ContinueWatchingEntry(BaseModel):
                 # sometimes true. It comes off the row's own ``watch_progress``
                 # rather than a second lookup, and it is the same flag the show
                 # page's mark reads: the shelf changed which rows it lists, not
-                # what "watched" means.
-                watched=row.completed,
+                # what "watched" means. ``list_progress`` is FR-W5's other
+                # half, and it is why an episode somebody watched elsewhere
+                # and then reopened here still carries its tick.
+                completed=row.completed,
+                list_progress=list_progress,
                 torrent=torrent,
                 rendition=rendition,
                 transcode_job=transcode_job,

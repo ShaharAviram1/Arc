@@ -16,23 +16,26 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import (
     Anime,
+    Episode,
     EpisodeState,
     Job,
     JobStatus,
+    ListEntry,
     ListStatus,
     MediaFile,
     Rendition,
     Torrent,
+    User,
     Want,
 )
 from arc.services.acquisition import qbit as qbit_module
@@ -203,6 +206,131 @@ async def test_an_episode_nobody_ever_wanted_is_judged_on_its_age(
     if expected:
         assert found[0].episode_id == episode.id
         assert "nobody" in found[0].reason
+
+
+async def set_progress_entry(
+    session: AsyncSession,
+    user: User,
+    episode: Episode,
+    *,
+    progress: int,
+    updated_at: datetime,
+) -> ListEntry:
+    """One list entry over this episode's show, with its clock set by hand.
+
+    ``updated_at`` is what FR-W5's retention anchor reads, and the column has
+    an ``onupdate`` — so it is written after the flush, which is the only way
+    to make "the progress passed this episode eight days ago" a fact a frozen
+    clock can assert.
+    """
+    entry = ListEntry(
+        user_id=user.id,
+        anime_id=episode.anime_id,
+        status=ListStatus.WATCHING,
+        progress=progress,
+        activated_at=updated_at,
+    )
+    session.add(entry)
+    await session.flush()
+    await session.execute(
+        update(ListEntry)
+        .where(ListEntry.user_id == user.id, ListEntry.anime_id == episode.anime_id)
+        .values(updated_at=updated_at)
+    )
+    await session.flush()
+    await session.refresh(entry)
+    return entry
+
+
+async def test_an_episode_the_user_skipped_past_goes_on_the_same_schedule(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """FR-W5's retention half (owner, 2026-09-13).
+
+    Marking episode 9 watched writes one completion row and raises progress to
+    9; the eight episodes under it have no rows at all, and must not sit on the
+    disk waiting for rows Arc deliberately did not write. The anchor is the
+    entry's ``updated_at``, so both episodes come up on the same G-day
+    schedule — the one watched in Arc and the one skipped past.
+    """
+    settings = acquisition_settings(tmp_path)
+    # The files are older than the mark, so the clamp in ``progress_anchor``
+    # does not bite and the anchor under test is the only thing deciding.
+    watched = await make_retained_episode(
+        db_session, settings, anilist_id=970100, number=9, ready_at=days_ago(9)
+    )
+    skipped = await make_retained_episode(
+        db_session, settings, anilist_id=970101, number=4, ready_at=days_ago(9)
+    )
+    alice = await make_user(db_session, "alice-w5@arc.test")
+    # Episode 9 the ordinary way, and the entry that covers episode 4 stamped
+    # at the same moment — which is what one manual mark of episode 9 does.
+    await add_completion(db_session, alice, watched, at=days_ago(8))
+    await set_progress_entry(db_session, alice, watched, progress=9, updated_at=days_ago(8))
+    await set_progress_entry(db_session, alice, skipped, progress=9, updated_at=days_ago(8))
+
+    found = await candidates(db_session, settings, now=NOW)
+
+    assert {target.episode_id for target in found} == {watched.id, skipped.id}
+    # "watched", not "nobody ever wanted it": both anchors are the mark's own
+    # moment, and neither episode fell through to the file-age fallback, which
+    # would have read ``days_ago(9)`` and called them unwanted.
+    assert all("watched" in target.reason for target in found)
+    assert all(target.anchor == days_ago(8) for target in found)
+
+
+async def test_an_episode_above_the_progress_is_still_retained(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """The other side of the boundary: nobody has watched episode 10."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=970102, number=10, ready_at=days_ago(2)
+    )
+    alice = await make_user(db_session, "alice-w5-above@arc.test")
+    await set_progress_entry(db_session, alice, episode, progress=9, updated_at=days_ago(8))
+
+    assert await candidates(db_session, settings, now=NOW) == []
+
+
+async def test_a_refetched_file_gets_a_grace_period_of_its_own(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """The progress anchor is clamped to the age of the bytes.
+
+    An imported list stamps ``updated_at`` once and then sits there, so on an
+    episode at or below its progress the raw anchor is months old. An admin who
+    re-fetches that episode (FR-T3, FR-T4) must not watch the next hourly sweep
+    delete it before anybody can play it.
+    """
+    settings = acquisition_settings(tmp_path)
+    # Imported two hundred days ago; the file landed an hour ago.
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=970104, number=4, ready_at=days_ago(1 / 24)
+    )
+    alice = await make_user(db_session, "alice-w5-refetch@arc.test")
+    await set_progress_entry(db_session, alice, episode, progress=9, updated_at=days_ago(200))
+
+    assert await candidates(db_session, settings, now=NOW) == []
+
+    # …and it goes G days after the *file* landed, not G days after the import.
+    later = await candidates(db_session, settings, now=NOW + 8 * DAY)
+    assert [target.episode_id for target in later] == [episode.id]
+    assert "watched" in later[0].reason
+
+
+async def test_a_progress_change_this_morning_holds_the_files(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """The anchor is a grace period, not a licence: G has not run out."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=970103, number=4, ready_at=days_ago(2)
+    )
+    alice = await make_user(db_session, "alice-w5-fresh@arc.test")
+    await set_progress_entry(db_session, alice, episode, progress=9, updated_at=days_ago(0.5))
+
+    assert await candidates(db_session, settings, now=NOW) == []
 
 
 async def test_an_episode_somebody_still_wants_is_never_a_candidate(

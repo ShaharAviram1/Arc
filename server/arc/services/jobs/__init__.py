@@ -8,7 +8,9 @@ Layout:
 
 * ``registry`` — ``@register("type")`` and the :class:`JobContext` handlers get
 * ``queue`` — :func:`enqueue`, with optional dedupe
-* ``runner`` — :func:`claim_one`, :func:`run_job`, backoff, :func:`requeue_stale`
+* ``runner`` — :func:`claim_one`, :func:`run_job`, backoff, and the two
+  recovery rules: :func:`requeue_orphans` (by identity, at start-up) and
+  :func:`requeue_stale` (by age, periodically)
 * ``loop`` — :func:`run_worker_loop`, the worker's claim loop
 * ``builtin`` — ``noop`` and ``fail_once``
 
@@ -47,6 +49,7 @@ from arc.services.jobs.runner import (
     backoff,
     claim_one,
     claim_statement,
+    requeue_orphans,
     requeue_stale,
     run_job,
 )
@@ -69,6 +72,7 @@ __all__ = [
     "heartbeat_path",
     "register",
     "registered_types",
+    "requeue_orphans",
     "requeue_stale",
     "retry_job",
     "run_job",

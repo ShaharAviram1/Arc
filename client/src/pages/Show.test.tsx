@@ -12,8 +12,10 @@ import {
   FAILURE_REASON,
   FRIEREN,
   FRIEREN_DETAIL,
+  FRIEREN_DETAIL_AWAITING_STILLS,
   FRIEREN_DETAIL_NO_STATUS,
   FRIEREN_DETAIL_ON_LIST,
+  FRIEREN_DETAIL_UNMAPPED,
   FRIEREN_DETAIL_VIA_MAL,
   FRIEREN_DETAIL_VIA_OFFLINE,
   FRIEREN_SAMPLE,
@@ -43,6 +45,11 @@ const TRANSCODE_PATH = '/api/episodes/9007/transcode'
 const WATCHED_PATH = '/api/episodes/9001/watched'
 const UNWATCHED_PATH = '/api/episodes/9002/watched'
 const PROGRESS_RESULT = { completed: true, newly_completed: true, list_progress: 2 }
+/** The one line the episode list adds when there will never be stills (§5.8). */
+const NO_STILLS = 'No episode pictures for this show'
+
+/** The tooltip on a pill with no undo (FR-W5). */
+const PROGRESS_HINT = 'Unwatch from the latest watched episode down'
 
 /** The design's meta line: studio, when it aired, how much of it there is. */
 const META_LINE = 'Madhouse · Fall 2023 · 28 episodes · 1 watched'
@@ -76,6 +83,29 @@ function withEpisode(index: number, patch: Partial<EpisodeOut>): AnimeDetail {
     episodes: FRIEREN_DETAIL.episodes.map((episode, at) =>
       at === index ? { ...episode, ...patch } : episode,
     ),
+  }
+}
+
+/**
+ * Both watched states at once (FR-W5), as an imported list produces them: the
+ * list says 2, so episode 1 is under the line — watched on the list's word,
+ * nothing here to take back — and episode 2 is *at* it, the one episode the
+ * un-mark would lower. The show page has to render the two differently, which
+ * is the whole point of `watched_source`.
+ */
+function detailWithBothWatchedStates(): AnimeDetail {
+  return {
+    ...FRIEREN_DETAIL,
+    list_entry: listEntry({ progress: 2 }),
+    episodes: FRIEREN_DETAIL.episodes.map((episode) => {
+      if (episode.number === 1) {
+        return { ...episode, watched: true, watched_source: 'progress' as const }
+      }
+      if (episode.number === 2) {
+        return { ...episode, watched: true, watched_source: 'arc' as const }
+      }
+      return episode
+    }),
   }
 }
 
@@ -115,8 +145,11 @@ describe('Show', () => {
     // number rather than leaving the line blank.
     expect(screen.getByText('1. The Journey’s End')).toBeInTheDocument()
     expect(screen.getByText('2. Episode 2')).toBeInTheDocument()
-    // Each row says one thing about its state, in the state column.
-    expect(screen.getByText('Watched')).toBeInTheDocument()
+    // Each row says one thing about its state, in the state column — and that
+    // one thing is what Arc did about the *file* (FR-W5): the watched episode's
+    // column says its file is here, and the control at the end of the row is
+    // what says the viewer has seen it.
+    expect(screen.getByText('Ready to play')).toBeInTheDocument()
     expect(screen.getByText('Preparing 30%')).toBeInTheDocument()
     expect(screen.getByText('Searching')).toBeInTheDocument()
   })
@@ -623,6 +656,53 @@ describe('Show', () => {
     expect(screen.getByText('Matching 100%')).toBeInTheDocument()
   })
 
+  it('says what the last search asked and when the next one runs (FR-A7)', async () => {
+    freezeClock()
+    // Episode 6 is the `searching` row of the fixture. Berlin is the viewer's
+    // zone (`ME`), so 21:26 UTC is 23:26 to them — the point of formatting it
+    // on the client rather than sending a string.
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(5, {
+          search: {
+            at: '2026-09-12T09:26:00Z',
+            forms: 6,
+            results: 0,
+            next_at: '2026-09-12T21:26:00Z',
+          },
+        }),
+      },
+    })
+
+    renderShow()
+
+    const line = await screen.findByText('Searching · 6 forms, 0 results · next try 23:26')
+    // The same sentence as a tooltip: the column is 132 px wide and the text
+    // wraps, so hovering is how a viewer reads the whole of it.
+    expect(line.closest('[title]')).toHaveAttribute(
+      'title',
+      'Searching · 6 forms, 0 results · next try 23:26',
+    )
+  })
+
+  it('leaves an unavailable row its reason rather than a search summary', async () => {
+    freezeClock()
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: withEpisode(4, {
+          search: { at: '2026-09-12T09:26:00Z', forms: 10, results: 3, next_at: null },
+        }),
+      },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/10 forms/)).not.toBeInTheDocument()
+  })
+
   it('says why an unavailable episode is not coming (FR-A6)', async () => {
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
 
@@ -727,6 +807,53 @@ describe('Show', () => {
     expect(screen.queryAllByText('est.')).toHaveLength(0)
   })
 
+  describe('episode pictures (§5.8)', () => {
+    const HEALTH_PATH = 'GET /api/health'
+    const WITH_KEY = { body: { status: 'ok', version: '0.1.0', env: 'dev', tmdb_enabled: true } }
+    const NO_KEY = { body: { status: 'ok', version: '0.1.0', env: 'dev', tmdb_enabled: false } }
+
+    it('says so once when TMDB cannot be reached for this show', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [HEALTH_PATH]: WITH_KEY,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL_UNMAPPED },
+      })
+
+      renderShow()
+
+      // One line above the list, not a caption on fourteen identical stripes.
+      expect(await screen.findByText(NO_STILLS)).toBeInTheDocument()
+      expect(screen.getAllByText(NO_STILLS)).toHaveLength(1)
+    })
+
+    it('says nothing while the pictures are still on their way', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [HEALTH_PATH]: WITH_KEY,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL_AWAITING_STILLS },
+      })
+
+      renderShow()
+      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+
+      // Opening the page queued the enrichment; a caption saying there are no
+      // pictures would be wrong a few seconds later.
+      expect(screen.queryByText(NO_STILLS)).not.toBeInTheDocument()
+    })
+
+    it('says so on a deployment with no TMDB key, mapped or not', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [HEALTH_PATH]: NO_KEY,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL_AWAITING_STILLS },
+      })
+
+      renderShow()
+
+      expect(await screen.findByText(NO_STILLS)).toBeInTheDocument()
+    })
+  })
+
   it('links out to both catalogues when it has both ids', async () => {
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
 
@@ -786,11 +913,27 @@ describe('Show', () => {
 
       renderShow()
 
-      // Six of the seven episodes have aired; the watched one shows Unmark.
+      // Six of the seven episodes have aired; the watched one is the pressed
+      // pill, whose accessible name is what pressing it would do (FR-W5).
       const marks = await screen.findAllByRole('button', { name: 'Mark watched' })
       expect(marks).toHaveLength(5)
       // The unaired episode gets neither control: there is nothing to have watched.
-      expect(screen.getAllByRole('button', { name: 'Unmark' })).toHaveLength(1)
+      expect(screen.getAllByRole('button', { name: 'Unwatch' })).toHaveLength(1)
+    })
+
+    it('reads "Watched" and offers "Unwatch" on hover (FR-W5)', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+      renderShow()
+
+      const pill = await screen.findByRole('button', { name: 'Unwatch' })
+      expect(pill).toHaveAttribute('aria-pressed', 'true')
+      expect(pill).toHaveAttribute('title', 'Unwatch')
+      expect(pill).not.toHaveAttribute('aria-disabled')
+      // The visible word is the state; the other half of the toggle is markup
+      // on the same button, the way the sample pill does it.
+      expect(within(pill).getByText('Watched')).toBeInTheDocument()
+      expect(within(pill).getByText('Unwatch')).toBeInTheDocument()
     })
 
     it('posts the mark and refreshes the show', async () => {
@@ -822,11 +965,62 @@ describe('Show', () => {
       renderShow()
 
       expect(await screen.findByText('Watched')).toBeInTheDocument()
-      await userEvent.click(screen.getByRole('button', { name: 'Unmark' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Unwatch' }))
 
       await waitFor(() => {
         expect(requestsMade(fetchMock)).toContain(`DELETE ${WATCHED_PATH}`)
       })
+    })
+
+    it('renders the two watched states differently on the same page', async () => {
+      // The list says 2. Episode 2 is the one the un-mark would lower, so it
+      // is a button; episode 1 sits under it, so it is a word with a tooltip
+      // pointing at where the undo actually is (FR-W5).
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: detailWithBothWatchedStates() },
+        [`DELETE ${WATCHED_PATH}`]: {
+          body: { completed: false, newly_completed: false, list_progress: null },
+        },
+      })
+
+      renderShow()
+
+      const pill = await screen.findByRole('button', { name: 'Watched' })
+      expect(pill).toHaveAttribute('aria-disabled', 'true')
+      expect(pill).toHaveAttribute('aria-pressed', 'true')
+      expect(pill).toHaveAttribute('title', PROGRESS_HINT)
+      // No hover half, and nothing happens when it is pressed anyway.
+      expect(within(pill).queryByText('Unwatch')).not.toBeInTheDocument()
+      await userEvent.click(pill)
+      expect(requestsMade(fetchMock)).not.toContain(`DELETE ${WATCHED_PATH}`)
+
+      // Exactly one row is actionable, and it is not that one.
+      const undo = screen.getAllByRole('button', { name: 'Unwatch' })
+      expect(undo).toHaveLength(1)
+      expect(undo[0]).not.toBe(pill)
+    })
+
+    it('still offers Unwatch for a mark Arc itself holds (FR-W5)', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+      renderShow()
+
+      expect(await screen.findByRole('button', { name: 'Unwatch' })).toBeInTheDocument()
+      expect(screen.queryByTitle(PROGRESS_HINT)).not.toBeInTheDocument()
+    })
+
+    it('offers the first unwatched ready episode, by the new flag (FR-W5)', async () => {
+      // Episode 1 is ready and watched; the hero must not offer it back. The
+      // fixture's episode 2 is made ready and is not watched, so it is next.
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: withEpisode(1, { state: 'ready' }) },
+      })
+
+      renderShow()
+
+      expect(await screen.findByRole('link', { name: 'Play episode 2' })).toBeInTheDocument()
     })
 
     it('says so when the write fails', async () => {

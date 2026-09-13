@@ -271,6 +271,42 @@ async def test_an_episode_from_this_week_is_listed(
     assert row["anime"]["list_status"] == "watching"
 
 
+async def test_neither_shelf_cares_which_season_a_show_is_tagged_with(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Both shelves are list-driven, which the schedule's grid was not.
+
+    Checked rather than changed, because the Slime case (owner, 2026-09-13) was
+    a *season filter*: the schedule built its grid from the shows tagged with
+    the season being viewed, so a two-cour show tagged with the season it
+    started in fell out of it. Catch up and New this week start from the
+    caller's list and the episodes' own dates, so a show tagged ``SPRING 2026``
+    is on them exactly like any other. This test is what keeps that true.
+    """
+    anime_id = await add_anime(
+        api_factory,
+        title="Spring Two-Cour",
+        anilist_id=910014,
+        status="RELEASING",
+        season="SPRING",
+        season_year=2026,
+        episodes=24,
+        next_at=FIRST_AIRED + timedelta(weeks=7),
+        next_episode=8,
+    )
+    await add_episodes(api_factory, anime_id, count=24, first_at=FIRST_AIRED)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+
+    body = await home(client)
+
+    assert behind_titles(body) == ["Spring Two-Cour"]
+    assert body["behind"][0]["behind"] == 4
+    assert [
+        (row["anime"]["title"]["preferred"], row["episode"]["number"])
+        for row in body["new_this_week"]
+    ] == [("Spring Two-Cour", 7)]
+
+
 async def test_a_planned_show_is_new_this_week_but_never_behind(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
@@ -512,9 +548,14 @@ async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
     # not per-episode, so it is not what this test is about: the extras are the
     # lookups that select from the table itself.
     extras = [statement for statement in counted if "from anime" not in statement.lower()]
-    for table in ("torrents", "renditions", "jobs"):
+    # ``jobs`` is read twice per page since the search diagnostic (FR-A7,
+    # 2026-09-14): once for the transcode jobs, once for the pending
+    # ``search_release`` rows that give each searching episode its next try.
+    # Both are one statement for the whole page, which is what this test is
+    # guarding; thirty episodes must not turn into thirty reads.
+    for table, times in (("torrents", 1), ("renditions", 1), ("jobs", 2)):
         matched = [statement for statement in extras if f" {table}" in statement.lower()]
-        assert len(matched) == 1, f"{table} was queried {len(matched)} times"
+        assert len(matched) == times, f"{table} was queried {len(matched)} times"
 
 
 async def test_another_users_list_is_not_on_this_home_page(
@@ -688,7 +729,11 @@ async def test_continue_watching_orders_rewatches_with_everything_else(
     rows = (await home(client))["continue_watching"]
 
     assert [row["episode"]["number"] for row in rows] == [2, 3, 1]
-    assert [row["episode"]["watched"] for row in rows] == [False, True, True]
+    # All three are watched under FR-W5 — the list says 3 — and exactly one of
+    # them is the one the un-mark would take back: episode 3, the latest. The
+    # other two are under the line, completion row or not (episode 1 has one).
+    assert [row["episode"]["watched"] for row in rows] == [True, True, True]
+    assert [row["episode"]["watched_source"] for row in rows] == ["progress", "arc", "progress"]
 
 
 @pytest.mark.parametrize(
@@ -777,6 +822,39 @@ async def test_a_watched_episode_is_marked_on_the_new_this_week_card(
     cards = (await home(client))["new_this_week"]
 
     assert [row["episode"]["watched"] for row in cards] == [True]
+    assert [row["episode"]["watched_source"] for row in cards] == ["arc"]
+
+
+async def test_the_new_this_week_card_reads_the_list_progress_too(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-W5 on the home page, which is where the owner reported it.
+
+    A list imported from MyAnimeList at episode 9 has no ``watch_progress``
+    rows at all, and every tile on this shelf was telling the owner that an
+    episode they had plainly watched was "Not fetched".
+    """
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910050)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=9)
+
+    cards = (await home(client))["new_this_week"]
+
+    assert [row["episode"]["number"] for row in cards] == [7]
+    assert cards[0]["episode"]["watched"] is True
+    assert cards[0]["episode"]["watched_source"] == "progress"
+
+
+async def test_an_episode_above_the_list_progress_is_not_marked(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The boundary, from the other side: episode 7 with the list at 6."""
+    anime_id = await airing_show(api_factory, title="Show A", anilist_id=910051)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=6)
+
+    cards = (await home(client))["new_this_week"]
+
+    assert cards[0]["episode"]["watched"] is False
+    assert cards[0]["episode"]["watched_source"] is None
 
 
 # --- What a card carries about the show (M15) ---------------------------------

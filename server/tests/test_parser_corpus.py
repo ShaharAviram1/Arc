@@ -67,7 +67,7 @@ CASES = load_corpus()
 #: architecture.md §10 asks for at least 200 real names; the corpus stands
 #: well above that, and the floor is set at where it stands so that the cases
 #: added for a bug cannot be quietly deleted along with the fix.
-MIN_CASES = 247
+MIN_CASES = 259
 
 
 def test_corpus_is_big_enough() -> None:

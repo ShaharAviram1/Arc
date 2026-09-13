@@ -18,10 +18,12 @@ import {
   parseSeason,
   parseYear,
   seasonLabel,
+  SEASONS,
   useSchedule,
   weekdayInTimezone,
   WEEKDAY_LABELS,
   type ScheduleEntry,
+  type Season,
   type SeasonRef,
 } from '@/lib/schedule'
 
@@ -57,6 +59,35 @@ function SlotLine({ entry }: { entry: ScheduleEntry }) {
       ) : null}
       {entry.next_episode === null ? null : ` · Ep ${String(entry.next_episode)}`}
     </span>
+  )
+}
+
+/**
+ * "Since Spring 2026" — where a show in this week's grid started, when that is
+ * not the season the page is showing (`carried_over`, owner 2026-09-13).
+ *
+ * The current week's grid holds every show on air, whatever season it carries,
+ * so a two-cour show that began in spring sits in the summer grid without
+ * contradiction — but a person scanning a season page is entitled to know
+ * which of these rows the season is actually *about*. One 11px muted line
+ * inside the row's existing text column, below the slot: no new layout, and
+ * quiet enough that the ordinary row (which never renders it) is unchanged.
+ *
+ * Nothing is rendered for a show the catalogue gives no season year: a
+ * long-runner is carried into the week the same way, and "Since —" says less
+ * than silence.
+ */
+function CarriedOverLine({ entry }: { entry: ScheduleEntry }) {
+  const { season, season_year: year } = entry.anime
+  if (!entry.carried_over || year === null) return null
+
+  const label =
+    season !== null && (SEASONS as readonly string[]).includes(season)
+      ? seasonLabel(year, season as Season)
+      : String(year)
+
+  return (
+    <span className="mt-0.5 block text-[11px] text-[var(--arc-text-muted)]">{`Since ${label}`}</span>
   )
 }
 
@@ -129,6 +160,7 @@ function EntryRow({
             {anime.title.preferred}
           </span>
           <SlotLine entry={entry} />
+          <CarriedOverLine entry={entry} />
         </span>
       </Link>
 

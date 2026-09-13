@@ -31,6 +31,7 @@ from arc.services.acquisition.nyaa import (
     CATEGORY,
     MIN_INTERVAL,
     TRACKERS,
+    Candidate,
     NyaaClient,
     NyaaItem,
     NyaaUnavailable,
@@ -40,16 +41,18 @@ from arc.services.acquisition.nyaa import (
     filter_items,
     has_prequel,
     head_of,
+    is_single,
     pad,
     parse_feed,
     queries,
     rank,
     search_for_episode,
     shared_client,
+    strip_symbols,
     title_score,
 )
 from arc.services.acquisition.rules import Rules
-from arc.services.library.parser import strip_season
+from arc.services.library.parser import parse, strip_season
 from tests.acquisition_helpers import NyaaStub, force_transport, no_sleep, read_fixture
 
 
@@ -127,6 +130,34 @@ MADE_IN_ABYSS_TITLES = (
     "Made in Abyss: Retsujitsu no Ougonkyou",
     "Made in Abyss - The Golden City of the Scorching Sun",
 )
+#: AniList row 205068, copied field for field out of the production catalogue.
+#: Seven episodes, ``FINISHED``, no season marker in either title — and every
+#: release of it on Nyaa names the episode the **Western** way. Set to watching
+#: on 2026-09-13; episodes 1 and 2 went ``searching``, all five query forms
+#: returned zero, and the six-hour retry would have repeated that forever. By
+#: hand the same day: ``One-Room TA - 01`` → 0, ``One-Room TA 01`` → 0,
+#: ``One-Room TA`` → 9, seven of the nine being ``S01Exx`` singles.
+ONE_ROOM = Anime(
+    anilist_id=205068,
+    title_romaji="Wollum Jogyonim",
+    title_english="One-Room TA",
+    status="FINISHED",
+    episodes=7,
+)
+ONE_ROOM_TITLES = ("Wollum Jogyonim", "One-Room TA")
+#: The two ToonsHub singles and the two batches, verbatim from nyaa.si. The
+#: first single carries the entry's *romaji* title in a parenthetical, which is
+#: the asymmetric ``title_score`` exception: extra tokens that are one of the
+#: show's own other names do not lower the score.
+TOONSHUB_EPISODE_2 = (
+    "[ToonsHub] One-Room TA S01E02 1080p VIKI WEB-DL AAC2.0 H.264 (Wollum Jogyonim, Multi-Subs)"
+)
+TOONSHUB_EPISODE_7 = "[ToonsHub] One-Room TA S01E07 1080p VIKI WEB-DL AAC2.0 H.264 (Multi-Subs)"
+DOOMDOS_BATCH = "[Doomdos] - One-Room TA - S01E01-03 [1080p VIKI WEB-DL BATCH]"
+GECKYZZ_BATCH = (
+    "[geckyzz] One-Room TA - S01 (원룸 조교님; One Room Jogyo-nim) "
+    "[VIKI.WEB-DL 1080P AVC, AAC, M-SUB][BATCH]"
+)
 
 FEED = read_fixture("search_frieren_07.xml")
 EMPTY = read_fixture("search_empty.xml")
@@ -135,18 +166,31 @@ EMPTY = read_fixture("search_empty.xml")
 MUSHOKU_SHORT = read_fixture("search_mushoku_s3_11_short.xml")
 MUSHOKU_FULL = read_fixture("search_mushoku_s3_11_full.xml")
 
-#: Eight forms are built for this entry and six of them fit
-#: :data:`MAX_QUERIES`. The head forms add nothing: the romaji base is
+#: Twelve distinct forms are built for this entry and ten of them fit
+#: :data:`MAX_QUERIES`. The two that fall off the end are the **symbol-stripped
+#: variants of the full titles**, which is the ordering the cap is written for
+#: (2026-09-14): every romaji form — including all three short forms, which is
+#: what SubsPlease writes — comes first, then the english ones, and the
+#: speculative variant last. The head forms add nothing: the romaji base is
 #: ``Mushoku Tensei`` with no subtitle left in it, and the english head is
-#: ``Mushoku Tensei`` too, which the third short form already asked for.
+#: ``Mushoku Tensei`` too, which the third short form already asked for. The
+#: synonym adds nothing either: its head is that same ``Mushoku Tensei``.
 MUSHOKU_QUERIES = [
     "Mushoku Tensei III: Isekai Ittara Honki Dasu - 11",
     "Mushoku Tensei: Jobless Reincarnation Season 3 - 11",
+    "Mushoku Tensei S03E11",
     "Mushoku Tensei S3 - 11",
     "Mushoku Tensei III - 11",
     "Mushoku Tensei - 11",
+    "Mushoku Tensei: Jobless Reincarnation S03E11",
     "Mushoku Tensei: Jobless Reincarnation S3 - 11",
+    "Mushoku Tensei: Jobless Reincarnation III - 11",
+    "Mushoku Tensei: Jobless Reincarnation - 11",
 ]
+#: The two forms the ``search_mushoku_s3_11_*`` fixtures were captured for,
+#: named rather than indexed: the ``SxxEyy`` forms now sit between them.
+MUSHOKU_FULL_QUERY = MUSHOKU_QUERIES[0]
+MUSHOKU_SHORT_QUERY = "Mushoku Tensei S3 - 11"
 SUBSPLEASE_1080P = "[SubsPlease] Mushoku Tensei S3 - 11 (1080p) [4492A492].mkv"
 
 
@@ -214,44 +258,99 @@ def test_a_long_show_pads_to_three() -> None:
     assert pad(105, total_episodes=500) == "105"
 
 
-#: The order :func:`queries` documents: full romaji, full english, the season
-#: short forms, the head of romaji, the head of english, bare romaji.
+#: The order :func:`queries` documents: full romaji, full english, the two
+#: ``SxxEyy`` forms, the season short forms, the head of romaji, the head of
+#: english, bare romaji.
 FRIEREN_S1_QUERIES = [
     "Sousou no Frieren - 07",
     "Frieren: Beyond Journey's End - 07",
+    "Sousou no Frieren S01E07",
     "Frieren - 07",
     "Sousou no Frieren 07",
+    "Frieren: Beyond Journey's End S01E07",
+    "Frieren Beyond Journey's End - 07",
 ]
 
 
 def test_queries_are_built_in_the_documented_order() -> None:
     """The romaji title has no subtitle; the english one does, so ``Frieren``.
 
-    Third of four, in front of the bare form: a group writing ``Frieren - 07``
-    is likelier than one writing the romaji title with no dash.
+    The two ``SxxEyy`` forms sit third and fourth — the entry names no season,
+    so they say ``S01`` — and the head form stays in front of the bare one: a
+    group writing ``Frieren - 07`` is likelier than one writing the romaji
+    title with no dash.
     """
     assert queries(FRIEREN_S1, 7) == FRIEREN_S1_QUERIES
 
 
 def test_a_show_whose_title_names_a_season_gets_the_short_forms_too() -> None:
-    """Six forms, and the head of the english title is not one of them.
+    """Eight forms, and the head of the english title is not one of them.
 
-    The english short forms are built before the head forms and there is only
-    room for the first of them, so ``Frieren - 07`` falls off the end. That is
-    the intended trade: ``Frieren: Beyond Journey's End S2`` names the season
-    this entry is, and ``Frieren`` on its own does not.
+    The two ``SxxEyy`` forms carry the season this entry names (``S02``) and
+    the english short forms are built before the head forms, so there is still
+    only room for the first of those and ``Frieren - 07`` falls off the end.
+    That is the intended trade: ``Frieren: Beyond Journey's End S2`` names the
+    season this entry is, and ``Frieren`` on its own does not.
     """
     built = queries(FRIEREN_S2, 7)
 
     assert built == [
         "Sousou no Frieren 2nd Season - 07",
         "Frieren: Beyond Journey's End Season 2 - 07",
+        "Sousou no Frieren S02E07",
         "Sousou no Frieren S2 - 07",
         "Sousou no Frieren II - 07",
         "Sousou no Frieren - 07",
+        "Frieren - 07",
+        "Frieren: Beyond Journey's End S02E07",
         "Frieren: Beyond Journey's End S2 - 07",
+        "Frieren: Beyond Journey's End II - 07",
     ]
     assert len(built) <= nyaa_module.MAX_QUERIES
+
+
+def test_both_titles_are_asked_for_in_the_sxxeyy_form() -> None:
+    """The bug One-Room TA found, in one assertion (FR-A4).
+
+    Nyaa ANDs the words of a query and ``01`` is not a word of ``S01E01``, so
+    every form that writes the number as ``- 01`` or as a bare ``01`` misses a
+    group that writes it the Western way — which is all of ToonsHub, geckyzz
+    and Doomdos for this show. The entry names no season, so both forms say
+    ``S01``, and they sit third and fourth: the two in front of them are what
+    returned zero.
+    """
+    assert anime_season(ONE_ROOM) is None
+    assert queries(ONE_ROOM, 1) == [
+        "Wollum Jogyonim - 01",
+        "One-Room TA - 01",
+        "Wollum Jogyonim S01E01",
+        "Wollum Jogyonim 01",
+        "One-Room TA S01E01",
+    ]
+    assert "One-Room TA S01E02" in queries(ONE_ROOM, 2)
+
+
+def test_the_sxxeyy_form_names_the_season_the_entry_names() -> None:
+    """``S03E11`` for a third season, off the season-stripped base.
+
+    The same divergence :func:`_short_forms` covers, in the other convention:
+    the catalogue writes *Mushoku Tensei III: Isekai Ittara Honki Dasu* and a
+    scene-style release writes ``Mushoku Tensei S03E11``.
+    """
+    assert "Mushoku Tensei S03E11" in queries(MUSHOKU_S3, 11)
+    assert "Sousou no Frieren S02E07" in queries(FRIEREN_S2, 7)
+    assert "Sousou no Frieren S01E07" in queries(FRIEREN_S1, 7)
+
+
+def test_the_sxxeyy_episode_is_not_padded_to_three_for_a_long_show() -> None:
+    """``S01E1089`` is what the scene writes for One Piece, never ``S01E089``."""
+    anime = Anime(anilist_id=21, title_romaji="One Piece", title_english=None, episodes=1100)
+
+    assert queries(anime, 1089) == [
+        "One Piece - 1089",
+        "One Piece S01E1089",
+        "One Piece 1089",
+    ]
 
 
 def test_a_subtitled_title_is_also_asked_for_by_its_head() -> None:
@@ -265,9 +364,13 @@ def test_a_subtitled_title_is_also_asked_for_by_its_head() -> None:
     assert queries(RAKUDAI, 1) == [
         f"{RAKUDAI_ROMAJI} - 01",
         f"{RAKUDAI_ENGLISH} - 01",
+        f"{RAKUDAI_ROMAJI} S01E01",
         "Rakudai Kenja no Gakuin Musou - 01",
         "From Overshadowed to Overpowered - 01",
         f"{RAKUDAI_ROMAJI} 01",
+        f"{RAKUDAI_ENGLISH} S01E01",
+        f"{strip_symbols(RAKUDAI_ROMAJI)} - 01",
+        f"{strip_symbols(RAKUDAI_ENGLISH)} - 01",
     ]
     assert head_of(RAKUDAI_ROMAJI) == RAKUDAI_HEAD
     assert head_of(RAKUDAI_ENGLISH) == RAKUDAI_ENGLISH_HEAD
@@ -292,6 +395,7 @@ def test_a_dash_separated_subtitle_yields_a_head_too() -> None:
     assert has_prequel(anime) is False
     assert queries(anime, 7) == [
         "Made in Abyss - Retsujitsu no Ougonkyou - 07",
+        "Made in Abyss - Retsujitsu no Ougonkyou S01E07",
         "Made in Abyss - 07",
         "Made in Abyss - Retsujitsu no Ougonkyou 07",
     ]
@@ -306,6 +410,10 @@ def test_an_entry_with_a_prequel_asks_no_head_query_at_all() -> None:
     is the ordinary case of a group abbreviating an official name (see
     :func:`test_a_group_that_shortens_the_official_title_still_matches`). So
     the query is not asked.
+
+    The two ``SxxEyy`` forms need no such gate: they are built from the
+    season-stripped *base*, which for this entry is the whole subtitled title,
+    so neither of them is a bare head either.
     """
     built = queries(MADE_IN_ABYSS_S2, 7)
 
@@ -314,9 +422,13 @@ def test_an_entry_with_a_prequel_asks_no_head_query_at_all() -> None:
     assert built == [
         "Made in Abyss: Retsujitsu no Ougonkyou - 07",
         "Made in Abyss - The Golden City of the Scorching Sun - 07",
+        "Made in Abyss: Retsujitsu no Ougonkyou S01E07",
         "Made in Abyss: Retsujitsu no Ougonkyou 07",
+        "Made in Abyss - The Golden City of the Scorching Sun S01E07",
+        "Made in Abyss Retsujitsu no Ougonkyou - 07",
     ]
     assert "Made in Abyss - 07" not in built
+    assert "Made in Abyss S01E07" not in built
 
 
 def test_a_sequel_relation_does_not_withhold_the_head_form() -> None:
@@ -360,7 +472,13 @@ def test_a_title_with_no_subtitle_adds_no_head_form() -> None:
 
 
 def test_a_colon_inside_a_word_is_not_a_subtitle_separator() -> None:
-    """``Re:Zero`` is one name. ``Re`` is not a query worth two seconds."""
+    """``Re:Zero`` is one name. ``Re`` is not a query worth two seconds.
+
+    The english ``SxxEyy`` form loses its closing dash, which is not a typo:
+    every form built from a season-stripped base is trimmed of the punctuation
+    the strip cut at, and ``-Starting Life in Another World-`` was bracketed in
+    dashes rather than ending in a word.
+    """
     anime = Anime(
         anilist_id=7,
         title_romaji="Re:Zero kara Hajimeru Isekai Seikatsu",
@@ -372,7 +490,11 @@ def test_a_colon_inside_a_word_is_not_a_subtitle_separator() -> None:
     assert queries(anime, 7) == [
         "Re:Zero kara Hajimeru Isekai Seikatsu - 07",
         "Re:ZERO -Starting Life in Another World- - 07",
+        "Re:Zero kara Hajimeru Isekai Seikatsu S01E07",
         "Re:Zero kara Hajimeru Isekai Seikatsu 07",
+        "Re:ZERO -Starting Life in Another World S01E07",
+        "Re Zero kara Hajimeru Isekai Seikatsu - 07",
+        "Re ZERO -Starting Life in Another World- - 07",
     ]
 
 
@@ -385,8 +507,8 @@ def test_a_head_is_trimmed_of_the_punctuation_it_was_cut_at() -> None:
 
 
 def test_the_query_budget_caps_what_the_builder_produced() -> None:
-    """Eight forms built, six asked for: the cap is the politeness budget."""
-    assert nyaa_module.MAX_QUERIES == 6
+    """Fourteen distinct forms built, ten asked for: the cap is the budget."""
+    assert nyaa_module.MAX_QUERIES == 10
     assert len(queries(MUSHOKU_S3, 11)) == nyaa_module.MAX_QUERIES
 
 
@@ -416,7 +538,7 @@ def test_the_base_title_is_the_franchise_name_in_front_of_the_marker() -> None:
 def test_a_show_with_only_a_romaji_title_still_builds_queries() -> None:
     anime = Anime(anilist_id=1, title_romaji="Mushishi", title_english=None)
 
-    assert queries(anime, 3) == ["Mushishi - 03", "Mushishi 03"]
+    assert queries(anime, 3) == ["Mushishi - 03", "Mushishi S01E03", "Mushishi 03"]
 
 
 def test_the_season_a_catalogue_entry_names_is_read_off_its_title() -> None:
@@ -434,6 +556,377 @@ def test_titles_include_synonyms_and_drop_blanks() -> None:
     )
 
     assert anime_titles(anime) == ("Overlord IV", "オーバーロードIV", "Overlord Season 4")
+
+
+# --- Symbols: a star a group does not write (2026-09-14) --------------------
+
+
+def test_a_symbol_is_collapsed_to_a_single_space() -> None:
+    """Between two words it separates; after one it simply goes."""
+    assert strip_symbols("Yarichin☆Bitch-bu - 01") == "Yarichin Bitch-bu - 01"
+    assert strip_symbols("Love Live! Superstar!! - 03") == "Love Live Superstar - 03"
+    assert strip_symbols("Re:Zero kara Hajimeru") == "Re Zero kara Hajimeru"
+    assert strip_symbols("Sousou no Frieren - 07") == "Sousou no Frieren - 07"
+
+
+def test_the_full_titles_get_a_symbol_stripped_variant_at_the_end() -> None:
+    """The bug, in one assertion (FR-A4).
+
+    Nyaa ANDs the *tokens* of a query and ``Yarichin☆Bitch-bu`` is one token
+    nothing on the site holds, so every form built from the romaji title
+    returned zero. The variant is built for the **full titles only** and sits
+    at the end of the list: it is a guess about how a group spells a name, and
+    a marked entry's short forms — which are names the catalogue actually
+    holds — must not fall off the end of the budget behind it.
+    """
+    anime = Anime(
+        anilist_id=98789,
+        title_romaji="Yarichin☆Bitch-bu",
+        title_english="Yarichin Bitch Club",
+        episodes=4,
+    )
+
+    assert queries(anime, 1) == [
+        "Yarichin☆Bitch-bu - 01",
+        "Yarichin Bitch Club - 01",
+        "Yarichin☆Bitch-bu S01E01",
+        "Yarichin☆Bitch-bu 01",
+        "Yarichin Bitch Club S01E01",
+        # Last, because it is a guess about how a group spells a name rather
+        # than a name the catalogue holds — and the only form here that found
+        # the show.
+        "Yarichin Bitch-bu - 01",
+    ]
+
+
+def test_a_form_with_no_symbols_produces_no_variant() -> None:
+    """Nothing to strip, so nothing extra to ask — and nothing to dedupe."""
+    assert queries(FRIEREN_S1, 7).count("Sousou no Frieren - 07") == 1
+    assert all("☆" not in query for query in queries(FRIEREN_S1, 7))
+
+
+def test_the_exclamation_marks_of_a_shouted_title_are_stripped_too() -> None:
+    """``Love Live! Superstar!!`` is two tokens on Nyaa and four in the cache."""
+    anime = Anime(
+        anilist_id=125708,
+        title_romaji="Love Live! Superstar!!",
+        title_english=None,
+        episodes=12,
+    )
+
+    assert "Love Live Superstar - 03" in queries(anime, 3)
+
+
+# --- Films, OVAs and ONAs: one release, no number (2026-09-14) --------------
+
+#: Three production entries that sat in ``searching`` for a day on 2026-09-13,
+#: because every query Arc built for them carried ``- 01`` and no film release
+#: on Nyaa names an episode.
+SAO_PROGRESSIVE = Anime(
+    anilist_id=125367,
+    title_romaji="Sword Art Online Movie: Progressive - Hoshi Naki Yoru no Aria",
+    title_english="Sword Art Online the Movie: Progressive - Aria of a Starless Night",
+    format="MOVIE",
+    episodes=1,
+    season_year=2021,
+)
+SERVAMP_MOVIE = Anime(
+    anilist_id=101168,
+    title_romaji="Servamp Movie: Alice in the Garden",
+    title_english="Servamp Movie: Alice in the Garden",
+    format="MOVIE",
+    episodes=1,
+    season_year=2018,
+)
+ROYAL_TUTOR_MOVIE = Anime(
+    anilist_id=106578,
+    title_romaji="Oushitsu Kyoushi Haine Movie",
+    title_english="The Royal Tutor Movie",
+    format="MOVIE",
+    episodes=1,
+    season_year=2019,
+)
+SERVAMP_RELEASE = "[Erai-raws] Servamp Movie - Alice in the Garden [1080p][Multiple Subtitle].mkv"
+
+
+def test_a_movie_is_asked_for_by_name_with_no_episode_number() -> None:
+    """The bug, in one assertion (FR-A4)."""
+    assert is_single(SERVAMP_MOVIE) is True
+    assert queries(SERVAMP_MOVIE, 1) == [
+        "Servamp Movie: Alice in the Garden",
+        "Servamp Movie Alice in the Garden",
+    ]
+    assert queries(ROYAL_TUTOR_MOVIE, 1) == [
+        "Oushitsu Kyoushi Haine Movie",
+        "The Royal Tutor Movie",
+    ]
+
+
+def test_a_movies_symbol_stripped_variant_is_what_finds_it() -> None:
+    """``Movie:`` is a token; ``Movie`` is the word the group wrote."""
+    built = queries(SAO_PROGRESSIVE, 1)
+
+    assert built[1] == "Sword Art Online Movie Progressive - Hoshi Naki Yoru no Aria"
+    assert built[3] == "Sword Art Online the Movie Progressive - Aria of a Starless Night"
+
+
+def test_a_one_episode_ova_is_a_single_and_an_ova_series_is_not() -> None:
+    """``episodes == 1`` is the whole of the OVA rule."""
+    one_ova = Anime(anilist_id=3, title_romaji="Show OVA", title_english=None, format="OVA")
+    four = Anime(
+        anilist_id=4, title_romaji="Show OVA", title_english=None, format="OVA", episodes=4
+    )
+    one_ova.episodes = 1
+
+    assert is_single(one_ova) is True
+    assert is_single(four) is False
+    assert queries(four, 2) == ["Show OVA - 02", "Show OVA S01E02", "Show OVA 02"]
+
+
+def test_a_film_release_with_no_episode_number_is_accepted_as_episode_one() -> None:
+    candidate = acceptable(
+        one(SERVAMP_RELEASE),
+        titles=anime_titles(SERVAMP_MOVIE),
+        number=1,
+        season=None,
+        single=True,
+        year=SERVAMP_MOVIE.season_year,
+    )
+
+    assert candidate is not None
+    assert candidate.parsed.kind == "movie"
+    assert candidate.parsed.episode is None
+
+
+#: The three whole-series Blu-ray packs that were accepted as films until
+#: 2026-09-14. Each names no episode, no range and no batch marker — so the
+#: first version of the single rule read every one of them as "an episode-less
+#: single" — and each has a *shorter* title than the entry's, which the
+#: ordinary asymmetric comparison scores 1.00.
+BLU_RAY_PACKS = [
+    "[Coalgirls] Servamp (1920x1080 Blu-ray FLAC)",
+    "[Judas] Servamp Movie [BD 1080p]",
+    "[Judas] Sword Art Online [BD 1080p][HEVC x265]",
+]
+
+
+@pytest.mark.parametrize("title", BLU_RAY_PACKS, ids=lambda value: value[:28])
+def test_a_whole_series_blu_ray_pack_is_not_the_film(title: str) -> None:
+    """20 GB of a franchise, offered as one film (FR-A4).
+
+    Two rules reject it and either would do: the release never *says* it is a
+    film (:data:`~arc.services.acquisition.nyaa.SINGLE_KINDS`), and a single's
+    title comparison forgives only the type word itself, so ``servamp`` cannot
+    reach 0.90 against ``servamp movie alice in the garden``.
+    """
+    assert (
+        acceptable(
+            one(title),
+            titles=anime_titles(SERVAMP_MOVIE) + anime_titles(SAO_PROGRESSIVE),
+            number=1,
+            season=None,
+            single=True,
+            year=None,
+        )
+        is None
+    )
+
+
+#: *Kizumonogatari* is three films with one name, no episode numbers and no
+#: year on the rips — so the strict title rule is the entire margin between
+#: them, and the year check has nothing to work with.
+KIZUMONOGATARI_III = Anime(
+    anilist_id=15689,
+    title_romaji="Kizumonogatari III: Reiketsu-hen",
+    title_english="Kizumonogatari Part 3: Reiketsu",
+    format="MOVIE",
+    episodes=1,
+    season_year=2017,
+)
+
+
+def test_a_franchise_sibling_film_is_rejected_and_the_right_one_is_not() -> None:
+    def check(title: str) -> object:
+        return acceptable(
+            one(title),
+            titles=anime_titles(KIZUMONOGATARI_III),
+            number=1,
+            season=None,
+            single=True,
+            year=KIZUMONOGATARI_III.season_year,
+        )
+
+    assert check("[Moozzi2] Kizumonogatari III Reiketsu-hen Movie [BD 1920x1080 x264 FLAC]")
+    assert check("[Coalgirls] Kizumonogatari I Tekketsu-hen Movie [BD 1080p FLAC]") is None
+    assert check("[Coalgirls] Kizumonogatari II Nekketsu-hen Movie [BD 1080p FLAC]") is None
+    # And the cost of the rule, stated rather than hidden: a rip that names
+    # nothing but the franchise is not distinguishable from a series pack by
+    # anything in its name, so it is refused and the episode says so (FR-A6).
+    assert check("[Coalgirls] Kizumonogatari [BD 1080p]") is None
+
+
+def test_a_films_batch_is_still_rejected() -> None:
+    """Three films in one torrent is the 6 GB download FR-A4 forbids."""
+    assert (
+        acceptable(
+            one("[Judas] Servamp Movie - Alice in the Garden [BD 1080p][BATCH]"),
+            titles=anime_titles(SERVAMP_MOVIE),
+            number=1,
+            season=None,
+            single=True,
+        )
+        is None
+    )
+
+
+def test_a_numbered_episode_is_not_the_one_release_a_special_entry_is() -> None:
+    """A one-episode entry must not take the television series' episode 1.
+
+    ``[SubsPlease] Yuru Camp - 01`` is not *Yuru Camp Specials*: the title
+    scores 1.00 against it (the release name is a subset, which is the
+    ordinary case of a group shortening an official title) and only the
+    episode number says otherwise. A film is the exception — the parser calls
+    it a ``movie`` and a number in a film's name is a part index, not an
+    episode.
+    """
+    special = Anime(
+        anilist_id=5,
+        title_romaji="Yuru Camp Specials",
+        title_english=None,
+        format="SPECIAL",
+        episodes=1,
+    )
+
+    assert (
+        acceptable(
+            one("[SubsPlease] Yuru Camp - 01 (1080p) [A1B2C3D4].mkv"),
+            titles=anime_titles(special),
+            number=1,
+            season=None,
+            single=True,
+        )
+        is None
+    )
+
+
+def test_a_film_of_the_wrong_year_is_rejected() -> None:
+    """A franchise's other film carries the same name and a different year."""
+    titles = anime_titles(SAO_PROGRESSIVE)
+    older = one("[Judas] Sword Art Online the Movie Progressive [BD 1080p] (2016)")
+    right = one("[Judas] Sword Art Online the Movie Progressive [BD 1080p] (2022)")
+
+    assert acceptable(older, titles=titles, number=1, season=None, single=True, year=2021) is None
+    assert acceptable(right, titles=titles, number=1, season=None, single=True, year=2021)
+
+
+def test_a_film_that_names_no_year_is_not_held_against_it() -> None:
+    """Most releases say nothing, and silence is not a disagreement."""
+    assert acceptable(
+        one(SERVAMP_RELEASE),
+        titles=anime_titles(SERVAMP_MOVIE),
+        number=1,
+        season=None,
+        single=True,
+        year=2018,
+    )
+
+
+def test_a_creditless_opening_is_never_the_film() -> None:
+    assert (
+        acceptable(
+            one("[Moozzi2] Servamp Movie Alice in the Garden NCOP [BD 1080p]"),
+            titles=anime_titles(SERVAMP_MOVIE),
+            number=1,
+            season=None,
+            single=True,
+        )
+        is None
+    )
+
+
+# --- Synonyms: the other names a group writes (2026-09-14) ------------------
+
+
+def test_a_synonym_that_says_something_new_earns_a_query() -> None:
+    """manami's vocabulary is what release groups write (FR-A4)."""
+    anime = Anime(
+        anilist_id=21234,
+        title_romaji="Boku no Hero Academia",
+        title_english="My Hero Academia",
+        synonyms=["Izuku Midoriya: Origin", "Vigilantes"],
+        episodes=13,
+    )
+
+    built = queries(anime, 3)
+
+    assert "Izuku Midoriya: Origin - 03" in built
+    assert "Izuku Midoriya Origin - 03" in built, "and its symbol-stripped variant"
+    assert "Vigilantes - 03" in built
+
+
+def test_at_most_two_synonyms_are_asked_for() -> None:
+    anime = Anime(
+        anilist_id=21235,
+        title_romaji="Show",
+        title_english=None,
+        synonyms=["Alpha One", "Beta Two", "Gamma Three", "Delta Four"],
+        episodes=13,
+    )
+
+    built = queries(anime, 3)
+
+    assert [query for query in built if query.startswith(("Alpha", "Beta", "Gamma", "Delta"))] == [
+        "Alpha One - 03",
+        "Beta Two - 03",
+    ]
+
+
+def test_a_synonym_that_is_not_a_name_earns_nothing() -> None:
+    """The synonym list is somebody else's free-text field (FR-A4).
+
+    ``"Season 2"`` and ``"2"`` are in it, and a query for either is a query for
+    a quarter of Nyaa. The floor is two words or six characters, which also
+    drops a short native-script name — the same decision :func:`queries`
+    already makes about ``title_native``, which it never asks for either: it is
+    one of the names the *filter* compares against, not one Arc asks the
+    english-translated category for.
+    """
+    anime = Anime(
+        anilist_id=21236,
+        title_romaji="Shingeki no Kyojin",
+        title_english="Attack on Titan",
+        synonyms=["Season 2", "進撃の巨人", "2"],
+        episodes=25,
+    )
+
+    built = queries(anime, 3)
+
+    assert built == [
+        "Shingeki no Kyojin - 03",
+        "Attack on Titan - 03",
+        "Shingeki no Kyojin S01E03",
+        "Shingeki no Kyojin 03",
+        "Attack on Titan S01E03",
+    ]
+
+
+def test_a_synonym_the_head_rule_already_covers_earns_nothing() -> None:
+    """*Mushoku Tensei: … 3rd Season*'s head is the ``Mushoku Tensei`` asked for."""
+    assert MUSHOKU_S3.synonyms == ["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season"]
+    assert all("3rd Season" not in query for query in queries(MUSHOKU_S3, 11))
+
+
+def test_a_single_asks_its_synonyms_by_name_too() -> None:
+    anime = Anime(
+        anilist_id=6,
+        title_romaji="Kimi no Na wa.",
+        title_english="Your Name.",
+        synonyms=["Your Name"],
+        format="MOVIE",
+        episodes=1,
+    )
+
+    assert queries(anime, 1) == ["Kimi no Na wa.", "Your Name."]
 
 
 # --- Filtering --------------------------------------------------------------
@@ -681,8 +1174,11 @@ def test_a_head_query_cannot_admit_a_subtitled_sequel() -> None:
     ) == [
         "Kimetsu no Yaiba - 07",
         "Demon Slayer: Kimetsu no Yaiba - 07",
+        "Kimetsu no Yaiba S01E07",
         "Demon Slayer - 07",
         "Kimetsu no Yaiba 07",
+        "Demon Slayer: Kimetsu no Yaiba S01E07",
+        "Demon Slayer Kimetsu no Yaiba - 07",
     ]
     assert title_score("kimetsu no yaiba yuukaku hen", s1_titles) < 0.90
     assert (
@@ -740,6 +1236,55 @@ def test_the_title_threshold_is_what_rejects_a_near_miss() -> None:
 
     assert acceptable(item, titles=titles, number=7, season=2) is not None
     assert acceptable(item, titles=titles, number=7, season=2, threshold=1.01) is None
+
+
+# --- One-Room TA: the Western naming, end to end -----------------------------
+
+
+def test_the_toonshub_single_is_accepted_for_the_one_room_ta_entry() -> None:
+    """What the ``SxxEyy`` query is for: the release it finds has to pass.
+
+    The entry marks no season, so season 1 is what it means, and ToonsHub says
+    ``S01`` — the two agree. The parenthetical that carries the entry's romaji
+    title is the asymmetric-score exception and must not cost anything: the
+    leftover tokens are one of this show's own names, so the score stays at
+    1.00 rather than falling under the 0.90 threshold.
+    """
+    candidate = acceptable(one(TOONSHUB_EPISODE_2), titles=ONE_ROOM_TITLES, number=2, season=None)
+
+    assert candidate is not None
+    assert candidate.parsed.episode == 2
+    assert candidate.parsed.season == 1
+    assert candidate.parsed.title_key == "one room ta"
+    assert candidate.parsed.group == "ToonsHub"
+    assert candidate.title_similarity >= 0.90
+    assert title_score("one room ta wollum jogyonim", ONE_ROOM_TITLES) >= 0.90
+
+    seventh = acceptable(one(TOONSHUB_EPISODE_7), titles=ONE_ROOM_TITLES, number=7, season=None)
+
+    assert seventh is not None
+    assert seventh.parsed.episode == 7
+
+
+def test_the_toonshub_single_is_still_only_its_own_episode() -> None:
+    """``S01E02`` is episode 2 and nothing else — the number check still runs."""
+    wrong_number = acceptable(
+        one(TOONSHUB_EPISODE_2), titles=ONE_ROOM_TITLES, number=1, season=None
+    )
+
+    assert wrong_number is None
+
+
+@pytest.mark.parametrize("title", [DOOMDOS_BATCH, GECKYZZ_BATCH], ids=["range", "season pack"])
+def test_the_one_room_ta_batches_are_rejected(title: str) -> None:
+    """FR-A4: a range and a season pack, both under the same Western naming.
+
+    ``S01E01-03`` is three episodes whose low end is the number Arc asked for,
+    and ``- S01 … [BATCH]`` names no episode at all. Neither may reach the
+    ranker, whatever the new query form returns.
+    """
+    assert acceptable(one(title), titles=ONE_ROOM_TITLES, number=1, season=None) is None
+    assert filter_items([one(title)], titles=ONE_ROOM_TITLES, number=1, season=None) == []
 
 
 # --- Batches: never fetch a whole season (FR-A4) -----------------------------
@@ -990,9 +1535,6 @@ def test_with_no_group_preference_seeders_decide() -> None:
 
 
 def test_trusted_breaks_a_tie_that_seeders_do_not() -> None:
-    from arc.services.acquisition.nyaa import Candidate, NyaaItem
-    from arc.services.library.parser import parse
-
     def make(title: str, *, trusted: bool) -> Candidate:
         item = NyaaItem(
             title=title, link="", info_hash=title[:8].lower(), seeders=50, trusted=trusted
@@ -1041,6 +1583,67 @@ def test_the_reasons_explain_the_pick() -> None:
     assert "group SubsPlease is preference #1" in top.reasons
     assert "1080p is the preferred resolution" in top.reasons
     assert any(reason.endswith("seeders") for reason in top.reasons)
+
+
+# --- Dubs: below every subbed release (FR-A3, 2026-09-14) -------------------
+
+
+def candidate(title: str, *, seeders: int = 50, trusted: bool = False) -> Candidate:
+    """One filter-passing candidate, built straight from a release name."""
+    item = NyaaItem(
+        title=title,
+        link="",
+        info_hash=f"{abs(hash(title)):040x}"[:40],
+        seeders=seeders,
+        trusted=trusted,
+    )
+    return Candidate(item=item, parsed=parse(title), title_similarity=1.0)
+
+
+#: The two releases production picked on 2026-09-13, both because they were
+#: the most seeded upload of their episode — which is FR-A3's third rule doing
+#: exactly what it says and exactly the wrong thing.
+YAMEII_DUB = "[Yameii] Sword Art Online - S01E07 [English Dub] [CR WEB-DL 1080p] [F00DBABE]"
+KAIDUBS_DUB = "[KaiDubs] Bofuri - 07 [1080p].mkv"
+
+
+def test_a_dub_ranks_below_every_subbed_candidate() -> None:
+    """Whatever the seeders, the group preference or the resolution say."""
+    dub = candidate(YAMEII_DUB, seeders=4000, trusted=True)
+    sub = candidate("[nobody] Sword Art Online - 07 [480p].mkv", seeders=1)
+
+    ranked = rank([dub, sub], Rules(preferred_groups=("Yameii",), preferred_resolution="1080p"))
+
+    assert [entry.item.title for entry in ranked] == [sub.item.title, dub.item.title]
+    assert ranked[1].dubbed is True
+
+
+def test_a_group_that_names_itself_a_dubber_is_read_as_one() -> None:
+    """``[KaiDubs] Bofuri - 07`` says nothing else about its audio."""
+    dub = candidate(KAIDUBS_DUB, seeders=900)
+    sub = candidate("[SubsPlease] Bofuri - 07 (1080p) [A1B2C3D4].mkv", seeders=12)
+
+    ranked = rank([dub, sub], Rules(preferred_resolution="1080p"))
+
+    assert ranked[0].candidate.group == "SubsPlease"
+    assert ranked[0].dubbed is False
+
+
+def test_dual_audio_is_not_a_dub() -> None:
+    """It carries the original track too, so it is an ordinary candidate."""
+    dual = candidate("[Judas] Bofuri - 07 [BD 1080p][HEVC x265 10bit][Dual-Audio].mkv", seeders=90)
+    sub = candidate("[SubsPlease] Bofuri - 07 (1080p) [A1B2C3D4].mkv", seeders=12)
+
+    ranked = rank([dual, sub], Rules(preferred_resolution="1080p"))
+
+    assert ranked[0].item.title == dual.item.title
+    assert all(entry.dubbed is False for entry in ranked)
+
+
+def test_a_dub_that_is_ranked_says_so_in_its_reasons() -> None:
+    top = rank([candidate(YAMEII_DUB)], Rules())[0]
+
+    assert "english dub, so ranked below every subbed release" in top.reasons
 
 
 # --- The client -------------------------------------------------------------
@@ -1171,12 +1774,13 @@ async def test_the_search_runs_every_query_even_when_the_first_finds_plenty(
     stub = NyaaStub({"Sousou no Frieren - 07": FEED})
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        ranked = await search_for_episode(
+        found = await search_for_episode(
             client, FRIEREN_S1, 7, Rules(preferred_groups=("SubsPlease",))
         )
 
     assert stub.queries == FRIEREN_S1_QUERIES
-    assert ranked[0].candidate.group == "SubsPlease"
+    assert found.ranked[0].candidate.group == "SubsPlease"
+    assert (found.forms, found.results) == (len(FRIEREN_S1_QUERIES), 20)
 
 
 async def test_the_search_finds_what_only_a_later_query_returns(
@@ -1186,10 +1790,10 @@ async def test_the_search_finds_what_only_a_later_query_returns(
     stub = NyaaStub({"Sousou no Frieren 07": FEED})
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        ranked = await search_for_episode(client, FRIEREN_S1, 7, Rules())
+        found = await search_for_episode(client, FRIEREN_S1, 7, Rules())
 
     assert stub.queries == FRIEREN_S1_QUERIES
-    assert ranked
+    assert found.ranked
 
 
 async def test_the_pool_is_the_union_of_every_query(
@@ -1200,16 +1804,16 @@ async def test_the_pool_is_the_union_of_every_query(
     Neither feed alone contains both of these: the SubsPlease 1080p is only in
     the short one and the Erai-raws 1080p is only in the full one. Before the
     merge, the full-title query answered first and non-empty and the search
-    never asked the other five.
+    never asked the other seven.
     """
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
-    stub = NyaaStub({MUSHOKU_QUERIES[0]: MUSHOKU_FULL, MUSHOKU_QUERIES[2]: MUSHOKU_SHORT})
+    stub = NyaaStub({MUSHOKU_FULL_QUERY: MUSHOKU_FULL, MUSHOKU_SHORT_QUERY: MUSHOKU_SHORT})
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        ranked = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
+        found = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
 
     assert stub.queries == MUSHOKU_QUERIES
-    titles = [entry.item.title for entry in ranked]
+    titles = [entry.item.title for entry in found.ranked]
     assert SUBSPLEASE_1080P in titles
     assert any(title.startswith("[Erai-raws]") and "1080p" in title for title in titles)
 
@@ -1217,15 +1821,15 @@ async def test_the_pool_is_the_union_of_every_query(
 async def test_the_merge_keeps_one_row_per_info_hash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every query answers the same feed; the pool is that feed, not six of it."""
+    """Every query answers the same feed; the pool is that feed, not eight of it."""
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub(default=MUSHOKU_SHORT)
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        ranked = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
+        found = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
 
-    assert len(stub.queries) == len(MUSHOKU_QUERIES) == 6
-    hashes = [entry.item.info_hash for entry in ranked]
+    assert len(stub.queries) == len(MUSHOKU_QUERIES) == 10
+    hashes = [entry.item.info_hash for entry in found.ranked]
     assert len(hashes) == len(set(hashes))
 
 
@@ -1238,21 +1842,21 @@ async def test_the_most_seeded_1080p_release_wins_across_the_merged_pool(
     the bug; being asked to rank six of the fourteen was.
     """
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
-    stub = NyaaStub({MUSHOKU_QUERIES[0]: MUSHOKU_FULL, MUSHOKU_QUERIES[2]: MUSHOKU_SHORT})
+    stub = NyaaStub({MUSHOKU_FULL_QUERY: MUSHOKU_FULL, MUSHOKU_SHORT_QUERY: MUSHOKU_SHORT})
     rules = Rules(preferred_resolution="1080p", fallback_resolution="720p")
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        ranked = await search_for_episode(client, MUSHOKU_S3, 11, rules)
+        found = await search_for_episode(client, MUSHOKU_S3, 11, rules)
 
-    assert ranked[0].item.title == SUBSPLEASE_1080P
-    assert ranked[0].item.seeders == 4836
-    assert ranked[0].candidate.resolution == "1080p"
+    assert found.ranked[0].item.title == SUBSPLEASE_1080P
+    assert found.ranked[0].item.seeders == 4836
+    assert found.ranked[0].candidate.resolution == "1080p"
 
 
 async def test_every_query_is_still_spaced_by_the_polite_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A full budget costs five pauses, not zero and not a burst."""
+    """A full budget costs nine pauses, not zero and not a burst."""
     slept: list[float] = []
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
     stub = NyaaStub()
@@ -1260,19 +1864,23 @@ async def test_every_query_is_still_spaced_by_the_polite_interval(
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         await search_for_episode(client, MUSHOKU_S3, 11, Rules())
 
-    assert len(stub.queries) == nyaa_module.MAX_QUERIES == 6
-    assert len(slept) == 5, "the first request waits for nothing"
+    assert len(stub.queries) == nyaa_module.MAX_QUERIES == 10
+    assert len(slept) == 9, "the first request waits for nothing"
     assert all(0 < pause <= MIN_INTERVAL for pause in slept)
 
 
-async def test_a_search_that_finds_nothing_returns_an_empty_list(
+async def test_a_search_that_finds_nothing_says_what_it_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An empty answer, and the two numbers a stuck row is rendered from."""
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub()
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
-        assert await search_for_episode(client, FRIEREN_S1, 99, Rules()) == []
+        found = await search_for_episode(client, FRIEREN_S1, 99, Rules())
+
+    assert found.ranked == []
+    assert (found.forms, found.results, found.kept) == (len(FRIEREN_S1_QUERIES), 0, 0)
 
 
 async def test_concurrent_searches_do_not_burst(monkeypatch: pytest.MonkeyPatch) -> None:

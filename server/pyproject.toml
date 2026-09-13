@@ -59,7 +59,7 @@ module = ["arc.services.*", "arc.core.*"]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "anitopy.*"]
+module = ["apscheduler.*", "anitopy.*", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

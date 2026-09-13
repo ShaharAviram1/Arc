@@ -58,9 +58,9 @@ directly. Anything with logic goes through a Writer.
 ## Non-negotiables (from the spec)
 
 - **MAL writes:** no code path may write to MyAnimeList except from a
-  user-originated event (watch completion, explicit status/score change, or
-  explicit revert). Every write is logged with the previous value.
-  Automatic events never lower progress.
+  user-originated event (watch completion, explicit status/score change,
+  explicit un-mark, or explicit revert). Every write is logged with the
+  previous value. Automatic events never lower progress.
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
 - **Acquisition:** only the next N unwatched episodes of shows a user is

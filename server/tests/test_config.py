@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,8 @@ ENV_VARS = [
     "LLM_MATCH_SUGGESTIONS",
     "BOOTSTRAP_ADMIN_EMAIL",
     "BOOTSTRAP_ADMIN_PASSWORD",
+    "WORKER_DRAIN_TIMEOUT",
+    "WORKER_STALE_AFTER",
 ]
 
 
@@ -137,3 +140,41 @@ def test_the_transcode_knobs_are_configurable(monkeypatch: pytest.MonkeyPatch) -
 def test_an_impossible_crf_is_refused() -> None:
     with pytest.raises(ValueError, match="transcode_crf"):
         Settings(_env_file=None, transcode_crf=99)  # type: ignore[call-arg]
+
+
+# --- The worker's shutdown grace and the container's --------------------------
+#
+# Two numbers in two files that have to agree. Docker sends SIGTERM, waits
+# `stop_grace_period`, then sends SIGKILL; the worker uses that window to let
+# in-flight jobs finish and to put back the rows of the ones it has to cancel.
+# With the grace shorter than the drain, none of that runs — which is how a
+# transcode interrupted by a deploy stayed `running` under a dead container's
+# lock (2026-09-13).
+
+COMPOSE_FILE = Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.yml"
+
+#: `stop_grace_period: 15s` — seconds only, which is all this file uses.
+GRACE_PATTERN = re.compile(r"^\s*stop_grace_period:\s*(\d+(?:\.\d+)?)s\s*$", re.MULTILINE)
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_the_drain_timeout_fits_inside_the_container_stop_grace() -> None:
+    graces = [float(match) for match in GRACE_PATTERN.findall(COMPOSE_FILE.read_text())]
+
+    assert graces, f"no stop_grace_period in {COMPOSE_FILE}; the worker needs one"
+    assert _settings().worker_drain_timeout < min(graces), (
+        "WORKER_DRAIN_TIMEOUT must leave room inside the container's "
+        "stop_grace_period for the drain to requeue what it cancels"
+    )
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_the_worker_recovery_defaults() -> None:
+    settings = _settings()
+
+    # The shutdown grace, chosen against the container's 15s rather than
+    # against how long a job takes.
+    assert settings.worker_drain_timeout == 10.0
+    # And the age-based backstop, which a restart no longer waits for:
+    # `requeue_orphans` reclaims by identity at start-up.
+    assert settings.worker_stale_after == 7200.0

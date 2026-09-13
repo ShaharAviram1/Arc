@@ -18,6 +18,7 @@ import {
   usePlayInfo,
   useReportProgress,
   useUnmarkWatched,
+  WATCHED_BY_PROGRESS_HINT,
   type EpisodeRef,
   type PlayInfo,
 } from '@/lib/playback'
@@ -903,6 +904,19 @@ function PlayerView({ id }: { id: number }) {
   const episodeLabel = `Episode ${String(episode.number)}`
 
   const watched = watchedOverride ?? episode.watched
+  /**
+   * Whether this tick has an undo (FR-W5). `watched_source` folds that in: an
+   * episode *under* the viewer's latest watched one is `progress`, and the
+   * un-mark only ever moves the list by one from the top (FR-S4, revised
+   * 2026-09-13), so there is nothing here to press. The toggle becomes the same
+   * non-actionable control the show page's rows use, tooltip and all, with the
+   * glyph still filled because the viewer has still watched it.
+   *
+   * `watchedOverride` settles the question on its own: it is only ever set by
+   * pressing this control, which a `progress` episode never offers.
+   */
+  const watchedByList =
+    watchedOverride === null && episode.watched && episode.watched_source === 'progress'
   const watchedPending = markWatched.isPending || unmarkWatched.isPending
   const watchedError = unmarkWatched.isError
     ? UNMARK_WATCHED_FAILED
@@ -1237,17 +1251,30 @@ function PlayerView({ id }: { id: number }) {
                 />
                 <NeighbourLink episode={next} label="Next episode" glyph={<SkipForwardGlyph />} />
               </nav>
-              <button
-                type="button"
-                aria-label={watched ? 'Unmark watched' : 'Mark watched'}
-                aria-pressed={watched}
-                title={watched ? 'Unmark watched' : 'Mark watched'}
-                disabled={watchedPending}
-                onClick={toggleWatched}
-                className={PLAYER_ICON}
-              >
-                <WatchedGlyph filled={watched} />
-              </button>
+              {watchedByList ? (
+                <button
+                  type="button"
+                  aria-label="Watched"
+                  aria-pressed
+                  aria-disabled
+                  title={WATCHED_BY_PROGRESS_HINT}
+                  className={PLAYER_ICON}
+                >
+                  <WatchedGlyph filled />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  aria-label={watched ? 'Unmark watched' : 'Mark watched'}
+                  aria-pressed={watched}
+                  title={watched ? 'Unmark watched' : 'Mark watched'}
+                  disabled={watchedPending}
+                  onClick={toggleWatched}
+                  className={PLAYER_ICON}
+                >
+                  <WatchedGlyph filled={watched} />
+                </button>
+              )}
             </div>
 
             <div className="flex items-center justify-self-end">

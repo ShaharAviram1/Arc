@@ -360,9 +360,14 @@ def clean_slate(test_database_url: str) -> None:
         finally:
             await engine.dispose()
 
+    # Two clauses rather than one tuple: ``ruff format`` in this toolchain
+    # rewrites ``except (A, B):`` into the Python 2 spelling, which is a syntax
+    # error — and a syntax error in *this* file takes the whole suite with it.
     try:
         asyncio.run(run())
-    except OSError, SQLAlchemyError:
+    except OSError:
+        return
+    except SQLAlchemyError:
         return
 
 

@@ -373,6 +373,15 @@ services:
     command: ["python", "-m", "arc.worker"]
     volumes:
       - arc_data:/data
+    # Long enough for the worker's own shutdown to finish. On SIGTERM it stops
+    # claiming, gives in-flight jobs WORKER_DRAIN_TIMEOUT (10 s) to end, then
+    # cancels them and puts their rows back to `pending` so the next container
+    # picks them up at once. Docker's default grace is 10 s, which was shorter
+    # than that sequence: the SIGKILL landed mid-drain, and a transcode
+    # interrupted by a deploy stayed `running` under the dead container's lock
+    # with its episode stuck in `preparing` (2026-09-13). Raise this together
+    # with WORKER_DRAIN_TIMEOUT, never below it.
+    stop_grace_period: 15s
     # The worker has no port to probe, so its liveness is a file: the
     # scheduler rewrites $DATA_DIR/worker.heartbeat every 30 s and `--check`
     # exits 0 while that file is under 90 s old (arc/worker.py). Deliberately

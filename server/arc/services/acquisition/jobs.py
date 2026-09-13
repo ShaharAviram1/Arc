@@ -319,6 +319,22 @@ async def _pick(ctx: JobContext, episode: Episode, ranked: list[Ranked]) -> Rank
                 },
             )
             continue
+        if entry.dubbed:
+            # The ranker puts every dub behind every subbed candidate, so
+            # reaching one here means there was no subbed release at all — or
+            # every one of them has already been tried. Worth a line of its
+            # own: a dub is a file somebody can watch and the right answer
+            # when there is nothing else, and it is also the first thing to
+            # look at when a user says the audio is wrong (FR-A3).
+            ctx.log.info(
+                "choosing an english dub for lack of anything else",
+                extra={
+                    "episode_id": episode.id,
+                    "title": entry.item.title,
+                    "group": entry.candidate.group,
+                    "candidates": len(ranked),
+                },
+            )
         return entry
     return None
 
@@ -459,7 +475,13 @@ async def _requeue_paused(
 
 @register(SEARCH_RELEASE)
 async def search_release(ctx: JobContext) -> None:
-    """Find a release for one episode and start it downloading (FR-A3..A6)."""
+    """Find a release for one episode and start it downloading (FR-A3..A6).
+
+    Every attempt that actually reaches Nyaa also stamps what it asked and saw
+    on the episode — ``last_search_at``, ``last_search_forms``,
+    ``last_search_results`` — which is what the show page's row reads (FR-A7).
+    A paused or storage-held run stamps nothing, because it asked nothing.
+    """
     episode_id = int(ctx.payload["episode_id"])
     now = datetime.now(UTC)
 
@@ -509,7 +531,17 @@ async def search_release(ctx: JobContext) -> None:
     # goes through the same instance. It is never closed here — it outlives
     # the job (:func:`arc.services.acquisition.nyaa.shared_client`).
     nyaa = nyaa_module.shared_client(ctx.settings.nyaa_url)
-    ranked = await search_for_episode(nyaa, anime, episode.number, rules)
+    found = await search_for_episode(nyaa, anime, episode.number, rules)
+    ranked = found.ranked
+    # Every attempt, before anything is decided about it: the pair of numbers
+    # is the diagnostic for a row that says ``Searching`` and nothing else
+    # (FR-A7), and it is worth exactly as much on the attempt that fails as on
+    # the one that succeeds. Written even when the episode then goes
+    # ``unavailable``, which is where somebody is most likely to read it.
+    episode.last_search_at = now
+    episode.last_search_forms = found.forms
+    episode.last_search_results = found.results
+    await ctx.session.flush()
 
     chosen = await _pick(ctx, episode, ranked) if ranked else None
     if chosen is None:

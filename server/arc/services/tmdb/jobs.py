@@ -31,14 +31,17 @@ failure: a deployment with no key is a complete Arc that renders AniList's art
 (architecture.md §9), and a nightly job that failed instead would be a red row
 in the queue view for ever.
 
-Three paths ask for an enrichment **on demand** rather than waiting for the
+Four paths ask for an enrichment **on demand** rather than waiting for the
 sweep, all of them cheap SELECTs that answer nothing once the art is in:
 ``GET /api/home`` (:func:`enqueue_episode_stills` for the cards on screen, then
-:func:`enqueue_hero_art` for the season behind the hero) and the sample route
+:func:`enqueue_hero_art` for the season behind the hero), the sample route
 (:func:`enqueue_show_enrichment` for the one show a user has just asked Arc to
-fetch — FR-A8). All three share the same three gates — a key is set
-(:func:`tmdb_configured`), ``_mapped``, and "there is still a hole" — so none
-of them can queue a job whose only outcome is a logged skip.
+fetch — FR-A8) and ``GET /api/anime/{id}`` (the same call, for the show whose
+page is being opened — owner, 2026-09-13: a series nobody follows and no shelf
+shows had nothing else to ask for its stills). All four share the same three
+gates — a key is set (:func:`tmdb_configured`), ``_mapped``, and "there is
+still a hole" — so none of them can queue a job whose only outcome is a logged
+skip.
 
 **Cost.** A full enrichment is three requests — the show, its season, its crew
 — and an art-only one is a single ``/tv/{id}``, paced by the client at four a
@@ -154,6 +157,11 @@ async def tmdb_ids_for(session: AsyncSession, anime: Anime) -> OfflineId | None:
     cache matches payloads to rows with. A row that carries neither TMDB id is
     no use and comes back as ``None``: it exists, it just does not go where
     this job needs to go.
+
+    The row-level twin of :func:`_mapped`, and what ``GET /api/anime/{id}``
+    reads to answer ``tmdb_mapped`` — so the page's "no episode pictures for
+    this show" and the handler's "the id map has no tmdb id for this show" are
+    one question asked once, rather than two clauses that could drift apart.
     """
     clauses = []
     if anime.anilist_id is not None:
@@ -640,10 +648,13 @@ async def enqueue_show_enrichment(
     """A full enrichment for **one** show a user has just asked Arc for.
 
     The single-row form of :func:`enqueue_episode_stills`, for the paths that
-    know exactly which show somebody is about to look at — today that is the
-    sample route (FR-A8), where the episode being fetched is a 16:9 card whose
-    still would otherwise arrive with the nightly sweep, or when somebody
-    happened to open Watch Now (owner, 2026-09-13).
+    know exactly which show somebody is about to look at: the sample route
+    (FR-A8), where the episode being fetched is a 16:9 card whose still would
+    otherwise arrive with the nightly sweep, or when somebody happened to open
+    Watch Now (owner, 2026-09-13); and ``GET /api/anime/{id}``, because the
+    show page is the one place a viewer looks at *every* episode of a series —
+    and a series nobody follows, which no shelf carries and nobody has sampled,
+    was reached by none of the paths above (owner, 2026-09-13).
 
     Gated by the same two clauses every other on-demand enqueue uses, so a
     press of the button cannot queue work that could only log a skip: the

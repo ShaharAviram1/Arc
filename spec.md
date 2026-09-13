@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-13. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-09-14. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -85,6 +85,10 @@ any time, and the owner uses it daily.
 - FR-C3 Seasonal schedule: for the current season (and prev/next), list shows
   grouped by weekday with air time in the user's timezone. Shows the user
   follows are highlighted. "Add to planned / watching" from the schedule.
+  The **current** week's grid includes every airing show with a known air
+  time, whatever season it started in — a two-cour show or a long-runner
+  belongs to the week it airs in — and names that season on the card; the
+  prev/next views stay the shows of the season being browsed.
 - FR-C4 Per followed show, know which episodes have aired and how many the
   user has not watched ("behind by N"). Published air dates that the rest of
   the list contradicts are not believed: a finished show has no future
@@ -103,7 +107,10 @@ any time, and the owner uses it daily.
   manami anime-offline-database plus Fribb's cross-id map) is consulted first
   for search, matching and id mapping, so those never depend on a live API;
   TMDB, reached through that id map, supplies key art, episode stills and
-  credits when AniList has not, and never overwrites AniList-provided values.
+  credits when AniList has not, and never overwrites AniList-provided values;
+  opening a show's page asks for its missing pictures (they appear without a
+  reload), and where the id map cannot reach the show — or the deployment has
+  no TMDB key — the episode list says so once instead of waiting.
   A record no live source has answered for carries a quiet "via offline
   catalogue" caveat wherever it is shown — the counterpart of "via MAL" — and
   that caveat disappears on its own once AniList or MAL fills the record,
@@ -125,11 +132,36 @@ any time, and the owner uses it daily.
   2. preferred resolution (default 1080p, fallback 720p),
   3. seeders (more is better),
   4. Nyaa "trusted" flag.
-  Per-show overrides for group and resolution are allowed.
+  Per-show overrides for group and resolution are allowed. **An English dub
+  ranks below every subbed candidate** and is never chosen while one exists
+  (owner, 2026-09-14): a dub is not a worse copy of the episode, it is the
+  episode in the wrong language, so it outranks all four rules above — both of
+  the releases Arc picked on 2026-09-13 won on seeders. It stays a ranking
+  rather than a filter, because when nothing else was found a file somebody can
+  watch beats a fortnight of "searching"; the choice is logged when it is made.
+  A dual-audio release is not a dub: it carries the original track too.
 - FR-A4 Nyaa is polled via its RSS search feed with a query built from the
   show's titles and episode number. Results are parsed with the same filename
   parser used for the library. Candidates whose parsed title/episode do not
-  match are discarded.
+  match are discarded. **Several forms of the query are asked, because a
+  release group names a show by neither the whole catalogue title nor the same
+  language**: the full titles, the episode number written the Western way
+  (`S01E07`), a later season's marker written the three ways groups write it,
+  the head of a subtitled title, the bare title, and up to two of the show's
+  other names — each of them also **with its symbols taken out**
+  (`Yarichin☆Bitch-bu` → `Yarichin Bitch-bu`, `Love Live! Superstar!!` → `Love
+  Live Superstar`), since Nyaa matches whole words and a star glues two of them
+  together. A **film, or a one-episode OVA/ONA, is asked for by name with no
+  episode number at all** and accepted as that entry's only episode (owner,
+  2026-09-14): three films sat unfetched for a day because Arc was asking for
+  "- 01" of them. Such a release has to **say** it is a film or a one-off, and
+  to name at least as much of the title as the catalogue does: a whole-series
+  Blu-ray pack names neither an episode nor a film, and *Kizumonogatari* is
+  three films with one name. A whole-season batch is still never picked,
+  whatever form found it, and where a release cannot be told from a series pack
+  by anything in its name Arc leaves the episode unfetched and says so — a
+  missing file is visible and fixable, the wrong film plays as though it were
+  right.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -153,6 +185,13 @@ any time, and the owner uses it daily.
   limit, are never touched by this.
 - FR-A7 Users can see the acquisition status of each episode on the show page
   (wanted, searching, downloading with %, preparing, ready, unavailable).
+  While Arc is still looking, the row also says **what the last search did**
+  (owner, 2026-09-14): how many query forms it asked, how many releases came
+  back before the filter, and when the next attempt runs — "Searching · 6
+  forms, 0 results · next try 23:26", in the viewer's own timezone. A row that
+  says only "searching" for six hours says nothing, and the pair of numbers is
+  what separates a query that matches nothing from a filter that keeps nothing.
+  An unavailable row keeps its reason instead.
 - FR-A8 A user can ask for the first episode of any show as a sample from the
   show page, without changing their list or MAL. Only that one episode is
   fetched; it follows the same states, D-day drop (FR-T2) and retention
@@ -223,8 +262,19 @@ any time, and the owner uses it daily.
   episode number is greater than current progress, and enqueues a MAL sync.
   If the show is not on the user's list, watching it adds it as Watching
   (the act of watching is the user's choice); status is never changed
-  automatically beyond that, and un-marking a watched episode never lowers
-  list progress or triggers a MAL write.
+  automatically beyond FR-W5's auto-complete.
+  **Un-marking** an episode (revised by the owner 2026-09-13, superseding the
+  2026-09-07 clarification) is a user-originated event: it clears the
+  completion row and, when the user's list progress *equals* that episode's
+  number, lowers progress to N−1 with one logged progress write carrying the
+  previous value. This is the only path on which Arc lowers MAL progress, and
+  only because the user asked; the FR-M4 guard that refuses a lowering
+  progress write still refuses every automatic one. An un-mark of any other
+  episode clears the row alone — above the progress there is nothing to lower,
+  and below it a rollback would claim something about the episodes in between
+  that the user never said. The status is never rolled back: a show FR-W5
+  completed stays completed, because "completed" is the user's word (FR-W2).
+  Un-marking never creates a list entry.
 - FR-S5 Next-episode: at the end of an episode, offer the next one if ready.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
 
@@ -234,16 +284,54 @@ any time, and the owner uses it daily.
   the episode is also marked watched, so a rewatch stopped half-way is offered
   and resumes where it stopped; owner, 2026-09-11), **Behind on** (followed airing shows with unwatched
   aired episodes), and **New this week** (episodes that aired in the last 7
-  days for followed shows, with ready/preparing state). As shelved since M15
+  days for followed shows). As shelved since M15
   those are Continue watching, Catch up, and This week plus Ready to watch —
-  the latter being the ready, unstarted half of New this week. The page also
+  the latter being the ready, unstarted half of New this week. The This-week
+  shelf carries **no acquisition state** (owner, 2026-09-13): the episode, its
+  air day, and a watched tick when the viewer has watched it (FR-W5). What Arc
+  is doing about the file belongs to the show page, where FR-A7's per-episode
+  state lives in full. The page also
   opens with a hero of season recommendations, which is presentation over the
-  same caches rather than a requirement of its own (owner, 2026-09-11).
+  same caches rather than a requirement of its own (owner, 2026-09-11). The
+  page **updates itself as episodes change state** — a tile appearing, a row
+  flipping, a still arriving — with no notifications and no sound (owner,
+  2026-09-13).
 - FR-W2 Users can set a show to watching / planned / on hold / dropped /
   completed, and set a score (1–10) from the show page.
 - FR-W3 Marking an episode as watched manually is allowed (e.g. watched
-  elsewhere) and is treated the same as FR-S4.
+  elsewhere) and is treated the same as FR-S4: it records the completion for
+  that episode **and** raises ListEntry.progress to its number if lower, with
+  one MAL progress write that never lowers. It writes no completion rows for
+  the episodes below it — FR-W5's progress half already counts them. Its undo
+  is FR-S4's un-mark, which lowers the progress by one when the episode is the
+  latest watched.
 - FR-W4 Dropped, completed and on-hold shows generate no acquisition wants.
+- FR-W5 **What "watched" means, and when a show completes itself** (owner,
+  2026-09-13). An episode counts as watched for a user when its number is at
+  or below that user's ListEntry.progress **or** the user has a completed
+  WatchProgress row for it. Every place Arc shows a watched state reads that
+  one definition: the show page's per-episode rows and its "Watched N / M"
+  line, the home page's tiles, and the "play the next thing" pick. Each
+  episode also carries **which** of the two said so, which is the same thing as
+  whether the user can take it back (FR-S4): an episode *at or above* the
+  list's progress is `arc` and offers "Unwatch" — at the progress because the
+  un-mark lowers it, above because there is a completion row to clear — and an
+  episode *below* the progress is `progress`, a plain non-actionable "Watched"
+  with a tooltip pointing at where the undo is. One value, not a second flag:
+  the only question the client has is whether the control is a button.
+  For retention (FR-T1) an episode at or below a user's progress counts as
+  watched by that user, with the grace period anchored on the list entry's
+  last change; so a file the user skipped past is deleted on the same G-day
+  schedule as one watched in Arc.
+  When a progress advance brings progress to the show's episode count **and**
+  the catalogue says the show has FINISHED airing **and** that count is known,
+  the entry's status becomes `completed` in the same transaction, as one
+  logged, user-originated status write to MAL alongside the progress (FR-M4,
+  FR-M7). This applies **whatever status the entry had**, `on_hold` and
+  `dropped` included (owner, 2026-09-13): finishing the last episode of a show
+  you had dropped is the clearest statement anybody makes about a list entry.
+  A show still airing, a show with an unknown episode count, and a rewatch of
+  an already-completed show are never auto-completed.
 
 ### 4.7 MyAnimeList sync
 - FR-M1 Each user links their own MAL account via OAuth 2.0 (PKCE). Tokens
@@ -255,8 +343,11 @@ any time, and the owner uses it daily.
   entry changed on both sides since last sync, the more recent change wins
   and the conflict is logged.
 - FR-M4 Arc writes to MAL only for changes a user made in Arc: episode
-  completed (progress), status change, score change. Progress written to MAL
-  never decreases as a result of automatic watch events.
+  completed (progress), status change, score change, and an explicit un-mark
+  (progress, FR-S4). Progress written to MAL never decreases as a result of
+  automatic watch events — the explicit un-mark is the one write that lowers
+  it, and the guard tells the two apart by the cause recorded on each queued
+  row rather than by the endpoint.
 - FR-M5 Every write is recorded in MalWriteLog with the previous value. A
   user can view their log and revert an entry, which writes the previous
   value back (and logs that too).
@@ -266,7 +357,8 @@ any time, and the owner uses it daily.
 - FR-M6 Writes are idempotent and retried with backoff; failures surface as a
   badge on the show and in the user's sync page.
 - FR-M7 "Never write a change I did not make": there is no code path that
-  writes to MAL except via a user-originated event or an explicit revert.
+  writes to MAL except via a user-originated event (a list edit, a watch
+  completion, an explicit un-mark) or an explicit revert.
 
 ### 4.8 Recommendations (phase 2)
 - FR-R1 Recommendations page with an optional free-text mood prompt ("something
@@ -301,7 +393,10 @@ any time, and the owner uses it daily.
 - FR-T1 An episode's files (source + rendition) are deleted when **all** of
   the following hold: every user who wanted the episode has completed it, and
   a grace period of **G** days has elapsed since the last completion
-  (default G = 7).
+  (default G = 7). "Completed" here is FR-W5's definition — an episode at or
+  below a user's list progress counts as completed by that user, anchored on
+  that entry's last change — so an episode somebody skipped past is deleted on
+  the same schedule as one they watched in Arc.
 - FR-T2 Additionally, if a user who wants the episode has not watched it
   within **D** days of it becoming ready (default D = 21) — counted from
   the later of the episode becoming ready and the user's last action on
@@ -333,10 +428,10 @@ any time, and the owner uses it daily.
 | Page | Phase | Contents |
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
-| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week, Catch up (behind on), Picked for you |
+| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you |
 | Schedule | 1 | Weekday grid for the season; prev/next season; add-to-list actions |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and watched marks, play buttons |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons |
 | Player | 1 | HLS player, resume, next episode, progress reporting |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
@@ -663,3 +758,90 @@ is and the grace period decides.
   mouse plus hover edge arrows on every shelf, chosen over turning the vertical
   wheel sideways, which would hijack page scrolling whenever the pointer rests
   on a shelf. Trackpad, touch and keyboard behaviour unchanged.
+- 2026-09-13 — Watched state (owner, M16 batch 2): an episode counts as
+  watched when its number is at or below the user's list progress OR the
+  user has an Arc completion for it; the Show page's per-episode control
+  reads "Watched" and offers "Unwatch"; the "New this week" shelf shows no
+  acquisition state. A manual "mark watched" of episode N raises list
+  progress to N (one MAL progress write, never lowering) and records no
+  synthetic completion rows for 1…N-1 — but retention treats episodes at or
+  below progress as watched by that user (anchored on the list entry's
+  progress change), so their files are deleted on the same grace schedule
+  as episodes watched in Arc. When progress reaches the episode count of a
+  FINISHED show the entry becomes `completed` (one logged, user-originated
+  status write to MAL); an airing show or one with an unknown count is
+  never auto-completed; a completed show marked again stays completed. The
+  FR text for all of this is **FR-W5**, with FR-S4, FR-W1, FR-W3 and FR-T1
+  amended to point at it.
+- 2026-09-13 — Watched state, second pass (owner, after the M16 batch-2
+  review). Two revisions. (1) **Un-watch lowers progress**, superseding the
+  2026-09-07 FR-S4 clarification: since FR-W5 derives the marks from list
+  progress, clearing a completion row alone left the viewer no way to correct
+  a mark at all — the tick stayed and the button did nothing. An explicit
+  `DELETE …/watched` of episode N is a user-originated event and lowers
+  progress to N−1 when the list stands at N, with one logged progress write
+  (cause `manual`, carrying the previous value). It is the **only** path on
+  which Arc lowers MyAnimeList's progress; the FR-M4 guard is unchanged and
+  still refuses every *automatic* lowering, because the cause is recorded per
+  queued row rather than per endpoint. Above the progress the un-mark clears
+  the row alone; below it nothing moves, because a rollback there would claim
+  something about the episodes in between that nobody said — so `watched_source`
+  is `arc` (actionable) at or above the progress and `progress`
+  (non-actionable, tooltip "Unwatch from the latest watched episode down")
+  below it, one value rather than a separate `unwatchable` flag. The status is
+  never rolled back: a show FR-W5 auto-completed stays completed, because
+  "completed" is the user's word. (2) **Any status auto-completes** — `on_hold`
+  and `dropped` flip to `completed` too when a finished show's count is
+  reached, because finishing the last episode of a show you had dropped is the
+  clearest statement anybody makes about a list entry.
+- 2026-09-13 — **Schedule membership** (FR-C3, owner, M16 batch 2). The
+  current week's grid is a calendar, not a season listing: it includes every
+  `RELEASING` show with a known air time in that week, whatever `season` the
+  catalogue tags it with, and a long-runner tagged with no season at all is
+  the same case. Previous/next season views are unchanged — they are a
+  catalogue browse, so they stay exactly the shows of the season being looked
+  at. The season tag on the row is never rewritten; a show carried into the
+  week says which season it started in ("Since Spring 2026") under its slot.
+  A `RELEASING` show with no known air time anywhere is still listed as
+  unscheduled on its own season's page, and is not carried in. Evidence: on
+  production, That Time I Got Reincarnated as a Slime Season 4 is `RELEASING`
+  with episode 23 airing Friday 2026-09-18 14:00 UTC, is tagged `SPRING 2026`
+  (a two-cour show that started in spring), and was therefore missing from
+  the Summer 2026 grid the owner reads. Home's "Catch up" and "New this week"
+  were checked and needed no change — both are driven by the caller's list
+  and the episodes' own dates, never by a season — and a test now pins that.
+- 2026-09-13 — **The page updates itself** (FR-W1, FR-A7, owner, M16 batch 2).
+  A signed-in tab learns about episode state changes for the shows that matter
+  to it without a manual refresh: a "Ready to watch" tile appearing, a show
+  page row flipping to Ready or Downloading, a still arriving. No push
+  notifications and no sound — the page simply stays true, and there is no
+  "live" indicator, because that would be a promise about something the spec
+  deliberately treats as an improvement on latency rather than a guarantee.
+  Polling remains the fallback: everything reachable this way is also
+  reachable by asking again, so a stream that cannot connect costs a viewer
+  seconds and nothing else. Mechanism in architecture.md §5.9.
+- 2026-09-14 — **Matching robustness** (FR-A3, FR-A4, FR-A7, owner, M16 batch
+  2: "failing on this matching is kinda embarrassing"). A day of production
+  logs, not a code review, and six answers to the same shape of problem: Arc
+  was asking Nyaa for names nobody writes. **Films, OVAs and one-episode
+  specials** were asked for as "- 01" and are now asked for by name, and
+  accepted as the one episode the catalogue holds for them; three of them had
+  sat in "searching" for a day. **Symbols** a keyboard does not reach —
+  `Yarichin☆Bitch-bu`, `Love Live! Superstar!!`, `Fate/Zero` — get a second,
+  flattened form of the query, because Nyaa matches whole words and a star
+  between two of them makes one word out of both. A **slash** was being read as
+  a directory separator, so *Fate/Zero* parsed as a show called "Zero" and
+  every release of it was rejected as the wrong show; which kind of slash it is
+  is now the caller's answer rather than a guess. **Dubs** rank below every
+  subbed release and are only taken for lack of anything else, which is the one
+  rule here that changes what a user *gets* rather than what Arc finds: two
+  shows were quietly delivered in English yesterday because the dub had the
+  most seeders. Up to two **synonyms** earn a query of their own. And the show
+  page now says **what the search actually did** — "6 forms, 0 results · next
+  try 23:26" — because the honest answer to "it has said searching all day" is
+  a number, not a spinner. The claims behind each form are written down in a
+  query corpus of real cases (architecture.md §10) rather than in whichever
+  unit test happened to find them. **Absolute episode numbering is deliberately
+  not part of this** and remains its own item: a release numbered 40 of a
+  two-season franchise needs the relation graph, and guessing at it means a
+  wrong file rather than a missing one.
