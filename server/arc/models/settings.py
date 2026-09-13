@@ -31,6 +31,12 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         "fallback_resolution": "720p",
         # N — how many unwatched episodes ahead to keep (FR-A1).
         "look_ahead_n": 2,
+        # K — how many shows one user may have fetching at once (FR-A10).
+        # 0 means *unlimited*, which is the opposite of what 0 means for N
+        # above. Five is what one disk and qBittorrent's handful of download
+        # slots actually allow to arrive at the same time; the shows over the
+        # cap wait visibly on their own page and start as the others finish.
+        "slot_cap_k": 5,
         # G — grace days before files are deleted (FR-T1).
         "grace_days_g": 7,
         # D — days a ready episode may sit unwatched before the want is
@@ -43,6 +49,14 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # ``search_release``; ``poll_qbit`` ignores it, so downloads already in
         # flight still finish and still reach the library.
         "acquisition_paused": False,
+        # The storage floor, in whole GB (FR-T6). While free space on the data
+        # volume is below it acquisition holds itself: the reconciler still
+        # drops, shelves and cancels — those free room — but no new search
+        # starts, and it resumes on its own once retention has made space. 10
+        # GB is about two episodes' source plus their renditions plus the
+        # transcode's scratch, which is the smallest margin that still leaves
+        # the machine somewhere to put what it is already holding.
+        "min_free_gb": 10,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

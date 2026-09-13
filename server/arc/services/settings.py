@@ -54,6 +54,8 @@ from arc.models import DEFAULT_SETTINGS, Anime, Setting
 from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import (
     MAX_LOOK_AHEAD,
+    MAX_MIN_FREE_GB,
+    MAX_SLOT_CAP,
     OVERRIDE_PREFIX,
     PAUSED_KEY,
     set_paused,
@@ -190,9 +192,19 @@ _VALIDATORS: Final[dict[str, Any]] = {
     "preferred_resolution": lambda value: _one_of(value, RESOLUTIONS),
     "fallback_resolution": lambda value: _one_of(value, RESOLUTIONS),
     "look_ahead_n": lambda value: _bounded_int(value, low=0, high=MAX_LOOK_AHEAD),
+    # K — shows one user may have fetching at once (FR-A10). 0 is legal and
+    # means *unlimited*, unlike N's 0 above, which means "fetch nothing"; the
+    # ceiling is the figure the reader clamps at, so the panel cannot accept a
+    # cap acquisition would quietly lower.
+    "slot_cap_k": lambda value: _bounded_int(value, low=0, high=MAX_SLOT_CAP),
     "grace_days_g": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "unwatched_days_d": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "acquisition_paused": _boolean,
+    # The storage floor in whole GB (FR-T6). 0 is a legal value and means "no
+    # reserve, fetch until the disk is full"; the ceiling is the same defensive
+    # figure the reader clamps at, so what the panel accepts and what
+    # acquisition acts on cannot differ.
+    "min_free_gb": lambda value: _bounded_int(value, low=0, high=MAX_MIN_FREE_GB),
     "sub_lang": _language,
     "audio_lang": _language,
 }

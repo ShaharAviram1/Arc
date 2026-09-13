@@ -109,8 +109,12 @@ export interface SettingsValues {
   preferred_resolution: string | null
   fallback_resolution: string | null
   look_ahead_n: number
+  /** K — shows one user may have fetching at once (FR-A10); 0 is no cap. */
+  slot_cap_k: number
   grace_days_g: number
   unwatched_days_d: number
+  /** The storage floor in whole GB (spec §4.9 FR-T6); 0 turns the guard off. */
+  min_free_gb: number
   sub_lang: string
   audio_lang: string
   acquisition_paused: boolean
@@ -146,15 +150,21 @@ export interface SettingsPayload {
  * authority for everything a number field cannot express.
  */
 export const NUMBER_BOUNDS: Record<
-  'look_ahead_n' | 'grace_days_g' | 'unwatched_days_d',
+  'look_ahead_n' | 'slot_cap_k' | 'grace_days_g' | 'unwatched_days_d' | 'min_free_gb',
   {
     min: number
     max: number
   }
 > = {
   look_ahead_n: { min: 0, max: 10 },
+  // `MAX_SLOT_CAP` = 50. Fifty simultaneous shows is not a cap; past that the
+  // honest setting is 0, which means no cap at all.
+  slot_cap_k: { min: 0, max: 50 },
   grace_days_g: { min: 0, max: 365 },
   unwatched_days_d: { min: 0, max: 365 },
+  // `MAX_MIN_FREE_GB` = 1000: a terabyte of reserve is a mistyped figure, not
+  // a policy, and the reader clamps at the same number.
+  min_free_gb: { min: 0, max: 1000 },
 }
 
 /** "0–365", for a hint under the field that carries the same numbers. */

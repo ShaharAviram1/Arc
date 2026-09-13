@@ -281,6 +281,38 @@ class Settings(BaseSettings):
     #: qBittorrent's own terms, and 512 KiB/s is enough to keep a swarm
     #: interested without the host uploading anything worth noticing.
     qbit_upload_limit_kib: int = Field(default=512, ge=0)
+    #: How many torrents the client may download **at once**, sent as
+    #: qBittorrent's ``max_active_downloads`` with queueing enabled. Arc owns
+    #: this figure for the same reason it owns the seeding policy: a container
+    #: restart returns the client to its own defaults (3 downloads, 5 active),
+    #: and three slots held by dead torrents is the whole queue stopped.
+    #: ``dont_count_slow_torrents`` is sent alongside it, so a torrent that has
+    #: gone quiet does not hold a slot against the ones that have not.
+    qbit_max_active_downloads: int = Field(default=8, ge=1)
+    #: And how many may be active at all — downloading plus seeding. Larger
+    #: than the downloads figure because a finished torrent Arc has not stopped
+    #: yet is still active, and a ceiling equal to the download slots would
+    #: make each completion block the next start.
+    qbit_max_active_torrents: int = Field(default=12, ge=1)
+    #: How long a torrent may sit in ``metaDL`` — asking the swarm for its
+    #: metadata, which is the first thing a magnet does — before ``poll_qbit``
+    #: gives up on it (:data:`~arc.services.acquisition.jobs.STALL_METADATA_AFTER`).
+    #: A magnet with any seeders at all answers within seconds; an hour of
+    #: silence is a torrent nobody is holding.
+    #:
+    #: Both stall thresholds are measured against qBittorrent's own
+    #: ``time_active`` — how long it has been *working on* the torrent — and not
+    #: against the age of Arc's row. With the queue bounded above, a torrent
+    #: waits its turn for as long as it takes and must not be charged for the
+    #: wait.
+    stall_metadata_minutes: int = Field(default=60, ge=1)
+    #: And how long a torrent that *has* its metadata may make no progress, or
+    #: hold a swarm the tracker says is empty
+    #: (:data:`~arc.services.acquisition.jobs.STALL_NO_BYTES_AFTER`). Six
+    #: hours: long enough that a slow swarm on a big file is not mistaken for a
+    #: dead one, short enough that a day's worth of episodes is not lost behind
+    #: one of them.
+    stall_no_bytes_hours: int = Field(default=6, ge=1)
 
     # --- Media -----------------------------------------------------------
     data_dir: Path = Path("./data")

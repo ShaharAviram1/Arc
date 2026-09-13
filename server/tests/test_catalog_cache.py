@@ -967,6 +967,33 @@ async def test_a_mal_refresh_keeps_anilists_art_and_prose_but_fills_the_nulls(
     assert after.refreshed_at is not None
 
 
+async def test_no_catalogue_upsert_touches_the_tmdb_backdrop(
+    db_session: AsyncSession,
+) -> None:
+    """``backdrop_url`` belongs to the TMDB enrichment alone (owner, 2026-09-13).
+
+    The whole reason it is a column of its own rather than a TMDB value in
+    ``banner_url``: an AniList refresh overwrites the detail columns in full,
+    so a backdrop stored there would be replaced by the 4.75:1 strip no hero
+    can show — every refresh, for ever. Asserted on both the *full* AniList
+    detail (which is allowed to overwrite anything AniList owns) and on the MAL
+    fallback, so neither half of the precedence rule can reach the column.
+    """
+    anime = await upsert_detail(db_session, mal_detail())
+    anime.backdrop_url = "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+    await db_session.flush()
+
+    after = await upsert_detail(db_session, anilist_detail())
+    assert after.banner_url is not None  # AniList's strip landed…
+    assert after.backdrop_url == "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+
+    again = await upsert_detail(db_session, mal_detail())
+    assert again.backdrop_url == "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+
+    summarised = await upsert_summaries(db_session, [anilist_detail()])
+    assert summarised[0].backdrop_url == "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+
+
 async def test_an_anilist_refresh_replaces_everything_on_a_mal_row(
     db_session: AsyncSession,
 ) -> None:

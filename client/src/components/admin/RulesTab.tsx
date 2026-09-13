@@ -67,7 +67,7 @@ const EXPLANATION =
  * what happened when the server settled on 0–365 for G and D.
  */
 const NUMBER_FIELDS: {
-  key: 'look_ahead_n' | 'grace_days_g' | 'unwatched_days_d'
+  key: 'look_ahead_n' | 'slot_cap_k' | 'grace_days_g' | 'unwatched_days_d' | 'min_free_gb'
   label: string
   help: string
 }[] = [
@@ -75,6 +75,14 @@ const NUMBER_FIELDS: {
     key: 'look_ahead_n',
     label: 'Look-ahead N',
     help: 'How many unwatched episodes ahead to keep for each show a user is watching (FR-A1).',
+  },
+  {
+    key: 'slot_cap_k',
+    label: 'Shows fetching at once (per user)',
+    help:
+      'How many of one user’s shows may be fetching at the same time. Shows already fetching ' +
+      'keep their place, free places go to what is airing and then to what they touched most ' +
+      'recently, and the rest wait on their own show page. 0 means no limit (FR-A10).',
   },
   {
     key: 'grace_days_g',
@@ -85,6 +93,14 @@ const NUMBER_FIELDS: {
     key: 'unwatched_days_d',
     label: 'Unwatched days D',
     help: 'How long a ready episode may sit unwatched before its want is dropped (FR-T2).',
+  },
+  {
+    key: 'min_free_gb',
+    label: 'Free space floor (GB)',
+    help:
+      'Below this much free space on the data volume acquisition holds itself: nothing new is ' +
+      'searched for, downloads and playback carry on, and it resumes on its own when retention ' +
+      'frees room. 0 turns the guard off (FR-T6).',
   },
 ]
 

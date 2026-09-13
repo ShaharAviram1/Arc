@@ -22,6 +22,15 @@ true. Status is left alone even when progress reaches the last episode — FR-W2
 gives "completed" to the user to set, and a show marked completed by a rewatch
 of episode 12 would be Arc making a claim nobody made.
 
+**Every progress report is a touch, though** (FR-A9). ``activated_at`` on an
+existing list entry is stamped on the *first* report of an episode, not on the
+completion: pressing play on a show a MyAnimeList import brought in is the user
+asking Arc for it, and waiting for 90 % would mean the next episode only
+started downloading after they had finished this one. It never *creates* an
+entry — "pressed play" is not "is watching this show", and FR-S4 draws that
+line at the completion — so the one row this can stamp is one that already
+exists (:func:`_activate_entry`).
+
 **The upsert is one statement, and "was it already complete?" comes out of
 that same statement's ``RETURNING``.** At one POST per ten seconds per player
 a read-then-write would be two round trips and a race; ``INSERT … ON CONFLICT
@@ -66,6 +75,7 @@ from arc.models import (
     WatchProgress,
 )
 from arc.models.enums import MalWriteCause
+from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.mal.names import enqueue_mal_push, is_linked
 from arc.services.mal.writelog import FIELD_PROGRESS, record_pending
@@ -222,6 +232,15 @@ async def record_progress(
         )
     ).one()
 
+    # Play is one of FR-A9's touches, and it is a touch from the *first*
+    # report rather than from the one that crosses 90 %: somebody watching
+    # thirty seconds of an imported show has asked Arc for it, and waiting for
+    # the completion would mean the next episode only started arriving after
+    # they had finished this one. An entry that does not exist yet is left to
+    # the completion path below (FR-S4 creates it, activated); this only ever
+    # stamps a row that is already there.
+    await _activate_entry(session, user_id=user_id, anime_id=episode.anime_id, now=at)
+
     newly_completed = bool(completed) and not bool(was_completed)
     if not newly_completed:
         return ProgressOutcome(completed=bool(completed), newly_completed=False)
@@ -233,6 +252,28 @@ async def record_progress(
     # binge costs one reconciliation rather than one per episode.
     await enqueue_compute_wants(session)
     return ProgressOutcome(completed=True, newly_completed=True, list_progress=progress)
+
+
+async def _activate_entry(
+    session: AsyncSession, *, user_id: int, anime_id: int, now: datetime
+) -> None:
+    """Stamp this show's list entry as touched in Arc, if there is one (FR-A9).
+
+    A ``SELECT`` on the primary key per progress report, which at one report
+    per ten seconds per player is nothing, and it is the write-once
+    :func:`~arc.services.acquisition.dormancy.activate` behind it — so the
+    second report of an episode reads the row, finds a stamp and changes
+    nothing.
+
+    Deliberately does **not** create an entry. "The user pressed play" is not
+    "the user is watching this show"; FR-S4 draws that line at the completion,
+    and drawing it here would put a show on somebody's list — and into their
+    MyAnimeList push queue — because they opened an episode and changed their
+    mind.
+    """
+    entry = await session.get(ListEntry, (user_id, anime_id))
+    if entry is not None and activate(entry, now=now):
+        await session.flush()
 
 
 async def _advance_list(
@@ -261,6 +302,15 @@ async def _advance_list(
             progress=0,
         )
         session.add(entry)
+
+    # FR-A9, for the entry this function has just *created*: an existing one
+    # was stamped by :func:`_activate_entry` on the first progress report of
+    # the episode, long before this. Kept here rather than left to that, and
+    # unconditional rather than inside the ``advanced`` branch, because a row
+    # created by FR-S4 is the user's own choice to watch the show and must not
+    # spend its first fifteen minutes dormant. Write-once, so the two writers
+    # cannot disagree.
+    activate(entry, now=now)
 
     was = entry.progress
     advanced = episode.number > entry.progress

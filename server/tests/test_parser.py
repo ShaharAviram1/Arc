@@ -1,7 +1,7 @@
 """Parser behaviour the corpus does not pin (FR-L2).
 
 ``tests/fixtures/release_names.txt`` asserts title_key, episode, season, kind,
-group and version over 235 names. This file covers the rest — the technical
+group and version over 247 names. This file covers the rest — the technical
 fields, the batch span, the fractional-episode and Japanese-marker rules,
 ``title_key`` itself, and the handful of rules whose *reason* matters more
 than any one filename does.
@@ -78,6 +78,169 @@ class TestBatches:
         parsed = parse("[SubsPlease] Sousou no Frieren - 05 (1080p) [ABCD1234].mkv")
         assert parsed.episode_end is None
         assert parsed.episode_span == (5,)
+
+    @pytest.mark.parametrize(
+        ("name", "span"),
+        [
+            # The Dagashi Kashi shape: a title that ends in a number, a spaced
+            # tilde range, and anitopy reporting only the "01". This is the
+            # production failure of 2026-09-13 — 6.3 GB and twelve transcodes.
+            ("[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]", (1, 12)),
+            ("[Erai-raws] Bocchi the Rock! - 01~12 [1080p].mkv", (1, 12)),
+            ("[Judas] Fate Zero - 01-25 [1080p].mkv", (1, 25)),
+            ("[Group] Show - 01 - 12 [1080p].mkv", (1, 12)),
+            ("[Group] Show - E01-E12 [1080p].mkv", (1, 12)),
+            ("[Group] Show S01E01-E12 [1080p].mkv", (1, 12)),
+            ("[Group] One Piece - 001-024 [480p].mkv", (1, 24)),
+            # The wave dash and the fullwidth tilde a Japanese raw writes.
+            ("[Group] Show - 01 〜 12 [1080p].mkv", (1, 12)),
+            ("[Group] Show - 01〜12 [1080p].mkv", (1, 12)),
+            ("[Group] Show - 01～12 [1080p].mkv", (1, 12)),
+            # A two-episode pack. Padded, so it is a range and not a name.
+            ("[RH] Fukigen na Mononokean - 01-02 (The Morose Mononokean) [1080p]", (1, 2)),
+        ],
+    )
+    def test_a_range_at_the_episode_position_is_a_batch(
+        self, name: str, span: tuple[int, int]
+    ) -> None:
+        parsed = parse(name)
+        assert parsed.kind == "batch"
+        assert (parsed.episode, parsed.episode_end) == span
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[Group] Show - 01〜12 [1080p].mkv",
+            "[Group] Show - 01～12 [1080p].mkv",
+        ],
+    )
+    def test_a_range_anitopy_cannot_read_is_taken_off_the_title(self, name: str) -> None:
+        """anitopy knows ``~`` and not ``〜``, so it hands back ``Show - 01〜12``.
+
+        A title that keeps the run in it is a title the matcher can never
+        match, and a batch is exactly the file a person has to look at.
+        """
+        assert parse(name).title_key == "show"
+
+    @pytest.mark.parametrize(
+        ("name", "title_key_"),
+        [
+            ("[Group] 86 - 01〜11 [1080p].mkv", "86"),
+            ("[Group] 07-Ghost - 01〜25 [1080p].mkv", "07 ghost"),
+        ],
+    )
+    def test_only_the_files_own_run_comes_off_the_title(self, name: str, title_key_: str) -> None:
+        """A number in the *name* of a show is not the run the file holds.
+
+        The pattern is built from the two numbers the file was found to hold,
+        so *86* keeps its title and *07-Ghost* keeps its hyphen.
+        """
+        parsed = parse(name)
+
+        assert parsed.kind == "batch"
+        assert parsed.title_key == title_key_
+
+    def test_a_pair_of_years_is_not_a_range(self) -> None:
+        """``1998-1999`` is when *Cowboy Bebop* aired, not what the file holds.
+
+        Both ends have to be plausible years: ``0001-2000`` of One Piece is a
+        run somebody really does upload.
+        """
+        parsed = parse("[Kametsu] Cowboy Bebop 1998-1999 [BD 1080p].mkv")
+
+        assert parsed.kind != "batch"
+        assert parsed.episode_end is None
+        assert parse("[Judas] One Piece - 0001-1000 [1080p].mkv").episode_end == 1000
+
+    def test_a_number_that_opens_an_episode_title_is_not_a_range(self) -> None:
+        """anitopy reports ``- 01 - 100 Poems`` as the pair (1, 100).
+
+        It is episode 1 of a show whose episode title starts with a number, and
+        a range has to have nothing but a tag behind it to count as one.
+        """
+        parsed = parse("[Commie] Chihayafuru - 01 - 100 Poems [ABCD1234].mkv")
+
+        assert (parsed.kind, parsed.episode, parsed.episode_end) == ("episode", 1, None)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 01 ~ 10 [1080p][BATCH]",
+            "[Erai-raws] Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2 - 01 ~ 12"
+            " [1080p][Multiple Subtitles][Unofficial Batch]",
+            "[Group] Show - 12 [Batch][1080p].mkv",
+            "[Group] Show Season Pack [1080p].mkv",
+            "Show.Name.Season.Pack.1080p.BluRay.x264-GROUP.mkv",
+            "[Group] Show Season_Pack [1080p].mkv",
+        ],
+    )
+    def test_a_batch_marker_is_a_batch_whatever_the_numbers_say(self, name: str) -> None:
+        """``[BATCH]`` used to be read only when the name gave no number at all.
+
+        Which is never true of the case it was for: a batch names the first
+        episode of the run it holds, and Arc downloaded the run.
+        """
+        assert parse(name).kind == "batch"
+
+    def test_complete_on_one_numbered_file_is_a_last_episode_not_a_season(self) -> None:
+        """``COMPLETE`` is what a group shouts on the last episode of a run.
+
+        The same claim ``END`` makes, which is why :data:`_END_RE` carries the
+        word too — so unlike ``BATCH`` it is read only when the name names no
+        single episode.
+        """
+        parsed = parse("[Group] Show - 12 [COMPLETE][1080p].mkv")
+
+        assert (parsed.kind, parsed.episode, parsed.episode_end) == ("episode", 12, None)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[Group] Show [Complete][1080p].mkv",
+            "[Group] Show - 01-12 [Complete][1080p].mkv",
+            "[Kametsu] Cowboy Bebop Complete Series (BD 1080p Hi10P FLAC).mkv",
+            "[Kametsu] Gurren Lagann S1 Complete (BD 1080p Hi10P FLAC).mkv",
+        ],
+    )
+    def test_complete_with_no_single_episode_is_still_a_batch(self, name: str) -> None:
+        assert parse(name).kind == "batch"
+
+    @pytest.mark.parametrize(
+        ("name", "episode"),
+        [
+            # A version marker is not a range, and neither is a resolution, a
+            # bit depth, a language pair or a date.
+            ("[Group] Show - 01v2 [1080p].mkv", 1),
+            ("[Group] Show - 12v2 [1920x1080][10-bit][FLAC].mkv", 12),
+            ("[Group] Show - 05 [1080p][x264-AAC][10-bit].mkv", 5),
+            ("[Erai-raws] Show - 05 [1080p][Multiple Subtitle] [ENG][POR-BR][SPA-LA]", 5),
+            ("Show.Name.S01E05.2024-05-10.1080p.WEB-DL.x264-GROUP.mkv", 5),
+            # A title that ends in a padded number, counting down or from zero.
+            ("[Group] Mob Psycho 100 - 07 [1080p].mkv", 7),
+            ("[Group] Mobile Suit Gundam 00 - 05 [1080p].mkv", 5),
+            ("[Group] 86 - 09 [1080p].mkv", 9),
+            ("[Group] 07-Ghost - 05 [1080p].mkv", 5),
+            # An episode number the release wrote with no range anywhere.
+            ("[Erai-raws] Dagashi Kashi 2 - 10 [1080p][Multiple Subtitle].mkv", 10),
+        ],
+    )
+    def test_a_single_episode_stays_a_single_episode(self, name: str, episode: int) -> None:
+        parsed = parse(name)
+        assert (parsed.kind, parsed.episode, parsed.episode_end) == ("episode", episode, None)
+
+    def test_the_files_inside_a_batch_are_ordinary_episodes(self) -> None:
+        """What ingest actually sees. A batch directory holds episode files.
+
+        The directory is a batch and never becomes a ``media_files`` row; the
+        files in it are what Arc scans, and each of them is one episode. Only
+        the last path component is read, so the batch's own name in the path
+        above must not make an episode of it a batch.
+        """
+        directory = "[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]"
+        for number in (1, 10, 12):
+            name = f"{directory}/[Erai-raws] Dagashi Kashi 2 - {number:02d} [1080p].mkv"
+            parsed = parse(name)
+            assert (parsed.kind, parsed.episode, parsed.episode_end) == ("episode", number, None)
 
 
 class TestKinds:

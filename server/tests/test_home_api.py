@@ -18,8 +18,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from arc.config import Settings
 from arc.db import SessionFactory
+from arc.main import create_app
 from arc.models import (
     Anime,
     Episode,
@@ -38,6 +41,7 @@ from arc.services.media.names import TRANSCODE
 from arc.services.playback.progress import CONTINUE_LIMIT
 from tests.conftest import add_user, api_transport, login
 from tests.test_schedule_api import add_anime, add_episodes, follow
+from tests.tmdb_mock import API_KEY
 
 pytestmark = pytest.mark.pg
 
@@ -60,6 +64,21 @@ SEVENTH_AIRED = FIRST_AIRED + timedelta(weeks=6)
 def frozen(monkeypatch: pytest.MonkeyPatch) -> datetime:
     monkeypatch.setattr("arc.api.home.now", lambda: NOW)
     return NOW
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """The app under test runs with a TMDB key set.
+
+    Overriding the session's fixture for this whole module (a documented pytest
+    idiom: the override asks for the one it replaces) because the page's two
+    on-demand enqueues are gated on the key (§5.8, owner 2026-09-13) — without
+    one this page correctly queues nothing, which is what
+    ``test_the_page_queues_no_art_without_a_tmdb_key`` asserts against its own
+    keyless app. Nothing else here reads the key, and no test reaches TMDB: the
+    enqueues are SELECTs and INSERTs.
+    """
+    return settings.model_copy(update={"tmdb_api_key": API_KEY})
 
 
 @pytest.fixture
@@ -778,6 +797,7 @@ async def test_a_home_card_carries_the_banner_the_genres_and_the_studio(
         anime = await session.get(Anime, anime_id)
         assert anime is not None
         anime.banner_url = "https://img.test/banner.jpg"
+        anime.backdrop_url = "https://img.test/backdrop.jpg"
         anime.cover_large_url = "https://img.test/cover-xl.jpg"
         anime.genres = ["Adventure", "Drama"]
         anime.studio = "MADHOUSE"
@@ -788,6 +808,7 @@ async def test_a_home_card_carries_the_banner_the_genres_and_the_studio(
     for row in body["behind"] + body["new_this_week"]:
         anime_out = row["anime"]
         assert anime_out["banner_url"] == "https://img.test/banner.jpg"
+        assert anime_out["backdrop_url"] == "https://img.test/backdrop.jpg"
         assert anime_out["cover_large_url"] == "https://img.test/cover-xl.jpg"
         assert anime_out["genres"] == ["Adventure", "Drama"]
         assert anime_out["studio"] == "MADHOUSE"
@@ -903,7 +924,7 @@ async def test_a_second_visit_does_not_queue_the_art_again(
     assert len(await enrichments(api_factory)) == 1
 
 
-async def test_a_season_show_with_a_banner_is_left_alone(
+async def test_a_season_show_with_a_backdrop_is_left_alone(
     client: AsyncClient, api_factory: SessionFactory
 ) -> None:
     anime_id = await add_anime(api_factory, title="Framed", anilist_id=910042)
@@ -911,10 +932,59 @@ async def test_a_season_show_with_a_banner_is_left_alone(
     async with api_factory() as session:
         row = await session.get(Anime, anime_id)
         assert row is not None
-        row.banner_url = "https://anilist.example/banner.jpg"
+        row.backdrop_url = "https://image.tmdb.example/backdrop.jpg"
         await session.commit()
 
     await home(client)
+
+    assert await enrichments(api_factory) == []
+
+
+async def test_a_season_show_with_only_an_anilist_banner_is_queued(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The owner's hero, 2026-09-13: a 4.75:1 strip is not art a hero can show.
+
+    Before ``backdrop_url`` this row counted as having key art and the page
+    left it alone for good, so the hero stayed on the blurred-poster wash.
+    """
+    anime_id = await add_anime(api_factory, title="Striped", anilist_id=910044)
+    await map_to_tmdb(api_factory, anilist_id=910044, tmdb_tv_id=4044)
+    async with api_factory() as session:
+        row = await session.get(Anime, anime_id)
+        assert row is not None
+        row.banner_url = "https://anilist.example/banner.jpg"
+        row.cover_large_url = "https://anilist.example/cover.jpg"
+        await session.commit()
+
+    await home(client)
+
+    queued = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in queued] == [anime_id]
+    assert queued[0].payload["art_only"] is True
+
+
+async def test_the_page_queues_no_art_without_a_tmdb_key(
+    settings: Settings,
+    pg_engine: AsyncEngine,
+    api_factory: SessionFactory,
+    user: User,
+) -> None:
+    """A keyless deployment queues nothing from a page load (owner, 2026-09-13).
+
+    Its own app, because the module's app has a key: the handler would skip
+    itself anyway, but on a deployment with no key every row is a hole for
+    ever, so each visit to Watch Now would write up to twenty job rows whose
+    only outcome is one INFO line — and the next visit twenty more.
+    """
+    await add_anime(api_factory, title="Unloved", anilist_id=910045)
+    await map_to_tmdb(api_factory, anilist_id=910045, tmdb_tv_id=4045)
+    keyless = create_app(settings.model_copy(update={"tmdb_api_key": None}))
+    keyless.state.engine = pg_engine
+    keyless.state.session_factory = api_factory
+
+    async with api_transport(keyless) as http:
+        await home(await login(http, USER_EMAIL, USER_PASSWORD))
 
     assert await enrichments(api_factory) == []
 
@@ -936,6 +1006,7 @@ async def give_art(factory: SessionFactory, anime_id: int) -> None:
         row = await session.get(Anime, anime_id)
         assert row is not None
         row.banner_url = "https://anilist.example/banner.jpg"
+        row.backdrop_url = "https://image.tmdb.example/backdrop.jpg"
         row.cover_large_url = "https://anilist.example/cover.jpg"
         await session.commit()
 

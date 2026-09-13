@@ -7,6 +7,14 @@ weakest source Arc has — it is reached by id through a weekly snapshot of
 somebody else's cross-id map, and it knows nothing about anime as anime — so it
 never overwrites anything. In particular:
 
+* ``backdrop_url`` is the **exception**, and the only one: it is TMDB's own
+  column (owner, 2026-09-13), written whenever TMDB has a backdrop and what is
+  stored is not already that same URL. No other source writes it, so there is
+  nothing there to overwrite but an older TMDB answer — and a backdrop TMDB has
+  replaced is a backdrop TMDB replaced for a reason. The column exists because
+  the 21:9 hero and the 16:9 card cannot show AniList's 4.75:1 banner strip as
+  a picture at all (§4, ``anime.backdrop_url``), and filling ``banner_url``
+  under rule 3 could never reach a row AniList had already written.
 * ``banner_url`` and ``cover_large_url`` are filled only where they are null.
   Both are AniList's columns when AniList has answered, and a backdrop
   replacing published key art is exactly the mistake rule 3 exists to stop.
@@ -131,8 +139,16 @@ class Enrichment:
     for a row that already carries one is simply absent here. That is what
     makes the rule testable without a database — :func:`plan_enrichment` is
     where rule 3 lives, and :func:`apply_enrichment` only writes.
+
+    That is why ``backdrop_url`` is absent when the row already carries the URL
+    TMDB is offering, even though this column is the one TMDB may overwrite: a
+    write that changes nothing is not a write, and a plan that claimed one
+    would make every night's enrichment of every filled row non-:attr:`empty`.
     """
 
+    #: TMDB's 16:9 backdrop, whenever it differs from what the row holds. The
+    #: one column here that is not "only where it is null".
+    backdrop_url: str | None = None
     banner_url: str | None = None
     cover_large_url: str | None = None
     credits: list[dict[str, Any]] | None = None
@@ -145,7 +161,8 @@ class Enrichment:
     def empty(self) -> bool:
         """Whether this enrichment would write nothing at all."""
         return (
-            self.banner_url is None
+            self.backdrop_url is None
+            and self.banner_url is None
             and self.cover_large_url is None
             and self.credits is None
             and not self.episodes
@@ -156,6 +173,7 @@ class Enrichment:
         return [
             name
             for name, value in (
+                ("backdrop_url", self.backdrop_url),
                 ("banner_url", self.banner_url),
                 ("cover_large_url", self.cover_large_url),
                 ("credits", self.credits),
@@ -385,15 +403,21 @@ def plan_enrichment(
     """
     show = payloads.show or {}
 
-    banner = (
-        image_url(show.get("backdrop_path"), BACKDROP_SIZE) if anime.banner_url is None else None
-    )
+    # The same picture, planned onto two columns under two different rules:
+    # ``backdrop_url`` is TMDB's own and is written unless the row already
+    # holds this exact URL, while ``banner_url`` is AniList's and is only ever
+    # filled where it is null. A row that has both ends up with the backdrop in
+    # each of them, which is correct — the heroes read ``backdrop_url`` and
+    # anything still on ``banner_url`` is a row AniList never reached.
+    picture = image_url(show.get("backdrop_path"), BACKDROP_SIZE)
+    backdrop = None if picture == anime.backdrop_url else picture
+    banner = picture if anime.banner_url is None else None
     poster = (
         image_url(show.get("poster_path"), POSTER_SIZE) if anime.cover_large_url is None else None
     )
 
     if art_only:
-        return Enrichment(banner_url=banner, cover_large_url=poster)
+        return Enrichment(backdrop_url=backdrop, banner_url=banner, cover_large_url=poster)
 
     credits: list[dict[str, Any]] | None = None
     if _may_write_credits(anime):
@@ -406,6 +430,7 @@ def plan_enrichment(
             credits = credits_from(anime.studio, staff)
 
     return Enrichment(
+        backdrop_url=backdrop,
         banner_url=banner,
         cover_large_url=poster,
         credits=credits,
@@ -417,13 +442,16 @@ async def apply_enrichment(session: AsyncSession, anime: Anime, plan: Enrichment
     """Write ``plan`` and return how many episode rows it touched.
 
     A plain assignment per column and per row: :func:`plan_enrichment` has
-    already decided that each of these is a hole, and re-deciding it in SQL
-    would be rule 3 written twice. The episode rows are re-read here rather
+    already decided that each of these is a hole — or, for ``backdrop_url``,
+    TMDB's own column with a new answer in it — and re-deciding it in SQL would
+    be rule 3 written twice. The episode rows are re-read here rather
     than taken from the caller so that the write lands on objects this session
     owns, whatever the caller was holding.
 
     Flushes, does not commit — the job runner owns the transaction.
     """
+    if plan.backdrop_url is not None:
+        anime.backdrop_url = plan.backdrop_url
     if plan.banner_url is not None:
         anime.banner_url = plan.banner_url
     if plan.cover_large_url is not None:

@@ -130,8 +130,15 @@ async def make_entry(
     dirty: bool = False,
     updated_by: UpdatedBy = UpdatedBy.ARC,
     updated_at: datetime | None = None,
+    activated_at: datetime | None = None,
 ) -> None:
-    """A ``list_entries`` row in a known state."""
+    """A ``list_entries`` row in a known state.
+
+    ``activated_at`` is FR-A9's stamp: null (the default) is a row nobody has
+    touched in Arc, which is what an import leaves behind. A test about
+    anything *other* than dormancy that needs the row to generate wants has to
+    say so, because a dormant entry generates none.
+    """
     async with factory() as session:
         entry = ListEntry(
             user_id=user_id,
@@ -141,6 +148,7 @@ async def make_entry(
             score=score,
             mal_dirty=dirty,
             updated_by=updated_by,
+            activated_at=activated_at,
         )
         if updated_at is not None:
             entry.updated_at = updated_at

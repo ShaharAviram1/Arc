@@ -10,6 +10,7 @@ import {
   EmptyState,
   Eyebrow,
   FOCUS_RING,
+  GLASS_CIRCLE,
   HeroFrame,
   PosterWash,
   Shelf,
@@ -377,7 +378,8 @@ function recommendationMeta(anime: AnimeSummary): string {
 }
 
 /**
- * A 36px glass circle in the action row, not an overlay on the artwork.
+ * The shared glass circle (`GLASS_CIRCLE`), in the action row rather than as
+ * an overlay on the artwork.
  *
  * They started inside the frame, where the left one landed squarely on top of
  * the eyebrow and the title and the right one floated over the art (owner, in
@@ -385,8 +387,7 @@ function recommendationMeta(anime: AnimeSummary): string {
  * hero's own title block, so the whole control — ‹ dots › — moved down beside
  * the buttons, which is also where a thumb already is.
  */
-const CHEVRON =
-  'flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-surface-raised)] text-[18px] leading-none text-[var(--arc-text)] backdrop-blur-glass transition-colors duration-200 hover:bg-[rgba(255,255,255,0.13)]'
+const CHEVRON = cx(GLASS_CIRCLE, FOCUS_RING)
 
 /**
  * The framed card at the top of Watch Now: shows of the season this viewer
@@ -491,7 +492,7 @@ function SeasonHero({ items }: { items: AnimeSummary[] }) {
               onClick={() => {
                 step(-1)
               }}
-              className={cx(CHEVRON, FOCUS_RING)}
+              className={CHEVRON}
             >
               <span aria-hidden>‹</span>
             </button>
@@ -530,7 +531,7 @@ function SeasonHero({ items }: { items: AnimeSummary[] }) {
               onClick={() => {
                 step(1)
               }}
-              className={cx(CHEVRON, FOCUS_RING)}
+              className={CHEVRON}
             >
               <span aria-hidden>›</span>
             </button>

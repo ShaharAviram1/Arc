@@ -3,11 +3,18 @@ import { buttonClass, type ButtonVariant } from '@/components/ui/styles'
 
 export type { ButtonVariant }
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-pressed'> {
   /** `secondary` by default: the primary white pill is for one action a screen. */
   variant?: ButtonVariant
   /** Rendered before the label — a `PlayGlyph`, a count, a glyph. */
   iconLeft?: ReactNode
+  /**
+   * A toggle, and whether it is on. Sets `aria-pressed` (so a screen reader
+   * announces the state the look is showing) and the pressed treatment from
+   * `styles`. Omit it entirely for an ordinary button: `aria-pressed` on
+   * something that does not stay pressed is a lie about the control.
+   */
+  pressed?: boolean
 }
 
 /**
@@ -24,11 +31,17 @@ export function Button({
   iconLeft,
   className,
   type = 'button',
+  pressed,
   children,
   ...rest
 }: ButtonProps) {
   return (
-    <button {...rest} type={type} className={buttonClass(variant, className)}>
+    <button
+      {...rest}
+      type={type}
+      aria-pressed={pressed}
+      className={buttonClass(variant, className, { pressed })}
+    >
       {iconLeft}
       {children}
     </button>

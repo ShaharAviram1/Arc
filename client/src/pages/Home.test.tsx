@@ -237,6 +237,20 @@ const VIA_MAL_OTHER = seasonRow(700007, 'Also via MAL', {
   popularity: 120_000,
 })
 
+/**
+ * A show that has both kinds of wide art (owner, 2026-09-13): AniList's
+ * 4.75:1 strip, which no frame here will show, and TMDB's 16:9 backdrop,
+ * which is what `bannerArt` has to reach for.
+ */
+const BOTH_KINDS_OF_ART = seasonRow(700013, 'Both Kinds of Art', {
+  genres: KAIJU.genres,
+  // A poster too, so the frame has a wash to fall back to and "it did not
+  // fall back" is worth asserting.
+  cover_large_url: 'https://example.test/striped-large.jpg',
+  banner_url: 'https://example.test/striped-banner.jpg',
+  backdrop_url: 'https://example.test/striped-backdrop.jpg',
+})
+
 /** Two more in-season picks, so a run can try to claim more than its two. */
 const PICK_TWO = seasonRow(700008, 'Second Pick', {
   banner_url: 'https://example.test/second-banner.jpg',
@@ -568,6 +582,23 @@ describe('Watch Now hero', () => {
     // A 16:9 banner fills the frame, and nothing is blurred.
     loadBanner(KAIJU.banner_url as string)
     expect(hero().querySelector('img')).toHaveAttribute('src', KAIJU.banner_url)
+    expect(hero().querySelector('[data-hero-backdrop]')).toBeNull()
+  })
+
+  it('fills the frame with the TMDB backdrop, not the AniList strip', async () => {
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: seasonSchedule(BOTH_KINDS_OF_ART) },
+      'GET /api/list': { body: [] },
+    })
+
+    await screen.findByText('Recommended this season')
+    // The strip is never even asked for: nothing in the hero points at it.
+    expect(hero().querySelector(`img[src="${BOTH_KINDS_OF_ART.banner_url as string}"]`)).toBeNull()
+
+    loadBanner(BOTH_KINDS_OF_ART.backdrop_url as string)
+    expect(hero().querySelector('img')).toHaveAttribute('src', BOTH_KINDS_OF_ART.backdrop_url)
+    // 16:9 fills, so there is no wash behind it.
     expect(hero().querySelector('[data-hero-backdrop]')).toBeNull()
   })
 

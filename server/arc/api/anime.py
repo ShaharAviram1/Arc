@@ -34,6 +34,13 @@ Reading a show is the opposite: cache first, upstream only when the row is
 missing, older than a day, or filled from MAL while AniList is healthy again
 (FR-C5, FR-C6).
 
+The two ``/{id}/sample`` routes are the show page's "try episode 1" (FR-A8):
+the one way a user can cause a download without a list change. They are thin
+over :mod:`arc.services.acquisition.samples`, which owns the three refusals and
+hands each of them up as a sentence this router puts straight into a 409 —
+there is nothing for the client to translate, because the refusal is the
+answer.
+
 The refresh endpoint takes the job type and its dedupe key from
 :mod:`arc.services.catalog.names` rather than spelling them out: the worker's
 sweeps queue the same work under the same key, and a second copy of that string
@@ -59,12 +66,20 @@ from arc.api.anime_schemas import (
     MalSyncOut,
     RelatedAnime,
     RelationOut,
+    SampleOut,
     SearchPage,
 )
-from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep
+from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep, SettingsDep
 from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.models import Anime, Job, ListEntry
+from arc.services.acquisition.samples import (
+    SampleError,
+    cancel_sample,
+    request_sample,
+    sample_for,
+)
+from arc.services.acquisition.wants import WANTING_STATUSES, slot_view
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceNotFound,
@@ -90,6 +105,11 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/anime", tags=["anime"])
 
 ANIME_NOT_FOUND = "anime not found"
+
+#: What ``DELETE /api/anime/{id}/sample`` answers when there is nothing to
+#: cancel — a second press of Cancel, or a sample the D-day drop already
+#: closed. A 404 about the sample, not about the show (FR-A8).
+SAMPLE_NOT_FOUND = "no sample requested for this show"
 
 #: Shortest query worth sending upstream. One character matches most of
 #: AniList and costs a request to say so.
@@ -269,6 +289,7 @@ async def detail(
     user: CurrentUser,
     session: SessionDep,
     catalog: CatalogDep,
+    settings: SettingsDep,
 ) -> AnimeDetail:
     """``anime_id`` is Arc's internal id, not AniList's (FR-C6)."""
     try:
@@ -291,6 +312,20 @@ async def detail(
     # three queries for the whole list rather than three per episode.
     episode_ids = [episode.id for episode in episodes]
     extras = await episode_extras(session, episode_ids)
+    # The caller's own "try episode 1" want, if they have one (FR-A8). The
+    # episode number comes from the list already loaded rather than from a
+    # second query — the sample is always one of these rows.
+    want = await sample_for(session, user_id=user.id, anime_id=anime.id)
+    # Where the caller stands under the slot cap (FR-A10), and only when it
+    # could possibly say anything: the note is about an entry of theirs that
+    # is watching or planned. One pass over that user's list, on the one page
+    # that renders the answer — the same bargain ``mal_sync`` above makes.
+    slots = (
+        await slot_view(session, user.id, settings=settings)
+        if entry is not None and entry.status in WANTING_STATUSES
+        else None
+    )
+    by_id = {episode.id: episode for episode in episodes}
     return AnimeDetail.build(
         anime,
         episodes=episodes,
@@ -315,7 +350,75 @@ async def detail(
         torrents=extras.torrents,
         renditions=extras.renditions,
         transcode_jobs=extras.transcode_jobs,
+        sample=(
+            SampleOut.build(want, by_id[want.episode_id])
+            if want is not None and want.episode_id in by_id
+            else None
+        ),
+        slots=slots,
     )
+
+
+@router.post(
+    "/{anime_id}/sample",
+    response_model=SampleOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Fetch this show's first episode as a sample (FR-A8)",
+    responses={404: {"description": ANIME_NOT_FOUND}, 409: {"description": "cannot be sampled"}},
+)
+async def sample(
+    anime_id: AnimeId,
+    user: CurrentUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> SampleOut:
+    """One episode, no list change, no MAL write (FR-A8).
+
+    202 rather than 201: what comes back is a want, and the episode behind it
+    is searched for, downloaded and prepared by the same jobs as any other —
+    nothing is ready when this answers. The search *is* started here, though,
+    through the reconciler's own helper, so the response's ``state`` and the
+    episode row on the page say ``wanted`` at once rather than after the next
+    fifteen-minute tick. The three 409s carry the service's own sentence, which
+    is written to be read by a person on the show page.
+
+    Not admin-gated: it is the caller's own want, on the caller's own account,
+    and it fetches strictly less than putting the show on their list would.
+    """
+    if await session.get(Anime, anime_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ANIME_NOT_FOUND)
+    try:
+        requested = await request_sample(
+            session, user_id=user.id, anime_id=anime_id, now=now(), settings=settings
+        )
+    except SampleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    out = SampleOut.build(requested.want, requested.episode)
+    await session.commit()
+    return out
+
+
+@router.delete(
+    "/{anime_id}/sample",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Cancel a sample (FR-A8)",
+    responses={404: {"description": SAMPLE_NOT_FOUND}},
+)
+async def unsample(
+    anime_id: AnimeId,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Response:
+    """Drop the want and release the episode, if nothing else wants it.
+
+    404 when there is no live sample: a second press of Cancel, or one the
+    D-day drop (FR-T2) has already closed, is the client's view being out of
+    date rather than a request to do nothing.
+    """
+    if not await cancel_sample(session, user_id=user.id, anime_id=anime_id, now=now()):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SAMPLE_NOT_FOUND)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _mal_sync(state: SyncState) -> MalSyncOut:
@@ -359,6 +462,7 @@ __all__ = [
     "CATALOGUE_UNAVAILABLE",
     "MIN_QUERY_LENGTH",
     "REFRESH_JOB",
+    "SAMPLE_NOT_FOUND",
     "now",
     "refresh_dedupe_key",
     "router",

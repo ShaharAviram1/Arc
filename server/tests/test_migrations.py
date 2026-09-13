@@ -114,7 +114,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 9
+    assert len(seeded) == 11
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -126,6 +126,11 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     assert seeded["audio_lang"] == "ja"
     # The kill switch is seeded off: a fresh install acquires (spec §4.2).
     assert seeded["acquisition_paused"] is False
+    # And the storage floor is seeded on: a fresh install holds itself below
+    # 10 GB free rather than filling the volume (FR-T6).
+    assert seeded["min_free_gb"] == 10
+    # And the per-user slot cap (FR-A10): five shows fetching at once.
+    assert seeded["slot_cap_k"] == 5
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:

@@ -31,6 +31,15 @@ failure: a deployment with no key is a complete Arc that renders AniList's art
 (architecture.md §9), and a nightly job that failed instead would be a red row
 in the queue view for ever.
 
+Three paths ask for an enrichment **on demand** rather than waiting for the
+sweep, all of them cheap SELECTs that answer nothing once the art is in:
+``GET /api/home`` (:func:`enqueue_episode_stills` for the cards on screen, then
+:func:`enqueue_hero_art` for the season behind the hero) and the sample route
+(:func:`enqueue_show_enrichment` for the one show a user has just asked Arc to
+fetch — FR-A8). All three share the same three gates — a key is set
+(:func:`tmdb_configured`), ``_mapped``, and "there is still a hole" — so none
+of them can queue a job whose only outcome is a logged skip.
+
 **Cost.** A full enrichment is three requests — the show, its season, its crew
 — and an art-only one is a single ``/tv/{id}``, paced by the client at four a
 second and spaced by :data:`SPACING_SECONDS` between shows. :data:`SWEEP_LIMIT`
@@ -48,6 +57,7 @@ from typing import Any, cast
 from sqlalchemy import ColumnElement, Select, Text, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from arc.config import Settings
 from arc.models import (
     Anime,
     Episode,
@@ -115,13 +125,26 @@ CREDITS_MIN_ROWS = 2
 NO_KEY_MESSAGE = "tmdb enrichment skipped: TMDB_API_KEY is not set"
 
 
+def tmdb_configured(settings: Settings) -> bool:
+    """Whether TMDB can be reached at all — i.e. whether ``TMDB_API_KEY`` is set.
+
+    The handlers read the key and skip themselves without one, which is enough
+    to keep Arc correct but not enough to keep its queue quiet: the three
+    on-demand enqueues below run on a GET or a button press, so without this
+    test a keyless deployment would write twenty job rows per visit to Watch
+    Now, for ever, each of them to log the same skip. So the callers ask first
+    (owner, 2026-09-13). One expression, in one place, because "is TMDB
+    configured" is answered in the health route and in :func:`_api_key` too.
+    """
+    return bool((settings.tmdb_api_key or "").strip())
+
+
 def _api_key(ctx: JobContext) -> str | None:
     """The key, or ``None`` after logging why there will be no enrichment."""
-    key = (ctx.settings.tmdb_api_key or "").strip()
-    if not key:
+    if not tmdb_configured(ctx.settings):
         ctx.log.info(NO_KEY_MESSAGE)
         return None
-    return key
+    return (ctx.settings.tmdb_api_key or "").strip()
 
 
 async def tmdb_ids_for(session: AsyncSession, anime: Anime) -> OfflineId | None:
@@ -303,8 +326,52 @@ def _in_current_seasons(now: datetime | None = None) -> ColumnElement[bool]:
 
 
 def _missing_key_art() -> ColumnElement[bool]:
-    """No backdrop, or no key-art poster. Either is a hole TMDB fills."""
-    return or_(Anime.banner_url.is_(None), Anime.cover_large_url.is_(None))
+    """No TMDB backdrop, no banner, or no key-art poster. Any is a hole TMDB fills.
+
+    ``backdrop_url`` is here as well as ``banner_url`` because it is the column
+    the heroes and the 16:9 cards actually read (owner, 2026-09-13), and only
+    TMDB writes it: a row AniList reached first has a banner and a poster and
+    still nothing a 21:9 frame can show, which is exactly the row this sweep
+    exists for. Every mapped row therefore counts as holed once, which is what
+    fills the rows that predate the column — the first night after the
+    migration queues up to :data:`SWEEP_LIMIT` of them and the rest follow.
+    """
+    return or_(
+        Anime.backdrop_url.is_(None),
+        Anime.banner_url.is_(None),
+        Anime.cover_large_url.is_(None),
+    )
+
+
+def _missing_hero_art() -> ColumnElement[bool]:
+    """No backdrop: the one thing a 21:9 hero can be filled with.
+
+    Narrower than :func:`_missing_key_art` on purpose — this gates a GET
+    (:func:`enqueue_hero_art`), so it asks only about the column the hero
+    itself reads. It used to be "no artwork at all, neither a banner nor a
+    key-art poster", which this subsumes: a row with nothing has no backdrop
+    either, and a row that *has* a backdrop is a hero that fills honestly
+    however little else it carries (owner, 2026-09-13). What it adds is the row
+    the column was made for — AniList's 4.75:1 strip and a poster, which the
+    old clause counted as art and the frame cannot show as a picture.
+    """
+    return Anime.backdrop_url.is_(None)
+
+
+def _missing_still() -> ColumnElement[bool]:
+    """Whether an episode of this show has aired with no still of its own.
+
+    The hole every 16:9 card in the client falls back to a poster for. Only
+    *aired* episodes count: an episode nobody has broadcast has no still to
+    publish, so an upcoming season would otherwise read as a permanent hole and
+    be fetched every night for ever.
+    """
+    return exists().where(
+        Episode.anime_id == Anime.id,
+        Episode.still_url.is_(None),
+        Episode.air_at.isnot(None),
+        Episode.air_at <= func.now(),
+    )
 
 
 def _already_queued() -> ColumnElement[bool]:
@@ -389,12 +456,6 @@ def _needs_enrichment() -> Select[tuple[int]]:
     """
     wanted = _worth_enriching()
     mapped = _mapped()
-    missing_still = exists().where(
-        Episode.anime_id == Anime.id,
-        Episode.still_url.is_(None),
-        Episode.air_at.isnot(None),
-        Episode.air_at <= func.now(),
-    )
     # The same rule :func:`~arc.services.tmdb.enrich._may_write_credits`
     # applies, expressed in SQL: a column AniList filled is not a hole however
     # short its answer, and without that clause a row whose AniList credits
@@ -407,7 +468,7 @@ def _needs_enrichment() -> Select[tuple[int]]:
             func.jsonb_array_length(Anime.credits) < CREDITS_MIN_ROWS,
         ),
     )
-    incomplete = or_(_missing_key_art(), missing_credits, missing_still)
+    incomplete = or_(_missing_key_art(), missing_credits, _missing_still())
     return select(Anime.id).where(wanted, mapped, incomplete).order_by(Anime.id).limit(SWEEP_LIMIT)
 
 
@@ -486,7 +547,11 @@ async def enqueue_enrichment(
 
 
 async def enqueue_hero_art(
-    session: AsyncSession, *, now: datetime | None = None, limit: int = HERO_ART_LIMIT
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    now: datetime | None = None,
+    limit: int = HERO_ART_LIMIT,
 ) -> int:
     """Art for the shows the Home hero is about to choose between. Returns how many.
 
@@ -495,21 +560,24 @@ async def enqueue_hero_art(
     name the six shows it will land on — but it knows the pool they come from,
     and it is the same one: the season's shows, most popular first. This
     queues art-only enrichments for the top :data:`HERO_ART_LIMIT` of them
-    that have **no artwork at all** — neither a banner nor a key-art poster,
-    which is the row that makes the hero look broken.
+    that have no backdrop — the only art the frame can show at its own size
+    (:func:`_missing_hero_art`).
 
     Cheap enough to sit in a GET: one SELECT, which returns nothing at all once
-    the pool is filled in, because a row with either kind of art is out of it
-    and a row whose job is already queued is filtered in SQL
-    (:func:`_already_queued`). The caller commits.
+    the pool is filled in, because a row with a backdrop is out of it and a row
+    whose job is already queued is filtered in SQL
+    (:func:`_already_queued`). Nothing at all without a key
+    (:func:`tmdb_configured`), since every row would then be a hole for ever.
+    The caller commits.
     """
+    if not tmdb_configured(settings):
+        return 0
     candidates = await session.scalars(
         select(Anime.id)
         .where(
             _in_current_seasons(now),
             _mapped(),
-            Anime.banner_url.is_(None),
-            Anime.cover_large_url.is_(None),
+            _missing_hero_art(),
             ~_already_queued(),
         )
         .order_by(Anime.popularity.desc().nullslast(), Anime.id)
@@ -523,7 +591,11 @@ async def enqueue_hero_art(
 
 
 async def enqueue_episode_stills(
-    session: AsyncSession, anime_ids: Sequence[int], *, limit: int = STILL_LIMIT
+    session: AsyncSession,
+    anime_ids: Sequence[int],
+    *,
+    settings: Settings,
+    limit: int = STILL_LIMIT,
 ) -> int:
     """Full enrichments for the shows on the Home shelves with no episode still. Returns how many.
 
@@ -548,6 +620,8 @@ async def enqueue_episode_stills(
     if not wanted:
         return 0
 
+    if not tmdb_configured(settings):
+        return 0
     candidates = await session.scalars(
         select(Anime.id)
         .where(Anime.id.in_(wanted), _mapped(), ~_already_queued())
@@ -558,6 +632,47 @@ async def enqueue_episode_stills(
         if await enqueue_enrichment(session, anime_id) is not None:
             queued += 1
     return queued
+
+
+async def enqueue_show_enrichment(
+    session: AsyncSession, anime_id: int, *, settings: Settings
+) -> Job | None:
+    """A full enrichment for **one** show a user has just asked Arc for.
+
+    The single-row form of :func:`enqueue_episode_stills`, for the paths that
+    know exactly which show somebody is about to look at — today that is the
+    sample route (FR-A8), where the episode being fetched is a 16:9 card whose
+    still would otherwise arrive with the nightly sweep, or when somebody
+    happened to open Watch Now (owner, 2026-09-13).
+
+    Gated by the same two clauses every other on-demand enqueue uses, so a
+    press of the button cannot queue work that could only log a skip: the
+    offline id map must be able to reach the show (:func:`_mapped`) and there
+    must still be a hole worth fetching — missing key art in any of its three
+    columns (:func:`_missing_key_art`, ``backdrop_url`` included) or an aired
+    episode with no still. Credits are deliberately not a hole here: they are
+    the nightly sweep's business, and nobody presses a button for a staff list.
+
+    Returns the job, or ``None`` when there is nothing to do — a deployment
+    with no ``TMDB_API_KEY`` (:func:`tmdb_configured`), an unmapped show, a
+    show whose art is already in, or one whose enrichment is already queued
+    (one dedupe key per show; the first caller wins). Flushes with the enqueue;
+    the caller owns the transaction, and a caller that cannot afford to fail on
+    this should not be calling it at all — nothing here reaches TMDB.
+    """
+    if not tmdb_configured(settings):
+        return None
+    worth_it = await session.scalar(
+        select(Anime.id).where(
+            Anime.id == anime_id,
+            _mapped(),
+            or_(_missing_key_art(), _missing_still()),
+            ~_already_queued(),
+        )
+    )
+    if worth_it is None:
+        return None
+    return await enqueue_enrichment(session, anime_id)
 
 
 async def sweep_candidates(
@@ -626,7 +741,9 @@ __all__ = [
     "enqueue_enrichment",
     "enqueue_episode_stills",
     "enqueue_hero_art",
+    "enqueue_show_enrichment",
     "sweep_candidates",
+    "tmdb_configured",
     "tmdb_enrich",
     "tmdb_enrich_all",
     "tmdb_ids_for",

@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-12 (M0–M15.5 done; M16 next; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-13 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -397,6 +397,111 @@ the finish work (bugs found that way are fixed inside M16).
       qBittorrent, the LLM) — both visible only when the demo account is
       signed in
 - [ ] Kinks from the owner's daily use (tracked here as they come in)
+  - [x] "Try episode 1" sample want (FR-A8) — one explicit exception to
+        FR-A1, decided by the owner 2026-09-12. Verified 2026-09-13
+        (orchestrator): server 2868 / client 550 green, lint clean; on dev
+        the button appeared on an unlisted show, the press wrote one
+        `sample` want and no list entry or MAL log row, a rolled-back
+        `compute_wants` with the pause cleared moved the episode to
+        `wanted` and queued its search, and Cancel dropped the row
+        ("sample cancelled") and restored the button. Review fix: a sample
+        on a show listed as completed/dropped/on hold is shelved once the
+        user has watched it, so it cannot pin the file forever. Owner remarks
+        2026-09-13, landed and re-verified in the browser: the control is one
+        toggle pill ("Try episode N" → "✓ Episode N requested", hover "Cancel
+        request", `aria-pressed`) and the routes move the episode themselves
+        through the reconciler's shared `start_search`/`release_if_unwanted`
+        helpers, so the row reads "Wanted" the moment it is pressed (also
+        while acquisition is paused) and "Not fetched" again on cancel.
+  - [x] Sample request queues the show's TMDB enrichment so stills arrive with
+        the episode. Verified 2026-09-13 (orchestrator): on dev, pressing
+        "Try episode 1" on The Villager of Level 999 queued one full
+        `tmdb_enrich:148` job and all 12 stills were filled within seconds,
+        without opening Watch Now; a show with complete art queues nothing
+        (tests)
+  - [x] Production acquisition resumed 2026-09-13 after the MAL-import
+        pause (Admin → Acquisition), so wanted shows download again
+  - [x] Nyaa query builder asks by the title's head before a subtitle (FR-A4),
+        unless the entry has a PREQUEL relation (a bare-head release is most
+        likely the first season and an unmarked sequel cannot be told apart by
+        season agreement). Verified 2026-09-13 (orchestrator): 443 acquisition,
+        parser and matcher tests green incl. the corpus at 100 %; live on dev
+        the Rakudai Kenja no Gakuin Musou sample went from 0 results on three
+        full-title queries to 9 results on the head query, 7 kept, SubsPlease
+        1080p chosen and downloading
+  - [x] Batch releases (episode ranges incl. `~`/`〜`/`E01-E12`, and `BATCH`/
+        `Season Pack` markers; `Complete` only without a single episode
+        number) are classified as batches and never picked (FR-A4). Found
+        2026-09-12 when production pulled `Dagashi Kashi 2 - 01 ~ 12` as
+        episode 1 and transcoded all twelve. Verified 2026-09-13
+        (orchestrator): corpus 247/247 on episode+kind and title key, 561
+        parser/filter/matcher/ingest tests green, Reviewer's should-fixes
+        (wave dash, year pairs, `01 - 100 Poems`) landed; the seven
+        production names all parse as batch and the files inside a batch
+        directory still parse as episodes
+  - [x] Home/Show hero showed the blurred-poster fallback for shows that have
+        a proper TMDB backdrop (owner, 2026-09-13): the banner's aspect probe
+        rendered a `loading="lazy"` image inside a 0×0 box, which Chrome never
+        fetches, so the aspect stayed unknown and the wash stayed for good
+        unless another card had cached the banner. `AspectProbe` now loads
+        eagerly; regression assertion in `ui.test.tsx`. Verified on dev
+        (orchestrator): the probe reports 1280×720 and the hero fills with the
+        backdrop; 550 client tests green
+  - [x] `backdrop_url` (TMDB only) preferred by heroes and cards over the
+        AniList banner strip; AniList refreshes cannot clobber it; a missing
+        backdrop counts as a hole for the sweep and the on-demand paths, and
+        none of those queue anything without a `TMDB_API_KEY`. Verified
+        2026-09-13 (orchestrator): migration `0aa6beaab5ed` applied on dev;
+        after a worker restart the sweep filled 59 of 69 Summer 2026 shows
+        and all six Watch Now hero slides render a backdrop (Tanya S2,
+        Villager of Level 999 and Magilumiere S2 were washed before); 341
+        server tests on the touched modules and 556 client tests green
+  - [x] Stalled torrents are removed and the episode retried on the FR-A6
+        schedule; a release is never chosen twice; 0-seeder releases are
+        rejected — awaiting orchestrator validation
+  - [x] Downloads nobody wants any more are cancelled; qBittorrent queue
+        policy applied by Arc — verified
+        (both verified 2026-09-13 by the orchestrator: Reviewer's three
+        blockers fixed — stall clock is qBittorrent's `time_active`, dead
+        swarm judged on tracker scrape figures only, a decided torrent row
+        never drags a retried episode back — 972 acquisition/retention/
+        jobs tests green, lint clean; live proof waits for the deploy)
+  - [x] Dormant imports (FR-A9): an imported entry fetches nothing until
+        touched in Arc (status, any progress report, revert), airing shows
+        excepted; Try samples a dormant entry without activating it; Show
+        page note + "Fetch this show"; Admin shows the dormant count.
+        Verified 2026-09-13 (orchestrator): migration `3b7c41e9d2af` on dev
+        leaves 222 of the admin's 784 imported entries dormant (the
+        production shape), Admin → Acquisition shows "Dormant imports 222",
+        a dormant show's page shows the note and the button; 680 server /
+        569 client tests green after the Reviewer's four should-fixes
+  - [x] Storage guard (FR-T6): `min_free_gb` (default 10) in the Rules
+        editor as "Free space floor"; below it acquisition reconciles but
+        starts no search, searches requeue, ingest/transcode/playback go on;
+        Admin pill reads "held". Verified 2026-09-13 (orchestrator): setting
+        seeded and visible on dev, rule matrix and hold tests in the same
+        green run; the held state cannot be shown live on a disk with 150 GB
+        free, so it rests on the tests
+  - [x] Per-user slot cap K (FR-A10): `slot_cap_k` (default 5, 0 = unlimited)
+        in the Rules editor; occupants keep their slot, free slots go airing
+        first then most recently updated, a waiting show's rows are left
+        alone except a want the user has watched past; `unavailable`/`failed`
+        hold no slot; the Show page says why a show waits (slot, paused,
+        held); Admin shows "N waiting · cap K". Verified 2026-09-13
+        (orchestrator): Reviewer's two blockers fixed (a stale-dropped want
+        of a waiting show is no longer deleted; unfindable shows cannot
+        freeze a list); final tree green — server 3142, client 576, lint
+        clean; seed migration `7c1d5b3ae4f2` applied on dev
+  - [x] Shelves scroll for mouse users: drag-to-scroll (mouse only, 6 px
+        threshold, click suppressed after a drag, snap restored on release)
+        and hover edge arrows (glass chevrons, hidden at the ends and on
+        touch, one viewport per press). Verified 2026-09-13 (orchestrator)
+        in Chrome on dev: the arrow moved the Catch up shelf one viewport
+        per click; the first real drag did nothing because the tiles are
+        links wrapping images and the native HTML5 drag cancelled the
+        pointer gesture — fixed with one `dragstart` handler on the strip;
+        a real drag then moved it 588 px, snapped, without following the
+        link; 583 client tests, lint clean
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

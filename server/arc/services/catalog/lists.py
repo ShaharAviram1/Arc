@@ -18,6 +18,13 @@ allowed to queue such a write (:mod:`arc.services.mal.names` names the other
 two), and it does so for the same reason it recomputes the acquisition window:
 an explicit list edit is a user-originated event, which is precisely what
 FR-M4 permits Arc to write.
+
+It is also the moment an imported entry stops being dormant (FR-A9): every
+successful ``PUT`` stamps ``activated_at`` if it is null, because a request to
+this endpoint is by definition the user acting in Arc — including one that
+re-sends the status the show already has, which is exactly how the Show page's
+"Fetch this show" button works. :mod:`arc.services.acquisition.dormancy` owns
+the rule; this is one of its three writers.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, ListEntry, ListStatus, MalWriteCause, UpdatedBy
+from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.catalog.cache import ensure_anime
 from arc.services.catalog.service import CatalogService
@@ -128,7 +136,14 @@ async def set_list_entry(
     # to fire it, and an entry whose only change was ``mal_dirty`` must still
     # move, because §5.5 step 4 resolves MAL conflicts by comparing this
     # timestamp against MAL's.
-    entry.updated_at = datetime.now(UTC)
+    now = datetime.now(UTC)
+    entry.updated_at = now
+    # And this request *is* the user touching the show in Arc (FR-A9), whether
+    # it changed anything or not: re-sending the status a show already has is
+    # how somebody says "yes, this one, fetch it" about a row a MyAnimeList
+    # import created. Write-once, so it records the first time and not the
+    # last.
+    activate(entry, now=now)
 
     await session.flush()
     # The acquisition window is a function of this row (FR-A1, FR-W4), so

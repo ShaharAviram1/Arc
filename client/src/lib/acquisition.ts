@@ -11,6 +11,11 @@
  * requires the role, and a user who cannot unpause it has nothing to do with
  * the information.
  *
+ * The same line now carries the **storage hold** (FR-T6), which is silent in
+ * exactly the same way and for a reason nobody chose: free space under the
+ * floor. It says so differently because the remedy is different — a pause is
+ * resumed by a person, a hold lifts itself when retention frees room.
+ *
  * Polled rather than invalidated, on a minute: the flag moves when an admin
  * presses something in another tab (M14 gives it controls of its own), and a
  * minute is far sooner than anyone notices. `retry: false` because a status
@@ -27,12 +32,35 @@ import { useMe } from '@/lib/auth'
 export interface AcquisitionStatus {
   /** Whether the kill switch is set. */
   paused: boolean
+  /**
+   * Whether free space on the data volume is under the admin-set floor
+   * (spec §4.9 FR-T6). Nobody pressed this and nobody clears it: it lifts
+   * itself once retention has freed room. Optional on the wire, like every
+   * other field added after this endpoint shipped.
+   */
+  storage_held?: boolean
+  /** What the data volume has left, and the floor it is measured against. */
+  free_bytes?: number
+  min_free_bytes?: number
   /** Live wants across every user (FR-A2 merges them; this counts rows). */
   active_wants: number
   /** Episodes a search job is looking for a release for. */
   searching: number
   /** Episodes qBittorrent is downloading. Unaffected by the pause. */
   downloading: number
+  /**
+   * Watching/planned entries fetching nothing because nobody has touched them
+   * in Arc and their show is not airing (FR-A9) — the figure to look at after
+   * a MyAnimeList import.
+   */
+  dormant_entries?: number
+  /**
+   * (user, show) pairs the per-user slot cap is holding back right now
+   * (spec §4.2 FR-A10), and K itself. The fourth reason acquisition can look
+   * idle while nothing at all is wrong.
+   */
+  waiting_shows?: number
+  slot_cap_k?: number
   /**
    * Bytes Arc is holding for episodes it has acquired (FR-T4). Optional on the
    * wire — the server defaults it to 0 — so read it through `?? 0` rather than

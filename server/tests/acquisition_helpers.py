@@ -17,7 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus, Setting, User
+from arc.services.acquisition.rules import BYTES_PER_GB
 from arc.services.auth import create_user
+from arc.services.storage import DiskUsage
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "nyaa"
 
@@ -103,8 +105,22 @@ async def make_entry(
     *,
     status: ListStatus = ListStatus.WATCHING,
     progress: int = 0,
+    activated: bool = True,
 ) -> ListEntry:
-    entry = ListEntry(user_id=user.id, anime_id=anime.id, status=status, progress=progress)
+    """One list entry, **activated** by default (FR-A9).
+
+    A test that says "this user is watching this show" means a user who chose
+    to, which is what ``activated_at`` records. ``activated=False`` is the
+    other kind of row — one a MyAnimeList import created and nobody has touched
+    — and it is the tests about dormancy that ask for it.
+    """
+    entry = ListEntry(
+        user_id=user.id,
+        anime_id=anime.id,
+        status=status,
+        progress=progress,
+        activated_at=now() if activated else None,
+    )
     session.add(entry)
     await session.flush()
     return entry
@@ -117,6 +133,35 @@ async def set_setting(session: AsyncSession, key: str, value: Any) -> None:
     else:
         existing.value = value
     await session.flush()
+
+
+#: What the stub pretends the data volume is: a 100 GB disk with as much free
+#: as the test asks for. Only ``free`` is read by the guard; the other two are
+#: there so the admin status endpoint has something coherent to report.
+STUB_DISK_TOTAL = 100 * BYTES_PER_GB
+
+
+def fake_free_space(
+    monkeypatch: Any, module: Any, free_bytes: int | None, *, total: int = STUB_DISK_TOTAL
+) -> None:
+    """Make ``module``'s ``disk_usage`` report ``free_bytes`` free (FR-T6).
+
+    ``None`` is the unmeasurable path — no answer at all, which the guard must
+    read as "not held" rather than as zero free.
+
+    Stubbed rather than driven by a floor bigger than the disk, because the
+    floor is capped at :data:`~arc.services.acquisition.rules.MAX_MIN_FREE_GB`
+    (1 TB) and a machine with more than that free would quietly stop testing
+    the rule. ``module`` is whichever one imported the function — the guard
+    (:mod:`arc.services.acquisition.rules`) or the status endpoint
+    (:mod:`arc.api.acquisition`) — because both hold their own reference.
+    """
+    usage = (
+        None
+        if free_bytes is None
+        else DiskUsage(total=total, used=total - free_bytes, free=free_bytes)
+    )
+    monkeypatch.setattr(module, "disk_usage", lambda _path: usage)
 
 
 def acquisition_settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -261,7 +306,13 @@ class QbitStub:
                 rows = [t for t in self.torrents if t["hash"].lower() in wanted]
             return httpx.Response(200, text=json.dumps(rows))
         if path.endswith("/torrents/delete"):
-            self.deleted.append(self._form(request))
+            form = self._form(request)
+            self.deleted.append(form)
+            # Gone is gone: the next listing must not still show it, or a test
+            # of "what happens on the poll after a removal" would be testing
+            # nothing.
+            removed = {value.lower() for value in form.get("hashes", "").split("|") if value}
+            self.torrents = [t for t in self.torrents if t["hash"].lower() not in removed]
             return httpx.Response(200, text="")
         if path.endswith("/torrents/stop") or path.endswith("/torrents/pause"):
             # qBittorrent 4.x has only ``pause`` and answers 404 to ``stop``,
@@ -303,22 +354,47 @@ class QbitStub:
         size: int = 0,
         dlspeed: int = 0,
         upspeed: int = 0,
+        time_active: int = 0,
+        num_seeds: int = 0,
+        num_leechs: int = 0,
+        num_complete: int = -1,
+        num_incomplete: int = -1,
+        report_counts: bool = True,
     ) -> None:
-        self.torrents.append(
-            {
-                "hash": info_hash,
-                "name": name,
-                "progress": progress,
-                "state": state,
-                "content_path": content_path,
-                "save_path": content_path,
-                "category": category,
-                "completion_on": completion_on,
-                "size": size,
-                "dlspeed": dlspeed,
-                "upspeed": upspeed,
+        """One torrent in the client's listing, as ``torrents/info`` shapes it.
+
+        The defaults are what a *real* client says about a torrent it has just
+        started: connected to nobody yet (``num_seeds``/``num_leechs`` 0, which
+        it always reports), tracker not scraped yet (``num_complete``/
+        ``num_incomplete`` ``-1``, which means *unknown* and must never be read
+        as an empty swarm), and no time on the clock. ``time_active`` is what
+        the stall rule measures, so a test about a stall says so explicitly.
+
+        ``report_counts=False`` omits all four, which is what an older client
+        that does not send them looks like.
+        """
+        row: dict[str, Any] = {
+            "hash": info_hash,
+            "name": name,
+            "progress": progress,
+            "state": state,
+            "content_path": content_path,
+            "save_path": content_path,
+            "category": category,
+            "completion_on": completion_on,
+            "size": size,
+            "dlspeed": dlspeed,
+            "upspeed": upspeed,
+            "time_active": time_active,
+        }
+        if report_counts:
+            row |= {
+                "num_seeds": num_seeds,
+                "num_leechs": num_leechs,
+                "num_complete": num_complete,
+                "num_incomplete": num_incomplete,
             }
-        )
+        self.torrents.append(row)
 
 
 def force_transport(cls: type, transport: httpx.MockTransport) -> Callable[..., None]:

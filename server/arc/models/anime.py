@@ -108,6 +108,19 @@ class Anime(Base):
     #: anything MAL wrote, and the client falls back to ``cover_url``.
     cover_large_url: Mapped[str | None] = mapped_column(Text)
     banner_url: Mapped[str | None] = mapped_column(Text)
+    #: TMDB's 16:9 backdrop, and **only** TMDB's (owner, 2026-09-13). AniList's
+    #: ``banner_url`` is a 1900×400 strip — 4.75:1 — and the M15 design never
+    #: shows one as a picture: the 21:9 hero rejects a banner wider than 2.6:1
+    #: and the 16:9 episode card one wider than 2.2:1, both falling back to the
+    #: blurred-poster wash. A backdrop is the shape both frames actually want,
+    #: so it gets a column of its own rather than sharing ``banner_url``: the
+    #: enrichment could only fill that one where it was null (cache rule 3),
+    #: and an AniList refresh would put the strip back over it anyway. The
+    #: heroes and cards prefer this and fall back to ``banner_url``
+    #: (``bannerArt`` in ``client/src/lib/anime.ts``); null until the TMDB
+    #: enrichment has reached the row, which is a hole the nightly sweep fills
+    #: (:func:`arc.services.tmdb.jobs._missing_key_art`).
+    backdrop_url: Mapped[str | None] = mapped_column(Text)
     #: How many people have the show on a list (AniList ``popularity``, MAL
     #: ``num_list_users``), and the average score on AniList's 0–100 scale
     #: (MAL's 0–10 ``mean`` is scaled on the way in). The recommendation pool

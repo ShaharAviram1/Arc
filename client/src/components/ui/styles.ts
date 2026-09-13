@@ -22,6 +22,16 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 export const FOCUS_RING =
   'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--arc-focus)]'
 
+/**
+ * A 36px glass circle carrying one glyph — the hero's ‹ › controls and the
+ * arrows at the ends of a shelf. Both are the same gesture ("show me the next
+ * one"), so they wear the same clothes: the strong hairline, the raised
+ * surface, the glass blur, and a glyph that inherits `currentColor` rather
+ * than arriving as an icon asset. Add `FOCUS_RING` at the call site.
+ */
+export const GLASS_CIRCLE =
+  'flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-surface-raised)] text-[18px] leading-none text-[var(--arc-text)] backdrop-blur-glass transition-colors duration-200 hover:bg-[rgba(255,255,255,0.13)]'
+
 export type ButtonVariant = 'primary' | 'secondary' | 'chip' | 'danger'
 
 const BUTTON_BASE =
@@ -42,9 +52,32 @@ const BUTTON_VARIANT: Record<ButtonVariant, string> = {
     'h-11 rounded-full px-[18px] text-[15px] border-[0.5px] border-[color-mix(in_srgb,var(--arc-error)_40%,transparent)] bg-[color-mix(in_srgb,var(--arc-error)_12%,transparent)] text-[var(--arc-error)] hover:bg-[color-mix(in_srgb,var(--arc-error)_18%,transparent)]',
 }
 
+/**
+ * A toggle that is currently **on** — `aria-pressed="true"`.
+ *
+ * The glass variants read as "a control you may use"; this reads as "a control
+ * you have used", which is a different thing and the design has no third
+ * colour for it. So it is the same pill with the strong border, the raised
+ * surface and full-strength text: brighter than its neighbours without
+ * becoming the primary action, and legible as *done* rather than as *do this*.
+ * Tokens only, so it follows the theme wherever the buttons do.
+ */
+export const BUTTON_PRESSED =
+  'border-[var(--arc-border-strong)] bg-[var(--arc-surface-raised)] text-[var(--arc-text)]'
+
 /** The classes for a button variant, for anything that cannot be a `Button`. */
-export function buttonClass(variant: ButtonVariant = 'secondary', className?: string): string {
-  return cx(BUTTON_BASE, BUTTON_VARIANT[variant], FOCUS_RING, className)
+export function buttonClass(
+  variant: ButtonVariant = 'secondary',
+  className?: string,
+  options?: { pressed?: boolean },
+): string {
+  return cx(
+    BUTTON_BASE,
+    BUTTON_VARIANT[variant],
+    options?.pressed === true && BUTTON_PRESSED,
+    FOCUS_RING,
+    className,
+  )
 }
 
 /** A filter chip: 44px, pill, quiet until it is the one that is on. */

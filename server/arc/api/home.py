@@ -17,8 +17,10 @@ actually hurt.
 Like the schedule, this endpoint reads the local cache and the caller's own
 rows. Nothing here calls a catalogue source — it *queues* two pieces of work
 and waits for neither. The page's hero is the season's shows, and a season show
-with no artwork at all is the "hero posters are still bad" the owner reported
-on 2026-09-12 (:func:`~arc.services.tmdb.jobs.enqueue_hero_art`); the shelves
+with no backdrop to fill the 21:9 frame is the "hero posters are still bad" the
+owner reported on 2026-09-12 and again on 2026-09-13, when the frame gained a
+column of its own to read (:func:`~arc.services.tmdb.jobs.enqueue_hero_art`);
+the shelves
 under it are 16:9 episode cards, and an episode with no still is a card framed
 around the show's poster rather than the scene it is for
 (:func:`~arc.services.tmdb.jobs.enqueue_episode_stills`).
@@ -30,7 +32,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter
 
-from arc.api.deps import CurrentUser, SessionDep
+from arc.api.deps import CurrentUser, SessionDep, SettingsDep
 from arc.api.episode_extras import episode_extras
 from arc.api.schedule_schemas import (
     BehindEntry,
@@ -56,7 +58,7 @@ def now() -> datetime:
 
 
 @router.get("", response_model=HomePage, summary="Continue watching, behind on, new this week")
-async def home(user: CurrentUser, session: SessionDep) -> HomePage:
+async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) -> HomePage:
     at = now()
     behind = await behind_for_user(session, user, now=at)
     fresh = await new_this_week(session, user, now=at)
@@ -89,9 +91,12 @@ async def home(user: CurrentUser, session: SessionDep) -> HomePage:
     # honest but is not the picture the card is for (owner, 2026-09-12).
     no_still = [row.anime.id for row in started if row.episode.still_url is None]
     no_still += [row.anime.id for row in fresh if row.episode.still_url is None]
-    queued = await enqueue_episode_stills(session, no_still)
+    # Both are no-ops without a ``TMDB_API_KEY``: the queue row would exist
+    # only to log a skip, and on a keyless deployment every row is a hole for
+    # ever, so the page would write twenty of them per visit.
+    queued = await enqueue_episode_stills(session, no_still, settings=settings)
     # One SELECT that returns nothing once the season's art is in.
-    queued += await enqueue_hero_art(session, now=at)
+    queued += await enqueue_hero_art(session, settings=settings, now=at)
     if queued:
         await session.commit()
 

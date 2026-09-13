@@ -44,8 +44,22 @@ const STATUS_PATH = 'GET /api/acquisition/status'
 const WANTS_PATH = 'GET /api/acquisition/wants'
 const QBIT_PATH = 'GET /api/acquisition/qbit'
 
-const RUNNING = { paused: false, active_wants: 2, searching: 1, downloading: 1, retained_bytes: 0 }
+const RUNNING = {
+  paused: false,
+  storage_held: false,
+  free_bytes: 50 * 1024 ** 3,
+  min_free_bytes: 10 * 1024 ** 3,
+  active_wants: 2,
+  searching: 1,
+  downloading: 1,
+  dormant_entries: 0,
+  waiting_shows: 0,
+  slot_cap_k: 5,
+  retained_bytes: 0,
+}
 const PAUSED = { ...RUNNING, paused: true }
+/** Under the floor: the guard nobody pressed and nobody has to clear (FR-T6). */
+const HELD = { ...RUNNING, storage_held: true, free_bytes: 2 * 1024 ** 3 }
 
 /** Everything the five tabs ask for, so a test may switch between them. */
 const ALL_ROUTES: MockRoutes = {
@@ -466,6 +480,10 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
       ['Look-ahead N', '10'],
       ['Grace days G', '365'],
       ['Unwatched days D', '365'],
+      // MAX_MIN_FREE_GB, the storage floor's ceiling (FR-T6).
+      ['Free space floor (GB)', '1000'],
+      // MAX_SLOT_CAP, K's ceiling (FR-A10).
+      ['Shows fetching at once (per user)', '50'],
     ]
     for (const [label, max] of bounds) {
       const input = screen.getByLabelText(label)
@@ -475,6 +493,34 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
       // it cannot drift from what the input will actually accept.
       expect(within(fieldOf(label)).getByText(new RegExp(`Allowed: 0–${max}\\.`))).toBeVisible()
     }
+  })
+
+  it('saves the storage floor like any other rule (FR-T6)', async () => {
+    const { fetchMock } = await openRules()
+
+    fireEvent.change(screen.getByLabelText('Free space floor (GB)'), { target: { value: '25' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ min_free_gb: 25 })
+  })
+
+  it('saves the per-user slot cap like any other rule (FR-A10)', async () => {
+    const { fetchMock } = await openRules()
+
+    const field = screen.getByLabelText('Shows fetching at once (per user)')
+    expect(field).toHaveValue(5)
+    fireEvent.change(field, { target: { value: '3' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ slot_cap_k: 3 })
+    // 0 is a legal value here and means "no cap" — the opposite of N's 0.
+    expect(field).toHaveAttribute('min', '0')
   })
 
   it('keeps the browser from sending a number outside its range', async () => {
@@ -758,5 +804,55 @@ describe('Admin — Acquisition (FR-D3)', () => {
     expect(await screen.findByText('unreachable')).toBeInTheDocument()
     expect(screen.getByText('connection refused: qbittorrent:8080')).toBeInTheDocument()
     expect(screen.queryByRole('table', { name: 'Torrents' })).not.toBeInTheDocument()
+  })
+
+  it('says the disk is holding acquisition, and that it lifts itself', async () => {
+    await openAcquisition({ [STATUS_PATH]: { body: HELD } })
+
+    expect(await screen.findByText('held')).toBeInTheDocument()
+    expect(screen.getByText('Acquisition is held by free space.')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Acquisition is holding: 2 GB free, floor 10 GB. ' +
+          'It resumes on its own when retention frees room.',
+      ),
+    ).toBeInTheDocument()
+    // Still a pause button: a hold is not a pause, and an admin may want both.
+    expect(screen.getByRole('button', { name: 'Pause acquisition' })).toBeInTheDocument()
+  })
+
+  it('reads "running" when the disk is above the floor', async () => {
+    await openAcquisition()
+
+    expect(await screen.findByText('running')).toBeInTheDocument()
+    expect(screen.queryByText('held')).not.toBeInTheDocument()
+  })
+
+  it('counts the imports that are fetching nothing yet', async () => {
+    await openAcquisition({ [STATUS_PATH]: { body: { ...RUNNING, dormant_entries: 414 } } })
+
+    const stat = (await screen.findByText('Dormant imports')).closest('div') as HTMLElement
+    expect(within(stat).getByText('414')).toBeInTheDocument()
+    expect(screen.getByText(/fetch nothing until someone does/)).toBeInTheDocument()
+  })
+
+  it('counts the shows waiting for a slot, against the cap (FR-A10)', async () => {
+    await openAcquisition({
+      [STATUS_PATH]: { body: { ...RUNNING, waiting_shows: 3, slot_cap_k: 5 } },
+    })
+
+    const stat = (await screen.findByText('Waiting for a slot')).closest('div') as HTMLElement
+    expect(within(stat).getByText('3 waiting · cap 5')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is ever cancelled to make room/)).toBeInTheDocument()
+  })
+
+  it('says so in words when there is no cap at all', async () => {
+    await openAcquisition({
+      [STATUS_PATH]: { body: { ...RUNNING, waiting_shows: 0, slot_cap_k: 0 } },
+    })
+
+    const stat = (await screen.findByText('Waiting for a slot')).closest('div') as HTMLElement
+    // "cap 0" would read as "nothing may fetch", which is the opposite.
+    expect(within(stat).getByText('0 waiting · no cap')).toBeInTheDocument()
   })
 })

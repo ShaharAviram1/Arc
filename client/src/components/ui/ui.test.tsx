@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CoverThumb } from '@/components/CoverThumb'
 import { Artwork } from '@/components/ui/Artwork'
 import { Button, PlayGlyph } from '@/components/ui/Button'
@@ -123,6 +123,9 @@ describe('HeroFrame', () => {
 
     // Until the shape is known the wash holds the frame, so nothing jumps.
     expect(container.querySelector('[data-hero-backdrop]')).toHaveAttribute('src', POSTER)
+    // The probe sits in a 0×0 box, and a lazy image with no box is never
+    // fetched — the shape would stay unknown and the wash would stay for good.
+    expect(probe(container)).toHaveAttribute('loading', 'eager')
 
     load(probe(container), 1920, 1080)
 
@@ -375,6 +378,83 @@ describe('Skeleton', () => {
 })
 
 describe('Shelf', () => {
+  /**
+   * jsdom has no layout, so a shelf measuring itself measures zeroes: the
+   * geometry it reads has to be planted, and on the prototype rather than the
+   * element, because the first measurement happens in the effect that `render`
+   * flushes before a test can reach the node.
+   *
+   * `scrollLeft` is writable so a drag can actually move it — jsdom's own is a
+   * getter that returns 0 whatever is assigned to it.
+   */
+  function plantGeometry(geometry: {
+    scrollWidth: number
+    clientWidth: number
+    scrollLeft?: number
+  }): void {
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+      configurable: true,
+      value: geometry.scrollWidth,
+    })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      value: geometry.clientWidth,
+    })
+    Object.defineProperty(HTMLElement.prototype, 'scrollLeft', {
+      configurable: true,
+      writable: true,
+      value: geometry.scrollLeft ?? 0,
+    })
+  }
+
+  /** The strip itself, which is the element the geometry belongs to. */
+  function scrollerIn(container: HTMLElement): HTMLElement {
+    return container.querySelector('.snap-x') as HTMLElement
+  }
+
+  function renderShelf(onClick: () => void = vi.fn()): HTMLElement {
+    const { container } = render(
+      <Shelf title="Catch up">
+        <button type="button" onClick={onClick}>
+          Frieren
+        </button>
+        <article>Apothecary</article>
+      </Shelf>,
+    )
+    return container
+  }
+
+  /** A mouse press, a drag of `travel` pixels, and a release. */
+  function dragBy(scroller: HTMLElement, travel: number): void {
+    fireEvent.pointerDown(scroller, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 200 })
+    fireEvent.pointerMove(scroller, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientX: 200 + travel,
+    })
+    fireEvent.pointerUp(scroller, { pointerId: 1, pointerType: 'mouse', clientX: 200 + travel })
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {
+          // No layout in jsdom, so nothing ever resizes.
+        }
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    for (const property of ['scrollWidth', 'clientWidth', 'scrollLeft']) {
+      Reflect.deleteProperty(HTMLElement.prototype, property)
+    }
+  })
+
   it('heads the section and puts its items in one scroller', () => {
     render(
       <Shelf title="Up Next" lede="Where you stopped.">
@@ -385,6 +465,120 @@ describe('Shelf', () => {
     expect(screen.getByRole('heading', { name: 'Up Next', level: 2 })).toBeInTheDocument()
     expect(screen.getByText('Where you stopped.')).toBeInTheDocument()
     expect(screen.getByText('Episode 12').parentElement).toHaveClass('snap-x')
+  })
+
+  it('offers no arrows and nothing to grab when the rail fits', () => {
+    plantGeometry({ scrollWidth: 600, clientWidth: 600 })
+    const container = renderShelf()
+
+    expect(screen.queryByRole('button', { name: 'Scroll left' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Scroll right' })).not.toBeInTheDocument()
+    expect(scrollerIn(container)).not.toHaveClass('cursor-grab')
+  })
+
+  it('shows only the arrow that has somewhere to go', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 0 })
+    const { unmount } = render(<Shelf title="Catch up">{[<article key="a">A</article>]}</Shelf>)
+
+    // At the start there is nothing to the left of the strip.
+    expect(screen.queryByRole('button', { name: 'Scroll left' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Scroll right' })).toBeInTheDocument()
+    unmount()
+
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 700 })
+    const middle = render(<Shelf title="Catch up">{[<article key="a">A</article>]}</Shelf>)
+    expect(screen.getByRole('button', { name: 'Scroll left' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Scroll right' })).toBeInTheDocument()
+    middle.unmount()
+
+    // 2000 − 600: the end of the strip, so only the way back is offered.
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 1400 })
+    render(<Shelf title="Catch up">{[<article key="a">A</article>]}</Shelf>)
+    expect(screen.getByRole('button', { name: 'Scroll left' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Scroll right' })).not.toBeInTheDocument()
+  })
+
+  it('moves almost a strip in the direction of the arrow pressed', async () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 700 })
+    const container = renderShelf()
+    const scroller = scrollerIn(container)
+    const scrollBy = vi.fn()
+    // jsdom implements no scrolling at all, so the call is the observable.
+    scroller.scrollBy = scrollBy
+
+    await userEvent.click(screen.getByRole('button', { name: 'Scroll right' }))
+    expect(scrollBy).toHaveBeenLastCalledWith({ left: 540, behavior: 'smooth' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Scroll left' }))
+    expect(scrollBy).toHaveBeenLastCalledWith({ left: -540, behavior: 'smooth' })
+  })
+
+  it('drags the strip with a mouse and swallows the click that ends the drag', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    const onClick = vi.fn()
+    const container = renderShelf(onClick)
+    const scroller = scrollerIn(container)
+
+    fireEvent.pointerDown(scroller, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 200 })
+    fireEvent.pointerMove(scroller, { pointerId: 1, pointerType: 'mouse', clientX: 260 })
+
+    // Dragged right by 60, so the rail moved 60 the other way.
+    expect(scroller.scrollLeft).toBe(340)
+    expect(scroller).toHaveClass('cursor-grabbing', 'select-none')
+    // Snap-mandatory would fight a live drag, so it is off until the release.
+    expect(scroller.style.scrollSnapType).toBe('none')
+
+    fireEvent.pointerUp(scroller, { pointerId: 1, pointerType: 'mouse', clientX: 260 })
+    expect(scroller.style.scrollSnapType).toBe('')
+    expect(scroller).toHaveClass('cursor-grab')
+
+    // The card under the hand is a link or a button; ending a drag on it must
+    // not follow it.
+    fireEvent.click(screen.getByRole('button', { name: 'Frieren' }))
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('refuses the native drag a link or an image would start instead', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    renderShelf()
+
+    // Chrome starts an HTML5 drag on a link or an image a few pixels in and
+    // cancels the pointer, which used to end the gesture before it began.
+    const tile = screen.getByRole('button', { name: 'Frieren' })
+    const dragStart = createEvent.dragStart(tile)
+    fireEvent(tile, dragStart)
+
+    expect(dragStart.defaultPrevented).toBe(true)
+  })
+
+  it('leaves a press that barely moved as a click', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    const onClick = vi.fn()
+    const container = renderShelf(onClick)
+    const scroller = scrollerIn(container)
+
+    // Four pixels is a hand pressing a button, not a hand moving a rail.
+    dragBy(scroller, 4)
+
+    expect(scroller.scrollLeft).toBe(400)
+    fireEvent.click(screen.getByRole('button', { name: 'Frieren' }))
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves touch and pen to the platform', () => {
+    plantGeometry({ scrollWidth: 2000, clientWidth: 600, scrollLeft: 400 })
+    const onClick = vi.fn()
+    const container = renderShelf(onClick)
+    const scroller = scrollerIn(container)
+
+    fireEvent.pointerDown(scroller, { pointerId: 2, pointerType: 'touch', clientX: 200 })
+    fireEvent.pointerMove(scroller, { pointerId: 2, pointerType: 'touch', clientX: 120 })
+    fireEvent.pointerUp(scroller, { pointerId: 2, pointerType: 'touch', clientX: 120 })
+
+    expect(scroller.scrollLeft).toBe(400)
+    expect(scroller.style.scrollSnapType).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Frieren' }))
+    expect(onClick).toHaveBeenCalledTimes(1)
   })
 })
 

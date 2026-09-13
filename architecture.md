@@ -1,7 +1,7 @@
 # Arc — Architecture
 
 > Living document. Update whenever the stack, a component boundary, or an
-> integration changes. Last updated: 2026-09-11.
+> integration changes. Last updated: 2026-09-13.
 > Companions: [spec.md](spec.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Stack at a glance
@@ -119,7 +119,7 @@ arc/
         qbit/                    qBittorrent Web API client
         library/                 file watcher, parser (anitopy), matcher, scoring
         media/                   ffprobe, transcode plan, HLS packaging
-        acquisition/             want computation, window logic
+        acquisition/             want computation, window logic, samples (FR-A8)
         catalog/                 source protocol, AniList+MAL service, breaker,
                                  cache, seasons, list states, local search
           offline/               M15.5: the weekly manami + Fribb import
@@ -127,6 +127,9 @@ arc/
                                  for what AniList has not filled
                                  (download, parse, importer, job)
         retention/               cleanup rules
+        storage.py               free space on the data volume (FR-T4, FR-T6);
+                                 a leaf read by both retention's disk page and
+                                 acquisition's storage guard
         recs/                    candidate pool, continuations, model prompt,
                                  schema, provider chain
         jobs/                    job table, claim/run/retry, handlers registry,
@@ -202,16 +205,22 @@ in them by the *shape* of the picture, not only by its presence:
 
 - The hero (`ui/HeroFrame.tsx`) is **always 21:9** — one fixed frame, so Watch
   Now's carousel does not change height between slides (owner, 2026-09-12).
-  It fills the frame with AniList's `banner_url` **only if its natural ratio is
+  It fills the frame with the show's wide art **only if its natural ratio is
   ≤ 2.6** (a 16:9 backdrop loses a little off the top and bottom; a ~4.75:1
   AniList strip would lose half of itself); otherwise the poster treatment
-  below, using the banner itself as the wash ground when the show has no
-  poster. With no banner at all it is the poster treatment as well.
+  below, using that art itself as the wash ground when the show has no poster.
+  With none at all it is the poster treatment as well.
 - The 16:9 episode card on Watch Now (`EpisodeArt` in `pages/Home.tsx`) takes
-  the episode's `still_url`; failing that the show's `banner_url` **only if its
+  the episode's `still_url`; failing that the show's wide art **only if its
   natural ratio is ≤ 2.2** — the same rule one size down, with a tighter
   threshold because the frame is narrower (owner, 2026-09-12); failing that,
   the poster treatment.
+- **"The show's wide art" is `backdrop_url` first, then `banner_url`**
+  (`bannerArt` in `lib/anime.ts`; owner, 2026-09-13). TMDB's backdrop is 16:9
+  and passes both tests; AniList's banner is a 1900×400 strip and passes
+  neither, so a show whose only wide art is a banner renders the poster
+  treatment however it arrived. The fallback stays for the deployment with no
+  TMDB key and for the row the enrichment has not reached yet.
 
 Both learn the ratio the same way: `ui/AspectProbe.tsx` renders an off-frame
 copy of the banner and reports `Artwork`'s `onNaturalSize` as a ratio, and the
@@ -230,6 +239,27 @@ advances itself — today only Watch Now's hero — asks
 `usePrefersReducedMotion` (`client/src/lib/media.ts`, alongside `useIsPhone`)
 and simply never starts the timer.
 
+**A shelf (`ui/Shelf.tsx`) can be scrolled with whatever is in the viewer's
+hand.** The strip keeps its hidden scrollbar and its mandatory snap points, and
+gains two things for a mouse (owner, 2026-09-13): a **drag** — pointer events,
+`pointerType === 'mouse'` only, so touch and pen keep the platform's own
+scrolling and inertia — where 6 px of travel is the line between a drag and a
+click, the click that ends a real drag is swallowed once in the capture phase
+so a card is not followed by accident, the cursor is `grab`/`grabbing` while
+the content overflows, and scroll-snap is turned off inline for the duration
+(mandatory snap fights a live drag) so the rail settles on a tile at release,
+and `dragstart` is refused on the scroller — the tiles are links wrapping
+images, so a few pixels in Chrome started an HTML5 drag and cancelled the
+pointer, which killed the gesture before it began (owner, in Chrome, the same
+day); one handler on the strip rather than `draggable={false}` on every tile;
+and **edge arrows**, the shared `GLASS_CIRCLE` from `styles.ts` — the same
+control as the hero's ‹ › — laid over the ends of the strip, each rendered only
+when there is rail in that direction (a `scroll` listener and a
+`ResizeObserver`, one measurement per frame), raised on hover or `focus-within`
+and only under `@media (hover: hover)`, never on a phone. An arrow moves 90 %
+of the visible width, smoothly. Both arrows are `position: absolute` over the
+strip, so nothing on the page moves when they appear.
+
 ## 4. Data model (tables)
 
 | Table | Key columns |
@@ -237,19 +267,19 @@ and simply never starts the timer.
 | `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
-| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url, genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
+| `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url (AniList's 4.75:1 strip), backdrop_url (TMDB's 16:9 backdrop — **only** the TMDB enrichment ever writes it, §5.8, and it is what the 21:9 heroes and 16:9 cards prefer; null until the enrichment reaches the row), genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
 | `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
-| `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty |
+| `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), updated_at |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
-| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason |
+| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list) |
 | `torrents` | id, episode_id, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
-| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused), plus per-show overrides under `override:anime:<id>`. Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
+| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n), plus per-show overrides under `override:anime:<id>`. Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 | `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
 | `offline_ids` | id (surrogate PK), anidb_id, anilist_id (indexed), mal_id (indexed), kitsu_id, tmdb_tv_id, tmdb_movie_id, tmdb_season, tvdb_id, tvdb_season, imdb_id (the first when the entry carries several), type. Fribb's `anime-lists`, and the only route from an Arc show to a **TMDB** id — AniList publishes none. An entry with neither an AniList nor a MAL id is dropped on import: nothing could ever reach it |
 | `offline_imports` | source (PK: `manami` \| `fribb`), version (manami's release tag out of the header's `$schema`; Fribb's `ETag`/`Last-Modified`/download date), imported_at, rows, checksum (sha256 of the downloaded file — an unchanged file skips the parse and the replace entirely) |
@@ -274,8 +304,115 @@ and simply never starts the timer.
    `downloaded`, enqueue `ingest_file` with the largest video file.
 
 ### 5.1a Acquisition as built (M6)
+- **Dormant imports (FR-A9, 2026-09-13).** Before the window there is a
+  question of whether the entry counts at all. A `watching`/`planned` entry
+  with `list_entries.activated_at IS NULL` whose show is not `RELEASING` is
+  **dormant**: `compute_wants` skips it entirely — it contributes nothing to
+  `desired` and its (user, show) does **not** join `wanting` — so any want it
+  left behind is shelved (`dormancy.REASON_DORMANT`, "imported; not touched in
+  Arc yet") rather than deleted, retention keeps its grace anchor, and a
+  download in flight for it is cancelled by the ordinary
+  `cancel_if_unwanted` + `qbit_cancel` path. The reason is distinct from
+  `REASON_NOT_WANTING` only in what it *says* — an admin reading the wants
+  table after an import needs "never picked up" told apart from "put on hold" —
+  and both revive unconditionally, so touching the show brings the row straight
+  back. The rule itself is `arc/services/acquisition/dormancy.py`, a leaf with
+  no service imports: `catalog.lists` writes the stamp and cannot import
+  `acquisition.wants` without closing a cycle through `catalog.airing`, so
+  `activate()` and `is_dormant()` live where both sides can reach them.
+  `is_dormant` takes *whether the show is airing* rather than the show, because
+  that is the catalogue's question and the answer is a boolean by the time this
+  rule cares. The writers of the stamp and no others: `set_list_entry` (every
+  successful PUT, including one that re-sends the status the show already has —
+  which is what the Show page's "Fetch this show" button does), **every**
+  progress report for a show that has an entry
+  (`playback.progress._activate_entry`, so Play is a touch from thirty seconds
+  in rather than from 90 %; it never *creates* an entry, because "pressed play"
+  is not "is watching this show" — FR-S4 draws that line at the completion, and
+  the entry it creates there is activated) and `arc.api.mal.revert` (FR-M7's
+  third user-originated event, including the entry a reverted removal
+  recreates). Every MyAnimeList-driven path — import, push, conflict resolution
+  — leaves it exactly as it found it. **`request_sample` deliberately does
+  not**: "Try episode 1" writes one want for one episode, which is what was
+  asked for, and activating would hand the show the whole N-episode window. For
+  the same reason its `AlreadyFollowing` refusal now asks about the *window*
+  rather than the status — a **dormant** watching/planned entry has no window,
+  so a sample is allowed on one and behaves exactly like a sample on an
+  unlisted show (the reconciler does not put the pair in `wanting` either).
+- **Slot cap (FR-A10, 2026-09-13).** After the window and before `desired`,
+  per user: at most K shows may be fetching at once (`slot_cap_k`, default 5,
+  0 = no cap). `arc/services/acquisition/slots.py` is a leaf holding the pure
+  `assign_slots(shows, k) -> (admitted, waiting)` over `SlotShow(anime_id,
+  airing, updated_at, fetching, hungry)`; the two flags come from the
+  reconciler, which is the only place that knows the wants and the window.
+  **fetching** (an occupant) is a live, non-`sample` want of that user on an
+  episode whose state is not one of `slots.SETTLED` — `ready` (arrived, waiting
+  to be *watched*, so a user who let three episodes pile up does not stop
+  fetching everything else), `unavailable` (FR-A6 gave up and retries daily;
+  five unfindable shows would otherwise freeze a list for ever, and the retry
+  needs no slot because it is not competing for the disk or the download queue)
+  and `failed` (an admin's problem, not a slot's). **hungry** is a window
+  episode with no live want of theirs: a show with nothing to ask for competes
+  for nothing, which is what makes "one of the five finished, so the sixth
+  starts" true on the next tick rather than handing the slot back to the show
+  that has finished. Occupants are admitted whatever K says (lowering K cancels
+  nothing and only stops new starts), free slots go to `RELEASING` first and
+  then by `list_entries.updated_at` descending, ties keeping the reconciler's
+  (user, anime) order. A show held back contributes **nothing**, and the pairs
+  go to `_reconcile` as a set of rows it must not touch — not shelve, restamp,
+  revive or delete, with one exception: a **live, non-sample** want whose
+  episode is at or below the user's progress takes the ordinary "left the
+  window" delete, because the user has watched past it and the completion in
+  `watch_progress` is the anchor retention measures FR-T1's grace from, so the
+  row has nothing left to say. Without that, a want the user had finished would
+  sit live until the show next won a slot — and a live want makes the sweep skip
+  an episode, so the cap would end up pinning files to the disk. Dropped rows,
+  rows still inside the window and samples are untouched. The first shape of this was "its window intersected
+  with the wants it already has", which a review broke: a want FR-T2 dropped on
+  a `ready` episode belongs to a show that is hungry but not an occupant, so
+  contributing only the *live* rows left that key out of `desired` while the
+  show was still in `wanting`, and `_reconcile` deletes such a row — losing the
+  `dropped_at` retention measures FR-T1's grace from, and handing the row back
+  live the moment a slot freed, bypassing FR-T2's Arc-side-touch revival. A show
+  in **neither** of `assign_slots`'s lists (settled: not fetching, not hungry)
+  is not held back and still contributes its window, which for it is exactly the
+  rows it already has. `WantsResult.waiting` counts the (user, show) pairs held
+  back;
+  `wants.slot_view(session, user_id)` is the same computation narrowed to one
+  user, which is what `ListEntryOut.waiting` and the show page's note read, so
+  "this show is waiting" on the page and "this show creates no wants" in the
+  next reconciliation are one predicate. It carries `paused` and `held` with it,
+  because "Arc starts this one when one of them finishes" is a promise and a
+  stopped or held reconciler cannot keep it — `ListEntryOut.waiting_reason`
+  (`slot` | `paused` | `held`) is what the page switches its sentence on.
+  Nothing is persisted and nothing cached — a slot frees itself when an episode
+  becomes ready, which no request is there to see. For one user the episode read
+  is narrowed to `number > progress` per show, which is exact rather than
+  approximate: `aired_through` is a max over dated past episodes, so dropping
+  the ones at or below `progress` can only lower the boundary to `<= progress`,
+  and `is_aired`'s `number <= boundary` is false for every episode the window
+  considers either way. N and K come from one `rules.look_ahead_and_cap` read.
+  Dormancy comes first: an untouched import is not a show
+  waiting for room. Seeded by migration `7c1d5b3ae4f2`.
+- **Storage guard (FR-T6, 2026-09-13).** `rules.is_storage_held` measures
+  `shutil.disk_usage(DATA_DIR)` through `arc/services/storage.py` (a leaf that
+  walks up to the nearest existing parent, and answers `None` rather than zeros
+  when nothing in the chain can be read) and compares the free bytes against
+  `min_free_gb` with the pure `rules.storage_hold`. While held: `compute_wants`
+  **still reconciles** — dropping, shelving, releasing and cancelling all free
+  space — and only `_start_searches`'s starting half is skipped (an episode with
+  a live want is skipped, not released: it is still wanted); `search_release`
+  requeues itself on `PAUSED_RETRY` through the same `_requeue_paused` the pause
+  uses, with `HELD_LOG` naming the disk instead of the switch; `poll_qbit` and
+  the transcodes are untouched, because finishing what has landed is how a
+  source becomes deletable. A floor of 0 never holds, exactly *at* the floor is
+  not held, and a measurement that fails never holds (logged once, then
+  quietly). `compute_wants` takes `settings` for this and nothing else; without
+  one there is no measurement and therefore no hold, which is the same answer a
+  failed measurement gives. Nobody presses a hold and nobody clears it: the
+  next tick after retention frees room starts fetching again.
 - `compute_wants` (every 15 min, after any list change, and after a watch
-  completion): for each `watching`/`planned` entry, `p` = max(furthest
+  completion): for each **non-dormant** `watching`/`planned` entry, `p` = max(furthest
   completed episode, list progress); wants `p+1 … p+N` (`look_ahead_n`,
   capped at 10) that have aired. A want whose show leaves watching/planned
   (on_hold/dropped/completed/off-list) is dropped with reason "show no
@@ -295,11 +432,126 @@ and simply never starts the timer.
   directory is ingested with `expected=[anime_id, number]` so the matcher's
   prior applies → `matching` → `matched` via `link()`. A torrent that
   vanished from the client → `unavailable` "removed from client".
+- **Stalls (FR-A6, 2026-09-13).** The same handler gives up on a torrent that
+  is going nowhere, which before this it never did: `poll_qbit` reacted only to
+  a torrent that had *vanished*, so a dead magnet held one of qBittorrent's
+  download slots until a person noticed. `jobs.stall_reason` is a pure function
+  of one `torrents/info` row, and it says *stalled* for a torrent in
+  `metaDL`/`forcedMetaDL` past `STALL_METADATA_MINUTES` (60), or one in
+  `downloading`/`forcedDL`/`stalledDL` past `STALL_NO_BYTES_HOURS` (6) that has
+  either fetched nothing ("no bytes after 6 hours") or whose swarm the tracker
+  says is empty ("no seeders after 6 hours"). Then: the row is marked
+  `torrents.qbit_state = "stalled"` and the episode → `unavailable` with that
+  sentence, **the session is flushed**, and only then `torrents/delete` **with
+  files** — so a client that stops answering mid-poll leaves a coherent
+  database and one torrent to tidy up, which the next poll does (a `stalled`
+  row still present in the listing is deleted again, `qbit.DELETE_ON_SIGHT`).
+  FR-A6's ordinary retry schedule takes the episode from there.
+  Four exclusions, each of which was or would have been a bug:
+  - **the clock is the client's own `time_active`**, never `torrents.added_at`.
+    Now that Arc bounds the queue, a torrent sits in `queuedDL` for hours and
+    then starts downloading already nine hours old with nothing fetched —
+    against the row's age that is a stall on its first poll, and `stalledDL`
+    (which means only "no bytes this instant") would have made it one. A client
+    that does not report `time_active` stalls nothing.
+  - **an empty swarm is only ever the tracker's two figures**
+    (`num_complete`/`num_incomplete`, both scraped and both 0 —
+    `TorrentInfo.dead_swarm`). `num_seeds`/`num_leechs` are the peers this
+    client holds *right now*, are reported as 0 all the time on healthy
+    torrents between announces, and reading them would delete a 60 %-complete
+    download. `-1` on either tracker figure means "not scraped yet" and is
+    mapped to `None`.
+  - a state outside the allow-list (`queuedDL` is most of the queue for hours
+    after a list import, `stoppedDL`/`pausedDL` is a person's own decision —
+    production had 297 of those), and a *complete* torrent.
+  - anything with `dlspeed > 0`: bytes are arriving, which settles it.
+
+  A `stalled` row outlives the torrent, and `poll_qbit` **never moves an
+  episode on account of a row that already carries a decision**. Rows are
+  polled oldest first, so without that guard the stalled attempt — gone from
+  the client by Arc's own hand — dragged an episode that had since been
+  retried from `downloading` back to `unavailable` on every tick, and the
+  release that was working was never handed to the library.
+- **A release is chosen once.** `jobs._pick` skips any candidate whose info
+  hash already has a `torrents` row — any episode, any state. A row only
+  exists because an earlier attempt *committed* (`search_release` is one
+  transaction), so the row means "tried, and it did not produce the episode";
+  re-choosing it would re-add the same dead magnet. With nothing left to try
+  the episode takes the ordinary "no release yet" path and looks again
+  tomorrow. Paired with the filter's new 0-seeder rejection (§6, Nyaa row):
+  zero seeders is not a worse candidate, it is a file that cannot be fetched.
+- **Cancelling (2026-09-13).** The reconciler's release step has a second half.
+  `wants.release_if_unwanted` returns a `wanted`/`searching`/`unavailable`
+  episode to `not_wanted`; `wants.cancel_if_unwanted` does the same for a
+  `downloading` one — marking every one of its `torrents` rows `cancelled` and
+  taking the `downloading → not_wanted` edge — and the client-side removal is a
+  **`qbit_cancel` job per episode**, queued after the flush. A job rather than
+  a loop inside `compute_wants` for two reasons: the reconciliation holds a
+  transaction and must not hold it across an HTTP call, and a client that is
+  not answering must not be able to fail it (the job carries that risk, with
+  the runner's backoff behind it). The job deletes only the hashes whose row
+  says `cancelled`, so an episode wanted again in the seconds in between keeps
+  the release its new search has just chosen — and, for the same reason, the
+  reconciler marks only rows that do *not* already carry a decision: an older
+  `rejected` attempt beside the live one is holding the file somebody is
+  looking at in review, and `qbit_cancel` deletes with files. After a
+  successful delete the job **deletes the `torrents` rows** it just cancelled,
+  because a row bars its release from `_pick` for ever: right for `stalled`
+  and `rejected` (tried, failed) and wrong for a cancel, where a change of
+  mind a minute later would otherwise have cost the episode the best release
+  on Nyaa. Nothing references them by then — the episode is `not_wanted`, the
+  torrent is out of the client and its files are gone. Episodes from
+  `downloaded` onwards are untouched: those bytes have landed and are
+  retention's (FR-T1). `qbit_state` values that are Arc's own decisions
+  (`rejected`, `stalled`, `cancelled`; `qbit.DECIDED_STATES`) are never
+  overwritten by a poll, in either direction. `samples.cancel_sample` calls
+  the same two helpers, so pressing Cancel mid-download stops it now rather
+  than at the next tick.
+- **Samples (FR-A8, M16).** `POST /api/anime/{id}/sample` writes one `wants`
+  row with `sample = true` on the show's lowest-numbered episode, **starts the
+  search there and then** and enqueues `compute_wants`; nothing else about
+  acquisition changes, and no list entry or MAL write is involved. The route
+  does not copy the reconciler's rule: the per-episode halves of
+  `_start_searches` are the public `start_search()` (STARTABLE check, the
+  `UNAVAILABLE_RETRY` gate — skipped here with `retry_now`, because a person
+  who has just asked is not the fifteen-minute sweep — the `wanted`
+  transition and the deduped `search_release`) and `release_if_unwanted()`
+  (RELEASABLE and no live want of any user → `not_wanted`), and both the
+  reconciler and the two sample routes call them. So the episode row tells the
+  truth as soon as the page re-reads instead of after the next tick — and for
+  ever, if acquisition happened to be paused. Paused still means paused: the
+  episode reads `wanted` and `search_release` requeues itself without touching
+  Nyaa. `DELETE` drops the row(s) and calls `release_if_unwanted`, so an
+  episode nobody else wants goes back to `not_wanted` immediately while one
+  that is already downloading is untouched. `arc/services/acquisition/samples.py` owns the
+  three refusals (no episodes cached, episode 1 unaired per
+  `catalog.airing`, the show already `watching`/`planned` — the window covers
+  it) and hands each up as the sentence the 409 carries. A second press with a
+  sample already live answers that same sample and writes nothing (one sample
+  per (user, show): "the lowest-numbered episode" is not a stable answer, and
+  Cancel drops every live sample row on the show rather than one). The reconciler reads
+  a sample off the row rather than off a list: a **live** sample whose
+  (user, show) is not watching/planned **and whose episode its user has not
+  completed** is added to `desired` as it stands, so it is never shelved as
+  "no longer watching"; a sample on a followed show is governed entirely by
+  the window like any other want; a sample its user has *watched* leaves
+  `desired` and is shelved, which is the only ending available on a show that
+  is on the list as `completed`/`dropped`/`on_hold` (FR-S4 leaves an existing
+  entry's status alone, so the show never joins `wanting`, and FR-T2 will not
+  drop a want whose user has watched the episode — without this the bytes
+  would be pinned by a live want forever); and a **dropped**
+  sample outside the window is left exactly as it is — cancelled
+  ("sample cancelled") or stale (FR-T2) — because FR-T2 is a sample's
+  intended end and re-labelling it `REASON_NOT_WANTING` would hand it back
+  that reason's unconditional revival. Pressing the button again is the only
+  way back, and it clears the drop itself.
 - `episodes.state` is written only by `acquisition/states.transition()`,
   which enforces the spec §6 table and logs every edge. Extra edges beyond
   the diagram: `searching → not_wanted` (want vanished mid-search),
   `matching → unavailable` (delivered file rejected in review),
-  `wanted|unavailable → not_wanted`. One process-wide Nyaa client keeps the
+  `wanted|unavailable → not_wanted`, and `downloading → not_wanted`
+  ("nobody wants this episode": the cancel above, the one place the reconciler
+  reaches into work in flight). One process-wide Nyaa client keeps the
   pacing and cache shared across concurrent searches.
 
 ### 5.2 Ingest and match
@@ -318,8 +570,29 @@ and simply never starts the timer.
 - Parser: `anitopy` plus normalisation into `ParsedName` (title, `title_key`,
   episode/range, season, part, version, group, resolution, kind:
   episode|batch|movie|special|nc|unknown). Pinned by
-  `tests/fixtures/release_names.txt` (235 names, 100 % on episode+kind and
+  `tests/fixtures/release_names.txt` (247 names, 100 % on episode+kind and
   title_key).
+- **Batches (FR-A4).** An episode *range* at the episode position (`01 ~ 12`,
+  `01~12`, `01 - 12`, `01-12`, `01〜12`, `01～12`, `E01-E12`, `S01E01-E12`,
+  `001-024`) or a batch
+  marker anywhere in the name (`BATCH`, `Batch`, `Season Pack`) makes the
+  file a `batch`, whatever else the name says — including a first episode
+  number, which is all anitopy reports of a range. The `Complete` family
+  (`Complete`, `Complete Series`, `S1 Complete`) is read **only when the name
+  names no single episode**: on a run it means the whole show, but on one
+  numbered file it is what a group shouts on the last episode, the same claim
+  as `END`, so `[Group] Show - 12 [COMPLETE]` is episode 12. Both ends of a
+  range must be zero-padded (or `E`-prefixed), count up from at least 1, not
+  both be plausible years (1950–2099, so `Cowboy Bebop 1998-1999` is an airing
+  span) and have nothing but a tag behind them (so `- 01 - 100 Poems` is
+  episode 1 with an episode title) — which is what keeps `Ranma 1-2`,
+  `1920x1080`, `10-bit`, `01v2`, a scene date and a title ending in a number
+  (`Mob Psycho 100 - 07`) out. The last two conditions apply to anitopy's own
+  range answers as well, not only to the pattern. A run anitopy cannot read
+  (`01〜12`) is also removed from the title, by a pattern built from the two
+  numbers the file was found to hold, so *86* and *07-Ghost* keep their names. A batch never reaches disk by acquisition (§6) and, when one arrives
+  through `manual/`, goes to review; the individual files *inside* a batch
+  directory are ordinary episode names and parse as episodes.
 - Candidates: expected-episode prior (Arc-downloaded files; applied as a
   bounded bonus so it can never beat a title that says otherwise), fuzzy
   search over the local cache, then (M15.5) the **offline catalogue** — up to
@@ -1022,7 +1295,8 @@ the cross-id map of §5.0a: `anime` → `offline_ids` (by AniList id, else MAL i
 → `tmdb_tv_id` (+ `tmdb_season`) or `tmdb_movie_id`. AniList publishes no TMDB
 id at all, which is why the offline import is a prerequisite for this.
 
-- **What is filled.** `anime.banner_url` from the backdrop (`w1280`),
+- **What is filled.** `anime.backdrop_url` and `anime.banner_url` from the
+  backdrop (`w1280`),
   `anime.cover_large_url` from the poster (`w780`), `episodes.still_url` from
   each episode's still (`w300`) and `episodes.title` from its name, and
   `anime.credits` from the series crew mapped onto the same six roles the
@@ -1030,6 +1304,15 @@ id at all, which is why the offline import is a prerequisite for this.
   `https://image.tmdb.org/t/p/` base are constants, not a `/configuration`
   call: that answer has not changed in a decade and asking would be a request
   per sweep to learn a constant.
+- **`backdrop_url` is TMDB's own column** (owner, 2026-09-13) and the one
+  exception to the rule below: it is written whenever TMDB has a backdrop and
+  the row does not already hold that same URL, so an older TMDB answer is
+  replaced and a re-run of a filled row still plans nothing. Nobody else writes
+  it — the AniList/MAL/offline upserts do not name it (§5.0), which is the
+  whole reason it exists as a column rather than as a TMDB value in
+  `banner_url`: rule 3 would keep the enrichment out of every row AniList had
+  filled, and an AniList refresh would overwrite what did land with the
+  4.75:1 strip no frame can show.
 - **Never overwrite** (cache rule 3, one source further down). TMDB is the
   weakest source Arc has, so it fills nulls and touches nothing else.
   `cover_url` is not its column — MAL's 230 px cover stays. `credits` is
@@ -1064,7 +1347,7 @@ id at all, which is why the offline import is a prerequisite for this.
      ever added to a list, and a show watched off-list could otherwise never
      gain a single episode still.
   2. **This season's and next season's** shows (`catalog/seasons.py`) that the
-     id map can reach and that have no backdrop or no key-art poster, most
+     id map can reach and that are missing any of the three art columns, most
      popular first (`popularity DESC NULLS LAST`). **Art only**: one
      `/tv/{id}`, backdrop + poster, no season and no credits call —
      `{"anime_id": N, "art_only": true}` in the payload, honoured by `_fetch`
@@ -1075,8 +1358,14 @@ id at all, which is why the offline import is a prerequisite for this.
   enriched (owner, 2026-09-12). The client paces at 4 req/s and shares one
   process-wide breaker, so a 429 or a 5xx stops the rest of the night instead
   of timing out three hundred times.
+- **What counts as a hole.** A mapped row missing *any* of `backdrop_url`,
+  `banner_url` or `cover_large_url` (`_missing_key_art`), or with an aired
+  episode that has no still, or — in the nightly sweep only — with no credits
+  beyond the studio row. Adding `backdrop_url` to that list is what fills the
+  rows that predate the column: the first night after the migration queues up
+  to 300 of them and the rest follow on the nights after (owner, 2026-09-13).
 - **On demand.** `catalog_refresh` queues one enrichment when it leaves a
-  followed show without a banner, without key art, or with an aired episode
+  followed show short of any of the three art columns, or with an aired episode
   that has no still. `GET /api/home` queues two kinds, in this order and
   waiting for neither:
   1. **Full** enrichments (`enqueue_episode_stills`, up to `STILL_LIMIT` = 8)
@@ -1084,9 +1373,23 @@ id at all, which is why the offline import is a prerequisite for this.
      to watch — whose card episode has no `still_url` and which the id map can
      reach. The nightly sweep reaches these shows too, but "tonight" is the
      wrong answer for the card somebody is looking at now (owner, 2026-09-12).
-  2. **Art-only** enrichments for up to 12 shows of this or next season that
-     have *no* artwork at all — the pool the client's hero picks its six
-     slides from, ranked the same way.
+  2. **Art-only** enrichments for up to 12 shows of this or next season with
+     no `backdrop_url` (`_missing_hero_art`) — the pool the client's hero picks
+     its six slides from, ranked the same way. Until 2026-09-13 the test was
+     "no artwork at all", which this subsumes: a row with nothing has no
+     backdrop either, and the rows it adds are the ones the hero could only
+     ever wash (an AniList strip and a poster).
+
+  And `POST /api/anime/{id}/sample` queues a **full** enrichment for that one
+  show (`enqueue_show_enrichment`, FR-A8, owner 2026-09-13): the episode it is
+  about to fetch is a 16:9 card, and before this its still arrived with the
+  nightly sweep — or whenever the viewer next happened to open Watch Now, since
+  the Home shelves were the only thing that asked. The show page never did. The
+  single-row form of the same query: the id map must reach the show and a hole
+  must remain (missing art in any of the three columns, or an aired episode
+  with no still — credits are the sweep's business, since nobody presses a
+  button for a staff list), and it never fails the sample, which does not wait
+  on it.
 
   Each is one SELECT that also filters out anything already queued, and
   returns nothing once the artwork is in. Everything deduplicates on
@@ -1095,7 +1398,11 @@ id at all, which is why the offline import is a prerequisite for this.
   want the same show the richer job is the one that stands, which is why the
   watched pass runs before the season pass and the stills before the hero's
   art.
-- **No key, no feature.** Both handlers log one INFO line and return when
+- **No key, no feature.** The three on-demand enqueues above ask first
+  (`tmdb_configured`, owner 2026-09-13) and queue nothing without a key, since
+  the handler would only log a skip and on a keyless deployment every row stays
+  a hole — a page load would otherwise write twenty job rows, and the next one
+  twenty more. Both handlers log one INFO line and return when
   `TMDB_API_KEY` is unset; `config_check` says so once at startup in prod
   (warning, not error). `GET /api/health` publishes `tmdb_enabled`, and the
   client shows TMDB's required attribution line under the Home shelves only
@@ -1117,29 +1424,31 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue; the listing takes `status=`, `type=`, `limit=` (≤ 200), `offset=`, newest id first |
 | `GET /api/jobs/summary` | admin | `{by_status: {pending, running, done, failed, cancelled}, by_type_pending: {type: count}, worker: {heartbeat_at, alive}}` — `alive` is the heartbeat file younger than 90 s, the same decision the container healthcheck makes |
 | `POST /api/jobs/{id}/retry`, `POST /api/jobs/{id}/cancel` | admin | 200 `JobOut`. Retry: `failed`/`cancelled` → `pending`, `attempts` 0, `run_after` now, lock and finish timestamps cleared, `last_error` kept. Cancel: `pending` → `cancelled`. 409 for any other status (a `running` job cannot be stopped safely), 404 unknown |
-| `GET /api/settings`, `PUT /api/settings` | admin | the rules editor (FR-D2, FR-T5): `{values, defaults, overrides[{anime_id, title, preferred_groups, resolution}]}` for every `DEFAULT_SETTINGS` key. PUT takes a partial object of those keys and writes only what it names; 422 `{detail: [{loc: ["body", key], msg, type}]}` for an unknown key or a refused value (resolutions ∈ 2160p/1080p/720p/480p and fallback ≠ preferred — enforced only when the patch names one of the two, so a hand-edited collision does not block unrelated edits — N 0..10, G and D 0..365, ≤ 20 groups of ≤ 64 chars de-duplicated case-insensitively, languages 2–8 lowercase letters/dashes). Writing `acquisition_paused` goes through the same `set_paused` the pause button uses, and clearing it enqueues `compute_wants` in the same transaction, so unpausing from the editor and from the button do the same thing. Overrides are read-only here; editing them is M16 |
-| `GET /api/anime/search?q=&page=` | any | **local hits first, then the live search** (§5.0): cached rows matching every word of `q` in a title or synonym, ordered exact/prefix title → followed → popularity, capped at 20 and merged on `page=1` only; the live results follow, de-duplicated by internal id, and are cached. `page`/`has_next` describe the live half. Local hits with the catalogue down is a 200; 502 only when the local half is empty *and* upstream failed. Each `AnimeSummary` carries `cover_large_url` (nullable) beside `cover_url`, so a card prefers the sharp key art and falls back, plus `popularity` and `average_score` (both nullable; real summary columns, straight off the search — `average_score` is 0–100 whichever source answered, MAL's 0–10 scaled on the way in), plus `genres[]`, `banner_url` and `studio` — **read off the cached row, not the search payload**: AniList's search fragment does not carry them, so they are empty/null on a show no detail fetch has reached and fill in the moment one does. They are deliberately *not* in the summary write path; a search payload's empty genres would otherwise blank them (cache rule 2) |
+| `GET /api/settings`, `PUT /api/settings` | admin | the rules editor (FR-D2, FR-T5): `{values, defaults, overrides[{anime_id, title, preferred_groups, resolution}]}` for every `DEFAULT_SETTINGS` key. PUT takes a partial object of those keys and writes only what it names; 422 `{detail: [{loc: ["body", key], msg, type}]}` for an unknown key or a refused value (resolutions ∈ 2160p/1080p/720p/480p and fallback ≠ preferred — enforced only when the patch names one of the two, so a hand-edited collision does not block unrelated edits — N 0..10, K 0..50, G and D 0..365, ≤ 20 groups of ≤ 64 chars de-duplicated case-insensitively, languages 2–8 lowercase letters/dashes). Writing `acquisition_paused` goes through the same `set_paused` the pause button uses, and clearing it enqueues `compute_wants` in the same transaction, so unpausing from the editor and from the button do the same thing. Overrides are read-only here; editing them is M16. `min_free_gb` is FR-T6's storage floor: whole GB, 0..1000, 0 turning the guard off; validated and clamped at the same ceiling the reader uses, so what the panel accepts and what acquisition acts on cannot differ. `slot_cap_k` is FR-A10's K: 0..50, 0 meaning no cap, clamped at the same ceiling for the same reason |
+| `GET /api/anime/search?q=&page=` | any | **local hits first, then the live search** (§5.0): cached rows matching every word of `q` in a title or synonym, ordered exact/prefix title → followed → popularity, capped at 20 and merged on `page=1` only; the live results follow, de-duplicated by internal id, and are cached. `page`/`has_next` describe the live half. Local hits with the catalogue down is a 200; 502 only when the local half is empty *and* upstream failed. Each `AnimeSummary` carries `cover_large_url` (nullable) beside `cover_url`, so a card prefers the sharp key art and falls back, plus `popularity` and `average_score` (both nullable; real summary columns, straight off the search — `average_score` is 0–100 whichever source answered, MAL's 0–10 scaled on the way in), plus `genres[]`, `banner_url`, `backdrop_url` (TMDB's 16:9 backdrop, which the heroes and 16:9 cards prefer — §5.8) and `studio` — **read off the cached row, not the search payload**: AniList's search fragment does not carry them, so they are empty/null on a show no detail fetch has reached and fill in the moment one does. They are deliberately *not* in the summary write path; a search payload's empty genres would otherwise blank them (cache rule 2) |
 | `GET /api/catalog/status` | admin | source health and breaker state |
 | `GET /api/catalogue/offline` | admin | offline-catalogue import status (M15.5, §5.0a): `{sources: [{source, version, imported_at, rows, checksum}] (newest first), stale, anime_rows, id_rows}`. `stale` is manami's alone — the id map without the titles is not a catalogue — and is true when it has never been imported or is older than `OFFLINE_CATALOGUE_STALE_DAYS`. Reads three counts and nothing else; the import itself is a job |
-| `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert |
+| `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert. The revert writes `updated_by=arc`, `mal_dirty=true` and stamps `activated_at` if null (FR-A9: it is FR-M7's third user-originated event), on the entry it recreates as well as the one it edits |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, watched) |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, watched), and `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
-| `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true`; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url` and `studio` (M15: My List credits the studio per row) |
+| `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
+| `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
+| `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs |
-| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15) |
+| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
 | `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title` and `still_url` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
-| `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none), then `compute_wants` enqueued |
+| `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated) then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (un-mark never lowers list progress or MAL) |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight) |
 | `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, total}, episodes_retained}` — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
-| `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows paused, active wants, searching, downloading |
+| `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows `paused`, active wants, searching, downloading, `retained_bytes`, plus (2026-09-13) `storage_held`/`free_bytes`/`min_free_bytes` — FR-T6's guard, read from the same measurement and the same `storage_hold` rule the guard itself uses, with an unmeasurable path reading as zeros and *not* held — `dormant_entries`, the count of `watching`/`planned` entries with `activated_at IS NULL` whose show is not `RELEASING` (FR-A9), and `waiting_shows`/`slot_cap_k` — FR-A10's cap, the (user, show) pairs it is holding back right now and K itself, counted by the reconciler's own `wants.slot_totals(session)` (one pass over every list, K returned with the count) so the panel cannot disagree with the next tick. No upstream call |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 | `GET /api/acquisition/qbit` | admin | `{reachable, version, error, torrents[{hash, name, state, progress, size, dlspeed, upspeed, episode_id}]}`. The only route that calls qBittorrent inside a request (`app/version` + `torrents/info?category=arc`, read-only, `asyncio.timeout` bounding the **whole probe** at 5 s — the client logs in and retries a 403 once, so a per-request budget would be six of them) and the only one that **never fails**: down, wrong password or unconfigured is `reachable: false` with the reason in `error`, because that is the answer the admin came for. `episode_id` comes from Arc's `torrents` rows, not from the client's tags |
 
@@ -1149,13 +1458,13 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|---|
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). **Interactive calls do not wait on 429**: the app's catalogue is built with `wait_on_rate_limit=False` (`create_catalog`), so a 429 on a search or a show page raises `SourceRateLimited` at once and falls straight through to MAL/offline instead of holding the request open — and, being a burst limit rather than an outage, it leaves the breaker closed, only noting a per-client "rate-limited until" so the next interactive call inside the window skips AniList without a request. The worker's `catalog_for()` keeps the wait. Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
-| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to 5 query forms per episode (romaji and english full titles, plus season-stripped base title with `S<k>`, roman numeral, and plain), ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows differently (`Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`). Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, hash not already used by another episode. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
-| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
+| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to **6** query forms per episode, in order: romaji full title, english full title, then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — and finally the bare `<romaji> <NN>` for an unmarked entry. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. Six is the ceiling (six paced requests, 2 s apart); the dedupe keeps a typical show at two or three. The broad head form is safe only because of the filter below — never weaken it. Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked** (FR-A4): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. Every rejection is logged with the sentence it was rejected by. Ranked: preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. |
+| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
 | Offline catalogue (M15.5, **implemented — import, search, filename matching, id mapping and season seeding; TMDB follows**): manami `anime-offline-database` weekly release (`anime-offline-database.jsonl.zst`, ≈ 6 MB / 62 MB raw, 41,537 entries) + Fribb `anime-lists` (`anime-list-full.json`, ≈ 7.5 MB, 32,281 mappable entries) | none | one download each per week (Monday 03:30 UTC), 60 s timeouts, streamed to disk | Loaded by `import_offline_catalogue` into `offline_anime` and `offline_ids` (replace-on-import in one transaction; manami's release tag and Fribb's ETag stored in `offline_imports`, and a matching sha256 skips the work). Decompressed with the stdlib `compression.zstd` — no dependency. One source failing keeps its own rows and does not stop the other. `GET /api/catalogue/offline` reports version, age and counts; `arc.cli import-catalogue` runs it now. It **is** the first stop for search (§5.0, behind the cached rows and ahead of the live page), for filename matching (§5.2a, ahead of the live catalogue search), and for cross-id mapping (AniList ↔ MAL, filled into the cache upsert and into `catalog_reconcile` with no network); and it seeds the season when both live sources fail (FR-C7). Hits are materialised as `anime` rows written as the weakest source, so a live payload overwrites everything they wrote. The TMDB ids it also carries (series + season) are bullet 4. |
-| TMDB `https://api.themoviedb.org/3` (M15.5, **implemented**) | `TMDB_API_KEY` (free, v3, sent as `api_key=`) | ~50 req/s; the client paces at 4 req/s, one process-wide breaker on 429/5xx/401, two retries on 5xx | Nightly `tmdb_enrich_all` (04:10 UTC; watched shows in full — on a list, with playback progress, or holding a ready episode — then this and next season's shows art-only, most popular first) + on-demand from `catalog_refresh` and from `GET /api/home` (full, for the shelf cards missing a still; art-only for the hero's pool), reached by id through `offline_ids` (§5.0a). Three calls per full enrichment and one per art-only one: `/tv/{id}` (or `/movie/{id}`), `/tv/{id}/season/{n}`, `/tv/{id}/aggregate_credits`. Fills `banner_url` (backdrop w1280), `cover_large_url` (poster w780), `episodes.still_url` (w300) / `title`, and `credits` — only where they are null, and never a column AniList filled (cache rule 3, §5.8). Season from `offline_ids.tmdb_season`, else the year + episode-count heuristic; no plausible season means art only. `/api/health` publishes `tmdb_enabled` and the Home footer carries TMDB's attribution line. |
+| TMDB `https://api.themoviedb.org/3` (M15.5, **implemented**) | `TMDB_API_KEY` (free, v3, sent as `api_key=`) | ~50 req/s; the client paces at 4 req/s, one process-wide breaker on 429/5xx/401, two retries on 5xx | Nightly `tmdb_enrich_all` (04:10 UTC; watched shows in full — on a list, with playback progress, or holding a ready episode — then this and next season's shows art-only, most popular first) + on-demand from `catalog_refresh` and from `GET /api/home` (full, for the shelf cards missing a still; art-only for the hero's pool), reached by id through `offline_ids` (§5.0a). Three calls per full enrichment and one per art-only one: `/tv/{id}` (or `/movie/{id}`), `/tv/{id}/season/{n}`, `/tv/{id}/aggregate_credits`. Fills `backdrop_url` and `banner_url` (backdrop w1280), `cover_large_url` (poster w780), `episodes.still_url` (w300) / `title`, and `credits` — only where they are null, and never a column AniList filled (cache rule 3, §5.8); `backdrop_url` is the exception, TMDB's own column, written whenever its answer differs from what is stored. Season from `offline_ids.tmdb_season`, else the year + episode-count heuristic; no plausible season means art only. `/api/health` publishes `tmdb_enabled` and the Home footer carries TMDB's attribution line. |
 
 ## 7. Security
 
@@ -1284,7 +1593,12 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 with no bufsize gets twice the maxrate), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
 (10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400),
 `BACKUP_KEEP_DAYS` (14), `QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
-(false), `COMPOSE_PROFILES` (vpn|novpn), `VPN_PROVIDER`, `WIREGUARD_PRIVATE_KEY`,
+(false), `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `QBIT_MAX_ACTIVE_TORRENTS` (12),
+`STALL_METADATA_MINUTES` (60), `STALL_NO_BYTES_HOURS` (6) — the four of §5.1a's
+queue and stall policy; the two stall thresholds count the client's own
+`time_active`, and the queue limits only decide what *counts* as active (a
+torrent is counted out after 5 min under 2 KiB/s) while the stall rule is the
+only thing that removes a dead torrent — `COMPOSE_PROFILES` (vpn|novpn), `VPN_PROVIDER`, `WIREGUARD_PRIVATE_KEY`,
 `WIREGUARD_ADDRESSES`, `WIREGUARD_PUBLIC_KEY`, `WIREGUARD_ENDPOINT_IP`,
 `WIREGUARD_ENDPOINT_PORT`, `VPN_SERVER_COUNTRIES/CITIES` (deploy-only, read
 by gluetun), `WORKER_CONCURRENCY`
@@ -1888,3 +2202,238 @@ two together.
   probe is what reads it. `PosterWash` gained `ground` (what to blur, when it
   is not the poster). The show page hero keeps the same behaviour — it uses the same
   component and has no reason to differ.
+- 2026-09-12 — "Try episode 1" (FR-A8, M16) is a **flag on `wants`**, not a
+  table of its own. A sample is an ordinary want in every respect that costs
+  anything — one row per (user, episode), merged across users, the same episode
+  state machine, the same FR-T2 drop, the same FR-T1 grace — and the only thing
+  that differs is who justifies it: the reconciler derives every other want
+  from a list it can re-read, and cannot derive this one from anything, so the
+  row says so itself. A `samples` table would have meant a second source of
+  "does this episode have a live want?" in `_start_searches` and in retention,
+  which is the one question those two must never answer differently. The two
+  routes live on the anime router (it is the show page's button) over
+  `services/acquisition/samples.py`, which is import-light enough for a request
+  path: it reaches `wants` and `catalog.airing` and nothing heavier.
+- 2026-09-13 — The sample routes act on the episode inside the request (owner,
+  on seeing it in the browser), through two helpers factored out of
+  `_start_searches` — `start_search()` and `release_if_unwanted()` — rather
+  than by enqueueing `compute_wants` alone. The enqueue-only version was
+  correct and useless: the row a person had just pressed said "Not fetched" for
+  up to fifteen minutes, and for ever while acquisition was paused. Extracting
+  the reconciler's own per-episode decisions instead of copying them keeps one
+  answer to "may this episode be searched for yet", which matters most for the
+  `UNAVAILABLE_RETRY` gate — the sample path deliberately skips it
+  (`retry_now`), and that is a decision visible at the one call site rather
+  than a second copy of the rule that drifts. `SampleOut` gained `state` so the
+  client can render the row from the response it already has; the mutation
+  writes it into the cached detail and the invalidation behind it confirms it.
+- 2026-09-13 — The Nyaa query builder asks by the **head of the title** as well
+  as the whole of it (FR-A4), and `MAX_QUERIES` rises 5 → 6 so an unmarked
+  title with a subtitle keeps its bare form behind the two head forms. The
+  evidence: on 2026-09-12 22:20 the worker ran all three of its forms for
+  *Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi
+  Bouken-roku* (english *From Overshadowed to Overpowered: Second
+  Reincarnation of a Talentless Sage*, no season marker) and every one returned
+  0 results, so episode 1 went onto the six-hour retry schedule; by hand the
+  same night `Rakudai Kenja no Gakuin Musou 01` and `Rakudai Kenja no Gakuin
+  Musou - 01` each returned 9 releases and `From Overshadowed to Overpowered
+  01` returned 0. Nyaa ANDs every word and groups name a show by its head, so a
+  nine-word catalogue title is not a query at all — the `_short_forms` fix only
+  covered the case where the *season marker* is what diverges, and this is the
+  case where the *subtitle* is. A separator counts only with whitespace on one
+  side, which is what keeps `Re:Zero kara Hajimeru Isekai Seikatsu` from being
+  asked for as `Re`. Nothing in the filter changed: the 0.90 asymmetric
+  `title_score` rejects a release that merely shares the head (its extra tokens
+  are in none of the entry's own titles) and the season-agreement check rejects
+  a later season, and those two are the entire safety of a broad query. The one
+  thing they cannot catch is the reverse direction, so head forms are not asked
+  for an entry with a `PREQUEL` relation: a release named by the bare head is
+  most likely the first season and an unmarked sequel — one whose title names
+  an arc rather than a season, *Made in Abyss: Retsujitsu no Ougonkyou* — cannot
+  be told apart from it by season agreement, while the shorter release name is
+  exactly what `title_score` reads as a group abbreviating an official title. An
+  entry with no relations stored keeps the head forms: a missing list is not
+  evidence of a prequel, and those are the rows Arc knows least about.
+- 2026-09-13 — **A batch is never picked, and a range or a marker is what makes
+  one** (§5.2a, §6, FR-A4). One production acquisition run fetched seven batches,
+  the first of them 6.3 GB of *Dagashi Kashi* season 2 — all twelve episodes
+  transcoded for the one or two somebody wanted. Every one of them parsed as
+  `kind=episode`, episode 1, and the filter keeps exactly that. Two holes, both
+  in the parser: anitopy reports `- 01 ~ 12` as episode `01` and stops, and the
+  loose range re-read was swallowed by the show's own trailing number (the
+  regex matched `2 - 01` of `Dagashi Kashi 2 - 01 ~ 12` first, a range counting
+  down, and `finditer` resumed past the real one); and a `[BATCH]` marker was
+  consulted only when the name carried no episode number at all, which is never
+  true of a batch that names the first episode of its run. Now a dedicated
+  episode-range pattern is read at the episode position *before* anitopy's
+  answer is trusted, and a batch marker (`BATCH`, `Season Pack`) is a batch
+  whatever the numbers say. The `Complete` family is gated on the name naming
+  no single episode (owner follow-up the same day): the word is also what a
+  fansub shouts on the last episode of a run — the same claim `END` makes, and
+  the reason `_END_RE` carries it — so `[Group] Show - 12 [COMPLETE]` is
+  episode 12 and `[Group] Show [Complete]` is a batch. Both ends of a range must
+  be zero-padded or `E`-prefixed and count up from at least 1 — which is what
+  keeps `Ranma 1-2` a name, `1920x1080` a resolution, `10-bit` a bit depth,
+  `01v2` a version, `2024-05-10` a date and `Mob Psycho 100 - 07` an episode —
+  and the range has to be the last thing before the tags and not a pair of
+  years, so `Chihayafuru - 01 - 100 Poems` is episode 1 and `Cowboy Bebop
+  1998-1999` is an airing span; those last two also gate anitopy's own range
+  answers, which is where both of those had been read as runs. The separator
+  set includes the wave dash `〜` and the fullwidth `～` a Japanese raw writes,
+  and a run written that way is taken off the title too (anitopy leaves it
+  there), targeted by the file's own two numbers so *86* keeps its name. A padded two-episode pack **is** a batch
+  (`[RH] Fukigen na Mononokean - 01-02`): it is an episode nobody asked for.
+  `MIN_BATCH_SPAN` still governs the unpadded fallbacks only. The corpus carries
+  all seven names plus four single-episode controls from the same groups and
+  shows (247 names, 100 % on episode+kind and title_key), and `acceptable()`
+  now logs the sentence behind every rejection, the batch one first.
+- 2026-09-13 — `AspectProbe` loads its off-frame copy **eagerly**. The probe
+  sits in a 0×0 box, and Chrome does not fetch a `loading="lazy"` image that
+  has no box to scroll into view, so the hero's banner aspect was never
+  reported and every hero whose banner was not already cached by another
+  card stayed on the blurred-poster fallback (owner spotted it on Watch Now,
+  Saga of Tanya the Evil II, which has a 1280×720 TMDB backdrop). One
+  attribute; the rule that decides banner-vs-wash is unchanged.
+- 2026-09-13 — **`anime.backdrop_url`: a column TMDB owns, because the design
+  cannot show AniList's banner** (owner; spec.md §10, "Hero art"; §4, §5.8,
+  §5b). AniList's `bannerImage` is a 1900×400 strip — 4.75:1 — and nothing in
+  the M15 grammar renders one as a picture: `HeroFrame` refuses a banner wider
+  than 2.6:1 and `EpisodeArt` one wider than 2.2:1, both falling back to the
+  blurred-poster wash. TMDB's backdrop is 16:9 and is what both frames want,
+  but the enrichment could only write `banner_url` where it was null (cache
+  rule 3) and an AniList refresh would overwrite it with the strip anyway — so
+  every show AniList reached first sat on the wash for good (dev: Tanya S2,
+  Villager of Level 999, Magilumiere S2). The new column is written **only** by
+  the TMDB enrichment, and there whenever TMDB's answer differs from what is
+  stored — the one place TMDB may overwrite itself, since no other source can
+  put anything there to lose. `bannerArt` in `lib/anime.ts` returns it ahead of
+  `banner_url` and every hero and card already went through that one function,
+  so no component changed. A null `backdrop_url` on a mapped show is a hole
+  (`_missing_key_art`), which is what backfills the existing rows through the
+  nightly sweep, the refresh hook and the sample route; the Home hero's own
+  enqueue now asks only about the backdrop (`_missing_hero_art`), replacing
+  "no artwork at all" — a strip and a poster was art the frame could not use.
+  Chosen over letting TMDB overwrite `banner_url`, which the refresh would
+  undo, and over teaching the frames to letterbox a strip, which is a 4.75:1
+  picture in a 21:9 hole either way. Migration `0aa6beaab5ed`, nullable, no
+  backfill.
+- 2026-09-13 — **Stalls, one attempt per release, cancels, and the download
+  queue** (owner, spec §10). Four changes to acquisition, all of them the same
+  lesson twice: Arc knew what it had *started* and nothing about whether it was
+  getting anywhere.
+  1. `poll_qbit` now gives up on a torrent that is going nowhere
+     (`jobs.stall_reason`, §5.1a): `metaDL` past `STALL_METADATA_MINUTES` (60),
+     or no bytes / an empty swarm past `STALL_NO_BYTES_HOURS` (6). Row marked
+     `stalled` and episode `unavailable` onto FR-A6's schedule, flushed, then
+     deleted with its files — that order so a failed delete is retried rather
+     than forgotten. The rule needed no new column: it reads the client's own
+     `time_active` (**not** `torrents.added_at`, which with a bounded queue
+     makes a torrent's first active minute look like nine hours of failure),
+     and it calls a swarm empty only on the tracker's `num_complete`/
+     `num_incomplete` (the connected `num_seeds`/`num_leechs` are 0 all the
+     time on healthy torrents). Guarded further by an **allow-list of states**
+     plus `dlspeed == 0`, because `queuedDL` (most of the queue for hours after
+     an import) and `stoppedDL` (297 in production) make no progress correctly.
+     A row carrying a decision never moves its episode again, or a stalled
+     attempt would drag the retry that replaced it back to `unavailable`.
+  2. `_pick` skips any candidate whose hash already has a `torrents` row, and
+     the Nyaa filter rejects 0 seeders outright. `search_release` is one
+     transaction, so a row *means* "tried and failed"; without this the same
+     dead magnet was re-added on every retry.
+  3. A `downloading` episode whose last want has gone is cancelled: new state
+     edge `downloading → not_wanted`, torrents marked `cancelled`, and one
+     `qbit_cancel` job per episode to do the deleting. The job rather than a
+     loop in `compute_wants` because the reconciler holds a transaction and
+     because an unreachable client must not fail a reconciliation; the job
+     deletes only rows marked `cancelled`, so a re-wanted episode's new
+     release survives, and the reconciler leaves alone any row that already
+     carries a decision (a `rejected` one is holding a file in review).
+     After a successful delete the rows themselves go, because `_pick` bars
+     every hash that has one and a cancel is not a failed attempt.
+     `downloaded` onwards stays retention's (FR-T1), and `cancel_sample`
+     (FR-A8) goes through the same helpers.
+  4. `qbit_apply_policy` writes the **queue** policy alongside the seeding one
+     (`queueing_enabled`, `QBIT_MAX_ACTIVE_DOWNLOADS` 8,
+     `QBIT_MAX_ACTIVE_TORRENTS` 12, and `dont_count_slow_torrents` with
+     deliberate thresholds — 2 KiB/s either way, 300 s — so an ordinary lull
+     costs no slot and a dead torrent stops blocking the queue five minutes
+     in; the queue still only *counts*, never removes). The owner had
+     raised these by hand on the production client; a container restart would
+     have silently put them back to qBittorrent's 3 and 5.
+- 2026-09-13 — **Dormant imports as built** (FR-A9). `list_entries.activated_at`
+  (nullable, TZ, write-once, never cleared) is the stamp; the rule is a leaf
+  module, `arc/services/acquisition/dormancy.py`, with `activate()`,
+  `is_dormant(entry, *, airing)` and `REASON_DORMANT`. A leaf because
+  `catalog.lists` — one of its writers — cannot import
+  `acquisition.wants` without closing an import cycle through `catalog.airing`,
+  and `is_dormant` takes a boolean rather than the `Anime` row for the same
+  reason: "is it airing?" is the catalogue's question. `compute_wants` skips a
+  dormant entry before the window and keeps its (user, show) out of `wanting`,
+  so its wants shelve, its searches release and its downloads cancel through
+  the paths that already existed. Migration `3b7c41e9d2af` adds the column and
+  backfills `activated_at = updated_at` where `updated_by = 'arc' OR
+  mal_synced_at IS NULL` — the first clause for a row whose last change was
+  Arc's, the second for an Arc-made row a later import overwrote (`updated_by`
+  only remembers the last writer, and an import does not set `mal_synced_at`).
+  The one shape neither clause can tell from an import — Arc-made, then changed
+  on MAL, then successfully pushed — goes dormant and costs one press of "Fetch
+  this show", which is a far smaller error than the other direction.
+  `ListEntryOut` gained `activated_at` and a derived `dormant`, built through
+  `ListEntryOut.build(entry, anime_status=…)` rather than `model_validate` at
+  every call site (the list index and PUT, the show detail, the schedule's
+  "behind on" rows), because the airing half of the rule is not on the entry.
+- 2026-09-13 — **Storage guard as built** (FR-T6). `arc/services/storage.py` is
+  a new leaf holding the one free-space measurement (the walk-up rule moved out
+  of `arc/api/retention.py`'s private `_disk_usage`, which a service could not
+  import), answering `None` rather than zeros when the filesystem cannot be
+  read at all — "no free space" and "I could not look" are different facts, and
+  only the first may hold acquisition. `acquisition.rules` gained the
+  `min_free_gb` reader, the pure `storage_hold(free, floor)` and
+  `is_storage_held(session, settings)` (the syscall on a worker thread, the
+  unmeasurable case logged once). `compute_wants` now takes an optional
+  `settings` — the only thing it is for — and passes a `held` flag to
+  `_start_searches`, which skips the *starting* branch and nothing else;
+  `search_release` reuses `_requeue_paused` with `HELD_LOG`. Seeded by
+  migration `5e0a92c7b431`, editable in the rules editor, reported on
+  `GET /api/acquisition/status` as `storage_held`/`free_bytes`/`min_free_bytes`
+  from the same measurement and the same rule.
+- 2026-09-13 — **Per-user slot cap as built** (FR-A10). The owner asked for
+  "both" — dormant imports *and* a cap on what an activated list starts at
+  once. `compute_wants`'s first half became `_plan_wants`, one pass that reads
+  the entries, the episodes, the completions and the live wants and answers a
+  `_Plan` (desired, wanting, dormant, waiting-per-user, fetching-per-user, K);
+  `compute_wants` reconciles it and `slot_view` narrows it to one user for the
+  API, so the show page's "waiting" and the reconciler's "creates no wants" are
+  the same predicate rather than two that agree most of the time. The rule
+  itself is the pure `slots.assign_slots`, a leaf beside `dormancy` for the same
+  reason: both sides ask it the same question. The two definitions that took the
+  argument: a slot is occupied by a live non-sample want on an episode that is
+  neither `ready` nor `unavailable` nor `failed` (so neither a pile of
+  watched-later episodes nor five shows FR-A6 has given up on can hold a slot
+  for ever — the second was a review blocker), and only a **hungry** show
+  competes for a free one (so an all-`ready` show hands its slot to the next
+  show rather than keeping it for nothing). The other review blocker: a held-back
+  show contributes nothing and `_reconcile` is told not to touch its rows,
+  rather than the first version's "window ∩ live wants", which deleted a
+  stale-dropped want and with it retention's grace anchor. The API pays one pass
+  over the caller's list on the show page only — the same bargain `mal_sync`
+  makes — and `GET /api/list`, the schedule and the home page leave the three
+  new `ListEntryOut` fields at their "nothing to say" defaults rather than
+  paying it per row. `GET /api/acquisition/status` gained
+  `waiting_shows`/`slot_cap_k`; the rules editor gained "Shows fetching at once
+  (per user)"; the show page gained one muted line and deliberately **no
+  button**, because unlike a dormant entry there is nothing the viewer could
+  press that would be honest.
+- 2026-09-13 — **Shelves scroll for mouse users** (owner, dogfooding in
+  Chrome). A `Shelf` was an `overflow-x-auto snap-x snap-mandatory` strip with
+  a hidden scrollbar: perfect with a trackpad or a thumb, and with a mouse
+  there was nothing to grab — the wheel scrolls the page and only Shift+wheel
+  moved the rail. Rejected: hijacking the wheel (a vertical gesture that moves
+  something sideways is the one scroll behaviour people hate, and it steals the
+  page's own scroll on a tall page), and a visible scrollbar (a 12px grey bar
+  under every rail is not this design). Chosen: **drag-to-scroll for mouse
+  pointers plus arrows at the two edges on hover**, both in the shared
+  component, so Watch Now, the show page's franchise rail and anything added
+  later get them at once. Details in §3's client-shell section; the hero's
+  glass circle moved to `styles.GLASS_CIRCLE` so the arrows and the carousel's
+  ‹ › are literally the same control.

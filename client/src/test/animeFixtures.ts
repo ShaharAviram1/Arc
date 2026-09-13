@@ -7,6 +7,7 @@ import type {
   EpisodeRelease,
   EpisodeRendition,
   ListEntry,
+  Sample,
 } from '@/lib/anime'
 import type { MalStatus, MalWrite } from '@/lib/mal'
 import type { PlayInfo } from '@/lib/playback'
@@ -43,6 +44,10 @@ export const FRIEREN: AnimeSummary = {
   cover_url: 'https://example.test/frieren.jpg',
   cover_large_url: 'https://example.test/frieren-large.jpg',
   banner_url: 'https://example.test/frieren-banner.jpg',
+  // No backdrop: the row AniList reached and TMDB has not, which is the
+  // ordinary case and the one `bannerArt`'s fallback exists for. A test that
+  // needs the preference itself overrides this field (owner, 2026-09-13).
+  backdrop_url: null,
   genres: ['Adventure', 'Drama', 'Fantasy'],
   studio: 'Madhouse',
   popularity: 480_000,
@@ -74,6 +79,8 @@ export const FRIEREN_SPECIAL: AnimeSummary = {
   // Nothing AniList-only: no large cover, no banner, no genres, no studio.
   cover_large_url: null,
   banner_url: null,
+  // And nothing from TMDB either: the enrichment has never reached it.
+  backdrop_url: null,
   genres: [],
   studio: null,
   // Null rather than 0: nothing has rated it and nobody is listed as watching.
@@ -283,10 +290,21 @@ export const FRIEREN_DETAIL: AnimeDetail = {
   genres: ['Adventure', 'Drama', 'Fantasy'],
   studio: 'Madhouse',
   banner_url: null,
+  backdrop_url: null,
   next_airing: null,
   /** Both relation shapes, so the show page renders a linked and a plain one. */
   relations: [LINKED_RELATION, UNLINKED_RELATION],
   list_entry: null,
+  sample: null,
+}
+
+/** The same show with episode 1 asked for as a sample (FR-A8). */
+export const FRIEREN_SAMPLE: Sample = {
+  episode_id: 9001,
+  episode_number: 1,
+  requested_at: '2026-09-12T09:00:00Z',
+  // What the route answers on a resting episode: it starts the search itself.
+  state: 'wanted',
 }
 
 export const FRIEREN_DETAIL_ON_LIST: AnimeDetail = {
@@ -380,6 +398,7 @@ export const APOTHECARY: AnimeSummary = {
   cover_url: null,
   cover_large_url: null,
   banner_url: null,
+  backdrop_url: null,
   genres: ['Drama', 'Mystery'],
   studio: 'OLM',
   popularity: 210_000,

@@ -1,19 +1,34 @@
-"""The acquisition handlers: wants, search, poll, policy (architecture.md §5.1).
+"""The acquisition handlers: wants, search, poll, cancel, policy (architecture.md §5.1).
 
 ``compute_wants`` decides *what*; ``search_release`` decides *which release*
 and starts it; ``poll_qbit`` watches it finish and hands the file to the
-library. Between them they cover FR-A1 through FR-A6. ``qbit_apply_policy`` is
-housekeeping alongside them: it writes Arc's no-seeding, capped-upload policy
-to the client (spec §9), and ``poll_qbit`` stops anything that got past it.
+library. Between them they cover FR-A1 through FR-A6. The other two are
+housekeeping alongside them: ``qbit_apply_policy`` writes Arc's no-seeding,
+capped-upload, bounded-queue policy to the client (spec §9) and ``poll_qbit``
+stops anything that got past it, and ``qbit_cancel`` carries out the removal
+the reconciler decided on when the last want on a download went away.
 
-All three are idempotent, and each is idempotent for a different reason.
+All of them are idempotent, and each is idempotent for a different reason.
 ``compute_wants`` reconciles a whole table against the lists, so a second run
 finds nothing to do. ``search_release`` refuses to act on an episode that is
 not ``wanted`` or ``searching``, and qBittorrent answers ``Ok.`` to a magnet it
 already holds. ``poll_qbit`` reads the client's live state and writes what it
 says, and the ``media_files.path`` unique constraint is what keeps a
-re-delivered file from being indexed twice. (``qbit_apply_policy`` writes the
-same fixed values every time, which is idempotence for free.)
+re-delivered file from being indexed twice. ``qbit_cancel`` deletes by hash,
+and a hash the client no longer holds is dropped by the category check.
+(``qbit_apply_policy`` writes the same fixed values every time, which is
+idempotence for free.)
+
+**A torrent that is going nowhere is given up on** (:func:`stall_reason`).
+``poll_qbit`` used to react only to a torrent that had *vanished* from the
+client, so a dead magnet — ``metaDL`` with no seeders, which is what a 2018
+upload looks like — held a download slot until somebody noticed. Now it is
+removed with its files, the row is marked ``stalled``, and the episode goes
+``unavailable`` onto FR-A6's ordinary retry schedule. A release Arc has tried
+is never chosen again (:func:`_pick`), so the retry looks for something else.
+The clock is the client's own ``time_active`` rather than the row's age,
+because Arc now bounds the client's queue: a torrent can wait a day in
+``queuedDL`` and its first active minute must not look like a day of failure.
 
 **The retry schedule (FR-A6) lives in the job payload, not in a column.**
 A search that finds nothing requeues *itself* with a delay and carries
@@ -25,13 +40,24 @@ that arrives with no such value — the daily revival of an episode that already
 gave up — reads it off the last search this episode had instead, so the
 fortnight is cumulative rather than restarted every morning (:func:`_started_at`).
 
-**The pause switch stops two of the three.** ``acquisition_paused`` in
+**The pause switch stops the two that fetch.** ``acquisition_paused`` in
 ``settings`` (:func:`arc.services.acquisition.rules.is_paused`) makes
 ``compute_wants`` a no-op and turns ``search_release`` into "put me back on the
 queue in fifteen minutes". ``poll_qbit`` keeps running: pausing means *stop
 fetching more*, not *abandon the download that is already 80 % of the way in*,
 and a torrent that finishes during a pause still reaches the library and still
 becomes something to watch.
+
+**The storage guard stops the same two, and lifts itself** (FR-T6,
+2026-09-13). While free space on the data volume is under ``min_free_gb``
+(:func:`arc.services.acquisition.rules.is_storage_held`) ``compute_wants``
+still reconciles — dropping, shelving and cancelling all *free* space — but
+starts no search, and ``search_release`` requeues itself on the same
+:data:`PAUSED_RETRY` it uses while paused, with a log line naming the disk
+rather than the switch. ``poll_qbit`` and the transcodes are untouched:
+finishing what has already landed is how the source becomes deletable. Nobody
+has to resume it; the next tick after retention frees room starts fetching
+again.
 
 **qBittorrent being down is not "unavailable".** FR-A6's ``unavailable`` means
 *no acceptable release exists*, which is a statement about Nyaa. A client that
@@ -56,6 +82,7 @@ from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     POLL_QBIT,
+    QBIT_CANCEL,
     QBIT_POLICY,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
@@ -63,15 +90,19 @@ from arc.services.acquisition.names import (
 )
 from arc.services.acquisition.nyaa import Ranked, search_for_episode
 from arc.services.acquisition.qbit import (
+    DECIDED_STATES,
+    DELETE_ON_SIGHT,
+    QBIT_MISSING,
+    QBIT_STALLED,
     SEEDING_STATES,
     QbitClient,
     QbitError,
     TorrentInfo,
     host_path,
 )
-from arc.services.acquisition.reject import QBIT_REJECTED
-from arc.services.acquisition.rules import is_paused, load_rules
+from arc.services.acquisition.rules import is_paused, is_storage_held, load_rules
 from arc.services.acquisition.states import transition
+from arc.services.acquisition.wants import NOBODY_WANTS, QBIT_CANCELLED
 from arc.services.acquisition.wants import compute_wants as reconcile_wants
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
@@ -102,10 +133,39 @@ NO_RELEASE = "no acceptable release found"
 #: And when the client forgot about a download Arc had started.
 REMOVED_FROM_CLIENT = "removed from the torrent client"
 
-#: And when nobody wants the episode any more, which is not a failure at all —
-#: it is why the episode leaves ``searching`` for ``not_wanted`` rather than
-#: sitting there being looked for on nobody's behalf.
-NO_LONGER_WANTED = "no longer wanted"
+#: How long a torrent may ask the swarm for its metadata before it is a stall
+#: (the default; ``STALL_METADATA_MINUTES`` overrides it). A magnet with any
+#: seeders at all answers in seconds.
+STALL_METADATA_AFTER = timedelta(minutes=60)
+
+#: And how long a torrent that has its metadata may fetch nothing (the
+#: default; ``STALL_NO_BYTES_HOURS`` overrides it).
+STALL_NO_BYTES_AFTER = timedelta(hours=6)
+
+#: The three sentences a stalled episode is shown (FR-A6, FR-A7). They name the
+#: threshold rather than the state, because "no seeders after 6 hours" tells a
+#: user both what happened and that Arc is going to try again — and they name
+#: the *right* one of the three: "no seeders" is a statement about the swarm and
+#: is only made when the tracker actually said so, while a torrent that has
+#: fetched nothing from a swarm that does exist gets "no bytes".
+NO_METADATA = "no metadata after {age}"
+NO_SEEDERS = "no seeders after {age}"
+NO_BYTES = "no bytes after {age}"
+
+#: The states a torrent is in while qBittorrent is asking the swarm for its
+#: metadata: a magnet that has not become a torrent yet.
+METADATA_STATES: frozenset[str] = frozenset({"metaDL", "forcedMetaDL"})
+
+#: And the states that mean "the client is trying to download this **now**".
+#: An allow-list, deliberately: most of the other states are ones where making
+#: no progress is correct. ``queuedDL`` is a torrent waiting its turn behind
+#: :attr:`~arc.config.Settings.qbit_max_active_downloads` — with four hundred
+#: wants that is most of them, for hours — and ``stoppedDL``/``pausedDL`` is
+#: somebody's own decision (production has 297 torrents deliberately stopped).
+#: Checking, moving and allocating are busy, and an errored torrent is a
+#: different problem. None of those is a stall, and a deny-list would have to
+#: be right about every state qBittorrent ever adds.
+ACTIVE_DL_STATES: frozenset[str] = frozenset({"downloading", "forcedDL", "stalledDL"})
 
 #: Payload key holding when the *first* search for this episode ran.
 STARTED_KEY = "attempts_started_at"
@@ -209,33 +269,48 @@ async def _has_live_want(session: AsyncSession, episode_id: int) -> bool:
 
 @register(COMPUTE_WANTS)
 async def compute_wants(ctx: JobContext) -> None:
-    """Recompute every user's acquisition window (FR-A1, FR-A2, FR-W4)."""
-    result = await reconcile_wants(ctx.session)
+    """Recompute every user's acquisition window (FR-A1, FR-A2, FR-W4, FR-A9).
+
+    ``ctx.settings`` goes through so the reconciler can measure free space and
+    hold the *starting* half while the disk is under the floor (FR-T6). It is
+    the only caller that can: everything else enqueues this job.
+    """
+    result = await reconcile_wants(ctx.session, settings=ctx.settings)
     ctx.log.info("wants computed", extra={"job_id": ctx.job.id, **result.as_dict()})
 
 
 async def _pick(ctx: JobContext, episode: Episode, ranked: list[Ranked]) -> Ranked | None:
     """The best-ranked release this episode may actually claim.
 
-    ``torrents.info_hash`` is unique and one hash is one download in
-    qBittorrent, saved under one episode's directory. So a release whose hash
+    **A release Arc has already tried is never tried again**, whichever episode
+    tried it and whatever became of it. Two reasons, and they arrive from
+    opposite directions.
+
+    ``torrents.info_hash`` is unique, and one hash is one download in
+    qBittorrent saved under one episode's directory. A release whose hash
     already belongs to *another* episode cannot be taken: the row would keep
     pointing at the first episode, the save path would be the first episode's,
     and this episode would end up with a torrent it does not own and a file it
-    never sees. That is what a batch offered as a single episode looks like,
-    and it is worth skipping rather than failing — the next candidate down is
-    usually the same episode from another group.
+    never sees. That is what a batch offered as a single episode looks like.
 
-    Same episode, same hash is not that: it is a retry after a crash, and
-    :func:`_record_torrent` updates the row it already has.
+    And a hash belonging to *this* episode is an attempt that has already
+    happened and did not work — it stalled, a person rejected the file, it was
+    cancelled, or it was removed from the client — because the whole of
+    ``search_release`` is one transaction: a run that crashed before its commit
+    left no row at all. Choosing it again would delete the files, re-add the
+    same dead magnet and wait another six hours for the same answer. The next
+    candidate down is usually the same episode from another group, and an
+    episode with nothing left to try follows the ordinary "no release yet"
+    path (FR-A6) — which is how it gets a fresh look tomorrow, by which time
+    Nyaa may have something new.
     """
     for entry in ranked:
         owner = await ctx.session.scalar(
             select(Torrent.episode_id).where(Torrent.info_hash == entry.item.info_hash)
         )
-        if owner is not None and owner != episode.id:
+        if owner is not None:
             ctx.log.info(
-                "skipping a release already downloaded for another episode",
+                "skipping a release arc has already tried",
                 extra={
                     "episode_id": episode.id,
                     "hash": entry.item.info_hash,
@@ -251,17 +326,28 @@ async def _pick(ctx: JobContext, episode: Episode, ranked: list[Ranked]) -> Rank
 async def _record_torrent(session: AsyncSession, episode: Episode, chosen: Ranked) -> Torrent:
     """The ``torrents`` row for the chosen release, reused if it exists.
 
-    ``info_hash`` is unique, and a hash Arc already has a row for is this
-    episode's own earlier attempt — a retry after a crash, or a second run of
-    this handler. The existing row is updated rather than duplicated. A hash
-    belonging to a *different* episode never reaches here: :func:`_pick` has
-    already passed over it.
+    ``info_hash`` is unique, and :func:`_pick` passes over every hash that
+    already has a row — so in the ordinary case there is nothing here to reuse
+    and this inserts. The lookup stays for one race: two searches for two
+    episodes can rank the same release, and the other one's row can be
+    committed in the moment between this episode's :func:`_pick` and this
+    query. A row that belongs to *this* episode is taken over (it cannot
+    happen through ``_pick``, and taking it is right if it ever does); a row
+    that belongs to another episode raises, so the job retries and the next
+    attempt's ``_pick`` sees the row and chooses something else — which is a
+    better ending than this episode going ``downloading`` against a torrent
+    filed under somebody else's id.
     """
     item = chosen.item
     torrent = await session.scalar(select(Torrent).where(Torrent.info_hash == item.info_hash))
     if torrent is None:
         torrent = Torrent(episode_id=episode.id, info_hash=item.info_hash)
         session.add(torrent)
+    elif torrent.episode_id != episode.id:
+        raise RuntimeError(
+            f"{item.info_hash} was taken for episode {torrent.episode_id} while episode "
+            f"{episode.id} was choosing it"
+        )
     torrent.magnet = item.magnet
     torrent.title = item.title
     torrent.group = chosen.candidate.group
@@ -318,13 +404,25 @@ async def _schedule_retry(ctx: JobContext, episode: Episode, *, now: datetime) -
     )
 
 
-async def _requeue_paused(ctx: JobContext, episode_id: int, *, now: datetime) -> None:
+#: The two lines :func:`_requeue_paused` can log. One function because the
+#: behaviour is identical — requeue, touch nothing, ask Nyaa nothing — and the
+#: only thing an operator needs from the log is *which* brake is on, since one
+#: of them they pressed and the other lifts itself (FR-T6).
+PAUSED_LOG = "acquisition paused; search requeued without touching nyaa"
+HELD_LOG = "acquisition held by free space; search requeued without touching nyaa"
+
+
+async def _requeue_paused(
+    ctx: JobContext, episode_id: int, *, now: datetime, message: str = PAUSED_LOG
+) -> None:
     """Put this search back on the queue, unchanged, for a quarter of an hour.
 
     Requeued rather than failed or dropped: a pause is temporary, and the job
     row *is* the record that this episode is still owed a search. Nothing about
     the episode is touched — no state change, no ``torrents`` row, no request
-    to Nyaa — so a resume finds exactly the world the pause left behind.
+    to Nyaa — so a resume finds exactly the world the pause left behind. A
+    storage hold (FR-T6) is the same shape with a different cause, so it is the
+    same function with ``message`` naming the disk instead of the switch.
 
     ``attempts_started_at`` rides along when the payload has one, so a pause in
     the middle of FR-A6's fortnight does not restart it. The 14-day clock does
@@ -351,7 +449,7 @@ async def _requeue_paused(ctx: JobContext, episode_id: int, *, now: datetime) ->
         exclude_job_id=ctx.job.id,
     )
     ctx.log.info(
-        "acquisition paused; search requeued without touching nyaa",
+        message,
         extra={
             "episode_id": episode_id,
             "retry_in_s": int(PAUSED_RETRY.total_seconds()),
@@ -370,6 +468,13 @@ async def search_release(ctx: JobContext) -> None:
         # read nothing it might act on and write nothing but its own retry.
         await _requeue_paused(ctx, episode_id, now=now)
         return
+    if await is_storage_held(ctx.session, ctx.settings):
+        # FR-T6, and for the same reason in the same place: a search that
+        # cannot be allowed to fetch must not touch the episode either, or a
+        # full disk would leave rows saying "looking for a release" on behalf
+        # of a search that never ran.
+        await _requeue_paused(ctx, episode_id, now=now, message=HELD_LOG)
+        return
 
     episode = await ctx.session.get(Episode, episode_id)
     if episode is None:
@@ -386,7 +491,7 @@ async def search_release(ctx: JobContext) -> None:
         # here rather than leaving it to ``compute_wants``: this job is the one
         # holding it, and an episode left ``searching`` by a search that
         # returned is looked for by nobody and says so to no one (FR-A7).
-        transition(episode, EpisodeState.NOT_WANTED, reason=NO_LONGER_WANTED)
+        transition(episode, EpisodeState.NOT_WANTED, reason=NOBODY_WANTS)
         await ctx.session.flush()
         ctx.log.info("nobody wants this episode any more", extra={"episode_id": episode_id})
         return
@@ -437,6 +542,78 @@ async def search_release(ctx: JobContext) -> None:
 
 
 # --- poll_qbit --------------------------------------------------------------
+
+
+def _plural(count: int, unit: str) -> str:
+    """``6, "hour"`` → ``"6 hours"``, and ``1, "hour"`` → ``"1 hour"``."""
+    return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+
+
+def stall_reason(
+    info: TorrentInfo,
+    *,
+    metadata_after: timedelta = STALL_METADATA_AFTER,
+    no_bytes_after: timedelta = STALL_NO_BYTES_AFTER,
+) -> str | None:
+    """Why this torrent is never going to finish, or ``None`` if it might.
+
+    Pure, so the table of states, times and swarm counts in the tests *is* the
+    rule.
+
+    **The clock is ``time_active``, not the row's age.** qBittorrent reports how
+    long it has actually been *working on* a torrent, and that is the only
+    figure this may measure against now that Arc bounds the client's queue: a
+    torrent sits in ``queuedDL`` behind
+    :attr:`~arc.config.Settings.qbit_max_active_downloads` for as long as it
+    takes, then starts downloading already nine hours old with nothing fetched.
+    Against ``torrents.added_at`` that is a stall on its first poll, and
+    ``stalledDL`` — which is simply "no bytes this instant" — would have made
+    it one; against ``time_active`` it is thirty seconds into its first
+    attempt. A client that does not report the field stalls nothing.
+
+    Three ways to fail, then:
+
+    * still in :data:`METADATA_STATES` after ``metadata_after`` of *activity* —
+      a magnet whose swarm never answered. This is what held production's three
+      download slots for a whole day: 2018 uploads with nothing behind them,
+      sitting in ``metaDL`` for ever because a magnet with no peers has nothing
+      to time out against;
+    * the tracker says the swarm is **empty** (:attr:`TorrentInfo.dead_swarm` —
+      ``num_complete`` and ``num_incomplete`` both scraped and both zero)
+      after ``no_bytes_after``, whatever the progress: a swarm that emptied at
+      60 % is as final as one that was never there;
+    * nothing fetched at all after ``no_bytes_after``.
+
+    Three things are **not** a stall, and each of them would be a bug:
+
+    * a torrent that has finished — there is nothing left to wait for;
+    * a state outside :data:`ACTIVE_DL_STATES` — queued behind the client's own
+      download limit, stopped by a person, checking, moving, errored;
+    * anything with ``dlspeed`` above zero. Bytes are arriving *right now*,
+      which settles the question whatever the history says.
+
+    Note what is **not** consulted: ``num_seeds``/``num_leechs``, the peers
+    this client happens to be connected to this instant. Those are reported as
+    0 all the time on healthy torrents between announces, and reading them as
+    an empty swarm would delete a 60 %-complete download.
+    """
+    if info.complete or info.time_active is None or info.dlspeed > 0:
+        return None
+    active = timedelta(seconds=info.time_active)
+    if info.state in METADATA_STATES:
+        if active >= metadata_after:
+            return NO_METADATA.format(
+                age=_plural(int(metadata_after.total_seconds() // 60), "minute")
+            )
+        return None
+    if info.state not in ACTIVE_DL_STATES or active < no_bytes_after:
+        return None
+    hours = _plural(int(no_bytes_after.total_seconds() // 3600), "hour")
+    if info.dead_swarm:
+        return NO_SEEDERS.format(age=hours)
+    if info.progress <= 0.0:
+        return NO_BYTES.format(age=hours)
+    return None
 
 
 def largest_video(root: Path, extensions: frozenset[str]) -> Path | None:
@@ -598,16 +775,31 @@ async def poll_qbit(ctx: JobContext) -> None:
         ctx.log.debug("no torrents to poll")
         return
 
+    metadata_after = timedelta(minutes=ctx.settings.stall_metadata_minutes)
+    no_bytes_after = timedelta(hours=ctx.settings.stall_no_bytes_hours)
+
     synced = finished = vanished = 0
     seeding: list[str] = []
+    stalled: list[str] = []
     async with QbitClient.from_settings(ctx.settings) as qbit:
         live = {info.hash: info for info in await qbit.torrents()}
 
         for torrent, episode in rows:
             info = live.get(torrent.info_hash.lower())
+            decided = torrent.qbit_state in DECIDED_STATES
             if info is None:
+                if decided:
+                    # Arc is why it is gone, and the row already says so. Two
+                    # things follow. The note stays (it is the only record of
+                    # what became of this download), and — the important half —
+                    # **the episode is not touched**: rows iterate oldest
+                    # first, so a stalled attempt from this morning would
+                    # otherwise drag an episode that has since been retried
+                    # from ``downloading`` back to ``unavailable``, over and
+                    # over, and the new download would never be handed off.
+                    continue
                 was = torrent.qbit_state
-                torrent.qbit_state = "missing"
+                torrent.qbit_state = QBIT_MISSING
                 # ``downloaded`` as well as ``downloading``: an episode whose
                 # torrent finished but whose file was not readable yet sits in
                 # ``downloaded`` waiting for the next poll, and if the torrent
@@ -619,7 +811,7 @@ async def poll_qbit(ctx: JobContext) -> None:
                         "a torrent Arc was downloading is gone from the client",
                         extra={"episode_id": episode.id, "hash": torrent.info_hash},
                     )
-                elif was != "missing":
+                elif was != QBIT_MISSING:
                     ctx.log.info(
                         "a torrent Arc had finished with is gone from the client",
                         extra={
@@ -631,20 +823,78 @@ async def poll_qbit(ctx: JobContext) -> None:
                 continue
 
             torrent.progress = info.progress
-            if torrent.qbit_state != QBIT_REJECTED:
-                # ``rejected`` is a decision, not a state qBittorrent has an
-                # opinion about: the client is still happily seeding a file a
-                # person has said is not this episode
-                # (:mod:`arc.services.acquisition.reject`), and overwriting the
-                # note with ``stalledUP`` sixty seconds later would lose the
-                # only record of why that download is not to be trusted.
+            if not decided:
+                # A decision is not a state qBittorrent has an opinion about:
+                # the client is still happily seeding a file a person has said
+                # is not this episode (:mod:`arc.services.acquisition.reject`),
+                # and overwriting the note with ``stalledUP`` sixty seconds
+                # later would lose the only record of why that download is not
+                # to be trusted. The same for a cancelled one, whose delete has
+                # been queued but has not run yet.
                 torrent.qbit_state = info.state
             synced += 1
             if info.state in SEEDING_STATES and not ctx.settings.qbit_seeding:
                 seeding.append(info.hash)
+            if decided:
+                # Still in the client, and Arc has already decided about it. A
+                # ``stalled`` row here means last poll's delete did not land —
+                # the client went away between the flush and the request — so
+                # ask again; ``rejected`` and ``cancelled`` are somebody else's
+                # to remove (:data:`DELETE_ON_SIGHT`).
+                if torrent.qbit_state in DELETE_ON_SIGHT:
+                    stalled.append(info.hash)
+                continue
             if info.complete and episode.state in COMPLETABLE:
                 await _complete(ctx, episode, torrent, info)
                 finished += 1
+                continue
+            if episode.state not in COMPLETABLE:
+                continue
+            reason = stall_reason(
+                info, metadata_after=metadata_after, no_bytes_after=no_bytes_after
+            )
+            if reason is None:
+                continue
+            # FR-A6 from the other end. The retry schedule handles "Nyaa has
+            # nothing"; this handles "Nyaa had something and it was dead", and
+            # it has to end the same way — ``unavailable`` is the state the
+            # daily retry picks up and the show page explains (FR-A7), and the
+            # files go with the torrent because a partial download of a release
+            # Arc will never choose again is worth nothing to anybody.
+            torrent.qbit_state = QBIT_STALLED
+            transition(episode, EpisodeState.UNAVAILABLE, reason=reason)
+            stalled.append(info.hash)
+            ctx.log.warning(
+                "a torrent is going nowhere and has been given up on",
+                extra={
+                    "episode_id": episode.id,
+                    "hash": torrent.info_hash,
+                    "state": info.state,
+                    "progress": round(info.progress, 3),
+                    "time_active_s": info.time_active,
+                    "swarm_seeds": info.swarm_seeds,
+                    "swarm_peers": info.swarm_peers,
+                    "connected_seeds": info.num_seeds,
+                    "reason": reason,
+                },
+            )
+
+        # **The rows first, then the client.** The flush is what makes the
+        # deletion safe to fail: the episode is already ``unavailable`` and the
+        # row already says ``stalled``, so a client that stops answering here
+        # leaves a coherent database and one torrent to tidy up — which the
+        # next poll does, because a ``stalled`` row still present in the client
+        # is asked to be deleted again (above). Doing it the other way round
+        # would delete files and then, on a rollback, forget it had.
+        #
+        # A partial download of a release the ranker is now barred from
+        # choosing again (``_pick``) is bytes nobody will ever use, so the
+        # files go too. Every hash came out of ``qbit.torrents()`` and
+        # :meth:`~arc.services.acquisition.qbit.QbitClient.delete` checks the
+        # category again, so this cannot reach a torrent Arc did not add.
+        await ctx.session.flush()
+        if stalled:
+            await qbit.delete(stalled, delete_files=True)
 
         # Belt and braces to ``qbit_apply_policy`` (spec §9). The share-ratio
         # limit is what normally stops these, and it only applies to torrents
@@ -666,6 +916,7 @@ async def poll_qbit(ctx: JobContext) -> None:
             "synced": synced,
             "finished": finished,
             "vanished": vanished,
+            "stalled": len(stalled),
             "stopped_seeding": len(seeding),
             "progress": {
                 torrent.info_hash[:8]: round(torrent.progress or 0.0, 3) for torrent, _ in rows
@@ -674,14 +925,81 @@ async def poll_qbit(ctx: JobContext) -> None:
     )
 
 
+@register(QBIT_CANCEL)
+async def qbit_cancel(ctx: JobContext) -> None:
+    """Remove one episode's cancelled torrents from the client, with the files.
+
+    The decision was made by the reconciler
+    (:func:`~arc.services.acquisition.wants.cancel_if_unwanted`) and is already
+    in the database: the episode is back to ``not_wanted`` and every torrent
+    row it has says ``cancelled``. All that is left is the request to another
+    process, which is exactly why it is a job — the reconciliation must not
+    hold its transaction open across an HTTP call, and a client that is not
+    answering must not be able to fail it.
+
+    **Only rows marked** :data:`~arc.services.acquisition.qbit.QBIT_CANCELLED`.
+    An episode can be wanted again in the seconds between the reconcile and
+    this job — a user changing their mind, or a second user's list — and the
+    search that follows chooses a *new* release whose row says whatever
+    qBittorrent says. Deleting "this episode's torrents" would take that one
+    with it; deleting the marked ones takes only what was cancelled.
+
+    **And then the rows go.** This is the one ending that deletes a ``torrents``
+    row rather than annotating it, and the reason is :func:`_pick`: a row bars
+    its release from ever being chosen again, which is right for ``stalled``
+    (it was tried and it failed) and for ``rejected`` (a person said that file
+    was wrong), and wrong for a cancel — nothing was tried and nothing failed,
+    somebody simply stopped wanting the episode. Leaving the row would mean
+    that pressing Cancel and changing your mind a minute later cost you the
+    best release on Nyaa for good. Nothing references the row by then: the
+    episode is ``not_wanted``, the torrent is out of the client, and its files
+    are gone with it.
+
+    Nothing is caught. An unreachable client raises
+    :class:`~arc.services.acquisition.qbit.QbitUnavailable` and the runner
+    retries with backoff, which is the whole of the error handling this needs:
+    the rows say what should happen and they do not expire — and because the
+    rows are deleted only *after* the client has answered, a retry finds
+    exactly the work the failed attempt left.
+    """
+    episode_id = int(ctx.payload["episode_id"])
+    torrents = list(
+        (
+            await ctx.session.scalars(
+                select(Torrent).where(
+                    Torrent.episode_id == episode_id,
+                    Torrent.qbit_state == QBIT_CANCELLED,
+                )
+            )
+        ).all()
+    )
+    if not torrents:
+        ctx.log.info("nothing left to cancel", extra={"episode_id": episode_id})
+        return
+    hashes = [torrent.info_hash for torrent in torrents]
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        await qbit.delete(hashes, delete_files=True)
+    for torrent in torrents:
+        await ctx.session.delete(torrent)
+    await ctx.session.flush()
+    ctx.log.info(
+        "cancelled torrents removed from the client",
+        extra={"job_id": ctx.job.id, "episode_id": episode_id, "hashes": hashes},
+    )
+
+
 @register(QBIT_POLICY)
 async def qbit_apply_policy(ctx: JobContext) -> None:
-    """Write Arc's seeding policy to the client (spec §9).
+    """Write Arc's seeding and queue policy to the client (spec §9).
 
     Queued at every worker start-up and once a day. Both, because the two
     failure modes are different: a fresh container comes up with qBittorrent's
-    defaults (seed forever, upload unlimited), and a long-lived one can be
-    changed by hand in the Web UI. Neither should be able to leave Arc seeding.
+    defaults (seed forever, upload unlimited, three concurrent downloads), and
+    a long-lived one can be changed by hand in the Web UI. Neither should be
+    able to leave Arc seeding, and neither should be able to leave it with
+    three download slots — the limits an operator raised by hand are exactly
+    the ones a container restart loses, which is how they came to be written
+    here.
 
     Nothing is caught here. qBittorrent being unreachable raises
     :class:`~arc.services.acquisition.qbit.QbitUnavailable`, the runner retries
@@ -692,6 +1010,8 @@ async def qbit_apply_policy(ctx: JobContext) -> None:
         sent = await qbit.apply_policy(
             seeding=ctx.settings.qbit_seeding,
             upload_limit_kib=ctx.settings.qbit_upload_limit_kib,
+            max_active_downloads=ctx.settings.qbit_max_active_downloads,
+            max_active_torrents=ctx.settings.qbit_max_active_torrents,
         )
     ctx.log.info(
         "qbittorrent policy written",
@@ -700,23 +1020,34 @@ async def qbit_apply_policy(ctx: JobContext) -> None:
 
 
 __all__ = [
+    "ACTIVE_DL_STATES",
     "AIR_DAY_RETRY",
     "AIR_DAY_WINDOW",
     "COMPUTE_WANTS",
     "GIVE_UP_AFTER",
+    "HELD_LOG",
     "LATER_RETRY",
-    "NO_LONGER_WANTED",
+    "METADATA_STATES",
+    "NO_BYTES",
+    "NO_METADATA",
     "NO_RELEASE",
+    "NO_SEEDERS",
+    "PAUSED_LOG",
     "PAUSED_RETRY",
     "POLL_QBIT",
+    "QBIT_CANCEL",
     "QBIT_POLICY",
     "REMOVED_FROM_CLIENT",
     "SEARCH_RELEASE",
+    "STALL_METADATA_AFTER",
+    "STALL_NO_BYTES_AFTER",
     "STARTED_KEY",
     "compute_wants",
     "largest_video",
     "poll_qbit",
     "qbit_apply_policy",
+    "qbit_cancel",
     "retry_delay",
     "search_release",
+    "stall_reason",
 ]

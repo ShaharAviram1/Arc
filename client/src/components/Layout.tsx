@@ -66,7 +66,11 @@ interface AccountMenu {
   initial: string
   entries: AccountEntry[]
   /** Admin-only, and only while it is true (M14 has the controls). */
-  acquisitionPaused: boolean
+  /**
+   * What, if anything, is stopping acquisition: the admin's pause, or the
+   * storage guard (spec §4.9 FR-T6). `null` when nothing is.
+   */
+  acquisitionBrake: 'paused' | 'held' | null
   logout: () => void
   loggingOut: boolean
 }
@@ -125,7 +129,8 @@ function useAccountMenu(): AccountMenu | null {
     email: me.email,
     initial: me.email.slice(0, 1).toUpperCase(),
     entries,
-    acquisitionPaused: acquisition?.paused === true,
+    acquisitionBrake:
+      acquisition?.paused === true ? 'paused' : acquisition?.storage_held === true ? 'held' : null,
     logout: () => {
       logout.mutate()
     },
@@ -141,19 +146,28 @@ function MenuSeparator() {
   return <div aria-hidden className="my-1.5 h-[0.5px] bg-[var(--arc-hairline)]" />
 }
 
+/** The two ways acquisition can be stopped, in the words the note uses. */
+const BRAKE_LABELS: Record<'paused' | 'held', string> = {
+  paused: 'Acquisition paused',
+  // Named for its cause, because the remedy differs: a pause is resumed by a
+  // person, a hold lifts itself once retention frees room (FR-T6).
+  held: 'Acquisition held (disk)',
+}
+
 /**
- * "Acquisition paused", above Log out, for an admin and only while it is true.
+ * "Acquisition paused" — or "Acquisition held (disk)" — above Log out, for an
+ * admin and only while one of them is true.
  *
- * A pause is invisible from everywhere else in the app — episodes just stop
- * moving — so the one thing this has to do is stop that being a mystery.
+ * Either is invisible from everywhere else in the app: episodes just stop
+ * moving. The one thing this has to do is stop that being a mystery.
  * `role="status"` so a screen reader is told when it appears mid-session
  * rather than only on a reload. It used to sit under the sidebar nav; the
  * sidebar is gone, and this is where an admin now looks.
  */
-function AcquisitionPausedNote() {
+function AcquisitionBrakeNote({ brake }: { brake: 'paused' | 'held' }) {
   return (
     <p role="status" className="px-3 py-1 text-[13px] text-[var(--arc-text-muted)]">
-      Acquisition paused
+      {BRAKE_LABELS[brake]}
     </p>
   )
 }
@@ -193,7 +207,9 @@ function AccountItems({
       >
         {account.email}
       </p>
-      {account.acquisitionPaused ? <AcquisitionPausedNote /> : null}
+      {account.acquisitionBrake === null ? null : (
+        <AcquisitionBrakeNote brake={account.acquisitionBrake} />
+      )}
 
       <button
         type="button"

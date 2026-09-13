@@ -16,6 +16,7 @@ import {
   FRIEREN_DETAIL_ON_LIST,
   FRIEREN_DETAIL_VIA_MAL,
   FRIEREN_DETAIL_VIA_OFFLINE,
+  FRIEREN_SAMPLE,
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
@@ -32,6 +33,10 @@ const OFFLINE_NOTICE =
   'Catalogue data from the weekly offline import — live sources are unavailable. Air dates unknown until a live source answers.'
 const DETAIL_PATH = `GET /api/anime/${FRIEREN.id}`
 const LIST_PATH = `/api/list/${FRIEREN.id}`
+/** "Try episode 1" (FR-A8): one route, POSTed and DELETEd. */
+const SAMPLE_PATH = `/api/anime/${FRIEREN.id}/sample`
+/** The server's own sentence for a sample it refuses. */
+const NOT_AIRED_DETAIL = 'episode 1 has not aired yet'
 /** The one failed episode in the fixture, the only one with a Retry button. */
 const TRANSCODE_PATH = '/api/episodes/9007/transcode'
 /** Episode 1 is the fixture's only watched episode; episode 2 has aired and is not. */
@@ -144,6 +149,37 @@ describe('Show', () => {
     const box = (frame.querySelector('img') as HTMLImageElement).parentElement as HTMLElement
     expect(box).toHaveClass('aspect-[21/9]')
     expect(box.style.aspectRatio).toBe('')
+  })
+
+  it("prefers TMDB's backdrop to the AniList strip in the hero", async () => {
+    const banner = 'https://example.test/frieren-banner.jpg'
+    const backdrop = 'https://example.test/frieren-backdrop.jpg'
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: {
+        body: {
+          ...FRIEREN_DETAIL,
+          banner_url: banner,
+          backdrop_url: backdrop,
+        } satisfies AnimeDetail,
+      },
+    })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    const frame = hero()
+
+    // The strip is not in the frame at all — not even as the off-frame probe.
+    expect(frame.querySelector(`img[src="${banner}"]`)).toBeNull()
+
+    const probe = frame.querySelector(`img[src="${backdrop}"]`) as HTMLImageElement
+    Object.defineProperty(probe, 'naturalWidth', { value: 1280, configurable: true })
+    Object.defineProperty(probe, 'naturalHeight', { value: 720, configurable: true })
+    fireEvent.load(probe)
+
+    expect(frame.querySelector('img')).toHaveAttribute('src', backdrop)
+    expect(frame.querySelector('[data-hero-backdrop]')).toBeNull()
   })
 
   it('washes the poster when the only banner is an AniList strip', async () => {
@@ -864,6 +900,324 @@ describe('Show', () => {
 
       expect(await screen.findByText('Watched 4 / 28')).toBeInTheDocument()
       expect(screen.queryByText(/^MAL:/)).not.toBeInTheDocument()
+    })
+  })
+
+  describe('trying episode 1 (FR-A8)', () => {
+    /** Episode 1 has aired and Arc has not been asked for it: the sample case. */
+    const NOT_FETCHED: AnimeDetail = withEpisode(0, {
+      state: 'not_wanted',
+      watched: false,
+      rendition: null,
+    })
+    const TRY = 'Try episode 1'
+    /** The pressed button's accessible name: the action, not the state. */
+    const CANCEL_HINT = 'Cancel the request'
+
+    it('offers the sample on a show the viewer has not committed to', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: NOT_FETCHED } })
+
+      renderShow()
+
+      const button = await screen.findByRole('button', { name: TRY })
+      expect(button).toBeEnabled()
+      // One control, both directions: off to begin with.
+      expect(button).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    it('names the episode it will actually fetch, not always episode 1', async () => {
+      // A special published as episode 0 is the row the server samples from.
+      const zeroFirst: AnimeDetail = {
+        ...NOT_FETCHED,
+        episodes: [
+          { ...(NOT_FETCHED.episodes[0] as EpisodeOut), id: 9000, number: 0 },
+          ...NOT_FETCHED.episodes,
+        ],
+      }
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: zeroFirst } })
+
+      renderShow()
+
+      expect(await screen.findByRole('button', { name: 'Try episode 0' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
+    })
+
+    it('names the requested episode in the button the same way', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: {
+            ...NOT_FETCHED,
+            sample: { ...FRIEREN_SAMPLE, episode_id: 9000, episode_number: 0 },
+          } satisfies AnimeDetail,
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByText('Episode 0 requested')).toBeInTheDocument()
+    })
+
+    it('offers nothing when the episode has already arrived', async () => {
+      // The fixture's episode 1 is `ready`: the Play button above is the offer.
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+      renderShow()
+
+      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
+    })
+
+    it('offers nothing before episode 1 has aired', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: withEpisode(0, {
+            state: 'not_wanted',
+            watched: false,
+            rendition: null,
+            aired: false,
+            air_at: '2099-09-29T14:00:00Z',
+          }),
+        },
+      })
+
+      renderShow()
+
+      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
+    })
+
+    it.each(['watching', 'planned'] as const)(
+      'offers nothing while the show is %s: the window covers it',
+      async (status) => {
+        mockApi({
+          'GET /api/auth/me': ME,
+          [DETAIL_PATH]: {
+            body: {
+              ...NOT_FETCHED,
+              list_status: status,
+              list_entry: listEntry({ status }),
+            } satisfies AnimeDetail,
+          },
+        })
+
+        renderShow()
+
+        await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+        expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
+      },
+    )
+
+    it.each(['watching', 'planned'] as const)(
+      'still offers it on a dormant %s entry: there is no window to duplicate',
+      async (status) => {
+        // FR-A9: nothing is being fetched for this row, so one episode is a
+        // smaller thing to ask for than the whole show — and the hero offers
+        // both, "Try episode 1" here and "Fetch this show" in the note.
+        mockApi({
+          'GET /api/auth/me': ME,
+          [DETAIL_PATH]: {
+            body: {
+              ...NOT_FETCHED,
+              list_status: status,
+              list_entry: listEntry({ status, activated_at: null, dormant: true }),
+            } satisfies AnimeDetail,
+          },
+        })
+
+        renderShow()
+
+        expect(await screen.findByRole('button', { name: TRY })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Fetch this show' })).toBeInTheDocument()
+      },
+    )
+
+    it('still offers it on a show that is dropped or completed', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: {
+          body: {
+            ...NOT_FETCHED,
+            list_status: 'dropped',
+            list_entry: listEntry({ status: 'dropped' }),
+          } satisfies AnimeDetail,
+        },
+      })
+
+      renderShow()
+
+      expect(await screen.findByRole('button', { name: TRY })).toBeInTheDocument()
+    })
+
+    it('asks the server for the episode', async () => {
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: NOT_FETCHED },
+        [`POST ${SAMPLE_PATH}`]: { status: 202, body: FRIEREN_SAMPLE },
+      })
+
+      renderShow()
+      await userEvent.setup().click(await screen.findByRole('button', { name: TRY }))
+
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain(`POST ${SAMPLE_PATH}`)
+      })
+    })
+
+    it('says which episode is on its way, and takes the request back', async () => {
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: { ...NOT_FETCHED, sample: FRIEREN_SAMPLE } satisfies AnimeDetail },
+        [`DELETE ${SAMPLE_PATH}`]: { status: 204 },
+      })
+
+      renderShow()
+
+      // The same button, pressed: it says what has been asked for, and its
+      // accessible name is what pressing it again would do.
+      expect(await screen.findByText('Episode 1 requested')).toBeInTheDocument()
+      const toggle = screen.getByRole('button', { name: CANCEL_HINT })
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(toggle).toHaveAttribute('title', CANCEL_HINT)
+      // Hover offers the other half, from markup rather than from state.
+      expect(within(toggle).getByText('Cancel request')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
+      await userEvent.setup().click(toggle)
+
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain(`DELETE ${SAMPLE_PATH}`)
+      })
+    })
+
+    it("renders the server's own reason when the sample is refused", async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: NOT_FETCHED },
+        [`POST ${SAMPLE_PATH}`]: { status: 409, body: { detail: NOT_AIRED_DETAIL } },
+      })
+
+      renderShow()
+      await userEvent.setup().click(await screen.findByRole('button', { name: TRY }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(NOT_AIRED_DETAIL)
+    })
+  })
+
+  describe('a dormant import (FR-A9)', () => {
+    const NOTE = 'Imported from MyAnimeList — Arc fetches episodes once you touch the show here.'
+    const DORMANT: AnimeDetail = {
+      ...FRIEREN_DETAIL_ON_LIST,
+      list_entry: listEntry({ progress: 4, score: 9, activated_at: null, dormant: true }),
+    }
+
+    it('explains why nothing is being fetched and offers to start it', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: DORMANT } })
+
+      renderShow()
+
+      expect(await screen.findByText(NOTE)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Fetch this show' })).toBeInTheDocument()
+    })
+
+    it('says nothing on an entry the viewer has already touched', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL_ON_LIST } })
+
+      renderShow()
+      await screen.findByText('Watched 4 / 28')
+
+      expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Fetch this show' })).not.toBeInTheDocument()
+    })
+
+    it('PUTs the status the entry already has, which is what activates it', async () => {
+      const fetchMock = mockApi({
+        'GET /api/auth/me': ME,
+        [DETAIL_PATH]: { body: DORMANT },
+        [`PUT ${LIST_PATH}`]: { body: listEntry({ progress: 4, score: 9, dormant: false }) },
+      })
+
+      renderShow()
+      await userEvent.setup().click(await screen.findByRole('button', { name: 'Fetch this show' }))
+
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain(`PUT ${LIST_PATH}`)
+      })
+      // The status it already has: nothing about the list changes, so nothing
+      // is owed to MyAnimeList either — the touch is the whole point.
+      expect(jsonBodyOf(callTo(fetchMock, LIST_PATH))).toEqual({ status: 'watching' })
+    })
+  })
+
+  describe('waiting for a slot (FR-A10)', () => {
+    const WAITING: AnimeDetail = {
+      ...FRIEREN_DETAIL_ON_LIST,
+      list_entry: listEntry({
+        progress: 4,
+        score: 9,
+        waiting: true,
+        waiting_reason: 'slot',
+        fetching_count: 5,
+        slot_cap: 5,
+      }),
+    }
+
+    function waitingFor(reason: 'paused' | 'held'): AnimeDetail {
+      return {
+        ...WAITING,
+        list_entry: listEntry({ waiting: true, waiting_reason: reason }),
+      }
+    }
+
+    it('says the show is waiting, how full the cap is, and what happens next', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: WAITING } })
+
+      renderShow()
+
+      expect(
+        await screen.findByText(
+          'Waiting for a slot — 5 of your 5 shows are fetching. ' +
+            'Arc starts this one when one of them finishes.',
+        ),
+      ).toBeInTheDocument()
+      // No button: unlike a dormant entry there is nothing honest to press.
+      expect(screen.queryByRole('button', { name: /slot/i })).not.toBeInTheDocument()
+    })
+
+    it('says nothing on a show that is not waiting', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL_ON_LIST } })
+
+      renderShow()
+      await screen.findByText('Watched 4 / 28')
+
+      expect(screen.queryByText(/Waiting for a slot/)).not.toBeInTheDocument()
+    })
+
+    it('does not promise a finishing show will start it while paused', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: waitingFor('paused') } })
+
+      renderShow()
+
+      expect(
+        await screen.findByText(
+          'Waiting — acquisition is paused on this server, so nothing new is being fetched.',
+        ),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/when one of them finishes/)).not.toBeInTheDocument()
+    })
+
+    it('names the free-space hold instead, when that is what stopped it', async () => {
+      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: waitingFor('held') } })
+
+      renderShow()
+
+      expect(
+        await screen.findByText(
+          'Waiting — acquisition is holding: the server is low on free space. ' +
+            'It starts again on its own once room is freed.',
+        ),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/when one of them finishes/)).not.toBeInTheDocument()
     })
   })
 

@@ -141,6 +141,11 @@ _SEASON_RANGE_RE = re.compile(r"\s*[-:]?\s*\bS\d{1,2}\s*[-~]\s*S\d{1,2}\b\s*", r
 #: A bare four-digit year among dot-separated scene tokens.
 _BARE_YEAR_RE = re.compile(r"(?<![\d])(19[5-9]\d|20\d\d)(?![\d])")
 
+#: The window every year rule in this module uses: 1950 to 2099. The same one
+#: :data:`_BARE_YEAR_RE` and :data:`_YEAR_RE` spell out, as numbers, for the
+#: rules that have an ``int`` rather than a string in hand.
+YEAR_RANGE: tuple[int, int] = (1950, 2099)
+
 #: Creditless openings/endings, previews and trailers. These are real files in
 #: a batch and must never be matched to an episode (FR-L4).
 _NC_RE = re.compile(
@@ -165,19 +170,103 @@ _MOVIE_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A whole season in one directory or file: ``[01-12]``, ``01~12``, ``S1
-#: Complete``, ``Batch``.
-_BATCH_WORD_RE = re.compile(
-    r"(?:^|[\s\-_.\[\(])(?:batch|complete(?:\s+series)?|seasons?\s*\d+\s*complete)"
-    r"(?:[\s\-_.\]\)]|$)",
+#: A whole season in one directory or file, said in words: ``[BATCH]``,
+#: ``[Unofficial Batch]``, ``Season Pack``. **Enough on its own** (FR-A4): a
+#: release that says ``BATCH`` is a batch whatever numbers it also carries,
+#: because ``[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 01 ~ 10
+#: [1080p][BATCH]`` is 10 episodes and 6 GB, and the one thing Arc must never
+#: do is fetch a whole season. This used to be read only when the name gave no
+#: episode number at all, which is precisely the case a batch *with* a range
+#: never is.
+_BATCH_MARKER_RE = re.compile(
+    r"(?:^|[\s\-_.\[\(])(?:batch|seasons?[\s._-]+pack)(?:[\s\-_.\]\)]|$)",
     re.IGNORECASE,
 )
+
+#: The other half of the batch vocabulary — ``Complete``, ``Complete Series``,
+#: ``S1 Complete`` — and the half that is **only read when the name names no
+#: single episode**. The word means two things: on a run it is the whole show
+#: (``[Kametsu] Cowboy Bebop Complete Series``) and on one file it is a fansub
+#: shouting that this was the last one, which is the same claim ``END`` makes
+#: and why :data:`_END_RE` carries it too. ``[Group] Show - 12 [COMPLETE]`` is
+#: therefore episode 12 and not a season; nothing is lost by the gate, because
+#: a ``Complete`` release that really is a batch either writes a range — which
+#: has already decided the question by the time this is asked — or names no
+#: episode at all.
+_COMPLETE_MARKER_RE = re.compile(
+    r"(?:^|[\s\-_.\[\(])complete(?:\s+series)?(?:[\s\-_.\]\)]|$)",
+    re.IGNORECASE,
+)
+
+#: An episode **range**, as a release writes one at the place an episode number
+#: goes: ``- 01 ~ 12 [1080p]``, ``01~12``, ``[01-23]``, ``E01-E12``,
+#: ``S01E01-E12``, ``001-024``. Read *before* anitopy's own answer, because
+#: anitopy reports only the first number of ``- 01 ~ 12`` and a release Arc
+#: reads as episode 1 is a release Arc downloads: six gigabytes of *Dagashi
+#: Kashi* season 2 arrived that way, and all twelve episodes were transcoded
+#: for the sake of the two somebody wanted.
+#:
+#: Four details do all the work of keeping a *title* from reading as a range:
+#:
+#: * **Both numbers are padded** to at least two digits, unless one carries an
+#:   ``E`` prefix. ``Ranma 1-2`` is a name, and no group writes a range that
+#:   way; ``01-02`` is a two-episode pack, and every group writes one that way.
+#: * **The separator may not be a hyphen glued to a digit**, which is what a
+#:   date is: the ``05-10`` of ``Show.2024-05-10`` would otherwise be episodes
+#:   5 to 10. Checked after the separator is consumed, so the two characters
+#:   behind the cursor are the digit and the hyphen.
+#: * **The range is the last thing before the tags**, exactly as a single
+#:   episode number is (:data:`_DASH_EPISODE_RE`): a bracket, the extension or
+#:   the end of the name has to follow it. ``[Commie] Chihayafuru - 01 - 100
+#:   Poems [ABCD1234]`` writes an episode title after the number, and episodes
+#:   1 to 100 is not what it says.
+#: * **Plausibility is checked in code**, not here: the run has to count up
+#:   from at least 1, and two numbers that are both plausible *years* are a
+#:   year pair rather than a run — which is what stops ``Gundam 00 - 05`` (a
+#:   title ending in a padded zero), ``Mob Psycho 100 - 07`` (counting down)
+#:   and ``Cowboy Bebop 1998-1999`` being ranges.
+#:
+#: The separator is any dash or tilde a group might write, the wave dash
+#: ``〜`` and the fullwidth ``～`` included: a Japanese raw writes ``01〜12``
+#: and means exactly what ``01-12`` means.
+#:
+#: A leading ``S01`` on either end is allowed and ignored; the season is read
+#: elsewhere and ``S1-S4`` names no episodes at all.
+_EPISODE_RANGE_RE = re.compile(
+    r"(?:^|[\s\-_.\[\(#])(?<!\d-)"
+    r"(?:S\d{1,2}\s*)?(?:(?:E|EP|EPISODE)\s*(?P<low>\d{1,4})|(?P<lowpad>\d{2,4}))(?:v\d)?"
+    r"\s*[-~〜～–—]\s*"
+    r"(?:S\d{1,2}\s*)?(?:(?:E|EP|EPISODE)\s*(?P<high>\d{1,4})|(?P<highpad>\d{2,4}))(?:v\d)?"
+    r"(?=\s*[\[({\])}]|\.[A-Za-z0-9]{2,4}$|\s*$)",
+    re.IGNORECASE,
+)
+
+#: The same question asked *leniently*, and only ever of a pair anitopy has
+#: already called a range: does that pair sit where a range sits — with nothing
+#: but a tag, an extension or the end of the name behind it? The numbers need
+#: no padding here, because whether this is a range is not what is being asked.
+#: ``[Commie] Chihayafuru - 01 - 100 Poems [ABCD1234]`` is episode 1 of a show
+#: whose episode title starts with a number, and anitopy reports the pair
+#: ``(1, 100)`` for it.
+_RANGE_BEFORE_TAG_RE = re.compile(
+    r"(?<![\w])(\d{1,4})(?:v\d)?\s*[-~〜～–—]\s*(\d{1,4})(?:v\d)?"
+    r"(?=\s*[\[({\])}]|\.[A-Za-z0-9]{2,4}$|\s*$)",
+    re.IGNORECASE,
+)
+
+#: The dashes and tildes a range may be written with, as a character class for
+#: :func:`_without_range` to build a pattern out of.
+_RANGE_SEPARATORS = r"[-~〜～–—]"
+
 _RANGE_RE = re.compile(r"(?<![\w])(\d{1,4})\s*[-~]\s*(\d{1,4})(?![\w])")
 
-#: Shortest run that counts as a batch. Two, so that ``Ranma 1-2`` — which
-#: anitopy reports as episodes 1 and 2 — is not read as a two-episode batch of
-#: a show called Ranma. Nobody distributes a two-episode batch; plenty of shows
-#: have a fraction or a hyphenated number in their name.
+#: Shortest run the *unpadded* fallbacks count as a batch. Two, so that
+#: ``Ranma 1-2`` — which anitopy reports as episodes 1 and 2 — is not read as a
+#: two-episode batch of a show called Ranma: plenty of shows have a fraction or
+#: a hyphenated number in their name, and none of them write it padded.
+#: :data:`_EPISODE_RANGE_RE` is not held to this, because a padded ``01-02``
+#: really is a two-episode pack (``[RH] Fukigen na Mononokean - 01-02``) and
+#: fetching it is fetching an episode nobody asked for.
 MIN_BATCH_SPAN = 2
 
 #: The episode number as the last thing before the tags: ``- 03 [1080p]``,
@@ -659,7 +748,12 @@ def _kind_of(
         return "nc"
     if episode_end is not None:
         return "batch"
-    if _BATCH_WORD_RE.search(haystack) and episode is None:
+    if _BATCH_MARKER_RE.search(haystack):
+        return "batch"
+    if _COMPLETE_MARKER_RE.search(haystack) and episode is None:
+        # A range has already returned above, so what is left here is either a
+        # whole show with no numbers (a batch) or one file a group marked as
+        # the last of its run (episode N, and ``END`` by another name).
         return "batch"
     if types & {"movie", "gekijouban"}:
         return "movie"
@@ -705,13 +799,100 @@ def _fraction_of(numbers: list[str], name: str) -> tuple[int, float] | None:
     return None
 
 
+def _without_range(title: str, low: int, high: int) -> str:
+    """``"Show - 01〜12"`` → ``"Show"``, and only for *this* file's own run.
+
+    Needed because anitopy knows ``-`` and ``~`` and not ``〜``: given
+    ``- 01 ~ 12`` it hands back the title ``Show``, and given ``- 01〜12`` it
+    hands back ``Show - 01〜12`` — a title the matcher could never match, on
+    exactly the file a person has to look at.
+
+    The pattern is built from the two numbers rather than searched for
+    generically, so nothing else that looks like a pair can be caught by it:
+    the ``86`` of *86* and the ``07-`` of *07-Ghost* are parts of names, and a
+    generic scan would also swallow ``86 - 01`` whole and never see the real
+    range behind it. Leading zeros are allowed on either end, because the
+    title writes ``01`` where this has the number 1.
+    """
+    pattern = re.compile(
+        rf"(?<![\w])0*{low}\s*{_RANGE_SEPARATORS}\s*0*{high}(?![\w])",
+    )
+    return pattern.sub(" ", title)
+
+
+def _is_year(value: int) -> bool:
+    """Whether a number could be a release year rather than an episode."""
+    return YEAR_RANGE[0] <= value <= YEAR_RANGE[1]
+
+
+def _explicit_range(name: str, first: int | None) -> tuple[int, int] | None:
+    """The episode range the release wrote out, ``(low, high)``, or ``None``.
+
+    The first thing asked of a name, and the reason is that anitopy does not
+    answer this question: ``[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p]`` is
+    reported as episode ``01``, full stop, and a release Arc reads as a single
+    episode 1 is one it downloads and transcodes twelve times over. So
+    :data:`_EPISODE_RANGE_RE` is read off the raw name before anitopy's answer
+    is trusted, and what it finds wins.
+
+    ``first`` is anitopy's own first number, and for a *bare* range it is a
+    veto: one whose low end is not the number anitopy read is not the episode
+    position at all but two numbers that happen to sit either side of a dash —
+    the ``12 - 24`` of a title ending in a number, followed by episode 24. When
+    anitopy read no number there is nothing to disagree with and the range
+    stands on its own, which is the ``[01-23]``-in-a-noise-bracket case. An
+    ``E``-prefixed range (``E01-E12``) skips the veto: nothing but an episode
+    range is written that way, and anitopy reads the pair as the single number
+    112.
+    """
+    for matched in _EPISODE_RANGE_RE.finditer(name):
+        prefixed = matched.group("low") is not None or matched.group("high") is not None
+        low_text = matched.group("low") or matched.group("lowpad")
+        high_text = matched.group("high") or matched.group("highpad")
+        low, high = int(low_text), int(high_text)
+        # Counting up, from a real episode, to a number a show could reach.
+        if not 0 < low < high <= 9999:
+            continue
+        if _is_year(low) and _is_year(high):
+            # ``[Kametsu] Cowboy Bebop 1998-1999`` is when it aired, not what
+            # it holds. Both ends, because episode 1998 of nothing exists but
+            # ``0001-2000`` of One Piece is a run somebody really does upload.
+            continue
+        if first is not None and low != first and not prefixed:
+            continue
+        return low, high
+    return None
+
+
+def _range_sits_before_a_tag(name: str, low: int, high: int) -> bool:
+    """Whether ``low``-``high`` appears in ``name`` with only a tag behind it.
+
+    Asked of anitopy's own pair, which it reports for two numbers either side
+    of a dash wherever they sit — including the episode number and the first
+    word of an episode *title*: ``[Commie] Chihayafuru - 01 - 100 Poems`` is
+    reported as ``(1, 100)`` and is episode 1.
+    """
+    return any(
+        int(matched.group(1)) == low and int(matched.group(2)) == high
+        for matched in _RANGE_BEFORE_TAG_RE.finditer(name)
+    )
+
+
 def _episode_numbers(name: str, parsed: dict[str, Any]) -> EpisodeNumbers:
     """anitopy's answer about the numbers, corrected.
 
-    anitopy reports a range as a two-element list, which is exactly the batch
-    case; ``[01-12]`` inside a bracket it treated as noise is not, so the raw
-    name is re-read for a range whenever it produced a single number and the
-    name still holds one.
+    A range the release wrote out (:func:`_explicit_range`) is read first and
+    settles the question. Failing that, anitopy reports a range as a two-element
+    list, which is the same batch case by another route; ``[01-12]`` inside a
+    bracket it treated as noise is neither, so the raw name is re-read for a
+    loose range whenever it produced a single number and the name still holds
+    one.
+
+    Both of those looser routes are held to the same two conditions the strict
+    pattern applies in code — the pair may not be two plausible years, and it
+    must sit before a tag (:func:`_range_sits_before_a_tag`) — because anitopy
+    pairs numbers wherever it finds them: ``- 01 - 100 Poems`` is episode 1 of
+    a show whose episode title opens with a number, not episodes 1 to 100.
     """
     numbers = _as_list(parsed.get("episode_number"))
     version = _first_int(_as_list(parsed.get("release_version")))
@@ -724,28 +905,41 @@ def _episode_numbers(name: str, parsed: dict[str, Any]) -> EpisodeNumbers:
     if fractional is not None:
         return EpisodeNumbers(fractional[0], None, version, fractional[1])
 
+    values = [int(re.sub(r"[^0-9]", "", value) or -1) for value in numbers]
+    values = [value for value in values if value >= 0]
+
+    explicit = _explicit_range(name, values[0] if values else None)
+    if explicit is not None:
+        return EpisodeNumbers(explicit[0], explicit[1], version, None)
+
     episode: int | None = None
     episode_end: int | None = None
     rejected_range = False
-    if numbers:
-        values = [int(re.sub(r"[^0-9]", "", value) or -1) for value in numbers]
-        values = [value for value in values if value >= 0]
-        if values:
-            episode = values[0]
-            if len(values) > 1 and values[-1] > episode:
-                if values[-1] - episode >= MIN_BATCH_SPAN:
-                    episode_end = values[-1]
-                else:
-                    # anitopy read a hyphenated number in the title as a range.
-                    episode, rejected_range = None, True
+    if values:
+        episode = values[0]
+        if len(values) > 1 and values[-1] > episode:
+            if values[-1] - episode < MIN_BATCH_SPAN:
+                # anitopy read a hyphenated number in the title as a range.
+                episode, rejected_range = None, True
+            elif _range_sits_before_a_tag(name, episode, values[-1]):
+                episode_end = values[-1]
+            # Otherwise anitopy paired the episode number with a number that
+            # opens the episode *title*. The episode stands; there is no span.
 
     if episode_end is None and not rejected_range:
         for matched in _RANGE_RE.finditer(name):
             low, high = int(matched.group(1)), int(matched.group(2))
-            # A range is only a range if it counts up and stays plausible; a
-            # resolution (1920-1080) and a date (2023-10) both look like one.
+            # A range is only a range if it counts up, stays plausible, is not
+            # a pair of years, and has nothing but a tag behind it: a
+            # resolution (1920-1080), a date (2023-10), an airing span
+            # (1998-1999) and the ``- 01 - 100 Poems`` of an episode title that
+            # opens with a number all look like one otherwise.
             if 0 < low < high <= 9999 and high - low >= MIN_BATCH_SPAN:
                 if episode is not None and low != episode:
+                    continue
+                if _is_year(low) and _is_year(high):
+                    continue
+                if not _range_sits_before_a_tag(name, low, high):
                     continue
                 episode, episode_end = low, high
                 break
@@ -812,6 +1006,8 @@ def parse(name: str) -> ParsedName:
         # A scene stem anitopy handed back verbatim: the dots are its spaces.
         title = title.replace(".", " ").strip()
     title = _SXXEXX_RE.sub(" ", title).strip(" \t._-~:")
+    if episode is not None and episode_end is not None:
+        title = _without_range(title, episode, episode_end).strip(" \t._-~:")
     title = _JP_EPISODE_RE.sub(" ", title).strip(" \t._-~:")
     title = _JP_DANGLING_RE.sub("", title).strip(" \t._-~:")
     title = re.sub(r"\s+", " ", title)

@@ -40,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Episode, EpisodeState, MediaFile, Torrent
+from arc.services.acquisition.qbit import QBIT_REJECTED
 from arc.services.acquisition.states import transition
 
 log = logging.getLogger(__name__)
@@ -47,11 +48,12 @@ log = logging.getLogger(__name__)
 #: The sentence the show page shows for it (FR-A7).
 WRONG_FILE = "downloaded file was not this episode"
 
-#: What the ``torrents`` row is marked. Not a qBittorrent state — the client
-#: is perfectly happy with that torrent — but this column is where "what
-#: became of this download" is read from, and "a person rejected it" is the
-#: answer retention (M10) needs when it decides what to delete.
-QBIT_REJECTED = "rejected"
+# ``QBIT_REJECTED`` — what the ``torrents`` row is marked — is defined in
+# :mod:`arc.services.acquisition.qbit` beside the other three values Arc writes
+# into that column and the :data:`~arc.services.acquisition.qbit.DECIDED_STATES`
+# set they form, and is re-exported here because this is where it is *decided*.
+# It is not a qBittorrent state: the client is perfectly happy with that
+# torrent, and the column is where "what became of this download" is read from.
 
 
 def episode_id_of(path: str, *, downloads_dir: Path) -> int | None:

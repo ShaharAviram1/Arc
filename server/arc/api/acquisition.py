@@ -30,6 +30,7 @@ tick came round.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated
 
@@ -39,7 +40,7 @@ from sqlalchemy import func, select
 
 from arc.api.deps import AdminUser, EpisodeId, SessionDep, SettingsDep, get_admin_user
 from arc.api.jobs import JobOut
-from arc.models import Anime, Episode, EpisodeState, Job, User, Want
+from arc.models import Anime, Episode, EpisodeState, Job, ListEntry, User, Want
 from arc.services.acquisition.names import (
     POLL_QBIT,
     POLL_QBIT_PRIORITY,
@@ -48,11 +49,14 @@ from arc.services.acquisition.names import (
     search_dedupe_key,
 )
 from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
-from arc.services.acquisition.rules import is_paused, set_paused
+from arc.services.acquisition.rules import is_paused, min_free_bytes, set_paused, storage_hold
 from arc.services.acquisition.status import qbit_status
+from arc.services.acquisition.wants import WANTING_STATUSES, slot_totals
 from arc.services.catalog import preferred_title
+from arc.services.catalog.airing import RELEASING
 from arc.services.jobs import enqueue
 from arc.services.retention.sweep import retained_bytes
+from arc.services.storage import disk_usage
 
 log = logging.getLogger(__name__)
 
@@ -81,10 +85,26 @@ class AcquisitionStatusOut(BaseModel):
     ``search_release`` rows that are all requeueing themselves is what a pause
     looks like from the job table, and it says nothing about how much of the
     library is mid-flight.
+
+    Three things beside the pause say why acquisition might be quiet when
+    nobody has pressed anything: the **storage hold** (FR-T6), the count of
+    **dormant imports** (FR-A9) and the shows **waiting for a slot** (FR-A10).
+    All three were added on 2026-09-13 because the answer to "why has Arc
+    stopped fetching?" had become "one of four reasons", and only one of them
+    was on the page.
     """
 
     #: The ``acquisition_paused`` setting.
     paused: bool
+    #: Whether free space is under the floor right now (FR-T6). Nobody set
+    #: this and nobody clears it: it lifts itself when retention frees room.
+    storage_held: bool = False
+    #: What the filesystem holding ``DATA_DIR`` says is free, and the floor it
+    #: is measured against — so the page can say *how close* it is rather than
+    #: only which side of the line it is on. Zero when the path could not be
+    #: measured at all, which is also never a hold.
+    free_bytes: int = 0
+    min_free_bytes: int = 0
     #: Wants that have not been dropped, across every user (FR-A2 merges them;
     #: this is the row count, so an episode three people want counts three).
     active_wants: int
@@ -94,6 +114,19 @@ class AcquisitionStatusOut(BaseModel):
     #: Episodes qBittorrent is downloading. Unaffected by the pause: these
     #: finish, and ``poll_qbit`` hands them on (FR-A5).
     downloading: int
+    #: ``watching``/``planned`` entries generating no wants because nobody has
+    #: touched them in Arc and their show is not airing (FR-A9). The figure an
+    #: admin looks at after a MyAnimeList import: 414 of these is the whole
+    #: reason the rule exists.
+    dormant_entries: int = 0
+    #: (user, show) pairs held back by the per-user slot cap right now
+    #: (FR-A10): they have something to fetch and K of that user's shows are
+    #: already fetching. Counted per user, so two users each waiting on one
+    #: show is two — the same arithmetic ``active_wants`` uses.
+    waiting_shows: int = 0
+    #: K itself, so the panel can say "3 waiting, cap 5" rather than leaving
+    #: the figure to be looked up in the rules editor. 0 means no cap.
+    slot_cap_k: int = 0
     #: Bytes Arc is holding for episodes it has acquired — sources from
     #: ``media_files.size``, renditions measured on disk (FR-T4: "admin can
     #: see disk usage"). It is here rather than under ``/api/retention``
@@ -245,7 +278,15 @@ async def resume(session: SessionDep, admin: AdminUser) -> PauseOut:
     summary="Whether acquisition is paused, and what it is holding (admin)",
 )
 async def acquisition_status(session: SessionDep, settings: SettingsDep) -> AcquisitionStatusOut:
-    """Three counts, a flag and a disk figure; no upstream call."""
+    """Counts, two flags and the disk figures; no upstream call.
+
+    The free-space figures come from the same measurement the guard itself
+    takes (:mod:`arc.services.storage`), and ``storage_held`` from the same
+    rule (:func:`~arc.services.acquisition.rules.storage_hold`) — a status page
+    that could disagree with the guard would be worse than no status page. An
+    unmeasurable path reads as zeros and *not* held, exactly as the guard
+    treats it.
+    """
     active_wants = await session.scalar(
         select(func.count()).select_from(Want).where(Want.dropped_at.is_(None))
     )
@@ -255,11 +296,35 @@ async def acquisition_status(session: SessionDep, settings: SettingsDep) -> Acqu
         .group_by(Episode.state)
     )
     states: dict[EpisodeState, int] = {state: count for state, count in rows.all()}
+    dormant = await session.scalar(
+        select(func.count())
+        .select_from(ListEntry)
+        .join(Anime, Anime.id == ListEntry.anime_id)
+        .where(
+            ListEntry.status.in_(WANTING_STATUSES),
+            ListEntry.activated_at.is_(None),
+            func.coalesce(Anime.status, "") != RELEASING,
+        )
+    )
+    # One pass over every user's list, which is the same computation the
+    # reconciler makes: a status page that could disagree with the cap would be
+    # as bad as one that could disagree with the storage guard. K comes back
+    # with the count rather than through a second read of ``settings``.
+    waiting, cap = await slot_totals(session)
+    floor = await min_free_bytes(session)
+    usage = await asyncio.to_thread(disk_usage, settings.data_dir)
+    free = usage.free if usage is not None else 0
     return AcquisitionStatusOut(
         paused=await is_paused(session),
+        storage_held=usage is not None and storage_hold(free, floor),
+        free_bytes=free,
+        min_free_bytes=floor,
         active_wants=active_wants or 0,
         searching=states.get(EpisodeState.SEARCHING, 0),
         downloading=states.get(EpisodeState.DOWNLOADING, 0),
+        dormant_entries=dormant or 0,
+        waiting_shows=waiting,
+        slot_cap_k=cap,
         retained_bytes=await retained_bytes(session, settings),
     )
 

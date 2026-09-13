@@ -81,6 +81,22 @@ def test_re_requesting_the_current_state_is_a_no_op() -> None:
     assert row.state_changed_at == before
 
 
+def test_a_download_nobody_wants_may_go_back_to_not_wanted() -> None:
+    """The 2026-09-13 edge: a cancel reaches into work in flight, once.
+
+    Named rather than left to the table sweep above because it is the one
+    place the reconciler is allowed to stop a download, and the states after
+    it — where the bytes have landed — must stay retention's.
+    """
+    assert can_transition(EpisodeState.DOWNLOADING, EpisodeState.NOT_WANTED)
+    assert not can_transition(EpisodeState.MATCHING, EpisodeState.NOT_WANTED)
+    assert not can_transition(EpisodeState.PREPARING, EpisodeState.NOT_WANTED)
+
+    row = episode(EpisodeState.DOWNLOADING)
+    assert transition(row, EpisodeState.NOT_WANTED, reason="nobody wants this episode") is True
+    assert row.state is EpisodeState.NOT_WANTED
+
+
 def test_can_transition_agrees_with_the_table() -> None:
     assert can_transition(EpisodeState.WANTED, EpisodeState.SEARCHING)
     assert can_transition(EpisodeState.WANTED, EpisodeState.WANTED), "a no-op is always allowed"

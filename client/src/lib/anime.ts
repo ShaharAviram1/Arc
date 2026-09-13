@@ -107,6 +107,17 @@ export interface AnimeSummary {
    */
   banner_url?: string | null
   /**
+   * TMDB's 16:9 backdrop (owner, 2026-09-13), or null — the ordinary case
+   * until the enrichment has reached the show, and for every row of a
+   * deployment with no TMDB key.
+   *
+   * The art both wide frames actually want: `banner_url` above is a ~4.75:1
+   * strip, and neither the 21:9 hero nor the 16:9 card will show a picture
+   * that shape. `bannerArt` prefers this and falls back to the banner, so no
+   * component reads either field directly.
+   */
+  backdrop_url?: string | null
+  /**
    * AniList's genres for this show (M15), in its order. Optional and possibly
    * empty: it is what Browse's chips are built from, and a result that
    * carries none simply matches no chip.
@@ -267,6 +278,43 @@ export interface ListEntry {
   score: number | null
   updated_at: string
   /**
+   * When the viewer first touched this show in Arc, or null (spec §4.2 FR-A9).
+   * Optional on the wire so a client ahead of its server reads "not stated"
+   * rather than crashing.
+   */
+  activated_at?: string | null
+  /**
+   * Whether this entry is fetching nothing: it came from a MyAnimeList import,
+   * nobody has touched the show here, and the show is not airing (FR-A9).
+   * Derived by the server, because the airing half of it changes on its own.
+   * Absent reads as `false`, which is what a server that does not say means.
+   */
+  dormant?: boolean
+  /**
+   * Whether the per-user slot cap is holding this show back (spec §4.2
+   * FR-A10): the viewer has something to fetch here and K of their shows are
+   * already fetching. Derived by the server, like `dormant`, and — like
+   * `mal_sync` below — carried **only on a show page**, which is the one place
+   * the note is rendered. Absent reads as `false`.
+   */
+  waiting?: boolean
+  /**
+   * Why it is waiting, when it is: `'slot'` (K of the viewer's shows are
+   * already fetching), `'paused'` (an admin stopped acquisition) or `'held'`
+   * (the server is below its free-space floor, FR-T6). Absent when the show is
+   * not waiting. The note needs it because "Arc starts this one when one of
+   * them finishes" is a promise the last two would make false.
+   */
+  waiting_reason?: 'slot' | 'paused' | 'held' | null
+  /**
+   * How many of the viewer's shows are fetching right now, and K. The two
+   * numbers the waiting note says out loud; they are here rather than on the
+   * admin status endpoint because that one needs the role and a waiting user
+   * may not have it. Absent, or 0, means the response did not say.
+   */
+  fetching_count?: number
+  slot_cap?: number
+  /**
    * How this entry stands with MyAnimeList (spec §4.7 FR-M6). Optional
    * because only the show page's `list_entry` carries it — the aggregates
    * (`/api/list`, home, schedule) answer a different question and leave it
@@ -292,6 +340,29 @@ export interface AnimeCredit {
   name: string
 }
 
+/**
+ * The viewer's live "try episode 1" want on this show (spec §4.2 FR-A8).
+ *
+ * Null whenever there is nothing to cancel — nobody asked, the sample was
+ * cancelled, or it was dropped for going unwatched for D days (FR-T2). The
+ * episode's own acquisition state stays where it always was, on its row in
+ * `episodes[]`; this only says that the viewer is the one who asked for it.
+ */
+export interface Sample {
+  episode_id: number
+  episode_number: number
+  requested_at: string
+  /**
+   * The episode's state as of the response — `wanted` straight after a
+   * request on a resting episode (spec §6, FR-A7). The server acts on the
+   * episode inside the request rather than leaving it to the next
+   * reconciliation, so this is what the row says before any refetch: the
+   * mutation writes it into the cached detail, and the invalidation that
+   * follows only confirms it.
+   */
+  state: string
+}
+
 export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   episodes: EpisodeOut[]
   episode_count: number | null
@@ -305,9 +376,13 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
    */
   credits?: AnimeCredit[]
   banner_url: string | null
+  /** TMDB's 16:9 backdrop, or null. What the show page's hero prefers. */
+  backdrop_url: string | null
   next_airing: NextAiring | null
   relations: AnimeRelation[]
   list_entry: ListEntry | null
+  /** The viewer's own sample want, or null — the ordinary case (FR-A8). */
+  sample: Sample | null
 }
 
 export interface SetListEntryInput {
@@ -361,22 +436,34 @@ export function keyVisual(
   return anime.cover_large_url ?? anime.cover_url
 }
 
+/** A string field that is present and not empty, or null. */
+function art(url: string | null | undefined): string | null {
+  return url === null || url === undefined || url === '' ? null : url
+}
+
 /**
- * AniList's 21:9 banner, or null — never a poster in its place.
+ * The show's wide art, or null — never a poster in its place.
  *
- * The one piece of art wide enough to fill a hero frame at its own size: the
- * banner is around 1900 px across, where `cover_url` is a 230–425 px picture
- * that only looks like artwork until something stretches it. A record filled
- * from MAL publishes no banner at all, which is what the poster hero in
- * `HeroFrame` exists for (owner, 2026-09-11).
+ * The one piece of art wide enough to fill a hero frame at its own size,
+ * where `cover_url` is a 230–425 px picture that only looks like artwork until
+ * something stretches it. A record filled from MAL has neither, which is what
+ * the poster hero in `HeroFrame` exists for (owner, 2026-09-11).
+ *
+ * TMDB's `backdrop_url` first, then AniList's `banner_url` (owner,
+ * 2026-09-13). The order is the whole point: a banner is a 1900×400 strip —
+ * 4.75:1 — and both wide frames measure what they are given and refuse
+ * anything that shape, so a show that has only a banner renders the
+ * blurred-poster wash no matter what this returns. A backdrop is 16:9 and
+ * fills. The fallback stays because a row the TMDB enrichment has not reached
+ * (or a deployment with no key) may still have a banner narrow enough to pass
+ * the frames' own test, and that is their call to make, not this function's.
  */
-export function bannerArt(anime: Pick<AnimeSummary, 'banner_url'>): string | null {
-  const banner = anime.banner_url
-  return banner === null || banner === undefined || banner === '' ? null : banner
+export function bannerArt(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>): string | null {
+  return art(anime.backdrop_url) ?? art(anime.banner_url)
 }
 
 /** True when a show has art a 21:9 frame can be filled with honestly. */
-export function hasBanner(anime: Pick<AnimeSummary, 'banner_url'>): boolean {
+export function hasBanner(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>): boolean {
   return bannerArt(anime) !== null
 }
 
@@ -890,6 +977,75 @@ export function useRetryTranscode(): UseMutationResult<null, Error, RetryTransco
     },
     onSuccess: (_result, { animeId }) => {
       void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
+    },
+  })
+}
+
+/**
+ * A message a person can act on when "try episode 1" is refused (FR-A8).
+ *
+ * The three 409s are the server saying something true about the show — no
+ * episodes yet, episode 1 has not aired, you already follow this — so its own
+ * sentence is the message, and there is nothing here to keep in step with it.
+ */
+export function sampleErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return 'Could not reach the server.'
+  return errorDetail(error) ?? 'Could not ask for that episode. Try again.'
+}
+
+/**
+ * What a sample changes in the caches, written from the server's answer.
+ *
+ * The show page, because the button and the episode's own row are both read
+ * from it, and Watch Now, because a sample puts an episode into the pipeline
+ * its shelves report on. The detail patch is what the response's `state` is
+ * for: the server has already moved the episode, so the row can say
+ * "Wanted" at once instead of showing "Not fetched" until the refetch lands.
+ * The invalidation behind it is still the authority — the patch only has to be
+ * true for the second in between.
+ */
+function refreshAfterSample(client: QueryClient, animeId: number, sample: Sample | null): void {
+  client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) => {
+    if (current === undefined) return current
+    return {
+      ...current,
+      sample,
+      episodes:
+        sample === null
+          ? current.episodes
+          : current.episodes.map((episode) =>
+              episode.id === sample.episode_id ? { ...episode, state: sample.state } : episode,
+            ),
+    }
+  })
+  void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
+  void client.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
+}
+
+/** Ask the server to fetch this show's first episode (spec §4.2 FR-A8). */
+export function useRequestSample(animeId: number): UseMutationResult<Sample, Error, void> {
+  const client = useQueryClient()
+
+  return useMutation<Sample, Error, void>({
+    mutationFn: () => apiFetch<Sample>(`/api/anime/${animeId}/sample`, { method: 'POST' }),
+    onSuccess: (sample) => {
+      refreshAfterSample(client, animeId, sample)
+    },
+  })
+}
+
+/**
+ * Drop it again. The episode's own state is left to the refetch: the server
+ * releases it only when nobody else wants it (FR-A2), and guessing which of
+ * those two happened is exactly the sort of thing a cache patch gets wrong.
+ */
+export function useCancelSample(animeId: number): UseMutationResult<null, Error, void> {
+  const client = useQueryClient()
+
+  return useMutation<null, Error, void>({
+    mutationFn: () => apiFetch<null>(`/api/anime/${animeId}/sample`, { method: 'DELETE' }),
+    onSuccess: () => {
+      refreshAfterSample(client, animeId, null)
     },
   })
 }

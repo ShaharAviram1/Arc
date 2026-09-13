@@ -151,9 +151,17 @@ async def _maybe_enrich(ctx: JobContext, anime: Anime) -> None:
         Episode.air_at.isnot(None),
         Episode.air_at <= func.now(),
     )
-    if anime.banner_url is not None and anime.cover_large_url is not None:
-        # Cheap test first: a row with both images only needs the episode
-        # query when something might still be missing below it.
+    if (
+        anime.backdrop_url is not None
+        and anime.banner_url is not None
+        and anime.cover_large_url is not None
+    ):
+        # Cheap test first: a row with all three images only needs the episode
+        # query when something might still be missing below it. The same three
+        # columns :func:`arc.services.tmdb.jobs._missing_key_art` reads, in
+        # Python because this one has the row in hand — ``backdrop_url`` among
+        # them, since only TMDB writes it and a refresh is when a followed show
+        # is closest to somebody's attention (owner, 2026-09-13).
         if not await ctx.session.scalar(select(missing_still)):
             return
     followed = await ctx.session.scalar(

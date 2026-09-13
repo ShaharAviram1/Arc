@@ -17,6 +17,8 @@ from arc.config import ConfigurationError
 from arc.services.acquisition.qbit import (
     API,
     COMPLETE_STATES,
+    SLOW_INACTIVE_SECONDS,
+    SLOW_RATE_KIB,
     STOP_AT_SHARE_LIMIT,
     QbitClient,
     QbitError,
@@ -205,6 +207,70 @@ def test_completion_time_is_read_when_the_client_has_one() -> None:
     assert row.completed_at.year == 2023
 
 
+# --- Swarm counts: absent, unknown and zero are three different things -------
+
+
+def swarm(**fields: object) -> TorrentInfo:
+    row = TorrentInfo.from_json(
+        {"hash": "a", "name": "n", "progress": 0.3, "state": "stalledDL", **fields}
+    )
+    assert row is not None
+    return row
+
+
+def test_the_swarm_counts_are_read_when_the_client_reports_them() -> None:
+    row = swarm(num_seeds=2, num_leechs=1, num_complete=9, num_incomplete=4)
+
+    assert (row.swarm_seeds, row.swarm_peers) == (9, 4), "the tracker's figures"
+    assert (row.num_seeds, row.num_leechs) == (2, 1), "and the connected ones, for the log"
+    assert row.dead_swarm is False
+
+
+def test_a_client_that_reports_no_counts_says_nothing_about_the_swarm() -> None:
+    """Which is not the same as saying nobody is there — the stall rule cares."""
+    row = swarm()
+
+    assert row.swarm_seeds is None and row.swarm_peers is None
+    assert row.dead_swarm is False
+
+
+def test_minus_one_means_not_scraped_yet_rather_than_zero() -> None:
+    """qBittorrent sends -1 for a tracker figure it has not asked for yet."""
+    row = swarm(num_seeds=0, num_leechs=0, num_complete=-1, num_incomplete=-1)
+
+    assert row.swarm_seeds is None and row.swarm_peers is None
+    assert row.dead_swarm is False, "unscraped is not empty"
+
+
+def test_a_dead_swarm_reports_zero_and_means_it() -> None:
+    row = swarm(num_seeds=0, num_leechs=0, num_complete=0, num_incomplete=0)
+
+    assert (row.swarm_seeds, row.swarm_peers) == (0, 0)
+    assert row.dead_swarm is True
+
+
+def test_connecting_to_nobody_this_instant_is_not_a_dead_swarm() -> None:
+    """The bug this property exists to avoid: ``num_seeds`` is 0 all the time.
+
+    A healthy 30 %-done torrent between announces reports no connections and a
+    tracker that has seen twelve seeders. Reading the first figure would delete
+    it (:func:`arc.services.acquisition.jobs.stall_reason`).
+    """
+    row = swarm(num_seeds=0, num_leechs=0, num_complete=12, num_incomplete=3)
+
+    assert row.dead_swarm is False
+
+
+def test_time_active_is_read_and_is_not_the_age() -> None:
+    row = swarm(time_active=45)
+
+    assert row.time_active == 45
+
+
+def test_a_client_that_does_not_report_time_active_says_nothing() -> None:
+    assert swarm().time_active is None
+
+
 # --- Delete -----------------------------------------------------------------
 
 
@@ -263,6 +329,13 @@ async def test_the_policy_stops_seeding_and_caps_the_upload() -> None:
     assert stub.preferences == [
         {
             "up_limit": 524288,
+            "queueing_enabled": True,
+            "max_active_downloads": 8,
+            "max_active_torrents": 12,
+            "dont_count_slow_torrents": True,
+            "slow_torrent_dl_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_ul_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_inactive_timer": SLOW_INACTIVE_SECONDS,
             "max_ratio_enabled": True,
             "max_ratio": 0,
             "max_ratio_act": STOP_AT_SHARE_LIMIT,
@@ -271,6 +344,20 @@ async def test_the_policy_stops_seeding_and_caps_the_upload() -> None:
         }
     ]
     assert sent == stub.preferences[0], "what it reports is what it sent"
+
+
+async def test_the_policy_bounds_the_download_queue() -> None:
+    """The limits Arc owns because a container restart loses them (2026-09-13)."""
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.apply_policy(max_active_downloads=4, max_active_torrents=6)
+
+    sent = stub.preferences[0]
+    assert sent["queueing_enabled"] is True, "without it the limits are ignored"
+    assert sent["max_active_downloads"] == 4
+    assert sent["max_active_torrents"] == 6
+    assert sent["dont_count_slow_torrents"] is True
 
 
 def test_the_share_limit_action_is_stop_not_remove() -> None:
@@ -287,14 +374,29 @@ async def test_the_upload_cap_is_sent_in_bytes_per_second() -> None:
     assert stub.preferences[0]["up_limit"] == 65536
 
 
-async def test_a_seeding_deployment_only_gets_the_rate_cap() -> None:
-    """Arc does not undo a share limit an operator who seeds set by hand."""
+async def test_a_seeding_deployment_keeps_its_own_share_limits() -> None:
+    """Arc does not undo a share limit an operator who seeds set by hand.
+
+    The queue limits still go: how many downloads run at once is not a
+    statement about uploading.
+    """
     stub = QbitStub()
 
     async with client(stub) as qbit:
         await qbit.apply_policy(seeding=True, upload_limit_kib=1024)
 
-    assert stub.preferences == [{"up_limit": 1048576}]
+    assert stub.preferences == [
+        {
+            "up_limit": 1048576,
+            "queueing_enabled": True,
+            "max_active_downloads": 8,
+            "max_active_torrents": 12,
+            "dont_count_slow_torrents": True,
+            "slow_torrent_dl_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_ul_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_inactive_timer": SLOW_INACTIVE_SECONDS,
+        }
+    ]
 
 
 async def test_dht_and_pex_are_never_touched() -> None:

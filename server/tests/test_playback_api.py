@@ -434,6 +434,88 @@ async def test_ninety_per_cent_completes_advances_the_list_and_queues_a_recomput
     assert len(await wants_jobs(api_factory)) == 1
 
 
+async def test_pressing_play_activates_a_dormant_entry(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-A9 counts Play, and counts it from the first report.
+
+    Thirty seconds in is the user asking Arc for this show; waiting for 90 %
+    would mean the next episode only started downloading after they had
+    finished this one.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950033)
+    await follow(api_factory, user, anime_id, progress=10)
+
+    body = await post_progress(client, ids[11], 30.0)
+
+    assert body == {"completed": False, "newly_completed": False, "list_progress": None}
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None and entry.activated_at is not None
+    # And nothing else about the row moved: this is not a list change.
+    assert entry.progress == 10
+    assert entry.mal_dirty is False
+
+
+async def test_pressing_play_on_an_unlisted_show_creates_no_entry(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """ "Pressed play" is not "is watching this show"; FR-S4 draws that line
+    at the completion, and drawing it here would put a show on somebody's list
+    — and into their MyAnimeList push queue — because they opened an episode.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950034)
+
+    await post_progress(client, ids[1], 30.0)
+
+    assert await entry_of(api_factory, user, anime_id) is None
+
+
+async def test_completing_an_episode_activates_a_dormant_entry(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-A9: watching an episode is the plainest touch there is.
+
+    A show a MyAnimeList import brought in starts fetching the moment its owner
+    finishes an episode of it, with no button pressed.
+    """
+    anime_id, ids = await add_show(api_factory, anilist_id=950030)
+    await follow(api_factory, user, anime_id, progress=10)
+    assert (await entry_of(api_factory, user, anime_id)).activated_at is None
+
+    await post_progress(client, ids[11], DURATION * 0.90)
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None and entry.activated_at is not None
+
+
+async def test_a_rewatch_activates_the_entry_even_though_nothing_advances(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The stamp is about the user being here, not about the number moving."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950031)
+    await follow(api_factory, user, anime_id, progress=11)
+
+    body = await post_progress(client, ids[2], DURATION * 0.95)
+
+    assert body["list_progress"] == 11, "never downwards (FR-M4)"
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None and entry.activated_at is not None
+
+
+async def test_the_entry_a_completion_creates_is_activated(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """FR-S4's auto-create is a user choice, so it is activated on the spot."""
+    anime_id, ids = await add_show(api_factory, anilist_id=950032)
+
+    await post_progress(client, ids[1], DURATION * 0.95)
+
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None
+    assert entry.status is ListStatus.WATCHING
+    assert entry.activated_at is not None
+
+
 async def test_a_second_report_past_the_threshold_completes_nothing_new(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:

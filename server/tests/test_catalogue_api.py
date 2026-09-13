@@ -27,7 +27,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arc.api.deps import ADMIN_REQUIRED, NOT_AUTHENTICATED
 from arc.db import SessionFactory
-from arc.models import Anime, Episode, Job, ListEntry, ListStatus, UpdatedBy, UserRole
+from arc.models import (
+    Anime,
+    Episode,
+    Job,
+    ListEntry,
+    ListStatus,
+    Setting,
+    UpdatedBy,
+    User,
+    UserRole,
+)
+from arc.services.acquisition.wants import compute_wants
 from arc.services.catalog import Breaker, CatalogService
 from tests.anilist_mock import (
     FRIEREN_ID,
@@ -807,6 +818,128 @@ async def test_detail_needs_a_session(anon_client: AsyncClient) -> None:
     assert (await anon_client.get("/api/anime/1")).status_code == 401
 
 
+# --- The slot cap on a show page (FR-A10) -----------------------------------
+
+
+async def seed_waiting_list(factory: SessionFactory, count: int) -> list[int]:
+    """``count`` cached, activated, planned shows for the logged-in viewer.
+
+    Index 0 is the **oldest** entry, so it is the one the cap pushes out when
+    there are more shows than slots. The rows carry ``refreshed_at`` and a
+    detail source, which is what keeps ``GET /api/anime/{id}`` from trying to
+    refresh them against the AniList fake.
+    """
+    moment = datetime.now(UTC)
+    ids: list[int] = []
+    async with factory() as session:
+        user = (await session.scalars(select(User).where(User.email == USER_EMAIL))).one()
+        for index in range(count):
+            anime = Anime(
+                anilist_id=970100 + index,
+                title_romaji=f"Slot Show {index}",
+                status="FINISHED",
+                episodes=4,
+                detail_source="anilist",
+                summary_source="anilist",
+                refreshed_at=moment,
+            )
+            session.add(anime)
+            await session.flush()
+            session.add_all(
+                Episode(
+                    anime_id=anime.id,
+                    number=number,
+                    air_at=moment - timedelta(days=10 - number),
+                )
+                for number in range(1, 5)
+            )
+            entry = ListEntry(
+                user_id=user.id,
+                anime_id=anime.id,
+                status=ListStatus.PLANNED,
+                activated_at=moment,
+            )
+            session.add(entry)
+            await session.flush()
+            entry.updated_at = moment - timedelta(hours=count - index)
+            ids.append(anime.id)
+        await session.flush()
+        await compute_wants(session)
+        await session.commit()
+    return ids
+
+
+async def test_a_show_held_back_by_the_slot_cap_says_so(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """FR-A10: "the rest wait visibly on their show page".
+
+    Six shows and a cap of five, so exactly one is held back — and the page
+    carries the two numbers its note reads out ("5 of your 5 shows are
+    fetching") because no user can read those off the admin status endpoint.
+    """
+    ids = await seed_waiting_list(api_factory, 6)
+
+    held = (await user_client.get(f"/api/anime/{ids[0]}")).json()["list_entry"]
+    admitted = (await user_client.get(f"/api/anime/{ids[5]}")).json()["list_entry"]
+
+    assert held["waiting"] is True
+    assert held["waiting_reason"] == "slot"
+    assert held["fetching_count"] == 5
+    assert held["slot_cap"] == 5
+    assert admitted["waiting"] is False
+    assert admitted["waiting_reason"] is None
+    assert admitted["fetching_count"] == 5
+
+
+async def test_a_show_under_the_cap_is_not_waiting(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Two shows, a cap of five: nobody waits, and the note never appears."""
+    ids = await seed_waiting_list(api_factory, 2)
+
+    body = (await user_client.get(f"/api/anime/{ids[0]}")).json()
+
+    assert body["list_entry"]["waiting"] is False
+    assert body["list_entry"]["fetching_count"] == 2
+    assert body["list_entry"]["slot_cap"] == 5
+
+
+async def test_a_paused_server_says_so_instead_of_promising_a_slot(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """ "Arc starts this one when one of them finishes" is false while paused.
+
+    Nothing finishing starts anything: ``compute_wants`` does not run at all.
+    So the reason travels with the flag and the page changes its sentence.
+    """
+    ids = await seed_waiting_list(api_factory, 6)
+    try:
+        async with api_factory() as session:
+            await session.merge(Setting(key="acquisition_paused", value=True))
+            await session.commit()
+
+        body = (await user_client.get(f"/api/anime/{ids[0]}")).json()
+    finally:
+        # The settings table outlives one test in this module, and a pause left
+        # behind would quietly stop every reconciliation after it.
+        async with api_factory() as session:
+            await session.merge(Setting(key="acquisition_paused", value=False))
+            await session.commit()
+
+    assert body["list_entry"]["waiting"] is True
+    assert body["list_entry"]["waiting_reason"] == "paused"
+
+
+async def test_a_show_that_is_not_on_the_list_carries_no_slot_picture(
+    user_client: AsyncClient,
+) -> None:
+    """No entry, nothing to wait for — and no pass over the list to pay for."""
+    anime_id = await frieren_id(user_client)
+
+    assert (await user_client.get(f"/api/anime/{anime_id}")).json()["list_entry"] is None
+
+
 # --- List states ------------------------------------------------------------
 
 
@@ -829,6 +962,32 @@ async def test_put_creates_the_entry_and_caches_the_show(
         episodes = list((await session.scalars(select(Episode))).all())
     assert anime is not None and anime.title_english == "Frieren: Beyond Journey’s End"
     assert len(episodes) == 28
+
+
+async def test_put_activates_the_entry_so_acquisition_starts(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """FR-A9: the PUT is the user touching the show in Arc.
+
+    Including a PUT that changes nothing — re-sending the status a show already
+    has is exactly how the Show page's "Fetch this show" button wakes a row a
+    MyAnimeList import created.
+    """
+    anime_id = await frieren_id(user_client)
+    response = await user_client.put(f"/api/list/{anime_id}", json={"status": "watching"})
+
+    assert response.json()["dormant"] is False
+    assert response.json()["activated_at"] is not None
+    entry = await entry_row(api_factory, anime_id)
+    first = entry.activated_at
+    assert first is not None
+
+    # A second, identical PUT leaves the *first* moment alone: the column
+    # answers "has the user ever engaged with this show here?", and
+    # ``updated_at`` beside it answers "when did they last?".
+    await user_client.put(f"/api/list/{anime_id}", json={"status": "watching"})
+    again = await entry_row(api_factory, anime_id)
+    assert again.activated_at == first
 
 
 async def test_put_marks_the_entry_dirty_for_mal_but_writes_nothing(
@@ -935,10 +1094,22 @@ async def test_get_list_returns_the_show_and_the_entry(user_client: AsyncClient)
         "progress": 0,
         "score": 9,
         "updated_at": rows[0]["entry"]["updated_at"],
+        # The PUT above *is* the touch (FR-A9), so the row is live rather than
+        # dormant and My List shows no "imported" badge on it.
+        "activated_at": rows[0]["entry"]["activated_at"],
+        "dormant": False,
+        # FR-A10's slot picture is a show-page field for the same reason the
+        # MAL badge below it is: working it out costs a pass over the caller's
+        # whole list, and My List renders neither.
+        "waiting": False,
+        "waiting_reason": None,
+        "fetching_count": 0,
+        "slot_cap": 0,
         # The MyAnimeList badge is a show-page field (M9): computing it per row
         # here would be a query per card, and the list does not render it.
         "mal_sync": None,
     }
+    assert rows[0]["entry"]["activated_at"] is not None
 
 
 async def test_a_list_row_carries_the_studio_the_genres_and_the_banner(

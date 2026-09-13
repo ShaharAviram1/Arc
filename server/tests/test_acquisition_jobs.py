@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -20,31 +20,45 @@ from arc.models import Episode, EpisodeState, Job, JobStatus, MediaFile, Torrent
 from arc.services.acquisition import jobs as acquisition_jobs
 from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition import qbit as qbit_module
+from arc.services.acquisition import rules as acquisition_rules
 from arc.services.acquisition.jobs import (
     GIVE_UP_AFTER,
     NO_RELEASE,
     REMOVED_FROM_CLIENT,
+    STALL_METADATA_AFTER,
+    STALL_NO_BYTES_AFTER,
     STARTED_KEY,
     largest_video,
     poll_qbit,
     qbit_apply_policy,
+    qbit_cancel,
     retry_delay,
     search_release,
+    stall_reason,
 )
 from arc.services.acquisition.names import (
+    QBIT_CANCEL,
     QBIT_POLICY,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
     search_dedupe_key,
 )
-from arc.services.acquisition.qbit import SEEDING_STATES, QbitUnavailable
-from arc.services.acquisition.rules import PAUSED_KEY
+from arc.services.acquisition.qbit import (
+    QBIT_CANCELLED,
+    QBIT_REJECTED,
+    QBIT_STALLED,
+    SEEDING_STATES,
+    QbitUnavailable,
+)
+from arc.services.acquisition.rules import BYTES_PER_GB, PAUSED_KEY
+from arc.services.acquisition.wants import cancel_if_unwanted
 from arc.services.jobs.registry import JobContext
 from arc.services.library.names import MATCH_FILE
 from tests.acquisition_helpers import (
     NyaaStub,
     QbitStub,
     acquisition_settings,
+    fake_free_space,
     force_transport,
     make_anime,
     make_entry,
@@ -291,23 +305,47 @@ async def test_an_episode_that_vanished_is_not_an_error(
     assert wired.nyaa.queries == []
 
 
-async def test_reusing_an_existing_torrent_row_rather_than_duplicating_it(
+async def test_a_release_this_episode_already_tried_is_not_tried_again(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``info_hash`` is unique; a retry after a crash must not violate it."""
+    """2026-09-13: one attempt per release, whatever became of it.
+
+    A ``torrents`` row is only ever there because a previous attempt committed
+    — ``search_release`` is one transaction — so the row means "this was tried
+    and it did not produce the episode". Taking it again would re-add the same
+    magnet and wait out the same six hours.
+    """
+    await set_setting(db_session, "preferred_groups", ["SubsPlease"])
     wired, episode = await wire(
         db_session, monkeypatch, tmp_path, anilist_id=962007, email="retryrow@arc.test"
     )
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+    first = await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+    assert first is not None and first.info_hash == SUBSPLEASE_1080
+    first.qbit_state = QBIT_STALLED
     episode.state = EpisodeState.WANTED
     await db_session.flush()
 
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
 
     rows = (
-        await db_session.scalars(select(Torrent).where(Torrent.info_hash == SUBSPLEASE_1080))
+        await db_session.scalars(
+            select(Torrent).where(Torrent.episode_id == episode.id).order_by(Torrent.id)
+        )
     ).all()
-    assert len(rows) == 1
+    assert [row.info_hash for row in rows] != [SUBSPLEASE_1080], "the stalled one was skipped"
+    assert len(rows) == 2, "and the next candidate down was taken"
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(Torrent).where(Torrent.info_hash == SUBSPLEASE_1080)
+                )
+            ).all()
+        )
+        == 1
+    ), "``info_hash`` is unique and nothing duplicated it"
 
 
 # --- A hash another episode already holds -----------------------------------
@@ -622,6 +660,53 @@ async def test_a_paused_search_does_not_pile_up_behind_one_already_queued(
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}, job_id=2))
 
     assert len(await queued(db_session, SEARCH_RELEASE)) == 1
+
+
+async def test_a_held_search_requeues_itself_and_touches_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-T6: a full disk stops a search exactly the way a pause does.
+
+    Same requeue, same fifteen minutes, same untouched episode — the only
+    difference is the log line, because one of the two brakes an operator
+    pressed and the other lifts itself.
+    """
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962064, email="held1@arc.test"
+    )
+    fake_free_space(monkeypatch, acquisition_rules, 1 * BYTES_PER_GB)
+    before = datetime.now(UTC)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries == [], "a held search must not ask nyaa anything"
+    assert wired.qbit.calls == [], "nor add a magnet"
+    assert episode.state is EpisodeState.WANTED, "the episode is left exactly as it was"
+    assert await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id)) is None
+
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert len(jobs) == 1, "the search is still owed, so it is still on the queue"
+    assert jobs[0].payload["episode_id"] == episode.id
+    delay = jobs[0].run_after - before
+    assert (
+        acquisition_jobs.PAUSED_RETRY - timedelta(seconds=5)
+        <= delay
+        <= (acquisition_jobs.PAUSED_RETRY + timedelta(seconds=5))
+    )
+
+
+async def test_a_search_runs_normally_when_the_floor_is_clear(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """So the guard cannot be on by accident on somebody else's machine."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962065, email="held2@arc.test"
+    )
+    fake_free_space(monkeypatch, acquisition_rules, 50 * BYTES_PER_GB)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries != []
 
 
 async def test_polling_keeps_running_while_acquisition_is_paused(
@@ -1025,6 +1110,725 @@ async def test_a_torrent_outside_arcs_category_is_never_touched(
     assert episode.state is EpisodeState.UNAVAILABLE, "invisible to Arc is the same as gone"
 
 
+# --- Stalls: a torrent that is going nowhere (2026-09-13) -------------------
+
+
+def info(
+    state: str,
+    *,
+    progress: float = 0.0,
+    dlspeed: int = 0,
+    time_active: int | None = 0,
+    num_seeds: int | None = 0,
+    num_leechs: int | None = 0,
+    num_complete: int | None = None,
+    num_incomplete: int | None = None,
+) -> qbit_module.TorrentInfo:
+    """A client row. The defaults are a torrent that has just been added.
+
+    ``num_complete``/``num_incomplete`` default to ``None`` — the tracker has
+    not been scraped — because that is what the client reports for the first
+    minute or two of every torrent's life and the rule has to be safe there.
+    """
+    return qbit_module.TorrentInfo(
+        hash="a" * 40,
+        name="release.mkv",
+        progress=progress,
+        state=state,
+        dlspeed=dlspeed,
+        time_active=time_active,
+        num_seeds=num_seeds,
+        num_leechs=num_leechs,
+        num_complete=num_complete,
+        num_incomplete=num_incomplete,
+    )
+
+
+HOUR = 3600
+
+#: ``(what the client says, the expected reason)``. The table *is* the rule —
+#: every branch of :func:`stall_reason`, and every reason it must refuse to
+#: call a stall. The clock throughout is ``time_active``: how long qBittorrent
+#: has been *working on* the torrent, never how old Arc's row is.
+STALLS: list[tuple[qbit_module.TorrentInfo, str | None]] = [
+    # Metadata: an hour of asking is a magnet nobody holds.
+    (info("metaDL", time_active=61 * 60), "no metadata after 60 minutes"),
+    (info("metaDL", time_active=59 * 60), None),
+    (info("forcedMetaDL", time_active=3 * HOUR), "no metadata after 60 minutes"),
+    # Six hours of *activity* and not one byte.
+    (info("downloading", time_active=7 * HOUR), "no bytes after 6 hours"),
+    (info("stalledDL", time_active=7 * HOUR), "no bytes after 6 hours"),
+    (info("downloading", time_active=5 * HOUR), None),
+    # Bytes have arrived, so "no bytes" does not apply...
+    (info("downloading", progress=0.4, time_active=7 * HOUR), None),
+    # ...and the swarm has to be *known* empty for "no seeders" to.
+    (
+        info(
+            "stalledDL",
+            progress=0.6,
+            time_active=7 * HOUR,
+            num_complete=0,
+            num_incomplete=0,
+        ),
+        "no seeders after 6 hours",
+    ),
+    # The bug the tracker figures exist to avoid: a healthy 60 %-done torrent
+    # between announces is connected to nobody and its tracker has seen twelve.
+    (
+        info("stalledDL", progress=0.6, time_active=7 * HOUR, num_complete=12, num_incomplete=3),
+        None,
+    ),
+    # And an unscraped tracker says nothing at all, whatever it looks like.
+    (info("stalledDL", progress=0.6, time_active=7 * HOUR), None),
+    (
+        info("stalledDL", progress=0.6, time_active=7 * HOUR, num_complete=-1, num_incomplete=-1),
+        None,
+    ),
+    # A known-empty swarm on a torrent that has not started either: the swarm
+    # is the more informative of the two sentences, so it is the one shown.
+    (
+        info("downloading", time_active=7 * HOUR, num_complete=0, num_incomplete=0),
+        "no seeders after 6 hours",
+    ),
+    # One seeder is not an empty swarm.
+    (
+        info("downloading", progress=0.6, time_active=7 * HOUR, num_complete=1, num_incomplete=0),
+        None,
+    ),
+    # **The queue.** Nine hours old, thirty seconds of work: a torrent the
+    # client has only just let out of ``queuedDL``. ``stalledDL`` means "no
+    # bytes this instant", which is what its first seconds look like.
+    (info("stalledDL", time_active=30), None),
+    (info("downloading", time_active=30), None),
+    # Bytes arriving right now settles it whatever the history says.
+    (info("downloading", dlspeed=900_000, time_active=9 * HOUR), None),
+    # A client that does not report the clock stalls nothing.
+    (info("metaDL", time_active=None), None),
+    (info("downloading", time_active=None), None),
+    # A person's own decision, never a stall.
+    (info("stoppedDL", time_active=4 * 24 * HOUR), None),
+    (info("pausedDL", time_active=4 * 24 * HOUR), None),
+    # Waiting its turn behind ``max_active_downloads``.
+    (info("queuedDL", time_active=2 * 24 * HOUR), None),
+    # Busy, or broken in a way this rule has nothing to say about.
+    (info("checkingDL", time_active=2 * 24 * HOUR), None),
+    (info("moving", progress=1.0, time_active=2 * 24 * HOUR), None),
+    (info("error", time_active=2 * 24 * HOUR), None),
+    # Finished. Nothing left to wait for.
+    (info("uploading", progress=1.0, time_active=2 * 24 * HOUR), None),
+]
+
+
+@pytest.mark.parametrize(("reported", "expected"), STALLS, ids=lambda value: str(value)[:56])
+def test_the_stall_rule(reported: qbit_module.TorrentInfo, expected: str | None) -> None:
+    assert stall_reason(reported) == expected
+
+
+def test_the_thresholds_are_configurable() -> None:
+    reported = info("downloading", time_active=2 * HOUR)
+
+    assert stall_reason(reported) is None
+    assert stall_reason(reported, no_bytes_after=timedelta(hours=1)) == "no bytes after 1 hour"
+
+
+def test_the_defaults_are_the_settings_defaults() -> None:
+    """One number, two homes: a drift here is a rule that says one thing and does another."""
+    settings = Settings(env="test", _env_file=None)  # type: ignore[call-arg]
+
+    assert timedelta(minutes=settings.stall_metadata_minutes) == STALL_METADATA_AFTER
+    assert timedelta(hours=settings.stall_no_bytes_hours) == STALL_NO_BYTES_AFTER
+
+
+async def stalling(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    anilist_id: int,
+    email: str,
+    age: timedelta = timedelta(days=1),
+) -> tuple[Wired, Episode, Torrent]:
+    """A downloading episode whose torrent row was written ``age`` ago.
+
+    The row's age is deliberately *old* in every one of these: it is not what
+    the rule reads, and a test that passed because the row was young would be
+    testing nothing.
+    """
+    wired, episode, torrent = await downloading(
+        session, monkeypatch, tmp_path, anilist_id=anilist_id, email=email
+    )
+    torrent.added_at = datetime.now(UTC) - age
+    await session.flush()
+    return wired, episode, torrent
+
+
+async def test_a_magnet_with_no_metadata_is_removed_and_the_episode_retried(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact production failure: three slots held by dead 2018 uploads."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962070, email="stall1@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="metaDL", time_active=2 * HOUR)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == "no metadata after 60 minutes"
+    assert torrent.qbit_state == QBIT_STALLED
+    assert wired.qbit.deleted == [{"hashes": torrent.info_hash.lower(), "deleteFiles": "true"}]
+    assert wired.qbit.torrents == [], "and it is gone from the client"
+
+
+async def test_a_download_with_no_bytes_after_six_hours_is_removed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962071, email="stall2@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="stalledDL", time_active=7 * HOUR)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == "no bytes after 6 hours"
+    assert torrent.qbit_state == QBIT_STALLED
+    assert wired.qbit.deleted[0]["deleteFiles"] == "true"
+
+
+async def test_a_swarm_the_tracker_says_is_empty_is_removed_half_way_through(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962072, email="stall3@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash,
+        progress=0.62,
+        state="stalledDL",
+        time_active=7 * HOUR,
+        num_complete=0,
+        num_incomplete=0,
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == "no seeders after 6 hours"
+
+
+async def test_a_torrent_connected_to_nobody_with_a_live_tracker_is_left_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blocker 3: ``num_seeds`` is 0 all the time on healthy torrents."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962081, email="stall12@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash,
+        progress=0.6,
+        state="stalledDL",
+        time_active=7 * HOUR,
+        num_seeds=0,
+        num_leechs=0,
+        num_complete=12,
+        num_incomplete=4,
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.deleted == [], "60 % of a file was very nearly deleted here"
+
+
+async def test_an_unscraped_tracker_is_not_an_empty_swarm(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962082, email="stall13@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash,
+        progress=0.6,
+        state="stalledDL",
+        time_active=7 * HOUR,
+        num_complete=-1,
+        num_incomplete=-1,
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.deleted == []
+
+
+async def test_a_torrent_just_out_of_the_queue_is_left_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blocker 2: the row is nine hours old and the download is 30 s old."""
+    wired, episode, torrent = await stalling(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962083,
+        email="stall14@arc.test",
+        age=timedelta(hours=9),
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="stalledDL", time_active=30)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state == "stalledDL"
+    assert wired.qbit.deleted == []
+
+
+async def test_the_same_torrent_seven_active_hours_later_is_removed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half of blocker 2's pair: activity is what condemns it."""
+    wired, episode, torrent = await stalling(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962084,
+        email="stall15@arc.test",
+        age=timedelta(hours=9),
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="stalledDL", time_active=7 * HOUR)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert torrent.qbit_state == QBIT_STALLED
+
+
+async def test_a_torrent_making_progress_is_left_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962073, email="stall4@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash,
+        progress=0.31,
+        state="downloading",
+        time_active=2 * 24 * HOUR,
+        num_complete=14,
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state == "downloading"
+    assert wired.qbit.deleted == []
+
+
+async def test_a_young_torrent_is_left_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962074, email="stall5@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="metaDL", time_active=20 * 60)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.deleted == []
+
+
+async def test_a_torrent_somebody_stopped_is_never_a_stall(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Production has 297 of these, stopped on purpose."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962075, email="stall6@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash, progress=0.0, state="stoppedDL", time_active=5 * 24 * HOUR
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state == "stoppedDL"
+    assert wired.qbit.deleted == []
+
+
+async def test_a_torrent_queued_behind_the_download_limit_is_never_a_stall(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With four hundred wants most of the queue is ``queuedDL`` for hours."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962076, email="stall7@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash, progress=0.0, state="queuedDL", time_active=2 * 24 * HOUR
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.deleted == []
+
+
+async def test_a_client_that_does_not_report_the_clock_stalls_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962089, email="stall16@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="metaDL")
+    del wired.qbit.torrents[0]["time_active"]
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.deleted == []
+
+
+async def test_the_thresholds_come_from_the_environment(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962077, email="stall8@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash, progress=0.0, state="downloading", time_active=2 * HOUR
+    )
+    impatient = acquisition_settings(tmp_path, stall_no_bytes_hours=1)
+
+    await poll_qbit(context(db_session, impatient, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == "no bytes after 1 hour"
+
+
+async def test_a_stalled_row_keeps_saying_stalled_once_the_torrent_is_gone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Arc is the reason it is missing; "missing" would lose the reason."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962078, email="stall9@arc.test"
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="stalledDL", time_active=8 * HOUR)
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+    assert torrent.qbit_state == QBIT_STALLED
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.unavailable_reason == "no bytes after 6 hours", "not 'removed from the client'"
+
+
+async def test_a_stalled_row_does_not_drag_the_next_attempt_back(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blocker 1. The old row outlives the stall; the new download must not.
+
+    Rows are polled oldest first, so without the ``DECIDED`` guard the stalled
+    attempt — gone from the client, by Arc's own hand — moved the episode from
+    ``downloading`` back to ``unavailable`` on every poll, and the release that
+    was actually working was never handed to the library.
+    """
+    await set_setting(db_session, "preferred_groups", ["SubsPlease"])
+    wired, episode, old = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962090, email="stall17@arc.test"
+    )
+    wired.qbit.add_torrent(old.info_hash, progress=0.0, state="metaDL", time_active=2 * HOUR)
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+    assert episode.state is EpisodeState.UNAVAILABLE
+
+    # FR-A6's retry finds another release, which starts downloading properly.
+    episode.state = EpisodeState.WANTED
+    await db_session.flush()
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+    fresh = await db_session.scalar(
+        select(Torrent)
+        .where(Torrent.episode_id == episode.id, Torrent.id != old.id)
+        .order_by(Torrent.id.desc())
+    )
+    assert fresh is not None
+    assert episode.state is EpisodeState.DOWNLOADING
+    directory = tmp_path / "downloads" / str(episode.id)
+    directory.mkdir(parents=True)
+    (directory / "ep.mkv").write_bytes(b"x" * 4096)
+    wired.qbit.add_torrent(
+        fresh.info_hash,
+        progress=1.0,
+        state="uploading",
+        content_path=f"/data/downloads/{episode.id}",
+        time_active=600,
+    )
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.MATCHING, "the new download was handed off"
+    assert old.qbit_state == QBIT_STALLED, "and the old row still says what became of it"
+    assert len(await queued(db_session, MATCH_FILE)) == 1
+
+
+async def test_a_stalled_torrent_still_in_the_client_is_deleted_again(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Should-fix 6: the rows are flushed first, so the delete may be retried.
+
+    Simulated by marking the row ``stalled`` with the torrent still there —
+    which is exactly the state a client that died between the flush and the
+    ``torrents/delete`` leaves behind.
+    """
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962091, email="stall18@arc.test"
+    )
+    torrent.qbit_state = QBIT_STALLED
+    episode.state = EpisodeState.UNAVAILABLE
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.0, state="stalledDL", time_active=30)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.deleted == [{"hashes": torrent.info_hash.lower(), "deleteFiles": "true"}]
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is EpisodeState.UNAVAILABLE
+
+
+async def test_a_rejected_torrent_still_in_the_client_is_never_deleted(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """It is holding a file somebody is looking at in review; retention owns it."""
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962092, email="stall19@arc.test"
+    )
+    torrent.qbit_state = QBIT_REJECTED
+    episode.state = EpisodeState.UNAVAILABLE
+    await db_session.flush()
+    wired.qbit.add_torrent(torrent.info_hash, progress=1.0, state="stoppedUP", time_active=HOUR)
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert wired.qbit.deleted == []
+    assert torrent.qbit_state == QBIT_REJECTED
+
+
+async def test_an_unreachable_client_leaves_a_stalling_torrent_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962079, email="stall10@arc.test"
+    )
+    wired.qbit.add_torrent(
+        torrent.info_hash, progress=0.0, state="metaDL", time_active=3 * 24 * HOUR
+    )
+    wired.qbit.down = True
+
+    with pytest.raises(QbitUnavailable):
+        await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert episode.unavailable_reason is None
+    assert torrent.qbit_state == "added"
+
+
+async def test_a_stalled_episode_searches_again_and_avoids_the_dead_release(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole loop: stall → unavailable → FR-A6's retry → another release."""
+    await set_setting(db_session, "preferred_groups", ["SubsPlease"])
+    wired, episode, torrent = await stalling(
+        db_session, monkeypatch, tmp_path, anilist_id=962080, email="stall11@arc.test"
+    )
+    dead = torrent.info_hash
+    wired.qbit.add_torrent(dead, progress=0.0, state="metaDL", time_active=8 * HOUR)
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+    assert episode.state is EpisodeState.UNAVAILABLE
+
+    # What the daily retry does: ``unavailable`` → ``wanted`` → a fresh search.
+    episode.state = EpisodeState.WANTED
+    await db_session.flush()
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    chosen = wired.qbit.added[-1]["urls"]
+    assert dead not in chosen, "the release that stalled is not offered again"
+
+
+# --- qbit_cancel: the client half of a cancellation -------------------------
+
+
+async def cancelled(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    anilist_id: int,
+    email: str,
+) -> tuple[Wired, Episode, Torrent]:
+    """A downloading episode the reconciler has just cancelled."""
+    wired, episode, torrent = await downloading(
+        session, monkeypatch, tmp_path, anilist_id=anilist_id, email=email
+    )
+    wired.qbit.add_torrent(torrent.info_hash, progress=0.2, state="downloading")
+    await session.execute(delete(Want).where(Want.episode_id == episode.id))
+    assert await cancel_if_unwanted(session, episode)
+    await session.flush()
+    return wired, episode, torrent
+
+
+async def a_user_id(session: AsyncSession) -> int:
+    """Any user's id — the want this writes only has to exist, not be anybody's."""
+    found = await session.scalar(select(Want.user_id).limit(1))
+    if found is not None:
+        return int(found)
+    from arc.models import User
+
+    return int((await session.scalars(select(User.id).limit(1))).one())
+
+
+async def test_the_cancel_handler_removes_the_torrent_with_its_files(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962085, email="cancel1@arc.test"
+    )
+
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert wired.qbit.deleted == [{"hashes": torrent.info_hash.lower(), "deleteFiles": "true"}]
+    assert wired.qbit.torrents == []
+
+
+async def test_the_cancel_handler_deletes_the_row_so_the_release_is_pickable_again(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Should-fix 7: a cancel must not cost the episode its best release.
+
+    ``_pick`` bars every hash that has a ``torrents`` row, which is right for a
+    release that was *tried and failed* and wrong for one nobody got round to
+    wanting. So the cancel is the one ending that removes the row — and the
+    proof is that changing your mind a moment later gets the same file.
+    """
+    await set_setting(db_session, "preferred_groups", ["SubsPlease"])
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962093, email="cancel5@arc.test"
+    )
+    was = torrent.info_hash
+    assert was == SUBSPLEASE_1080
+
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert await db_session.scalar(select(Torrent).where(Torrent.info_hash == was)) is None
+    # And the user changes their mind: the same release is chosen again.
+    episode.state = EpisodeState.WANTED
+    db_session.add(Want(user_id=await a_user_id(db_session), episode_id=episode.id))
+    await db_session.flush()
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    again = await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+    assert again is not None and again.info_hash == was
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+async def test_a_stalled_row_still_bars_its_release_after_a_cancel_elsewhere(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half of the rule: ``stalled`` and ``rejected`` rows stay put."""
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962094, email="cancel6@arc.test"
+    )
+    torrent.qbit_state = QBIT_STALLED
+    await db_session.flush()
+
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert wired.qbit.deleted == [], "not this job's row"
+    assert await db_session.scalar(select(Torrent).where(Torrent.id == torrent.id)) is torrent
+
+
+async def test_the_cancel_handler_keeps_the_row_when_the_client_refuses(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The rows are deleted only after the client has answered, so a retry works."""
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962095, email="cancel7@arc.test"
+    )
+    wired.qbit.down = True
+
+    with pytest.raises(QbitUnavailable):
+        await qbit_cancel(
+            context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+        )
+    assert torrent.qbit_state == QBIT_CANCELLED
+
+    wired.qbit.down = False
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert wired.qbit.deleted == [{"hashes": torrent.info_hash.lower(), "deleteFiles": "true"}]
+    assert await db_session.scalar(select(Torrent).where(Torrent.id == torrent.id)) is None
+
+
+async def test_the_cancel_handler_leaves_a_release_chosen_since_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The episode was wanted again before the job ran; only the mark is deleted."""
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962086, email="cancel2@arc.test"
+    )
+    fresh = Torrent(episode_id=episode.id, info_hash="f" * 40, qbit_state="downloading")
+    db_session.add(fresh)
+    await db_session.flush()
+    wired.qbit.add_torrent(fresh.info_hash, progress=0.1, state="downloading")
+
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert wired.qbit.deleted == [{"hashes": torrent.info_hash.lower(), "deleteFiles": "true"}]
+    assert [row["hash"] for row in wired.qbit.torrents] == [fresh.info_hash]
+
+
+async def test_the_cancel_handler_with_nothing_marked_asks_the_client_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Idempotence: the second run of the job, or one whose episode came back."""
+    wired, episode, _ = await downloading(
+        db_session, monkeypatch, tmp_path, anilist_id=962087, email="cancel3@arc.test"
+    )
+    wired.qbit.calls.clear()
+
+    await qbit_cancel(
+        context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+    )
+
+    assert wired.qbit.calls == [], "nothing to delete is not a reason to log in"
+
+
+async def test_the_cancel_handler_raises_when_the_client_is_down(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """So the runner retries it; the rows say what should happen and do not expire."""
+    wired, episode, torrent = await cancelled(
+        db_session, monkeypatch, tmp_path, anilist_id=962088, email="cancel4@arc.test"
+    )
+    wired.qbit.down = True
+
+    with pytest.raises(QbitUnavailable):
+        await qbit_cancel(
+            context(db_session, wired.settings, {"episode_id": episode.id}, job_type=QBIT_CANCEL)
+        )
+
+    assert torrent.qbit_state == "cancelled"
+    assert episode.state is EpisodeState.NOT_WANTED
+
+
 # --- Seeding policy (spec §9) -----------------------------------------------
 
 
@@ -1123,6 +1927,13 @@ async def test_the_policy_handler_writes_the_preferences(
     assert wired.qbit.preferences == [
         {
             "up_limit": 512 * 1024,
+            "queueing_enabled": True,
+            "max_active_downloads": 8,
+            "max_active_torrents": 12,
+            "dont_count_slow_torrents": True,
+            "slow_torrent_dl_rate_threshold": 2,
+            "slow_torrent_ul_rate_threshold": 2,
+            "slow_torrent_inactive_timer": 300,
             "max_ratio_enabled": True,
             "max_ratio": 0,
             "max_ratio_act": 0,
@@ -1130,6 +1941,32 @@ async def test_the_policy_handler_writes_the_preferences(
             "max_seeding_time": 0,
         }
     ]
+
+
+async def test_the_policy_handler_sends_the_configured_queue_limits(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The four keys of the 2026-09-13 decision, with the operator's figures."""
+    wired, _ = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962062, email="policy4@arc.test"
+    )
+    queued_up = acquisition_settings(
+        tmp_path, qbit_max_active_downloads=3, qbit_max_active_torrents=20
+    )
+
+    await qbit_apply_policy(context(db_session, queued_up, {}, job_type=QBIT_POLICY))
+
+    sent = wired.qbit.preferences[0]
+    assert sent["queueing_enabled"] is True
+    assert sent["max_active_downloads"] == 3
+    assert sent["max_active_torrents"] == 20
+    assert sent["dont_count_slow_torrents"] is True
+    # A torrent is only counted out after five minutes of moving nothing, so an
+    # ordinary lull never costs a healthy download its slot — and the queue
+    # never *removes* anything: that is the stall rule's job.
+    assert sent["slow_torrent_dl_rate_threshold"] == 2
+    assert sent["slow_torrent_ul_rate_threshold"] == 2
+    assert sent["slow_torrent_inactive_timer"] == 300
 
 
 async def test_the_policy_handler_honours_the_upload_limit_setting(
@@ -1142,7 +1979,8 @@ async def test_the_policy_handler_honours_the_upload_limit_setting(
 
     await qbit_apply_policy(context(db_session, capped, {}, job_type=QBIT_POLICY))
 
-    assert wired.qbit.preferences == [{"up_limit": 131072}]
+    assert wired.qbit.preferences[0]["up_limit"] == 131072
+    assert "max_ratio" not in wired.qbit.preferences[0], "a seeding host keeps its own limits"
 
 
 async def test_the_policy_handler_raises_when_the_client_is_down(

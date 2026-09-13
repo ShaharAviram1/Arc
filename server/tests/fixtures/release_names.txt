@@ -44,6 +44,19 @@
 #     flattened the punctuation nothing else in the filename distinguishes
 #     two shows with different episode counts. A single "!" is just
 #     enthusiasm and is left alone ("Bocchi the Rock!").
+#   * An episode *range* ("01 ~ 12", "01-02", "E01-E12", "001-024") or a
+#     batch marker ("BATCH", "Season Pack") makes the file a
+#     `batch`, whatever else the name says — including a first episode
+#     number, which is what a range's low end looks like to anitopy. A
+#     batch is a whole season, Arc must never fetch one (FR-A4), and the
+#     `episode` a batch line pins is the first of the run, not a claim
+#     that the file is that episode. Both numbers of a range are padded:
+#     "Ranma 1-2" is a name, and no group writes a range that way.
+#   * "Complete" is the exception: it is a batch only when the name names
+#     no single episode. On a run it means the whole show ("Cowboy Bebop
+#     Complete Series"); on one numbered file it is what a group shouts on
+#     the last episode — the same claim "END" makes — so "Yuru Camp - 12
+#     [COMPLETE]" is episode 12.
 
 [SubsPlease] Sousou no Frieren - 05 (1080p) [A1B2C3D4].mkv	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "sousou no frieren", "version": null}
 [SubsPlease] Sousou no Frieren - 28 (1080p) [9F8E7D6C].mkv	{"episode": 28, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "sousou no frieren", "version": null}
@@ -193,6 +206,27 @@ A.Silent.Voice.2016.2160p.BluRay.HEVC-TERMINAL.mkv	{"episode": null, "group": "T
 [MTBB] Sound! Euphonium - 01-13 [BD 1080p] Batch.mkv	{"episode": 1, "group": "MTBB", "kind": "batch", "season": null, "title_key": "sound euphonium", "version": null}
 [Group] Mushishi Zoku Shou - 01-10 [720p].mkv	{"episode": 1, "group": "Group", "kind": "batch", "season": null, "title_key": "mushishi zoku shou", "version": null}
 [Judas] Overlord - S1-S4 - 01-52 [1080p][HEVC].mkv	{"episode": 1, "group": "Judas", "kind": "batch", "season": null, "title_key": "overlord", "version": null}
+# The batches that were *not* caught until 2026-09-13, all seven from the
+# production log of one acquisition run. anitopy reports "- 01 ~ 12" as episode
+# 01 and stops, the old range check was swallowed by the "2" of the show's own
+# name, and a [BATCH] marker was read only when the name gave no number at all
+# — so Arc fetched 6.3 GB of Dagashi Kashi season 2 and transcoded all twelve
+# episodes for the two somebody wanted. A range or a batch marker is now a
+# batch whatever else the name says (FR-A4). The single-episode releases that
+# follow are from the same groups and the same shows, and are the control:
+# nothing about a batch's neighbours may become a batch with it.
+[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": null, "title_key": "dagashi kashi 2", "version": null}
+[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 01 ~ 10 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": 3, "title_key": "shingeki no kyojin", "version": null}
+[Erai-raws] Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2 - 01 ~ 12 [1080p][Multiple Subtitles][Unofficial Batch]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": 2, "title_key": "re zero kara hajimeru isekai seikatsu", "version": null}
+[Erai-raws] Karakai Jouzu no Takagi-san 2 - 01 ~ 12 [1080p][Multiple Subtitle]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": null, "title_key": "karakai jouzu no takagi san 2", "version": null}
+[Erai-raws] Sword Art Online - Alicization - War of Underworld Part 2 - 01 ~ 11 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA][ITA]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": 2, "title_key": "sword art online alicization war of underworld", "version": null}
+[Erai-raws] Quanzhi Gaoshou 2 - 01 ~ 12 [1080p CR WEB-DL AVC AAC][MultiSub] [BATCH]	{"episode": 1, "group": "Erai-raws", "kind": "batch", "season": null, "title_key": "quanzhi gaoshou 2", "version": null}
+[RH] Fukigen na Mononokean - 01-02 (The Morose Mononokean) [English Dubbed] [uncut] [1080p]	{"episode": 1, "group": "RH", "kind": "batch", "season": null, "title_key": "fukigen na mononokean", "version": null}
+[Erai-raws] Dagashi Kashi 2 - 10 [1080p][Multiple Subtitle].mkv	{"episode": 10, "group": "Erai-raws", "kind": "episode", "season": null, "title_key": "dagashi kashi 2", "version": null}
+[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 05 [1080p][Multiple Subtitle].mkv	{"episode": 5, "group": "Erai-raws", "kind": "episode", "season": 3, "title_key": "shingeki no kyojin", "version": null}
+[Erai-raws] Quanzhi Gaoshou 2 - 03 [1080p CR WEB-DL AVC AAC][MultiSub].mkv	{"episode": 3, "group": "Erai-raws", "kind": "episode", "season": null, "title_key": "quanzhi gaoshou 2", "version": null}
+[RH] Fukigen na Mononokean - 07 (The Morose Mononokean) [English Dubbed] [uncut] [1080p]	{"episode": 7, "group": "RH", "kind": "episode", "season": null, "title_key": "fukigen na mononokean", "version": null}
+[Group] Yuru Camp - 12 [COMPLETE][1080p].mkv	{"episode": 12, "group": "Group", "kind": "episode", "season": null, "title_key": "yuru camp", "version": null}
 [SubsPlease] Sousou no Frieren - 06v2 (1080p) [A1B2C3D4].mkv	{"episode": 6, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "sousou no frieren", "version": 2}
 [SubsPlease] Dandadan - 03v3 (1080p) [DEADBEEF].mkv	{"episode": 3, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "dandadan", "version": 3}
 [Erai-raws] Spy x Family - 09v2 [1080p][Multiple Subtitle][12345678].mkv	{"episode": 9, "group": "Erai-raws", "kind": "episode", "season": null, "title_key": "spy x family", "version": 2}

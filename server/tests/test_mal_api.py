@@ -534,6 +534,9 @@ async def test_revert_writes_the_old_value_back_and_queues_the_push(
         assert entry is not None
         assert entry.score == 5
         assert entry.mal_dirty is True
+        # A revert is FR-M7's third user-originated event, so it is a touch in
+        # Arc too (FR-A9): the show stops being a dormant import.
+        assert entry.activated_at is not None
     assert len(await _jobs(api_factory, PUSH)) == 1
     # The cause is on the *row*, not on the job: it is what tells the push that
     # putting a value back is a statement, not an automatic event (FR-M4).
@@ -563,6 +566,9 @@ async def test_reverting_a_removal_puts_the_show_back_on_the_list(
     async with api_factory() as session:
         entry = await session.get(ListEntry, (user_id, anime_id))
         assert entry is not None and entry.status is ListStatus.WATCHING
+        # The entry this recreated is a user putting the show back, so it is
+        # live rather than dormant from the moment it exists (FR-A9).
+        assert entry.activated_at is not None
 
 
 async def test_a_failed_write_cannot_be_reverted(

@@ -9,6 +9,7 @@ users, dropping on a status change and starting the searches actually happen.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -16,20 +17,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
     DEFAULT_PRIORITY,
+    Anime,
     Episode,
     EpisodeState,
     Job,
     ListEntry,
     ListStatus,
     Rendition,
+    Torrent,
+    User,
     Want,
 )
+from arc.services.acquisition import rules
+from arc.services.acquisition.dormancy import REASON_DORMANT
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
+    QBIT_CANCEL,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
+    cancel_dedupe_key,
 )
-from arc.services.acquisition.rules import PAUSED_KEY
+from arc.services.acquisition.qbit import QBIT_CANCELLED, QBIT_REJECTED, QBIT_STALLED
+from arc.services.acquisition.rules import (
+    BYTES_PER_GB,
+    MIN_FREE_KEY,
+    PAUSED_KEY,
+    SLOT_CAP_KEY,
+)
+from arc.services.acquisition.slots import SlotShow, assign_slots
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import (
     REASON_NOT_WANTING,
@@ -37,9 +52,13 @@ from arc.services.acquisition.wants import (
     UNAVAILABLE_RETRY,
     WantsResult,
     compute_wants,
+    slot_view,
     window,
 )
+from arc.services.catalog.airing import FINISHED, RELEASING
 from tests.acquisition_helpers import (
+    acquisition_settings,
+    fake_free_space,
     make_anime,
     make_entry,
     make_episodes,
@@ -850,25 +869,198 @@ async def test_a_released_episode_is_acquired_again_when_the_show_comes_back(
     )
 
 
-async def test_a_downloading_episode_is_not_released_when_the_want_goes(
-    db_session: AsyncSession,
-) -> None:
-    """The DoD's last step: the want goes, the download carries on."""
-    anime = await make_anime(db_session, anilist_id=960017)
-    rows = await make_episodes(db_session, anime, 12, aired_through=12)
-    user = await make_user(db_session, "keep@arc.test")
-    entry = await make_entry(db_session, user, anime, progress=4)
-    await compute_wants(db_session)
+# --- Cancelling a download nobody wants (2026-09-13) ------------------------
+
+
+async def downloading_episode(
+    session: AsyncSession,
+    *,
+    anilist_id: int,
+    email: str,
+    info_hash: str,
+) -> tuple[ListEntry, Episode, Torrent]:
+    """A wanted episode taken as far as ``downloading``, with its torrent row."""
+    anime = await make_anime(session, anilist_id=anilist_id)
+    rows = await make_episodes(session, anime, 12, aired_through=12)
+    user = await make_user(session, email)
+    entry = await make_entry(session, user, anime, progress=4)
+    await compute_wants(session)
     transition(rows[4], EpisodeState.SEARCHING)
     transition(rows[4], EpisodeState.DOWNLOADING)
+    torrent = Torrent(episode_id=rows[4].id, info_hash=info_hash, qbit_state="downloading")
+    session.add(torrent)
+    await session.flush()
+    return entry, rows[4], torrent
+
+
+async def anime_of(session: AsyncSession, episode: Episode) -> Anime:
+    found = await session.get(Anime, episode.anime_id)
+    assert found is not None
+    return found
+
+
+async def cancel_jobs(session: AsyncSession) -> list[Job]:
+    rows = await session.scalars(select(Job).where(Job.type == QBIT_CANCEL).order_by(Job.id))
+    return list(rows.all())
+
+
+async def test_a_download_nobody_wants_any_more_is_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    """Reversed 2026-09-13: it used to run to completion for nobody."""
+    entry, episode, torrent = await downloading_episode(
+        db_session, anilist_id=960017, email="keep@arc.test", info_hash="1" * 40
+    )
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert episode.state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+    assert result.cancelled == 1
+    jobs = await cancel_jobs(db_session)
+    assert [job.payload["episode_id"] for job in jobs] == [episode.id]
+    assert jobs[0].payload["dedupe_key"] == cancel_dedupe_key(episode.id)
+
+
+async def test_another_users_want_keeps_the_download_going(
+    db_session: AsyncSession,
+) -> None:
+    """FR-A2 merges wants, so one user backing out is not the last word."""
+    entry, episode, torrent = await downloading_episode(
+        db_session, anilist_id=960023, email="cancel-mine@arc.test", info_hash="2" * 40
+    )
+    other = await make_user(db_session, "cancel-theirs@arc.test")
+    await make_entry(db_session, other, await anime_of(db_session, episode), progress=4)
+    await compute_wants(db_session)
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state == "downloading"
+    assert result.cancelled == 0
+    assert await cancel_jobs(db_session) == []
+
+
+#: The legal route from ``downloading`` to each state with bytes on the disk.
+LANDED: list[tuple[EpisodeState, ...]] = [
+    (EpisodeState.DOWNLOADED,),
+    (EpisodeState.DOWNLOADED, EpisodeState.MATCHING),
+    (EpisodeState.DOWNLOADED, EpisodeState.MATCHING, EpisodeState.MATCHED),
+    (
+        EpisodeState.DOWNLOADED,
+        EpisodeState.MATCHING,
+        EpisodeState.MATCHED,
+        EpisodeState.PREPARING,
+    ),
+    (
+        EpisodeState.DOWNLOADED,
+        EpisodeState.MATCHING,
+        EpisodeState.MATCHED,
+        EpisodeState.PREPARING,
+        EpisodeState.READY,
+    ),
+]
+
+
+@pytest.mark.parametrize("route", LANDED, ids=lambda route: route[-1].value)
+async def test_bytes_that_have_landed_are_retentions_not_the_reconcilers(
+    db_session: AsyncSession, route: tuple[EpisodeState, ...]
+) -> None:
+    """FR-T1 owns a file on disk; a want going away is not a delete."""
+    state = route[-1]
+    index = LANDED.index(route)
+    entry, episode, torrent = await downloading_episode(
+        db_session,
+        anilist_id=960100 + index,
+        email=f"landed-{state.value}@arc.test",
+        info_hash=f"{index + 5:x}" * 40,
+    )
+    for step in route:
+        transition(episode, step)
     await db_session.flush()
 
     await db_session.delete(entry)
     await db_session.flush()
-    await compute_wants(db_session)
+    result = await compute_wants(db_session)
 
-    assert await wants_of(db_session, user.id) == set()
-    assert rows[4].state is EpisodeState.DOWNLOADING
+    assert episode.state is state
+    assert torrent.qbit_state == "downloading", "and the client was told nothing"
+    assert result.cancelled == 0
+
+
+async def test_the_reconciliation_commits_its_other_work_alongside_a_cancel(
+    db_session: AsyncSession,
+) -> None:
+    """Nothing here talks to qBittorrent, so a client that is down cannot fail it.
+
+    The delete is a ``qbit_cancel`` job with the runner's backoff behind it —
+    which is the whole reason the reconciler does not make the call itself.
+    """
+    entry, episode, torrent = await downloading_episode(
+        db_session, anilist_id=960024, email="cancel-other@arc.test", info_hash="3" * 40
+    )
+    elsewhere = await make_anime(db_session, anilist_id=960025)
+    other_rows = await make_episodes(db_session, elsewhere, 12, aired_through=12)
+    second = await make_user(db_session, "cancel-elsewhere@arc.test")
+    await make_entry(db_session, second, elsewhere, progress=0)
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert episode.state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+    assert result.cancelled == 1
+    assert other_rows[0].state is EpisodeState.WANTED, "the rest of the sweep ran"
+    assert await wants_of(db_session, second.id) == {other_rows[0].id, other_rows[1].id}
+
+
+async def test_a_rejected_attempt_beside_the_live_one_is_not_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    """Should-fix 4: ``qbit_cancel`` deletes with files, and that file is in review.
+
+    An episode can reach ``downloading`` with an older row beside the live one
+    — a release whose delivered file a person ignored in review, which the
+    client is still holding for them. Marking it ``cancelled`` would hand it to
+    a job that deletes it off the disk.
+    """
+    entry, episode, live = await downloading_episode(
+        db_session, anilist_id=960027, email="cancel-rejected@arc.test", info_hash="7" * 40
+    )
+    older = Torrent(episode_id=episode.id, info_hash="8" * 40, qbit_state=QBIT_REJECTED)
+    stalled = Torrent(episode_id=episode.id, info_hash="9" * 40, qbit_state=QBIT_STALLED)
+    db_session.add_all([older, stalled])
+    await db_session.flush()
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert result.cancelled == 1
+    assert live.qbit_state == QBIT_CANCELLED
+    assert older.qbit_state == QBIT_REJECTED, "the reviewed file is not this cancel's to delete"
+    assert stalled.qbit_state == QBIT_STALLED
+
+
+async def test_a_second_reconciliation_does_not_queue_a_second_cancel(
+    db_session: AsyncSession,
+) -> None:
+    entry, episode, _ = await downloading_episode(
+        db_session, anilist_id=960026, email="cancel-twice@arc.test", info_hash="4" * 40
+    )
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    await compute_wants(db_session)
+    second = await compute_wants(db_session)
+
+    assert second.cancelled == 0, "the episode is already not_wanted"
+    assert len(await cancel_jobs(db_session)) == 1
 
 
 async def test_an_unavailable_episode_is_not_retried_before_its_time(
@@ -1007,3 +1199,842 @@ async def test_a_list_change_enqueues_a_recompute(db_session: AsyncSession) -> N
 
     rows = await db_session.scalars(select(Job).where(Job.type == COMPUTE_WANTS))
     assert len(list(rows.all())) == 1, "the second call deduplicates onto the first"
+
+
+# --- Dormant imports (FR-A9, 2026-09-13) ------------------------------------
+
+
+async def test_a_dormant_imported_entry_wants_nothing(db_session: AsyncSession) -> None:
+    """FR-A9: an import is a baseline, not a request.
+
+    The production failure this rule comes from: 414 wants at once, most of
+    them shows planned years ago whose releases have no seeders left.
+    """
+    anime = await make_anime(db_session, anilist_id=960200, status=FINISHED)
+    await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "dormant@arc.test")
+    await make_entry(db_session, user, anime, progress=0, activated=False)
+
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == set()
+    assert result.added == 0
+    assert await search_jobs(db_session) == []
+
+
+async def test_an_airing_dormant_show_still_fetches(db_session: AsyncSession) -> None:
+    """FR-A9's one exception, and the reason weekly use keeps working.
+
+    A user whose whole list arrived by import should not have to press
+    something to get tonight's episode of a show that is broadcasting.
+    """
+    anime = await make_anime(db_session, anilist_id=960201, status=RELEASING)
+    rows = await make_episodes(db_session, anime, 12, aired_through=9)
+    user = await make_user(db_session, "airing-dormant@arc.test")
+    await make_entry(db_session, user, anime, progress=4, activated=False)
+
+    await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+
+@pytest.mark.parametrize("status", [ListStatus.WATCHING, ListStatus.PLANNED])
+async def test_touching_the_show_in_arc_starts_the_fetching(
+    db_session: AsyncSession, status: ListStatus
+) -> None:
+    """Both wanting statuses, because both arrive from an import."""
+    anime = await make_anime(db_session, anilist_id=960202, status=FINISHED)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, f"touch-{status.value}@arc.test")
+    entry = await make_entry(db_session, user, anime, status=status, activated=False)
+    await compute_wants(db_session)
+    assert await wants_of(db_session, user.id) == set()
+
+    entry.activated_at = NOW
+    await db_session.flush()
+    await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[0].id, rows[1].id}
+    assert rows[0].state is EpisodeState.WANTED
+
+
+async def test_an_entry_going_dormant_shelves_its_wants_with_its_own_reason(
+    db_session: AsyncSession,
+) -> None:
+    """Shelved, not deleted — retention still needs the moment (FR-T1).
+
+    The reason is :data:`REASON_DORMANT` rather than
+    :data:`REASON_NOT_WANTING` because they are different facts about the row:
+    the show has not been dropped, it has never been picked up. This is also
+    what the first reconciliation after the deploy does to production's 414.
+    """
+    anime = await make_anime(db_session, anilist_id=960203, status=FINISHED)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "shelve-dormant@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+    entry.activated_at = None
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == set()
+    assert result.shelved == 2
+    assert result.removed == 0
+    for row in rows[4:6]:
+        want = await db_session.get(Want, (user.id, row.id))
+        assert want is not None, "the row survives, as retention's anchor"
+        assert want.drop_reason == REASON_DORMANT
+    assert rows[4].state is EpisodeState.NOT_WANTED
+
+
+async def test_a_dormant_drop_revives_unconditionally_when_the_user_touches_it(
+    db_session: AsyncSession,
+) -> None:
+    """Unlike FR-T2's stale drop, which needs an Arc action *later* than it.
+
+    Pressing "Fetch this show" is the whole condition, and the stamp it writes
+    is what this reads.
+    """
+    anime = await make_anime(db_session, anilist_id=960204, status=FINISHED)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "revive-dormant@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    entry.activated_at = None
+    await db_session.flush()
+    await compute_wants(db_session)
+    assert await wants_of(db_session, user.id) == set()
+
+    entry.activated_at = NOW
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+    assert result.revived == 2
+    assert result.added == 0, "the shelved rows came back rather than new ones"
+
+
+async def test_a_download_for_a_dormant_entry_is_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    """The 2018 torrents that held every download slot, undone.
+
+    A dormant entry's (user, show) is not in ``wanting``, so the episode goes
+    the same way as any other want that has gone away: back to ``not_wanted``,
+    the torrent marked cancelled and a ``qbit_cancel`` queued to remove it with
+    its partial files.
+    """
+    anime = await make_anime(db_session, anilist_id=960205, status=FINISHED)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "dormant-dl@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    transition(rows[4], EpisodeState.SEARCHING)
+    transition(rows[4], EpisodeState.DOWNLOADING)
+    torrent = Torrent(episode_id=rows[4].id, info_hash="d" * 40, qbit_state="downloading")
+    db_session.add(torrent)
+    await db_session.flush()
+
+    entry.activated_at = None
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert rows[4].state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+    assert result.cancelled == 1
+    jobs = await cancel_jobs(db_session)
+    assert [job.payload["episode_id"] for job in jobs] == [rows[4].id]
+
+
+async def test_an_airing_dormant_show_keeps_its_download(
+    db_session: AsyncSession,
+) -> None:
+    """The other half of the same rule: airing is never dormant."""
+    anime = await make_anime(db_session, anilist_id=960206, status=RELEASING)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "airing-dl@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    transition(rows[4], EpisodeState.SEARCHING)
+    transition(rows[4], EpisodeState.DOWNLOADING)
+    torrent = Torrent(episode_id=rows[4].id, info_hash="e" * 40, qbit_state="downloading")
+    db_session.add(torrent)
+    await db_session.flush()
+
+    entry.activated_at = None
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    assert rows[4].state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state == "downloading"
+    assert result.cancelled == 0
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}
+
+
+# --- The storage guard (FR-T6, 2026-09-13) ----------------------------------
+
+#: A disk with a gigabyte left, against the default 10 GB floor.
+NEARLY_FULL = 1 * BYTES_PER_GB
+
+
+def held(monkeypatch: pytest.MonkeyPatch, free: int | None = NEARLY_FULL) -> None:
+    """Make the guard see ``free`` bytes left on the data volume."""
+    fake_free_space(monkeypatch, rules, free)
+
+
+async def test_a_held_reconciliation_starts_no_search(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-T6: the wants are computed, the searching is not started."""
+    anime = await make_anime(db_session, anilist_id=960210)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "held@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    held(monkeypatch)
+
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert await wants_of(db_session, user.id) == {rows[4].id, rows[5].id}, "still wanted"
+    assert result.added == 2
+    assert result.started == 0
+    assert await search_jobs(db_session) == []
+    assert rows[4].state is EpisodeState.NOT_WANTED
+
+
+async def test_a_hold_still_cancels_a_download_nobody_wants(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Because cancelling is what *frees* space — the pause's opposite.
+
+    A hold that refused to do this would be holding the disk full.
+    """
+    entry, episode, torrent = await downloading_episode(
+        db_session, anilist_id=960211, email="held-cancel@arc.test", info_hash="f" * 40
+    )
+    held(monkeypatch)
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert episode.state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+    assert result.cancelled == 1
+
+
+async def test_a_hold_still_releases_an_episode_nobody_wants(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    anime = await make_anime(db_session, anilist_id=960212)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "held-release@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    assert rows[4].state is EpisodeState.WANTED
+    held(monkeypatch)
+
+    await db_session.delete(entry)
+    await db_session.flush()
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert rows[4].state is EpisodeState.NOT_WANTED
+    assert result.released == 2, "both of the window's episodes came back"
+
+
+async def test_a_disk_above_the_floor_holds_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ordinary case, asserted so the guard cannot be on by accident."""
+    anime = await make_anime(db_session, anilist_id=960213)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "notheld@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    held(monkeypatch, 50 * BYTES_PER_GB)
+
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert result.started == 2
+    assert rows[4].state is EpisodeState.WANTED
+
+
+async def test_a_floor_of_zero_turns_the_guard_off(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An empty disk and no reserve asked for: fetch anyway (FR-T6)."""
+    anime = await make_anime(db_session, anilist_id=960215)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "nofloor@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    await set_setting(db_session, MIN_FREE_KEY, 0)
+    held(monkeypatch, 0)
+
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert result.started == 2
+    assert rows[4].state is EpisodeState.WANTED
+
+
+async def test_a_measurement_that_fails_never_holds(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ "I could not read the filesystem" is not a small number (FR-T6).
+
+    Treating it as one would stop Arc fetching for ever on a renamed data
+    directory, with nothing to lift it.
+    """
+    anime = await make_anime(db_session, anilist_id=960214)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "nodir@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    held(monkeypatch, None)
+
+    result = await compute_wants(db_session, settings=acquisition_settings(tmp_path))
+
+    assert result.started == 2
+    assert rows[4].state is EpisodeState.WANTED
+
+
+async def test_no_settings_means_no_measurement_and_no_hold(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every production caller passes one; a caller that cannot, is not held."""
+    anime = await make_anime(db_session, anilist_id=960216)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "nosettings@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    held(monkeypatch, 0)
+
+    result = await compute_wants(db_session)
+
+    assert result.started == 2
+    assert rows[4].state is EpisodeState.WANTED
+
+
+# --- The per-user slot cap (FR-A10, 2026-09-13) ------------------------------
+#
+# Two halves again. :func:`assign_slots` is pure, so the admission rule is a
+# table; the rest runs ``compute_wants`` with more shows than slots, which is
+# where "hungry", "fetching" and "waiting" actually come from.
+
+
+def slot_show(
+    anime_id: int,
+    *,
+    airing: bool = False,
+    hours_ago: int = 0,
+    fetching: bool = False,
+    hungry: bool = True,
+) -> SlotShow:
+    return SlotShow(
+        anime_id=anime_id,
+        airing=airing,
+        updated_at=NOW - timedelta(hours=hours_ago),
+        fetching=fetching,
+        hungry=hungry,
+    )
+
+
+@pytest.mark.parametrize(
+    ("shows", "k", "admitted", "waiting"),
+    [
+        # K = 0 is no cap at all — the opposite of what 0 means for N.
+        ([slot_show(1), slot_show(2), slot_show(3)], 0, [1, 2, 3], []),
+        # The plain case: the most recently touched entries get the slots.
+        ([slot_show(1), slot_show(2, hours_ago=1), slot_show(3, hours_ago=2)], 2, [1, 2], [3]),
+        # And the input order does not decide it: the same three, oldest first.
+        ([slot_show(3, hours_ago=2), slot_show(2, hours_ago=1), slot_show(1)], 2, [1, 2], [3]),
+        # Airing beats recency, however long ago the entry was touched: the
+        # weekly episode is the one a person notices missing.
+        ([slot_show(1), slot_show(2, airing=True, hours_ago=99)], 1, [2], [1]),
+        # Occupants keep their slot even when there are more of them than K —
+        # lowering the cap never cancels a download to make room.
+        (
+            [
+                slot_show(1, fetching=True),
+                slot_show(2, fetching=True),
+                slot_show(3, fetching=True),
+                slot_show(4, hours_ago=1),
+            ],
+            2,
+            [1, 2, 3],
+            [4],
+        ),
+        # But they do count against K, so one occupant leaves one free slot.
+        (
+            [slot_show(1, fetching=True), slot_show(2, hours_ago=1), slot_show(3, hours_ago=2)],
+            2,
+            [1, 2],
+            [3],
+        ),
+        # Ties keep the caller's order, which is the reconciler's (user, anime).
+        ([slot_show(7), slot_show(8), slot_show(9)], 2, [7, 8], [9]),
+        # A show with nothing to fetch is in neither list: it is not being held
+        # back, it is up to date. This is the all-``ready`` show whose slot the
+        # next run gives away — and the sample-only show, whose one want never
+        # makes it an occupant (``fetching`` is false for it by construction).
+        ([slot_show(1, fetching=True), slot_show(2, hungry=False)], 5, [1], []),
+        # The same show under a full cap: still not waiting.
+        (
+            [
+                slot_show(1, fetching=True),
+                slot_show(2, hungry=False),
+                slot_show(3, hours_ago=1),
+            ],
+            1,
+            [1],
+            [3],
+        ),
+    ],
+)
+def test_assign_slots_admits_occupants_then_airing_then_the_newest(
+    shows: list[SlotShow], k: int, admitted: list[int], waiting: list[int]
+) -> None:
+    got_admitted, got_waiting = assign_slots(shows, k)
+
+    assert [show.anime_id for show in got_admitted] == admitted
+    assert [show.anime_id for show in got_waiting] == waiting
+
+
+async def slot_shows(
+    session: AsyncSession,
+    user: User,
+    count: int,
+    *,
+    base: int,
+    airing: frozenset[int] = frozenset(),
+    activated: frozenset[int] | None = None,
+    episodes: int = 4,
+) -> list[tuple[Anime, list[Episode]]]:
+    """``count`` planned shows for one user, **most recently touched first**.
+
+    Index 0 is the newest entry, so the first K of them are the ones the cap
+    admits when nothing is airing and nothing is fetching yet. Every episode
+    has aired, which keeps the window out of the way of the rule under test.
+    """
+    moment = datetime.now(UTC)
+    rows: list[tuple[Anime, list[Episode]]] = []
+    for index in range(count):
+        anime = await make_anime(
+            session,
+            anilist_id=base + index,
+            romaji=f"Slot Show {index}",
+            english=None,
+            status=RELEASING if index in airing else FINISHED,
+            episodes=episodes,
+        )
+        made = await make_episodes(session, anime, episodes, aired_through=episodes)
+        entry = await make_entry(
+            session,
+            user,
+            anime,
+            status=ListStatus.PLANNED,
+            activated=activated is None or index in activated,
+        )
+        entry.updated_at = moment - timedelta(hours=index)
+        rows.append((anime, made))
+    await session.flush()
+    return rows
+
+
+async def test_only_k_shows_fetch_at_once(db_session: AsyncSession) -> None:
+    """FR-A10: seven shows, a cap of five, and two of them wait.
+
+    The production shape this comes from is the other half of the 414-want
+    afternoon: the imports that *were* activated all asked for their next two
+    episodes at once, and one disk and three download slots cannot answer that.
+    """
+    user = await make_user(db_session, "cap@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960300)
+
+    result = await compute_wants(db_session)
+
+    wanted = await wants_of(db_session, user.id)
+    assert wanted == {episode.id for _, episodes in shows[:5] for episode in episodes[:2]}, (
+        "the five most recently touched entries, two episodes each"
+    )
+    assert result.waiting == 2
+    assert result.added == 10
+
+
+async def test_a_cap_of_zero_is_no_cap(db_session: AsyncSession) -> None:
+    """0 means unlimited, unlike N's 0, which means "fetch nothing"."""
+    await set_setting(db_session, SLOT_CAP_KEY, 0)
+    user = await make_user(db_session, "nocap@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960310)
+
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {
+        episode.id for _, episodes in shows for episode in episodes[:2]
+    }
+    assert result.waiting == 0
+
+
+async def test_a_show_whose_episodes_are_all_ready_frees_its_slot(
+    db_session: AsyncSession,
+) -> None:
+    """A show waiting to be *watched* is not fetching, so it holds nothing.
+
+    The heart of why a slot is defined against the wants and not against
+    ``list_entries``: if a user who lets three episodes pile up kept their
+    slots, the cap would stop the rest of their list for as long as they took
+    to get round to them.
+    """
+    user = await make_user(db_session, "freed@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960320)
+    await compute_wants(db_session)
+    assert (await wants_of(db_session, user.id)).isdisjoint(
+        {episode.id for _, episodes in shows[5:] for episode in episodes}
+    ), "the last two shows are waiting"
+
+    # The third show's two episodes arrive and are prepared.
+    for episode in shows[2][1][:2]:
+        episode.state = EpisodeState.READY
+        episode.state_changed_at = datetime.now(UTC)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    wanted = await wants_of(db_session, user.id)
+    assert {episode.id for episode in shows[5][1][:2]} <= wanted, "the sixth show starts"
+    assert {episode.id for episode in shows[6][1][:2]}.isdisjoint(wanted), "the seventh still waits"
+    assert {episode.id for episode in shows[2][1][:2]} <= wanted, (
+        "and the ready episodes keep their wants — retention's grace runs from a "
+        "completion, not from a cap"
+    )
+    assert result.waiting == 1
+
+
+async def test_lowering_k_cancels_nothing(db_session: AsyncSession) -> None:
+    """A cap limits *starting*. Five shows over a cap of three keep going."""
+    user = await make_user(db_session, "lowered@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960330)
+    await compute_wants(db_session)
+    before = await wants_of(db_session, user.id)
+
+    await set_setting(db_session, SLOT_CAP_KEY, 3)
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == before, "nothing gained, nothing lost"
+    assert result.cancelled == 0
+    assert result.released == 0
+    assert result.removed == 0
+    assert result.shelved == 0
+    assert result.waiting == 2
+    assert all(
+        episode.state is EpisodeState.WANTED
+        for _, episodes in shows[:5]
+        for episode in episodes[:2]
+    )
+
+
+async def test_an_airing_show_takes_a_free_slot_before_a_newer_one(
+    db_session: AsyncSession,
+) -> None:
+    """Airing first, then recency — the order FR-A10 spells out."""
+    user = await make_user(db_session, "airing-slot@arc.test")
+    shows = await slot_shows(db_session, user, 6, base=960340, airing=frozenset({5}))
+
+    await compute_wants(db_session)
+
+    wanted = await wants_of(db_session, user.id)
+    assert {episode.id for episode in shows[5][1][:2]} <= wanted, "the oldest entry, but airing"
+    assert {episode.id for episode in shows[4][1][:2]}.isdisjoint(wanted)
+
+
+async def test_another_users_shows_do_not_take_your_slots(db_session: AsyncSession) -> None:
+    """The cap is per user, so a full list next door costs you nothing."""
+    first = await make_user(db_session, "mine@arc.test")
+    shows = await slot_shows(db_session, first, 7, base=960350)
+    second = await make_user(db_session, "theirs@arc.test")
+    # The two shows the first user is waiting on are the second user's whole
+    # list, so they are hers to fetch whatever the first user's cap says.
+    for anime, _ in shows[5:]:
+        entry = await make_entry(db_session, second, anime, status=ListStatus.PLANNED)
+        entry.updated_at = datetime.now(UTC)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    theirs = {episode.id for _, episodes in shows[5:] for episode in episodes[:2]}
+    assert await wants_of(db_session, second.id) == theirs
+    assert (await wants_of(db_session, first.id)).isdisjoint(theirs), (
+        "and the download she started does not admit his waiting show either"
+    )
+    assert result.waiting == 2
+
+
+async def test_a_dormant_entry_does_not_take_a_slot(db_session: AsyncSession) -> None:
+    """FR-A9 comes first: an untouched import is not a show waiting for room."""
+    user = await make_user(db_session, "dormant-slot@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960360, activated=frozenset({5, 6}))
+
+    result = await compute_wants(db_session)
+
+    assert await wants_of(db_session, user.id) == {
+        episode.id for _, episodes in shows[5:] for episode in episodes[:2]
+    }
+    assert result.waiting == 0
+
+
+async def test_a_sample_on_a_waiting_show_still_starts_its_search(
+    db_session: AsyncSession,
+) -> None:
+    """FR-A8 is one episode somebody asked for; the cap is not its business."""
+    user = await make_user(db_session, "sample-slot@arc.test")
+    shows = await slot_shows(db_session, user, 6, base=960370)
+    await compute_wants(db_session)
+    _, waiting_episodes = shows[5]
+    assert (await wants_of(db_session, user.id)).isdisjoint(
+        {episode.id for episode in waiting_episodes}
+    )
+
+    db_session.add(Want(user_id=user.id, episode_id=waiting_episodes[0].id, sample=True))
+    await db_session.flush()
+    result = await compute_wants(db_session)
+
+    live = await wants_of(db_session, user.id)
+    jobs = await search_jobs(db_session)
+    assert waiting_episodes[0].id in live
+    assert waiting_episodes[0].state is EpisodeState.WANTED
+    assert any(job.payload["episode_id"] == waiting_episodes[0].id for job in jobs)
+    assert waiting_episodes[1].id not in live, (
+        "and the window behind it is still waiting: a sample is one episode"
+    )
+    assert result.waiting == 1
+
+
+async def test_a_stale_drop_on_a_waiting_show_is_left_alone(db_session: AsyncSession) -> None:
+    """FR-A10 must not touch FR-T2's record, in either direction.
+
+    The row the review found: a want dropped for going unwatched sits on a
+    ``ready`` episode, so its show is not an occupant; the rest of its window
+    is hungry, so it competes for a slot and can lose. Contributing only the
+    *live* rows of a waiting show would have left this key out of ``desired``
+    while the show was still in ``wanting`` — and the reconciler deletes such a
+    row. That would have thrown away the ``dropped_at`` retention measures
+    FR-T1's grace from (files deleted days early) and handed the row back live
+    the moment a slot freed, skipping the Arc-side touch FR-T2's revival needs.
+    """
+    user = await make_user(db_session, "stale-slot@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960380)
+    _, waiting_episodes = shows[6]
+    # Episode 1 of the last show arrived a long time ago and was dropped for
+    # going unwatched; episode 2 is what makes the show hungry.
+    dropped_at = datetime.now(UTC) - timedelta(days=2)
+    waiting_episodes[0].state = EpisodeState.READY
+    db_session.add(
+        Want(
+            user_id=user.id,
+            episode_id=waiting_episodes[0].id,
+            dropped_at=dropped_at,
+            drop_reason=STALE_DROP_REASON,
+        )
+    )
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    row = await db_session.get(Want, (user.id, waiting_episodes[0].id))
+    assert row is not None, "the row is not deleted"
+    assert row.dropped_at == dropped_at, "and not restamped"
+    assert row.drop_reason == STALE_DROP_REASON, "and not relabelled"
+    assert result.waiting == 2
+    assert result.shelved == 0
+    assert result.removed == 0
+
+
+async def test_a_slot_does_not_revive_a_stale_drop(db_session: AsyncSession) -> None:
+    """And when the show is admitted, the drop still waits for the user.
+
+    A slot freeing up is not the user coming back to the show, which is the
+    only thing FR-T2 accepts (``updated_by == arc``, later than the drop) — so
+    the entry is quiet from before the drop, as an abandoned show is.
+    """
+    await set_setting(db_session, SLOT_CAP_KEY, 1)
+    user = await make_user(db_session, "stale-admitted@arc.test")
+    [(anime, episodes)] = await slot_shows(db_session, user, 1, base=960390)
+    dropped_at = datetime.now(UTC) - timedelta(days=2)
+    entry = await db_session.get(ListEntry, (user.id, anime.id))
+    assert entry is not None
+    entry.updated_at = dropped_at - timedelta(days=1)
+    episodes[0].state = EpisodeState.READY
+    db_session.add(
+        Want(
+            user_id=user.id,
+            episode_id=episodes[0].id,
+            dropped_at=dropped_at,
+            drop_reason=STALE_DROP_REASON,
+        )
+    )
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    row = await db_session.get(Want, (user.id, episodes[0].id))
+    assert row is not None
+    assert row.dropped_at == dropped_at, "admitted, and still dropped"
+    assert result.waiting == 0, "one show, a cap of one: nothing is waiting"
+    assert result.revived == 0
+
+
+async def test_unfindable_shows_do_not_hold_slots_for_ever(db_session: AsyncSession) -> None:
+    """FR-A6 gave up on these; FR-A10 must not let them freeze the list.
+
+    Five shows whose episodes are all ``unavailable`` — no seeders left, which
+    is exactly the 2018-planned shape production arrived with — would otherwise
+    occupy every slot a user has for as long as the shows stayed on their list.
+    """
+    user = await make_user(db_session, "unfindable@arc.test")
+    shows = await slot_shows(db_session, user, 6, base=960400)
+    await compute_wants(db_session)
+    for _, episodes in shows[:5]:
+        for episode in episodes[:2]:
+            episode.state = EpisodeState.UNAVAILABLE
+            episode.state_changed_at = datetime.now(UTC) - timedelta(days=3)
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    wanted = await wants_of(db_session, user.id)
+    assert {episode.id for episode in shows[5][1][:2]} <= wanted, "the sixth show is admitted"
+    assert result.waiting == 0
+    # And the ones that gave up keep their wants, so FR-A6's daily retry runs.
+    assert {episode.id for _, episodes in shows[:5] for episode in episodes[:2]} <= wanted
+
+
+@pytest.mark.parametrize("state", [EpisodeState.UNAVAILABLE, EpisodeState.FAILED])
+async def test_a_settled_episode_holds_no_slot(
+    db_session: AsyncSession, state: EpisodeState
+) -> None:
+    """``ready``, ``unavailable`` and ``failed`` are all somebody else's problem."""
+    await set_setting(db_session, SLOT_CAP_KEY, 1)
+    user = await make_user(db_session, f"settled-{state.value}@arc.test")
+    shows = await slot_shows(db_session, user, 2, base=960410)
+    await compute_wants(db_session)
+    for episode in shows[0][1][:2]:
+        episode.state = state
+        episode.state_changed_at = datetime.now(UTC) - timedelta(days=3)
+    await db_session.flush()
+
+    await compute_wants(db_session)
+
+    assert {episode.id for episode in shows[1][1][:2]} <= await wants_of(db_session, user.id)
+
+
+# --- slot_view(), what the show page reads -----------------------------------
+
+
+async def test_slot_view_answers_the_cap_for_one_user(db_session: AsyncSession) -> None:
+    user = await make_user(db_session, "view@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960420)
+    await compute_wants(db_session)
+
+    view = await slot_view(db_session, user.id)
+
+    assert view.waiting == {shows[5][0].id, shows[6][0].id}
+    assert view.fetching == 5
+    assert view.cap == 5
+    assert view.paused is False
+    assert view.held is False
+
+
+async def test_slot_view_says_when_acquisition_is_paused(db_session: AsyncSession) -> None:
+    """The page must not promise "when one of them finishes" while nothing runs."""
+    user = await make_user(db_session, "view-paused@arc.test")
+    await slot_shows(db_session, user, 7, base=960430)
+    await compute_wants(db_session)
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    view = await slot_view(db_session, user.id)
+
+    assert view.paused is True
+    assert view.held is False
+    assert len(view.waiting) == 2, "the cap's answer is still the cap's answer"
+
+
+async def test_slot_view_says_when_the_disk_is_holding_acquisition(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    user = await make_user(db_session, "view-held@arc.test")
+    await slot_shows(db_session, user, 7, base=960440)
+    await compute_wants(db_session)
+    held(monkeypatch, 1 * BYTES_PER_GB)
+
+    view = await slot_view(db_session, user.id, settings=acquisition_settings(tmp_path))
+
+    assert view.held is True
+    assert view.paused is False
+
+
+async def test_slot_view_without_settings_reports_no_hold(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No measurement, no hold — the same answer a failed measurement gives."""
+    user = await make_user(db_session, "view-nosettings@arc.test")
+    await slot_shows(db_session, user, 2, base=960450)
+    held(monkeypatch, 1 * BYTES_PER_GB)
+
+    view = await slot_view(db_session, user.id)
+
+    assert view.held is False
+
+
+async def test_a_waiting_show_still_drops_a_want_the_user_watched(
+    db_session: AsyncSession,
+) -> None:
+    """FR-A10's one exception: the ending that takes nothing away.
+
+    A live want on an episode the user has watched past is the ordinary "left
+    the window" delete, and it is safe for the ordinary reason — the completion
+    is in ``watch_progress``, which is what retention measures FR-T1's grace
+    from. Leaving it would pin the files to the disk until the show next won a
+    slot, because a live want makes the sweep skip an episode: a cap keeping
+    files alive is further from its job than anything else it could do.
+    Everything else the held show holds is still untouched.
+    """
+    user = await make_user(db_session, "watched-waiting@arc.test")
+    shows = await slot_shows(db_session, user, 7, base=960460, episodes=8)
+    anime, episodes = shows[6]
+    entry = await db_session.get(ListEntry, (user.id, anime.id))
+    assert entry is not None
+    # Watched four of eight, so episodes 5 and 6 are the window it is hungry
+    # for and loses the slot race over. Its rows: episode 3 watched past,
+    # episode 4 carrying a stale drop, episode 1 a sample. Both of the last two
+    # are ``ready``, which is what keeps the show from being an occupant — a
+    # live want on anything in flight would have earned it a slot outright.
+    entry.progress = 4
+    # Written by hand with the progress: ``updated_at`` carries ``onupdate``,
+    # so touching the row would otherwise stamp it *now* and make the oldest
+    # entry on the list the newest — which would win it a slot and test
+    # nothing.
+    entry.updated_at = datetime.now(UTC) - timedelta(hours=99)
+    dropped_at = datetime.now(UTC) - timedelta(days=2)
+    episodes[2].state = EpisodeState.READY
+    episodes[3].state = EpisodeState.READY
+    db_session.add_all(
+        [
+            Want(user_id=user.id, episode_id=episodes[2].id),
+            Want(
+                user_id=user.id,
+                episode_id=episodes[3].id,
+                dropped_at=dropped_at,
+                drop_reason=STALE_DROP_REASON,
+            ),
+            Want(user_id=user.id, episode_id=episodes[0].id, sample=True),
+        ]
+    )
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    assert await db_session.get(Want, (user.id, episodes[2].id)) is None, "watched past, deleted"
+    assert result.removed == 1
+    stale = await db_session.get(Want, (user.id, episodes[3].id))
+    assert stale is not None and stale.dropped_at == dropped_at, "the stale drop is untouched"
+    sample = await db_session.get(Want, (user.id, episodes[0].id))
+    assert sample is not None and sample.dropped_at is None, "and so is the sample"
+    assert result.shelved == 0
+    assert result.waiting == 2

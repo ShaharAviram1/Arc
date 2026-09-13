@@ -13,13 +13,14 @@ So there is one writer, :func:`transition`, and it enforces the table below.
     not_wanted → wanted → searching → downloading → downloaded
        → matching → (review) → matched → preparing → ready
     ready | downloaded | matched | failed → (retention) → not_wanted
+    wanted | searching | unavailable | downloading → not_wanted  (nobody wants it)
     ready → preparing                       (a deliberate re-encode, FR-P5)
     searching | downloading | downloaded | matching → unavailable
     unavailable → wanted                    (something wants it again)
     preparing → failed → preparing          (a transcode blew up, retry)
 
-Five edges are in :data:`TRANSITIONS` without being drawn in the spec's
-diagram, and all five are real.
+Six edges are in :data:`TRANSITIONS` without being drawn in the spec's
+diagram, and all six are real.
 
 * **→ matched from anywhere before it.** A file dropped into the manual
   directory belongs to an episode Arc never fetched, and confirming a review
@@ -32,9 +33,19 @@ diagram, and all five are real.
   because the alternative is a dead end — the search job returns without
   starting a download, nothing else writes that row, and the episode sits in
   ``searching`` for ever, telling the show page it is being looked for when
-  nobody is looking. Anything with bytes behind it — ``downloading``,
-  ``downloaded``, ``matched`` — is left alone by the *reconciler*; retention
-  is what unwinds those, through the edge below.
+  nobody is looking. Anything with bytes that have *landed* — ``downloaded``,
+  ``matched`` — is left alone by the *reconciler*; retention is what unwinds
+  those, through the edge below.
+* **→ not_wanted from downloading** (2026-09-13). The same arrow one state
+  further on, and the one place the reconciler reaches into work in flight:
+  a download nobody wants any more is removed from qBittorrent with its files
+  and the episode goes back to where it began
+  (:func:`~arc.services.acquisition.wants.cancel_if_unwanted`). Before this
+  edge existed such a download ran to completion, transcoded, and became
+  ready for nobody while holding one of the client's download slots. Nothing
+  has landed at ``downloading`` — the bytes are partial and in the client's
+  own directory — which is what makes this a cancel rather than a deletion,
+  and why the states after it stay retention's (FR-T1).
 * **→ not_wanted from downloaded / matched / failed** (M10, FR-T3). Deleting
   an episode's files "resets the episode to not acquired", and an episode
   does not have to have reached ``ready`` to have bytes worth deleting: a
@@ -88,7 +99,7 @@ TRANSITIONS: Final[Mapping[EpisodeState, frozenset[EpisodeState]]] = {
     _S.NOT_WANTED: frozenset({_S.WANTED}) | _TO_MATCHED,
     _S.WANTED: frozenset({_S.SEARCHING, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.SEARCHING: frozenset({_S.DOWNLOADING, _S.UNAVAILABLE, _S.NOT_WANTED}) | _TO_MATCHED,
-    _S.DOWNLOADING: frozenset({_S.DOWNLOADED, _S.UNAVAILABLE}) | _TO_MATCHED,
+    _S.DOWNLOADING: frozenset({_S.DOWNLOADED, _S.UNAVAILABLE, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.DOWNLOADED: frozenset({_S.MATCHING, _S.UNAVAILABLE, _S.NOT_WANTED}) | _TO_MATCHED,
     _S.MATCHING: frozenset({_S.UNAVAILABLE}) | _TO_MATCHED,
     _S.MATCHED: frozenset({_S.PREPARING, _S.NOT_WANTED}),

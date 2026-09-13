@@ -37,6 +37,17 @@ SEARCH_RELEASE = "search_release"
 #: library (FR-A5). Queue-wide work, deduplicated on the type.
 POLL_QBIT = "poll_qbit"
 
+#: Remove one episode's cancelled torrents from the client, with their files.
+#: Queued by the reconciler when an episode that was downloading loses its last
+#: want: the *decision* is written in the same transaction as the episode's
+#: state (``torrents.qbit_state = "cancelled"``), and this is the HTTP call that
+#: carries it out. A job rather than a loop inside the reconciliation for two
+#: reasons — the reconciler holds a transaction and must not hold it across a
+#: request to another process, and a client that is not answering must not fail
+#: the reconciliation. Per episode, so one unreachable delete does not hold up
+#: the rest.
+QBIT_CANCEL = "qbit_cancel"
+
 #: Write Arc's seeding policy to the client (spec §9: no seeding, upload
 #: capped). At worker start-up and daily after that, deduplicated on the type.
 #: A job rather than a line in the worker's start-up because qBittorrent is a
@@ -60,6 +71,11 @@ QBIT_POLICY = "qbit_apply_policy"
 #: episode. Delaying it delays a file that is already on the disk.
 POLL_QBIT_PRIORITY = 50
 
+#: Alongside the poll, and for the same reason: it is one request to a service
+#: on the same host, and what it frees is a download slot somebody else's
+#: episode is waiting for.
+QBIT_CANCEL_PRIORITY = 60
+
 #: Above the default: reconciling the whole wants table is a handful of
 #: queries, but nothing is waiting on the answer within the minute.
 COMPUTE_WANTS_PRIORITY = 120
@@ -77,6 +93,11 @@ QBIT_POLICY_PRIORITY = 200
 def search_dedupe_key(episode_id: int) -> str:
     """One queued search per episode, however many people want it (FR-A2)."""
     return f"{SEARCH_RELEASE}:{episode_id}"
+
+
+def cancel_dedupe_key(episode_id: int) -> str:
+    """One queued cancel per episode: the second would find nothing to delete."""
+    return f"{QBIT_CANCEL}:{episode_id}"
 
 
 async def enqueue_compute_wants(session: AsyncSession) -> Job:
@@ -99,10 +120,13 @@ __all__ = [
     "COMPUTE_WANTS_PRIORITY",
     "POLL_QBIT",
     "POLL_QBIT_PRIORITY",
+    "QBIT_CANCEL",
+    "QBIT_CANCEL_PRIORITY",
     "QBIT_POLICY",
     "QBIT_POLICY_PRIORITY",
     "SEARCH_RELEASE",
     "SEARCH_RELEASE_PRIORITY",
+    "cancel_dedupe_key",
     "enqueue_compute_wants",
     "search_dedupe_key",
 ]

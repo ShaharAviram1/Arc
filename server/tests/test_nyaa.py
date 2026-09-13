@@ -20,6 +20,7 @@ query that returned *something* was a correct ranking over the wrong pool.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -37,6 +38,8 @@ from arc.services.acquisition.nyaa import (
     anime_season,
     anime_titles,
     filter_items,
+    has_prequel,
+    head_of,
     pad,
     parse_feed,
     queries,
@@ -49,11 +52,25 @@ from arc.services.acquisition.rules import Rules
 from arc.services.library.parser import strip_season
 from tests.acquisition_helpers import NyaaStub, force_transport, no_sleep, read_fixture
 
+
+def relation(kind: str, *, anilist_id: int) -> dict[str, Any]:
+    """One ``anime.relations`` blob, shaped as ``catalog.cache`` stores it."""
+    return {
+        "anilist_id": anilist_id,
+        "mal_id": None,
+        "relation_type": kind,
+        "format": "TV",
+        "title": {"romaji": None, "english": None, "native": None, "preferred": None},
+    }
+
+
 FRIEREN_S1 = Anime(
     anilist_id=154587,
     title_romaji="Sousou no Frieren",
     title_english="Frieren: Beyond Journey's End",
     episodes=28,
+    #: A sequel and nothing in front of it — so the head forms apply.
+    relations=[relation("SEQUEL", anilist_id=175482)],
 )
 FRIEREN_S2 = Anime(
     anilist_id=175482,
@@ -72,6 +89,44 @@ MUSHOKU_S3 = Anime(
     synonyms=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season"],
     episodes=14,
 )
+#: Split at the colon the way the query builder splits it, because the heads
+#: are what the assertions are about.
+RAKUDAI_HEAD = "Rakudai Kenja no Gakuin Musou"
+RAKUDAI_ENGLISH_HEAD = "From Overshadowed to Overpowered"
+RAKUDAI_ROMAJI = f"{RAKUDAI_HEAD}: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku"
+RAKUDAI_ENGLISH = f"{RAKUDAI_ENGLISH_HEAD}: Second Reincarnation of a Talentless Sage"
+#: AniList row 190123, copied field for field out of the dev catalogue. No
+#: season marker anywhere, and a subtitle in both languages — so every query
+#: built from a whole title returns **zero** results, which is what the owner
+#: watched happen three times on 2026-09-12 before the episode went onto the
+#: six-hour retry schedule. ``Rakudai Kenja no Gakuin Musou 01`` had nine. No
+#: relations either, and that is deliberate: nothing comes before it.
+RAKUDAI = Anime(
+    anilist_id=190123,
+    title_romaji=RAKUDAI_ROMAJI,
+    title_english=RAKUDAI_ENGLISH,
+    episodes=12,
+)
+#: AniList row 97986. The sequel that carries **no season marker at all** — its
+#: title names the arc — and therefore the one entry a bare head query must not
+#: be asked for: ``[SubsPlease] Made in Abyss - 07`` is season one's episode 7,
+#: there is no season on either side to disagree, and the release being shorter
+#: than the catalogue title is what ``title_score`` calls normal. The
+#: ``PREQUEL`` edge is the only thing that knows.
+MADE_IN_ABYSS_S2 = Anime(
+    anilist_id=97986,
+    title_romaji="Made in Abyss: Retsujitsu no Ougonkyou",
+    title_english="Made in Abyss - The Golden City of the Scorching Sun",
+    episodes=12,
+    relations=[
+        relation("PREQUEL", anilist_id=34599),
+        relation("SIDE_STORY", anilist_id=100643),
+    ],
+)
+MADE_IN_ABYSS_TITLES = (
+    "Made in Abyss: Retsujitsu no Ougonkyou",
+    "Made in Abyss - The Golden City of the Scorching Sun",
+)
 
 FEED = read_fixture("search_frieren_07.xml")
 EMPTY = read_fixture("search_empty.xml")
@@ -80,12 +135,17 @@ EMPTY = read_fixture("search_empty.xml")
 MUSHOKU_SHORT = read_fixture("search_mushoku_s3_11_short.xml")
 MUSHOKU_FULL = read_fixture("search_mushoku_s3_11_full.xml")
 
+#: Eight forms are built for this entry and six of them fit
+#: :data:`MAX_QUERIES`. The head forms add nothing: the romaji base is
+#: ``Mushoku Tensei`` with no subtitle left in it, and the english head is
+#: ``Mushoku Tensei`` too, which the third short form already asked for.
 MUSHOKU_QUERIES = [
     "Mushoku Tensei III: Isekai Ittara Honki Dasu - 11",
     "Mushoku Tensei: Jobless Reincarnation Season 3 - 11",
     "Mushoku Tensei S3 - 11",
     "Mushoku Tensei III - 11",
     "Mushoku Tensei - 11",
+    "Mushoku Tensei: Jobless Reincarnation S3 - 11",
 ]
 SUBSPLEASE_1080P = "[SubsPlease] Mushoku Tensei S3 - 11 (1080p) [4492A492].mkv"
 
@@ -154,15 +214,33 @@ def test_a_long_show_pads_to_three() -> None:
     assert pad(105, total_episodes=500) == "105"
 
 
+#: The order :func:`queries` documents: full romaji, full english, the season
+#: short forms, the head of romaji, the head of english, bare romaji.
+FRIEREN_S1_QUERIES = [
+    "Sousou no Frieren - 07",
+    "Frieren: Beyond Journey's End - 07",
+    "Frieren - 07",
+    "Sousou no Frieren 07",
+]
+
+
 def test_queries_are_built_in_the_documented_order() -> None:
-    assert queries(FRIEREN_S1, 7) == [
-        "Sousou no Frieren - 07",
-        "Frieren: Beyond Journey's End - 07",
-        "Sousou no Frieren 07",
-    ]
+    """The romaji title has no subtitle; the english one does, so ``Frieren``.
+
+    Third of four, in front of the bare form: a group writing ``Frieren - 07``
+    is likelier than one writing the romaji title with no dash.
+    """
+    assert queries(FRIEREN_S1, 7) == FRIEREN_S1_QUERIES
 
 
 def test_a_show_whose_title_names_a_season_gets_the_short_forms_too() -> None:
+    """Six forms, and the head of the english title is not one of them.
+
+    The english short forms are built before the head forms and there is only
+    room for the first of them, so ``Frieren - 07`` falls off the end. That is
+    the intended trade: ``Frieren: Beyond Journey's End S2`` names the season
+    this entry is, and ``Frieren`` on its own does not.
+    """
     built = queries(FRIEREN_S2, 7)
 
     assert built == [
@@ -171,8 +249,145 @@ def test_a_show_whose_title_names_a_season_gets_the_short_forms_too() -> None:
         "Sousou no Frieren S2 - 07",
         "Sousou no Frieren II - 07",
         "Sousou no Frieren - 07",
+        "Frieren: Beyond Journey's End S2 - 07",
     ]
     assert len(built) <= nyaa_module.MAX_QUERIES
+
+
+def test_a_subtitled_title_is_also_asked_for_by_its_head() -> None:
+    """The bug, in one assertion (FR-A4).
+
+    Nyaa ANDs every word, so nine words of catalogue title match nothing at
+    all; ``Rakudai Kenja no Gakuin Musou - 01`` matched nine releases the same
+    night. Both languages get a head form, because which of the two a group
+    writes is not knowable in advance.
+    """
+    assert queries(RAKUDAI, 1) == [
+        f"{RAKUDAI_ROMAJI} - 01",
+        f"{RAKUDAI_ENGLISH} - 01",
+        "Rakudai Kenja no Gakuin Musou - 01",
+        "From Overshadowed to Overpowered - 01",
+        f"{RAKUDAI_ROMAJI} 01",
+    ]
+    assert head_of(RAKUDAI_ROMAJI) == RAKUDAI_HEAD
+    assert head_of(RAKUDAI_ENGLISH) == RAKUDAI_ENGLISH_HEAD
+    assert has_prequel(RAKUDAI) is False, "no relations stored, so nothing is in front"
+
+
+def test_a_dash_separated_subtitle_yields_a_head_too() -> None:
+    """``" - "`` separates as a colon does; ``"-"`` inside a word does not.
+
+    The same show as :data:`MADE_IN_ABYSS_S2` with its relations not yet
+    fetched, which is deliberately the *opposite* outcome: an absent relation
+    list is not evidence of a prequel, and the rows Arc knows least about are
+    the ones that need the head form most.
+    """
+    anime = Anime(
+        anilist_id=6,
+        title_romaji="Made in Abyss - Retsujitsu no Ougonkyou",
+        title_english=None,
+        episodes=12,
+    )
+
+    assert has_prequel(anime) is False
+    assert queries(anime, 7) == [
+        "Made in Abyss - Retsujitsu no Ougonkyou - 07",
+        "Made in Abyss - 07",
+        "Made in Abyss - Retsujitsu no Ougonkyou 07",
+    ]
+
+
+def test_an_entry_with_a_prequel_asks_no_head_query_at_all() -> None:
+    """The guard, and the one case the filter cannot defend (FR-A4).
+
+    ``Made in Abyss - 07`` would return season one's episode 7, and both
+    checks that make every other broad form safe would pass it: no season is
+    marked on either side, and a release name shorter than the catalogue title
+    is the ordinary case of a group abbreviating an official name (see
+    :func:`test_a_group_that_shortens_the_official_title_still_matches`). So
+    the query is not asked.
+    """
+    built = queries(MADE_IN_ABYSS_S2, 7)
+
+    assert has_prequel(MADE_IN_ABYSS_S2) is True
+    assert head_of("Made in Abyss: Retsujitsu no Ougonkyou") == "Made in Abyss"
+    assert built == [
+        "Made in Abyss: Retsujitsu no Ougonkyou - 07",
+        "Made in Abyss - The Golden City of the Scorching Sun - 07",
+        "Made in Abyss: Retsujitsu no Ougonkyou 07",
+    ]
+    assert "Made in Abyss - 07" not in built
+
+
+def test_a_sequel_relation_does_not_withhold_the_head_form() -> None:
+    """Only a ``PREQUEL`` disqualifies. Frieren S1 has a sequel, not a prequel."""
+    assert has_prequel(FRIEREN_S1) is False
+    assert queries(FRIEREN_S1, 7) == FRIEREN_S1_QUERIES
+    assert "Frieren - 07" in FRIEREN_S1_QUERIES
+
+
+def test_a_missing_relation_list_is_not_evidence_of_a_prequel() -> None:
+    """``None`` and ``[]`` both keep the head forms; casing does not matter."""
+    for relations in (None, []):
+        anime = Anime(
+            anilist_id=9,
+            title_romaji="Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen",
+            title_english=None,
+            episodes=12,
+            relations=relations,
+        )
+
+        assert has_prequel(anime) is False
+        assert "Kaguya-sama wa Kokurasetai - 07" in queries(anime, 7)
+
+    lowercase = Anime(
+        anilist_id=10,
+        title_romaji="Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen",
+        title_english=None,
+        episodes=12,
+        relations=[relation("prequel", anilist_id=11), "not a dict"],  # type: ignore[list-item]
+    )
+
+    assert has_prequel(lowercase) is True
+    assert "Kaguya-sama wa Kokurasetai - 07" not in queries(lowercase, 7)
+
+
+def test_a_title_with_no_subtitle_adds_no_head_form() -> None:
+    """Nothing to drop, so nothing extra to ask — not even for the dedupe."""
+    assert head_of("Mushishi") == ""
+    assert head_of("Sousou no Frieren") == ""
+    assert queries(FRIEREN_S1, 7).count("Sousou no Frieren - 07") == 1
+
+
+def test_a_colon_inside_a_word_is_not_a_subtitle_separator() -> None:
+    """``Re:Zero`` is one name. ``Re`` is not a query worth two seconds."""
+    anime = Anime(
+        anilist_id=7,
+        title_romaji="Re:Zero kara Hajimeru Isekai Seikatsu",
+        title_english="Re:ZERO -Starting Life in Another World-",
+        episodes=25,
+    )
+
+    assert head_of("Re:Zero kara Hajimeru Isekai Seikatsu") == ""
+    assert queries(anime, 7) == [
+        "Re:Zero kara Hajimeru Isekai Seikatsu - 07",
+        "Re:ZERO -Starting Life in Another World- - 07",
+        "Re:Zero kara Hajimeru Isekai Seikatsu 07",
+    ]
+
+
+def test_a_head_is_trimmed_of_the_punctuation_it_was_cut_at() -> None:
+    assert head_of("Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen") == (
+        "Kaguya-sama wa Kokurasetai"
+    )
+    assert head_of("Grisaia no Kajitsu ~Le Fruit de la Grisaia~") == "Grisaia no Kajitsu"
+    assert head_of("Sword Art Online — Alicization") == "Sword Art Online"
+
+
+def test_the_query_budget_caps_what_the_builder_produced() -> None:
+    """Eight forms built, six asked for: the cap is the politeness budget."""
+    assert nyaa_module.MAX_QUERIES == 6
+    assert len(queries(MUSHOKU_S3, 11)) == nyaa_module.MAX_QUERIES
 
 
 def test_a_season_marker_before_a_subtitle_still_yields_the_short_name() -> None:
@@ -442,6 +657,77 @@ def test_the_sequels_own_entry_still_takes_its_own_release() -> None:
     )
 
 
+def test_a_head_query_cannot_admit_a_subtitled_sequel() -> None:
+    """What makes the broad head form safe: the filter, not the query (FR-A4).
+
+    The first season's entry now asks ``Demon Slayer - 07`` as well, the head
+    of its english title, and a head form is by construction a subset of every
+    subtitled sequel's words: the *Entertainment District* episode 7 comes back
+    in that feed. The asymmetric :func:`title_score` is what rejects it —
+    ``yuukaku hen`` is in none of the entry's own titles, so the extra tokens
+    are scored by ``token_sort_ratio`` and fall under the 0.90 threshold. That
+    filter is the safety of the broad query and must not be weakened.
+    """
+    s1_titles = ("Kimetsu no Yaiba", "Demon Slayer: Kimetsu no Yaiba", "Demon Slayer")
+
+    assert queries(
+        Anime(
+            anilist_id=8,
+            title_romaji="Kimetsu no Yaiba",
+            title_english="Demon Slayer: Kimetsu no Yaiba",
+            episodes=26,
+        ),
+        7,
+    ) == [
+        "Kimetsu no Yaiba - 07",
+        "Demon Slayer: Kimetsu no Yaiba - 07",
+        "Demon Slayer - 07",
+        "Kimetsu no Yaiba 07",
+    ]
+    assert title_score("kimetsu no yaiba yuukaku hen", s1_titles) < 0.90
+    assert (
+        acceptable(
+            one("[SubsPlease] Kimetsu no Yaiba - Yuukaku-hen - 07 (1080p) [A1B2C3D4].mkv"),
+            titles=s1_titles,
+            number=7,
+            season=None,
+        )
+        is None
+    )
+
+
+def test_the_filter_cannot_save_an_unmarked_sequel_from_a_head_query() -> None:
+    """Why :func:`has_prequel` exists rather than a stricter threshold.
+
+    A sequel whose AniList title marks the season is safe without any help: the
+    season check reads the unmarked first-season release as season 1 and
+    rejects it. A sequel whose title marks nothing but the arc — *Made in
+    Abyss: Retsujitsu no Ougonkyou*, *Kimetsu no Yaiba: Yuukaku-hen* — has no
+    season to disagree about, and a release named by the head is *shorter* than
+    the entry's title, which :func:`title_score` reads as the ordinary case of
+    a group abbreviating an official name. Both checks pass and the file is
+    season one's.
+
+    Which is a statement about the *filter*, and the filter is right: it cannot
+    tell this apart from ``[SubsPlease] Mushoku Tensei - 07`` without knowing
+    that something comes before this entry. So the fix is upstream, in
+    :func:`queries`, and it is not to weaken anything here — the query is
+    simply never asked (see
+    :func:`test_an_entry_with_a_prequel_asks_no_head_query_at_all`).
+    """
+    assert title_score("made in abyss", MADE_IN_ABYSS_TITLES) == 1.0
+    assert (
+        acceptable(
+            one("[SubsPlease] Made in Abyss - 07 (1080p) [ABCD1234].mkv"),
+            titles=MADE_IN_ABYSS_TITLES,
+            number=7,
+            season=None,
+        )
+        is not None
+    )
+    assert "Made in Abyss - 07" not in queries(MADE_IN_ABYSS_S2, 7)
+
+
 def test_a_release_naming_a_different_show_is_discarded() -> None:
     other = Anime(anilist_id=3, title_romaji="Mushishi", title_english=None, episodes=26)
 
@@ -454,6 +740,200 @@ def test_the_title_threshold_is_what_rejects_a_near_miss() -> None:
 
     assert acceptable(item, titles=titles, number=7, season=2) is not None
     assert acceptable(item, titles=titles, number=7, season=2, threshold=1.01) is None
+
+
+# --- Batches: never fetch a whole season (FR-A4) -----------------------------
+
+#: The seven batches Arc actually picked, from one production acquisition run
+#: on 2026-09-12, each paired with the **single episode of the same show, the
+#: same season and the same number** from the same group. The pair is the
+#: point: the two differ only in that one names a range or a batch marker, so
+#: anything that rejects the batch and keeps the single can only be reading
+#: that. The first of them cost 6.3 GB and twelve transcodes.
+BATCHES: list[tuple[str, str, tuple[str, ...], int, int | None]] = [
+    (
+        "[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]",
+        "[Erai-raws] Dagashi Kashi 2 - 01 [1080p][Multiple Subtitle]",
+        ("Dagashi Kashi 2",),
+        1,
+        None,
+    ),
+    (
+        "[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 01 ~ 10"
+        " [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR]",
+        "[Erai-raws] Shingeki no Kyojin Season 3 Part 2 - 01 [1080p][Multiple Subtitle]",
+        ("Shingeki no Kyojin Season 3 Part 2", "Attack on Titan Season 3 Part 2"),
+        1,
+        3,
+    ),
+    (
+        "[Erai-raws] Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2 - 01 ~ 12"
+        " [1080p][Multiple Subtitles][Unofficial Batch]",
+        "[Erai-raws] Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2 - 01"
+        " [1080p][Multiple Subtitle]",
+        ("Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2",),
+        1,
+        2,
+    ),
+    (
+        "[Erai-raws] Karakai Jouzu no Takagi-san 2 - 01 ~ 12 [1080p][Multiple Subtitle]",
+        "[Erai-raws] Karakai Jouzu no Takagi-san 2 - 01 [1080p][Multiple Subtitle]",
+        ("Karakai Jouzu no Takagi-san 2",),
+        1,
+        None,
+    ),
+    (
+        "[Erai-raws] Sword Art Online - Alicization - War of Underworld Part 2 - 01 ~ 11"
+        " [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA][ITA]",
+        "[Erai-raws] Sword Art Online - Alicization - War of Underworld Part 2 - 01"
+        " [1080p][Multiple Subtitle]",
+        ("Sword Art Online: Alicization - War of Underworld Part 2",),
+        1,
+        2,
+    ),
+    (
+        "[Erai-raws] Quanzhi Gaoshou 2 - 01 ~ 12 [1080p CR WEB-DL AVC AAC][MultiSub] [BATCH]",
+        "[Erai-raws] Quanzhi Gaoshou 2 - 01 [1080p CR WEB-DL AVC AAC][MultiSub]",
+        ("Quanzhi Gaoshou 2",),
+        1,
+        None,
+    ),
+    (
+        "[RH] Fukigen na Mononokean - 01-02 (The Morose Mononokean)"
+        " [English Dubbed] [uncut] [1080p]",
+        "[RH] Fukigen na Mononokean - 01 (The Morose Mononokean) [English Dubbed] [uncut] [1080p]",
+        ("Fukigen na Mononokean",),
+        1,
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("batch", "single", "titles", "number", "season"),
+    BATCHES,
+    ids=lambda value: str(value)[:40],
+)
+def test_a_batch_is_rejected_and_says_it_was_a_batch(
+    batch: str,
+    single: str,
+    titles: tuple[str, ...],
+    number: int,
+    season: int | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """FR-A4: only the next N unwatched episodes, never a whole season."""
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(one(batch), titles=titles, number=number, season=season)
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert any("batch" in reason for reason in reasons), reasons
+
+
+@pytest.mark.parametrize(
+    ("batch", "single", "titles", "number", "season"),
+    BATCHES,
+    ids=lambda value: str(value)[:40],
+)
+def test_the_single_episode_of_the_same_show_is_still_accepted(
+    batch: str,
+    single: str,
+    titles: tuple[str, ...],
+    number: int,
+    season: int | None,
+) -> None:
+    """The control. A filter that rejected these too would be no fix at all."""
+    candidate = acceptable(one(single), titles=titles, number=number, season=season)
+
+    assert candidate is not None
+    assert candidate.parsed.kind == "episode"
+    assert candidate.parsed.episode == number
+
+
+def test_a_marker_only_batch_is_rejected_and_names_one_episode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``[Batch]`` with a single number holds one episode as far as Arc knows.
+
+    So the reason says "episode 12", not "episodes 12-12".
+    """
+    title = "[Erai-raws] Dagashi Kashi 2 - 12 [1080p][Multiple Subtitle][Batch]"
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(one(title), titles=("Dagashi Kashi 2",), number=12, season=None)
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert any("batch release covering episode 12," in reason for reason in reasons), reasons
+
+
+def test_the_ranker_never_sees_a_batch() -> None:
+    """Ranking is downstream of the filter, so it can only pick a survivor."""
+    rules = Rules(
+        preferred_groups=("Erai-raws",), preferred_resolution="1080p", fallback_resolution="720p"
+    )
+    batch, single, titles, number, season = BATCHES[0]
+    feed = [one(batch), one(single)]
+
+    candidates = filter_items(feed, titles=titles, number=number, season=season)
+    ranked = rank(candidates, rules)
+
+    assert [candidate.item.title for candidate in candidates] == [single]
+    assert [entry.item.title for entry in ranked] == [single]
+
+
+def test_every_batch_in_the_production_run_is_filtered_out() -> None:
+    """All seven at once, against the show each of them belongs to."""
+    for batch, _single, titles, number, season in BATCHES:
+        assert filter_items([one(batch)], titles=titles, number=number, season=season) == []
+
+
+# --- Seeders: zero is not "last", it is "no" (2026-09-13) -------------------
+
+#: A release that is this show's episode 7 in every other respect, so the only
+#: thing the tests below vary is the seeder count.
+GOOD = "[SubsPlease] Sousou no Frieren - 07 (1080p) [24356E19].mkv"
+GOOD_TITLES = ("Sousou no Frieren",)
+
+
+def seeded(title: str, seeders: int) -> NyaaItem:
+    return NyaaItem(title=title, link="", info_hash="0" * 40, seeders=seeders)
+
+
+def test_a_release_with_no_seeders_is_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    """It cannot be downloaded at all, so it is not a candidate at any rank."""
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(seeded(GOOD, 0), titles=GOOD_TITLES, number=7, season=None)
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert "no seeders" in reasons, reasons
+
+
+def test_one_seeder_is_enough_to_be_a_candidate() -> None:
+    """The rule is a floor at zero, not a quality bar: ranking does the rest."""
+    candidate = acceptable(seeded(GOOD, 1), titles=GOOD_TITLES, number=7, season=None)
+
+    assert candidate is not None
+    assert candidate.item.seeders == 1
+
+
+def test_the_ranker_never_sees_a_dead_release() -> None:
+    """And the live one below it wins rather than the episode going unfetched."""
+    dead = NyaaItem(title=GOOD, link="", info_hash="a" * 40, seeders=0)
+    alive = NyaaItem(
+        title="[Erai-raws] Sousou no Frieren - 07 [720p][Multiple Subtitle]",
+        link="",
+        info_hash="b" * 40,
+        seeders=12,
+    )
+
+    ranked = rank(
+        filter_items([dead, alive], titles=GOOD_TITLES, number=7, season=None),
+        Rules(preferred_resolution="1080p", fallback_resolution="720p"),
+    )
+
+    assert [entry.item.info_hash for entry in ranked] == ["b" * 40]
 
 
 # --- Ranking ----------------------------------------------------------------
@@ -695,11 +1175,7 @@ async def test_the_search_runs_every_query_even_when_the_first_finds_plenty(
             client, FRIEREN_S1, 7, Rules(preferred_groups=("SubsPlease",))
         )
 
-    assert stub.queries == [
-        "Sousou no Frieren - 07",
-        "Frieren: Beyond Journey's End - 07",
-        "Sousou no Frieren 07",
-    ]
+    assert stub.queries == FRIEREN_S1_QUERIES
     assert ranked[0].candidate.group == "SubsPlease"
 
 
@@ -712,11 +1188,7 @@ async def test_the_search_finds_what_only_a_later_query_returns(
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         ranked = await search_for_episode(client, FRIEREN_S1, 7, Rules())
 
-    assert stub.queries == [
-        "Sousou no Frieren - 07",
-        "Frieren: Beyond Journey's End - 07",
-        "Sousou no Frieren 07",
-    ]
+    assert stub.queries == FRIEREN_S1_QUERIES
     assert ranked
 
 
@@ -728,7 +1200,7 @@ async def test_the_pool_is_the_union_of_every_query(
     Neither feed alone contains both of these: the SubsPlease 1080p is only in
     the short one and the Erai-raws 1080p is only in the full one. Before the
     merge, the full-title query answered first and non-empty and the search
-    never asked the other four.
+    never asked the other five.
     """
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub({MUSHOKU_QUERIES[0]: MUSHOKU_FULL, MUSHOKU_QUERIES[2]: MUSHOKU_SHORT})
@@ -745,14 +1217,14 @@ async def test_the_pool_is_the_union_of_every_query(
 async def test_the_merge_keeps_one_row_per_info_hash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every query answers the same feed; the pool is that feed, not five of it."""
+    """Every query answers the same feed; the pool is that feed, not six of it."""
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub(default=MUSHOKU_SHORT)
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         ranked = await search_for_episode(client, MUSHOKU_S3, 11, Rules())
 
-    assert len(stub.queries) == 5
+    assert len(stub.queries) == len(MUSHOKU_QUERIES) == 6
     hashes = [entry.item.info_hash for entry in ranked]
     assert len(hashes) == len(set(hashes))
 
@@ -777,10 +1249,10 @@ async def test_the_most_seeded_1080p_release_wins_across_the_merged_pool(
     assert ranked[0].candidate.resolution == "1080p"
 
 
-async def test_five_queries_are_still_spaced_by_the_polite_interval(
+async def test_every_query_is_still_spaced_by_the_polite_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Running every form costs four pauses, not zero and not a burst."""
+    """A full budget costs five pauses, not zero and not a burst."""
     slept: list[float] = []
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
     stub = NyaaStub()
@@ -788,8 +1260,8 @@ async def test_five_queries_are_still_spaced_by_the_polite_interval(
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         await search_for_episode(client, MUSHOKU_S3, 11, Rules())
 
-    assert len(stub.queries) == nyaa_module.MAX_QUERIES == 5
-    assert len(slept) == 4, "the first request waits for nothing"
+    assert len(stub.queries) == nyaa_module.MAX_QUERIES == 6
+    assert len(slept) == 5, "the first request waits for nothing"
     assert all(0 < pause <= MIN_INTERVAL for pause in slept)
 
 

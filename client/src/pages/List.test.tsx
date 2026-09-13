@@ -82,6 +82,34 @@ describe('My List', () => {
     )
   })
 
+  it('badges a row a MyAnimeList import brought in and nobody has touched', async () => {
+    // FR-A9: Arc is fetching nothing for this row until its owner opens the
+    // show and asks, so the list says so rather than leaving "Watching" to
+    // imply episodes are on the way.
+    renderList('/list', {
+      'GET /api/list?status=watching': {
+        body: [
+          {
+            anime: FRIEREN,
+            entry: listEntry({ status: 'watching', progress: 0, dormant: true }),
+          },
+        ],
+      },
+    })
+
+    const row = await screen.findByRole('link', { name: /Frieren/ })
+    expect(within(row).getByText('imported')).toBeInTheDocument()
+  })
+
+  it('leaves a touched row unbadged', async () => {
+    renderList('/list', {
+      'GET /api/list?status=watching': { body: [WATCHING_FRIEREN] },
+    })
+
+    const row = await screen.findByRole('link', { name: /Frieren/ })
+    expect(within(row).queryByText('imported')).not.toBeInTheDocument()
+  })
+
   it('syncs the chips to ?status= and asks the server for that status', async () => {
     const { fetchMock, router } = renderList('/list', {
       'GET /api/list?status=watching': { body: [WATCHING_FRIEREN] },

@@ -12,12 +12,16 @@ const HEALTH = { body: { status: 'ok', version: '0.1.0', env: 'test' } }
 const REVIEW_SUMMARY = 'GET /api/review/summary'
 const ACQUISITION_STATUS = 'GET /api/acquisition/status'
 const PAUSED_NOTE = 'Acquisition paused'
+/** The other brake, named for its cause because it lifts itself (FR-T6). */
+const HELD_NOTE = 'Acquisition held (disk)'
 /** The mark is a link home; the image inside it is decorative. */
 const LOGO_LABEL = 'Arc — Watch Now'
 
-/** An acquisition status body with the flag set however we say. */
-function status(paused: boolean) {
-  return { body: { paused, active_wants: 4, searching: 1, downloading: 0 } }
+/** An acquisition status body with the flags set however we say. */
+function status(paused: boolean, held = false) {
+  return {
+    body: { paused, storage_held: held, active_wants: 4, searching: 1, downloading: 0 },
+  }
 }
 
 /**
@@ -315,6 +319,23 @@ describe('Acquisition pause note', () => {
       expect(requestsMade(fetchMock)).toContain(ACQUISITION_STATUS)
     })
     expect(screen.queryByText(PAUSED_NOTE)).not.toBeInTheDocument()
+  })
+
+  it('names the disk instead when the storage guard is what stopped it', async () => {
+    renderShell({ me: TEST_ADMIN, acquisition: status(false, true) })
+    await openAccountMenu()
+
+    const note = await screen.findByText(HELD_NOTE)
+    expect(note).toHaveAttribute('role', 'status')
+    expect(screen.queryByText(PAUSED_NOTE)).not.toBeInTheDocument()
+  })
+
+  it('says "paused" when both are true, because that is the one to undo', async () => {
+    renderShell({ me: TEST_ADMIN, acquisition: status(true, true) })
+    await openAccountMenu()
+
+    expect(await screen.findByText(PAUSED_NOTE)).toBeInTheDocument()
+    expect(screen.queryByText(HELD_NOTE)).not.toBeInTheDocument()
   })
 
   it('does not ask a non-admin, and never shows them the note', async () => {

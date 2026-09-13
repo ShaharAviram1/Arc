@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-09. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-09-13. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -112,11 +112,12 @@ any time, and the owner uses it daily.
   survives an outage of both sources.
 
 ### 4.2 Acquisition (Nyaa via qBittorrent)
-- FR-A1 For each user and each show in status `watching` or `planned`, the
-  server keeps the next **N** unwatched episodes available (N configurable
-  by admin, default 2), counted from that user's furthest watched episode.
-  For airing shows, the newest aired episode is fetched on its air day.
-  Nothing outside this window is fetched.
+- FR-A1 For each user and each show in status `watching` or `planned` **whose
+  entry is not dormant** (FR-A9), the server keeps the next **N** unwatched
+  episodes available (N configurable by admin, default 2), counted from that
+  user's furthest watched episode. For airing shows, the newest aired episode
+  is fetched on its air day. Nothing outside this window is fetched, and no
+  more of it at once than FR-A10's per-user cap allows.
 - FR-A2 Wants from all users are merged: an episode is fetched once even if
   several users want it.
 - FR-A3 Release selection uses ranked, admin-editable rules:
@@ -137,9 +138,41 @@ any time, and the owner uses it daily.
   "unavailable"; while someone still wants it, retry once a day (cheap: a
   few RSS requests) and stop only when the want goes away. If a downloaded
   file turns out not to be the episode (ignored in review), the episode is
-  flagged unavailable the same way.
+  flagged unavailable the same way. A download that makes no progress is
+  given up on and rejoins the same schedule: a torrent still asking for its
+  metadata after `STALL_METADATA_MINUTES` (default 60), or one that has
+  fetched nothing — or that the tracker says has no swarm left — after
+  `STALL_NO_BYTES_HOURS` (default 6), is removed from the client with its
+  files and the episode is flagged unavailable ("no metadata after 60
+  minutes", "no bytes after 6 hours", "no seeders after 6 hours"). Both
+  thresholds count **time the client spent downloading it**, not time since
+  Arc asked for it: a torrent waiting its turn behind the download limit has
+  not failed at anything. A release Arc has already tried is never chosen
+  again, and a release with no seeders is never chosen at all. Torrents
+  stopped by hand, and torrents queued behind the client's own download
+  limit, are never touched by this.
 - FR-A7 Users can see the acquisition status of each episode on the show page
   (wanted, searching, downloading with %, preparing, ready, unavailable).
+- FR-A8 A user can ask for the first episode of any show as a sample from the
+  show page, without changing their list or MAL. Only that one episode is
+  fetched; it follows the same states, D-day drop (FR-T2) and retention
+  (FR-T1) as any want. Watching it to completion adds a show that is not on
+  the list as Watching (FR-S4) and the ordinary window takes over; an existing
+  list entry keeps its status.
+- FR-A9 A list entry created by a MyAnimeList import generates no acquisition
+  wants until the user has touched the show in Arc (status, progress, score,
+  Play, or a MAL-log revert); a show that is currently airing is the
+  exception and keeps fetching. Activation never expires. "Try episode 1"
+  (FR-A8) is allowed on a dormant entry and fetches that one episode without
+  activating it — one episode is the point of a sample; activation means the
+  window.
+- FR-A10 At most K shows per user fetch at once (default 5; 0 = unlimited):
+  shows already fetching keep their slot, free slots go to currently airing
+  shows first and then to the most recently updated entries, and the rest wait
+  visibly on their show page. A show holds no slot once its wanted episodes
+  have arrived, or once Arc has given up on finding them (FR-A6). A sample
+  (FR-A8) never counts: it may add one episode beyond the cap, and is never
+  refused by it.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -284,6 +317,9 @@ any time, and the owner uses it daily.
   rewinds or a new user wants it, it is re-acquired.
 - FR-T4 Admin can see disk usage and manually delete or re-fetch.
 - FR-T5 All of G, D, N are admin-configurable.
+- FR-T6 Acquisition holds itself while free space on the data volume is below
+  an admin-set floor (default 10 GB): reconciliation, ingest and playback
+  continue, no new search starts; it resumes on its own when space is freed.
 
 ### 4.10 Admin (phase 2 UI; the underlying settings exist from phase 1 via config)
 - FR-D1 Users & invites; deactivate a user.
@@ -323,7 +359,10 @@ API status. Text only; TMDB's terms offer the logo but do not require it. With
 no key nothing of theirs is shown and the line is absent.
 
 The client is responsive; primary target is desktop, but phone layout must be
-usable for the home page and player.
+usable for the home page and player. Every horizontal shelf must be scrollable
+with a mouse as well as a trackpad or a thumb: it can be dragged, and hovering
+it raises an arrow at each end that still has somewhere to go (owner,
+2026-09-13).
 
 ## 6. Episode lifecycle
 
@@ -332,8 +371,17 @@ not_wanted → wanted → searching → downloading → downloaded
    → matching → (review) → matched → preparing → ready
 ready → (retention) → deleted → not_wanted
 any of searching/downloading → unavailable (after retry window)
+any of wanted/searching/unavailable → not_wanted (nobody wants this episode)
+downloading → not_wanted (nobody wants this episode: the torrent and its
+   partial files are removed from the client)
 preparing → failed → (retry) → preparing
 ```
+
+The last two are the same arrow either side of the point where bytes start
+arriving. A want going away unwinds everything up to and including
+`downloading`, because nothing has landed; from `downloaded` onwards the file
+is retention's to measure and delete (FR-T1), so the episode is left where it
+is and the grace period decides.
 
 ## 7. Non-functional requirements
 
@@ -488,4 +536,130 @@ preparing → failed → (retry) → preparing
   search or show page falls back to MAL/offline immediately rather than paying
   `Retry-After`, and a rate limit no longer stands AniList down for five
   minutes (FR-C6). Background jobs still wait.
+- 2026-09-12 — "Try episode 1" (FR-A8, owner): acquisition gains one explicit
+  exception to FR-A1. A user may ask for a show's first episode as a sample
+  from the show page, with no list entry and therefore no MAL write, because
+  deciding whether a show is worth adding is what the first episode is for;
+  the alternative was adding it as planned and remembering to take it off
+  again. Exactly one episode, never a season, and everything after the fetch —
+  states, the D-day drop, retention — is an ordinary want's. Nothing else about
+  the acquisition rules changes.
 - 2026-09-12 — M16 scope (owner): failure banner shows a user their own failures only; the demo account and "How Arc works" framing are part of M16 and appear only on the demo account; the owner dogfoods for a few days first.
+- 2026-09-13 — Production stalled after the MAL import (owner + orchestrator):
+  414 wants at once, qBittorrent's 3 active-download slots held by dead
+  2018 torrents, and a season batch (`Dagashi Kashi 2 - 01 ~ 12`) read as
+  episode 1 and fully transcoded. Owner decisions: (1) batch releases
+  (episode ranges, BATCH markers) are never picked; (2) stall handling — a
+  torrent with no progress is removed, the episode goes `unavailable` on the
+  retry schedule and that release is not chosen again; (3) **dormant
+  imports** — a MAL import creates no wants by itself; a show fetches once
+  the user touches it in Arc (status, progress, Play, Try), with airing
+  imported shows as the exception; (4) a **per-user slot cap** K (default 5)
+  on shows fetching at once, airing first then most recently updated, the
+  rest visibly waiting; (5) a **storage guard** — acquisition holds itself
+  when free space on the data volume is below an admin-set floor (default
+  10 GB). The FR text for 3–5 is written with each change.
+- 2026-09-13 — Hero art (owner): a new `backdrop_url` column, written only by
+  the TMDB enrichment for every mapped show, is preferred by the 21:9 heroes
+  and the 16:9 cards over AniList's 4.75:1 banner strip, which the design
+  never shows as a picture. Chosen over letting TMDB overwrite `banner_url`
+  because an AniList refresh would put the strip back. Also fixed the same
+  day: the hero's aspect probe loaded lazily inside a 0×0 box and was never
+  fetched, so even shows with a proper backdrop stayed on the blurred poster.
+- 2026-09-13 — Stalls, cancels and the download queue (owner), the second half
+  of the 2026-09-13 production entry above. (1) **Stall handling** (FR-A6): a
+  torrent in `metaDL` past `STALL_METADATA_MINUTES` (60), or with no bytes — or
+  a swarm the tracker says is empty — past `STALL_NO_BYTES_HOURS` (6), is
+  removed from qBittorrent with its files and the episode goes `unavailable`
+  onto the ordinary retry schedule. Both clocks measure the client's own
+  `time_active`, not the age of Arc's row, and torrents stopped by a person or
+  queued behind the download limit are never touched. (2) A release Arc
+  has **already tried** is never chosen again, and a release with **no
+  seeders** is rejected rather than merely ranked last. (3) A download **nobody
+  wants any more** is cancelled: the torrent and its partial files go, and the
+  episode returns to `not_wanted` (§6's new edge). Bytes that have landed stay
+  retention's, an attempt somebody rejected in review keeps its own file, and
+  the cancelled release may be chosen again — a change of mind must not cost
+  an episode the best release on Nyaa. "Try episode 1" (FR-A8) cancels the
+  same way when the user presses Cancel mid-download. (4) Arc now writes qBittorrent's **queue policy** as well as its
+  seeding policy — queueing on, `QBIT_MAX_ACTIVE_DOWNLOADS` (8),
+  `QBIT_MAX_ACTIVE_TORRENTS` (12), don't count slow torrents — because the
+  limits the owner raised by hand on 2026-09-13 are exactly the ones a
+  container restart loses.
+- 2026-09-13 — **Dormant imports** (FR-A9, owner), the third of the 2026-09-13
+  production decisions. A MyAnimeList import is a baseline (FR-M2), not a
+  request, so a `watching`/`planned` entry it created generates no wants until
+  the user has touched that show in Arc — a status, progress or score change, a
+  completed episode, or a "try episode 1". The moment is stamped on
+  `list_entries.activated_at` and is never cleared: activation does not expire,
+  because a show somebody asked for in March is still a show they asked for. A
+  **currently airing** show is the exception and keeps fetching whether or not
+  it has been touched, because "the episode is there on the morning it airs" is
+  the weekly use of Arc and a user whose whole list arrived by import should not
+  have to press anything for it. **Play counts from the first progress report**,
+  not from the completion: thirty seconds in is the user asking for the show,
+  and waiting for 90 % would mean the next episode only started arriving after
+  they had finished this one. Pressing play never *adds* a show to a list,
+  though — FR-S4 keeps that at the completion. **"Try episode 1" (FR-A8) does
+  not activate**: it writes its own want for exactly one episode, which is what
+  was asked for, and activating would hand the show the whole N-episode window;
+  by the same token it is no longer refused on a dormant `watching`/`planned`
+  entry, because such an entry has no window and "the next episodes are fetched
+  automatically" would be false. The migration backfills every entry that is
+  Arc's own (`updated_by = 'arc'`) **or has never been pushed to MyAnimeList**
+  (`mal_synced_at IS NULL`, which catches an Arc-made row a later import
+  overwrote), so nothing anybody is watching stops; genuinely imported rows
+  stay dormant, which is how production's 414 wants are shelved on the first
+  reconciliation after the deploy — with their downloads cancelled and their
+  landed bytes left to retention's grace. One shape no column can tell from an
+  import survives — an Arc-made entry later changed on MAL *and* successfully
+  pushed — and it costs one press of "Fetch this show". The alternative
+  considered and rejected was a one-off "start from today" cutoff, which would
+  have said nothing about the next import.
+- 2026-09-13 — **Per-user slot cap** (FR-A10, owner), the fourth of the
+  2026-09-13 production decisions, and the owner's answer to "dormant imports
+  or a cap?" was **both**. Dormancy (FR-A9) stops an untouched import from
+  asking for anything; the cap stops the activated half of a large list from
+  asking for all of it on one afternoon — which is what one disk and
+  qBittorrent's handful of download slots actually allow. K = 5 by default and
+  0 means no cap. A show **occupies a slot** while the user has a live want on
+  an episode that is not yet `ready`; a show whose wanted episodes have all
+  arrived is waiting to be *watched*, holds nothing, and frees its slot for the
+  next show — otherwise a user who let three episodes pile up would stop
+  fetching everything else. Occupants keep their slot whatever K says, so
+  lowering K cancels nothing and only stops new starts: throwing away bytes to
+  obey an ordering would be the one thing a *limit* should not do. Free slots go
+  to currently airing shows first (the weekly episode is the one a person
+  notices missing) and then to the most recently touched entries. A show that
+  has nothing to fetch competes for nothing. The shows over the cap say so on
+  their own page — "Waiting for a slot — 5 of your 5 shows are fetching" — with
+  no button, because unlike a dormant entry there is nothing the viewer could
+  press that would be honest. A sample (FR-A8) neither occupies a slot nor is
+  refused by one: one episode somebody asked to try is the smallest thing Arc
+  does, so a sample may add one episode beyond the cap. Two states beside
+  `ready` hold no slot either, both found in review: an episode FR-A6 has given
+  up on (`unavailable`, retried daily — five unfindable shows would otherwise
+  freeze a list for ever) and one whose transcode broke (`failed`, which needs
+  an admin rather than a slot). And a show waiting for a slot takes **no part**
+  in the reconciliation: every want it already holds is left exactly as it is,
+  including one FR-T2 dropped, whose `dropped_at` is what retention measures
+  the grace period from. A cap on how much is fetched at once decides nothing
+  about retention — with the one exception that costs nothing: a live want on
+  an episode the user has watched past is still deleted, because the completion
+  is the anchor and a live want left behind would make the sweep skip an episode
+  the cap had no business keeping.
+- 2026-09-13 — **Storage guard** (FR-T6, owner), the fifth. Acquisition holds
+  itself while free space on the data volume is under `min_free_gb` (default
+  10, admin-editable beside G, D and N). A hold is deliberately narrower than
+  the pause: reconciliation still runs, because everything it does when space
+  is short — dropping wants, shelving rows, cancelling downloads nobody wants —
+  *frees* space; ingest and transcodes still run, because finishing what has
+  landed is how a source becomes deletable; only the starting stops, and
+  `search_release` requeues itself exactly as it does while paused. Nobody
+  presses it and nobody has to clear it, which is the whole difference from the
+  pause: the next tick after retention frees room starts fetching again. A
+  measurement that cannot be taken never holds.
+- 2026-09-13 — Shelves scroll for mouse users (owner): drag-to-scroll with the
+  mouse plus hover edge arrows on every shelf, chosen over turning the vertical
+  wheel sideways, which would hijack page scrolling whenever the pointer rests
+  on a shelf. Trackpad, touch and keyboard behaviour unchanged.

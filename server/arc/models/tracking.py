@@ -76,6 +76,18 @@ class ListEntry(Base):
     mal_dirty: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    #: When the user first touched this show **in Arc** (FR-A9): a status,
+    #: progress or score change, a completed episode, or a "try episode 1".
+    #: Null means nobody has — which is what a row a MyAnimeList import created
+    #: and nobody has acted on since looks like, and the one state that
+    #: generates no acquisition wants
+    #: (:func:`arc.services.acquisition.wants.is_dormant`).
+    #:
+    #: Write-once and never cleared: FR-A9's "activation never expires". The
+    #: MAL import, push and reconcile paths leave it exactly as they find it,
+    #: which is the whole point — MyAnimeList moving a score is not the user
+    #: asking Arc to download 400 episodes.
+    activated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
 class WatchProgress(Base):

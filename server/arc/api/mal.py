@@ -53,6 +53,7 @@ from arc.models import (
     MalWriteStatus,
     UpdatedBy,
 )
+from arc.services.acquisition.dormancy import activate
 from arc.services.mal import oauth, writelog
 from arc.services.mal.client import MalApiError, needs_relink, store_tokens
 from arc.services.mal.factory import client_of, oauth_client
@@ -464,7 +465,12 @@ async def revert(log_id: int, user: CurrentUser, session: SessionDep) -> RevertO
 
     entry.updated_by = UpdatedBy.ARC
     entry.mal_dirty = True
-    entry.updated_at = datetime.now(UTC)
+    now = datetime.now(UTC)
+    entry.updated_at = now
+    # A revert is FR-M7's third user-originated event, so it is a touch in
+    # Arc like the other two (FR-A9) — including the one that *recreates* an
+    # entry a removal took off the list, which is a user putting the show back.
+    activate(entry, now=now)
     await session.flush()
     # The third of FR-M7's user-originated events, and the third and last
     # caller allowed to queue a write. The row carries ``revert`` so the push

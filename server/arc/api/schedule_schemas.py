@@ -167,7 +167,10 @@ class BehindEntry(BaseModel):
     def from_row(cls, row: BehindRow) -> BehindEntry:
         return cls(
             anime=AnimeSummary.from_anime(row.anime, row.entry.status),
-            entry=ListEntryOut.model_validate(row.entry),
+            # Built rather than validated, so ``dormant`` is derived here too
+            # (FR-A9): every ``ListEntryOut`` in the API answers that field the
+            # same way, and the show is in hand.
+            entry=ListEntryOut.build(row.entry, anime_status=row.anime.status),
             aired=row.aired,
             behind=row.behind,
             latest_aired_at=row.latest_aired_at,

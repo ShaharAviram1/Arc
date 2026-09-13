@@ -15,16 +15,23 @@ from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from arc.api import acquisition as acquisition_api
 from arc.db import SessionFactory
-from arc.models import EpisodeState, Job, Torrent, UserRole, Want
+from arc.models import EpisodeState, Job, ListEntry, ListStatus, Torrent, User, UserRole, Want
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     COMPUTE_WANTS_PRIORITY,
     POLL_QBIT,
     SEARCH_RELEASE,
 )
-from arc.services.acquisition.rules import PAUSED_KEY, is_paused
-from tests.acquisition_helpers import make_anime, make_entry, make_episodes, make_user
+from arc.services.acquisition.rules import BYTES_PER_GB, PAUSED_KEY, is_paused
+from tests.acquisition_helpers import (
+    fake_free_space,
+    make_anime,
+    make_entry,
+    make_episodes,
+    make_user,
+)
 from tests.conftest import add_user, api_transport, login
 
 pytestmark = pytest.mark.pg
@@ -55,6 +62,83 @@ async def show_with_torrent(factory: SessionFactory) -> tuple[int, int, int]:
         )
         await session.commit()
         return anime.id, episode.id, episodes[7].id
+
+
+async def show_with_entry(
+    factory: SessionFactory,
+    *,
+    anilist_id: int,
+    status: str,
+    activated: bool,
+    email: str,
+) -> int:
+    """A show with one list entry belonging to ``email``. Returns the anime id."""
+    await add_user(factory, email, USER_PASSWORD)
+    async with factory() as session:
+        anime = await make_anime(session, anilist_id=anilist_id, status=status)
+        await make_episodes(session, anime, 6, aired_through=6)
+        user = await session.scalar(select(User).where(User.email == email))
+        assert user is not None
+        entry = ListEntry(
+            user_id=user.id,
+            anime_id=anime.id,
+            status=ListStatus.WATCHING,
+            progress=0,
+            activated_at=datetime.now(UTC) if activated else None,
+        )
+        session.add(entry)
+        await session.commit()
+        return anime.id
+
+
+# --- ListEntryOut: dormant imports (FR-A9) ----------------------------------
+
+
+async def test_the_show_page_says_an_imported_entry_is_dormant(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """What the hero's note and its "Fetch this show" button read (FR-A9)."""
+    email = "dormant-show@arc.test"
+    anime_id = await show_with_entry(
+        api_factory, anilist_id=963020, status="FINISHED", activated=False, email=email
+    )
+
+    async with api_transport(api_app) as client:
+        await login(client, email, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["list_entry"]["dormant"] is True
+    assert body["list_entry"]["activated_at"] is None
+
+
+async def test_an_airing_show_is_never_dormant(api_app, api_factory: SessionFactory) -> None:
+    """FR-A9's exception, derived rather than stored: nothing is written when a
+    show starts broadcasting, and the note disappears anyway."""
+    email = "airing-show@arc.test"
+    anime_id = await show_with_entry(
+        api_factory, anilist_id=963021, status="RELEASING", activated=False, email=email
+    )
+
+    async with api_transport(api_app) as client:
+        await login(client, email, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["list_entry"]["dormant"] is False
+    assert body["list_entry"]["activated_at"] is None
+
+
+async def test_a_touched_entry_is_not_dormant(api_app, api_factory: SessionFactory) -> None:
+    email = "touched-show@arc.test"
+    anime_id = await show_with_entry(
+        api_factory, anilist_id=963022, status="FINISHED", activated=True, email=email
+    )
+
+    async with api_transport(api_app) as client:
+        await login(client, email, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    assert body["list_entry"]["dormant"] is False
+    assert body["list_entry"]["activated_at"] is not None
 
 
 # --- EpisodeOut -------------------------------------------------------------
@@ -331,8 +415,14 @@ async def test_resuming_clears_the_setting_and_queues_a_recompute(
 
 
 async def test_the_status_reports_the_flag_and_what_it_is_holding(
-    admin_client: AsyncClient, api_factory: SessionFactory, restore_pause: None
+    admin_client: AsyncClient,
+    api_factory: SessionFactory,
+    restore_pause: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The disk is stubbed so the two new figures are the same on every machine
+    # (FR-T6). 50 GB free against the seeded 10 GB floor is "not held".
+    fake_free_space(monkeypatch, acquisition_api, 50 * BYTES_PER_GB)
     async with api_factory() as session:
         anime = await make_anime(session, anilist_id=963007)
         episodes = await make_episodes(session, anime, 6, aired_through=6)
@@ -358,23 +448,123 @@ async def test_the_status_reports_the_flag_and_what_it_is_holding(
 
     assert body == {
         "paused": True,
+        "storage_held": False,
+        "free_bytes": 50 * BYTES_PER_GB,
+        "min_free_bytes": 10 * BYTES_PER_GB,
         "active_wants": 2,
         "searching": 1,
         "downloading": 1,
+        "dormant_entries": 0,
+        "waiting_shows": 0,
+        "slot_cap_k": 5,
         # Nothing is ``ready`` and nothing has a size, so M10's disk figure is
         # zero here; :mod:`tests.test_retention_api` is where it is exercised.
         "retained_bytes": 0,
     }
 
 
-async def test_the_status_of_an_idle_unpaused_arc(admin_client: AsyncClient) -> None:
+async def test_the_status_of_an_idle_unpaused_arc(
+    admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_free_space(monkeypatch, acquisition_api, 50 * BYTES_PER_GB)
+
     assert (await admin_client.get("/api/acquisition/status")).json() == {
         "paused": False,
+        "storage_held": False,
+        "free_bytes": 50 * BYTES_PER_GB,
+        "min_free_bytes": 10 * BYTES_PER_GB,
         "active_wants": 0,
         "searching": 0,
         "downloading": 0,
+        "dormant_entries": 0,
+        "waiting_shows": 0,
+        "slot_cap_k": 5,
         "retained_bytes": 0,
     }
+
+
+async def test_the_status_says_when_the_disk_is_holding_acquisition(
+    admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-T6, from the same rule and the same measurement as the guard itself.
+
+    A status page that could disagree with the guard would be worse than no
+    status page.
+    """
+    fake_free_space(monkeypatch, acquisition_api, 1 * BYTES_PER_GB)
+
+    body = (await admin_client.get("/api/acquisition/status")).json()
+
+    assert body["storage_held"] is True
+    assert body["free_bytes"] == 1 * BYTES_PER_GB
+    assert body["min_free_bytes"] == 10 * BYTES_PER_GB
+    assert body["paused"] is False, "a hold is not a pause; nobody pressed anything"
+
+
+async def test_an_unmeasurable_disk_reads_as_zero_and_not_held(
+    admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly as the guard treats it: no answer is not a small answer."""
+    fake_free_space(monkeypatch, acquisition_api, None)
+
+    body = (await admin_client.get("/api/acquisition/status")).json()
+
+    assert body["free_bytes"] == 0
+    assert body["storage_held"] is False
+
+
+async def test_the_status_counts_dormant_imports(
+    admin_client: AsyncClient, api_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-A9's figure: what an admin looks at after a MyAnimeList import.
+
+    Three entries, one of each kind: never touched on a finished show (dormant),
+    never touched on an airing one (the exception), and touched (live).
+    """
+    fake_free_space(monkeypatch, acquisition_api, 50 * BYTES_PER_GB)
+    async with api_factory() as session:
+        finished = await make_anime(session, anilist_id=963010, status="FINISHED")
+        airing = await make_anime(session, anilist_id=963011, status="RELEASING")
+        touched = await make_anime(session, anilist_id=963012, status="FINISHED")
+        user = await make_user(session, "dormant-count@arc.test")
+        await make_entry(session, user, finished, activated=False)
+        await make_entry(session, user, airing, activated=False)
+        await make_entry(session, user, touched)
+        # On hold is not watching/planned, so it is not an import waiting to be
+        # woken up — it is FR-W4's "no wants" for a different reason.
+        held_show = await make_anime(session, anilist_id=963013, status="FINISHED")
+        await make_entry(session, user, held_show, status=ListStatus.ON_HOLD, activated=False)
+        await session.commit()
+
+    body = (await admin_client.get("/api/acquisition/status")).json()
+
+    assert body["dormant_entries"] == 1
+
+
+async def test_the_status_counts_the_shows_waiting_for_a_slot(
+    admin_client: AsyncClient, api_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-A10's figure, and the fourth reason acquisition can look idle.
+
+    Seven activated shows under the default cap of five: five may fetch and two
+    wait. The count is the reconciler's own, so the panel cannot say "nothing
+    is waiting" while the next tick holds two shows back.
+    """
+    fake_free_space(monkeypatch, acquisition_api, 50 * BYTES_PER_GB)
+    async with api_factory() as session:
+        user = await make_user(session, "waiting-count@arc.test")
+        for index in range(7):
+            anime = await make_anime(
+                session, anilist_id=963020 + index, romaji=f"Waiting {index}", status="FINISHED"
+            )
+            await make_episodes(session, anime, 4, aired_through=4)
+            await make_entry(session, user, anime, status=ListStatus.PLANNED)
+        await session.commit()
+
+    body = (await admin_client.get("/api/acquisition/status")).json()
+
+    assert body["waiting_shows"] == 2
+    assert body["slot_cap_k"] == 5
 
 
 # --- The list hook ----------------------------------------------------------

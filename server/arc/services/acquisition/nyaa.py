@@ -18,7 +18,10 @@ library uses** (FR-A4) and has to agree about all of: it is a single episode,
 the number is the one being fetched, the title is that show's, and the season
 is that show's. A release Nyaa has flagged as a ``remake`` is dropped outright:
 it is a re-encode of somebody else's work, and the original is in the same
-list.
+list. So is a release with **no seeders** (:data:`MIN_SEEDERS`): it is not a
+worse candidate but a file that cannot be fetched at all, and taking one puts a
+magnet into qBittorrent that sits there asking for its metadata until the stall
+rule removes it hours later.
 
 The season check reads a missing marker as **season 1**, on both sides. A
 catalogue entry with no marker is season 1 of that entry — AniList files each
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -99,6 +103,13 @@ TIMEOUT_SECONDS: Final[float] = 20.0
 #: How long to wait before the single retry after a 5xx or a timeout.
 RETRY_AFTER: Final[float] = 3.0
 
+#: Fewest seeders a release may have and still be a candidate. One: a torrent
+#: with nobody holding it cannot be downloaded, however well its name matches,
+#: and the seeder count is a *filter* at zero and a ranking input above it
+#: (FR-A3). Nyaa reports the figure in the feed, so this is a decision taken
+#: before anything is asked of qBittorrent.
+MIN_SEEDERS: Final[int] = 1
+
 #: How close a parsed release title must be to one of the show's titles
 #: (FR-A4). High, because the episode number and season have already been
 #: checked by the time this is asked and the only thing left to get wrong is
@@ -107,9 +118,12 @@ TITLE_THRESHOLD: Final[float] = 0.90
 
 #: Most queries a single search makes, however many the builder produced.
 #: **Every one of them runs**, so this is the budget one episode's search may
-#: spend: five × 2 s of spacing, and rather less in practice because the cache
-#: is shared and the broad forms repeat from episode to episode.
-MAX_QUERIES: Final[int] = 5
+#: spend: six × 2 s of spacing, and rather less in practice because the cache
+#: is shared and the broad forms repeat from episode to episode. Six rather
+#: than the original five so that a title with a subtitle and no season marker
+#: keeps its bare form *behind* the two head forms (:func:`queries`); the
+#: dedupe keeps a typical show at two or three regardless.
+MAX_QUERIES: Final[int] = 6
 
 #: Season numbers as a release group writes them in a title. Only up to 5:
 #: past that nobody uses numerals, and ``I`` is never written at all.
@@ -118,6 +132,28 @@ ROMAN_SEASONS: Final[dict[int, str]] = {2: "II", 3: "III", 4: "IV", 5: "V"}
 #: Episode numbers are padded to two digits, or to three once a show is long
 #: enough that groups start writing ``- 105``.
 LONG_SHOW_EPISODES: Final[int] = 100
+
+#: What separates a title from its subtitle: a colon, an en/em dash or a tilde
+#: (both widths). **Whitespace on one side is part of the definition.** The
+#: colon of ``Rakudai Kenja no Gakuin Musou: Nidome no Tensei`` is glued to the
+#: word in front of it and followed by a space, and it does separate; the colon
+#: of ``Re:Zero kara Hajimeru Isekai Seikatsu`` has whitespace on neither side
+#: and is part of the name, which matters because the head it would otherwise
+#: produce is ``Re`` — a query worth two seconds of Nyaa's patience and nothing
+#: else. ``re.search`` finds the leftmost match whichever alternative it is, so
+#: this is the *first* separator of the title.
+SUBTITLE_SEPARATOR: Final[re.Pattern[str]] = re.compile(r"\s[-–—]\s|\s[:~〜]|[:~〜]\s")
+
+#: Trailing punctuation a head is trimmed of, the same set
+#: :func:`~arc.services.library.parser.strip_season` uses, plus the wide
+#: dashes and tilde.
+_TRIM: Final[str] = " \t._-~:–—〜"
+
+#: The relation type that disqualifies an entry from the head forms. Stored in
+#: ``anime.relations`` blobs under ``relation_type`` in AniList's vocabulary —
+#: MAL's ``lower_snake`` is upper-cased on the way in — and read the same way
+#: the matcher and the recommender read it.
+PREQUEL_RELATION: Final[str] = "PREQUEL"
 
 
 class NyaaUnavailable(RuntimeError):
@@ -418,21 +454,92 @@ def _short_forms(name: str, season: int, padded: str) -> list[str]:
     return built
 
 
+def has_prequel(anime: Anime) -> bool:
+    """Whether the catalogue says something comes *before* this entry.
+
+    The gate on the head forms, and the reason is the one thing a head query
+    cannot defend itself against. A release named by the bare head — ``[Group]
+    Made in Abyss - 07`` — is almost always the **first** season, and for a
+    sequel whose own title marks nothing but the arc (*Made in Abyss:
+    Retsujitsu no Ougonkyou*, *Kimetsu no Yaiba: Yuukaku-hen*) there is no
+    season marker for :func:`acceptable` to disagree with, while
+    :func:`title_score` reads the shorter name as the ordinary case of a group
+    abbreviating an official title. So the two checks that make every other
+    broad form safe both pass, and episode 7 of season 1 lands as episode 7 of
+    the sequel. A marked sequel (*Sousou no Frieren 2nd Season*) is not at
+    risk, and does not reach the head forms anyway.
+
+    **No relations is not evidence.** An offline-sourced row and a row nobody
+    has opened the detail of both carry ``None`` here, and refusing them the
+    head forms would withhold the fix from exactly the shows that need it —
+    the ones Arc knows least about. They keep it; the 0.90 filter and the
+    season check still apply.
+    """
+    return any(
+        isinstance(relation, dict)
+        and str(relation.get("relation_type") or "").upper() == PREQUEL_RELATION
+        for relation in anime.relations or ()
+    )
+
+
+def head_of(name: str) -> str:
+    """The title in front of its subtitle, or ``""`` when there is no subtitle.
+
+    The other half of :func:`_short_forms`' problem, and the half a season
+    marker does not cause. Nyaa ANDs every word, and a release group writes the
+    *head* of a title and stops: *Rakudai Kenja no Gakuin Musou: Nidome no
+    Tensei, S-Rank Cheat Majutsushi Bouken-roku* is nine words in the catalogue
+    and ``[SubsPlease] Rakudai Kenja no Gakuin Musou - 01`` on Nyaa, so asking
+    for the catalogue's title returns nothing at all — and so does asking for
+    the english one, whose head nobody writes either.
+
+    Returned only when it is non-empty and strictly shorter than what was
+    handed in, so a title with no subtitle produces no second query for the
+    dedupe to drop.
+    """
+    found = SUBTITLE_SEPARATOR.search(name)
+    if found is None:
+        return ""
+    head = name[: found.start()].strip(_TRIM)
+    return head if len(head) < len(name) else ""
+
+
 def queries(anime: Anime, number: int) -> list[str]:
     """What to ask Nyaa for, best first, at most :data:`MAX_QUERIES`.
 
-    ``"<title> - 07"`` first because that is how almost every group writes a
-    weekly release, and because the dash is what keeps the query from matching
-    a batch. Then the same for the english title, and then — for an entry whose
-    own title names a season — the short forms of :func:`_short_forms`, because
-    a later season is exactly where the catalogue's title and the release's
-    name diverge. A show with no season marker needs none of them: its base
-    *is* its title, and ``"<title> - 07"`` is already the broad form, so the
-    bare ``"<title> 07"`` is the only fallback left for the groups that write
-    no dash.
+    In order, and the order is the whole of the ranking between them:
 
-    All of these run (:func:`search_for_episode` merges them); the order is
-    what decides which survive the cap, not which are worth asking.
+    1. ``"<romaji> - 07"``, because that is how almost every group writes a
+       weekly release, and because the dash is what keeps the query from
+       matching a batch.
+    2. ``"<english> - 07"``, the same for the english title.
+    3. For an entry whose own title names a season, the short forms of
+       :func:`_short_forms` — a later season is where the catalogue's title and
+       the release's name diverge most.
+    4. ``"<head of romaji> - 07"`` and 5. ``"<head of english> - 07"``, where
+       :func:`head_of` found a subtitle to drop **and** :func:`has_prequel`
+       found nothing in front of the entry. A group names a show by its head:
+       nothing on Nyaa spells *… Musou: Nidome no Tensei, S-Rank Cheat
+       Majutsushi Bouken-roku* out, so every query built from the whole title
+       returns zero results and the episode goes on the retry schedule while
+       nine releases sit there under the head. Derived from the season-stripped
+       title exactly as the short forms are, which is why *Mushoku Tensei III:
+       Isekai Ittara Honki Dasu* adds nothing here — its base is already
+       ``Mushoku Tensei`` and the dedupe drops the repeat.
+    6. ``"<romaji> 07"``, the bare form, for the groups that write no dash. Only
+       for an entry with no season marker: a marked one spends its budget on
+       the short forms, which are broader and likelier.
+
+    A broad head query is safe because of what happens *after* it: the release
+    name still has to parse as this episode, agree about the season, and reach
+    :data:`TITLE_THRESHOLD` against one of the entry's own titles under the
+    asymmetric :func:`title_score`. A release that merely shares the head
+    carries tokens the entry never wrote and is rejected there. The one thing
+    those two cannot catch is an *unmarked sequel* being offered its first
+    season, which is what :func:`has_prequel` is for.
+
+    All of these run (:func:`search_for_episode` merges them); the cap is the
+    politeness budget, not an opinion about which are worth asking.
     """
     romaji = anime.title_romaji
     english = anime.title_english
@@ -444,13 +551,19 @@ def queries(anime: Anime, number: int) -> list[str]:
         built.append(f"{romaji} - {padded}")
     if english and english != romaji:
         built.append(f"{english} - {padded}")
-    if season is None:
-        if romaji:
-            built.append(f"{romaji} {padded}")
-    else:
+    if season is not None:
         for name in (romaji, english):
             if name:
                 built.extend(_short_forms(name, season, padded))
+    if not has_prequel(anime):
+        for name in (romaji, english):
+            if not name:
+                continue
+            head = head_of(strip_season(name).base)
+            if head:
+                built.append(f"{head} - {padded}")
+    if season is None and romaji:
+        built.append(f"{romaji} {padded}")
 
     seen: dict[str, None] = {}
     for query in built:
@@ -530,6 +643,16 @@ class Candidate:
         return self.parsed.resolution
 
 
+def _rejected(item: NyaaItem, reason: str) -> None:
+    """Log why one result is not the file.
+
+    Every branch of :func:`acceptable` goes through here, because the filter
+    throws away nineteen results out of twenty and "why was nothing found?" is
+    unanswerable without the sentence each of them was thrown away by.
+    """
+    log.debug("nyaa rejected", extra={"title": item.title, "reason": reason})
+
+
 def acceptable(
     item: NyaaItem,
     *,
@@ -540,6 +663,15 @@ def acceptable(
 ) -> Candidate | None:
     """``item`` as a :class:`Candidate`, or ``None`` with a reason logged.
 
+    A **batch is rejected first**, before the episode number is even compared,
+    because it is the rejection that matters most and the one whose reason has
+    to be legible: ``[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p]`` is an
+    entire 6 GB season whose first episode number is the one Arc asked for, and
+    "only the next N unwatched episodes, never a whole season" (FR-A4) is a
+    non-negotiable. The parser is what knows this — a range or a ``BATCH``
+    marker makes :attr:`~arc.services.library.parser.ParsedName.kind` ``batch``
+    — and the filter's job is only to refuse to look past it.
+
     Absolute numbering is deliberately **not** resolved here: episode 40 of a
     two-season franchise really is episode 15 of the sequel, but working that
     out needs the relation graph the matcher walks, and getting it wrong here
@@ -547,11 +679,36 @@ def acceptable(
     the matcher still has the offset rule for files that arrive anyway.
     """
     if item.remake:
+        _rejected(item, "nyaa flagged it a remake")
+        return None
+    if item.seeders < MIN_SEEDERS:
+        # Rejected, not ranked last. Seeders are the third of FR-A3's rules and
+        # a tie-break between releases that *could* be downloaded; zero is not
+        # a worse release, it is no release — a torrent nobody is holding never
+        # gets past asking for its metadata, and until 2026-09-13 Arc chose
+        # those anyway whenever they happened to be the only thing a group had
+        # uploaded, then held one of the client's download slots on them for as
+        # long as nobody looked. Nyaa's own RSS carries the count
+        # (``nyaa:seeders``), so this costs nothing but an ``if``.
+        _rejected(item, "no seeders")
         return None
     parsed = parse(item.title)
-    if parsed.kind != "episode" or parsed.episode != number:
+    if parsed.is_batch or parsed.episode_end is not None:
+        span = parsed.episode_span
+        if len(span) > 1:
+            covered = f" covering episodes {span[0]}-{span[-1]}"
+        elif span:
+            # A marker-only batch: it says BATCH and names one number.
+            covered = f" covering episode {span[0]}"
+        else:
+            covered = ""
+        _rejected(item, f"batch release{covered}, not a single episode")
         return None
-    if parsed.episode_end is not None:
+    if parsed.kind != "episode":
+        _rejected(item, f"parsed as {parsed.kind}, not a single episode")
+        return None
+    if parsed.episode != number:
+        _rejected(item, f"episode {parsed.episode}, not {number}")
         return None
     # Season 1 is what *both* sides mean when neither says otherwise, and the
     # comparison is symmetric because of it. A catalogue entry with no marker
@@ -566,9 +723,11 @@ def acceptable(
     # is visible and fixable; the wrong season on disk is linked by the
     # matcher's own prior and plays as if it were right.
     if (parsed.season or 1) != (season or 1):
+        _rejected(item, f"season {parsed.season or 1}, not {season or 1}")
         return None
     similarity = title_score(parsed.title_key, titles)
     if similarity < threshold:
+        _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
         return None
     return Candidate(item=item, parsed=parsed, title_similarity=similarity)
 
@@ -752,6 +911,7 @@ __all__ = [
     "CATEGORY",
     "MAX_QUERIES",
     "MIN_INTERVAL",
+    "MIN_SEEDERS",
     "NYAA_NS",
     "ROMAN_SEASONS",
     "TITLE_THRESHOLD",
@@ -767,6 +927,8 @@ __all__ = [
     "as_dict",
     "close_shared_client",
     "filter_items",
+    "has_prequel",
+    "head_of",
     "pad",
     "parse_feed",
     "queries",

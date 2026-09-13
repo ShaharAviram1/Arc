@@ -229,6 +229,12 @@ async def test_import_creates_entries_from_every_page(
     assert link is not None and link.last_import_at is not None
     # An import never writes: it is a read and a reconciliation (FR-M7).
     assert mal.patches == [] and mal.deletes == []
+    # And it activates nothing (FR-A9): an import is a baseline, not a
+    # request. Every one of these rows is dormant until its owner touches the
+    # show in Arc — which is why 414 of them no longer start 414 downloads.
+    for anime_id in ids:
+        row = await entry_of(api_factory, user_id=user.id, anime_id=anime_id)
+        assert row is not None and row.activated_at is None
 
 
 async def test_import_overwrites_a_clean_row_and_keeps_a_newer_local_change(
@@ -424,6 +430,10 @@ async def test_a_repeated_import_of_an_undated_row_leaves_updated_at_alone(
         progress=3,
         updated_by=UpdatedBy.MAL,
         updated_at=quiet,
+        # Touched in Arc back in January and abandoned since, so FR-T2's rule
+        # is the one under test here rather than FR-A9's dormancy — which would
+        # shelve the want for a different reason and never reach the D days.
+        activated_at=quiet,
     )
     # An episode ready a month ago, wanted and never watched: FR-T2's subject.
     async with api_factory() as session:

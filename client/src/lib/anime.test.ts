@@ -7,31 +7,39 @@ import {
   ACQUISITION_POLL_MS,
   anilistUrl,
   animeQueryKey,
+  bannerArt,
   catalogErrorMessage,
   episodeDetailLine,
   episodeProblem,
   episodeProgressPercent,
   hasActiveEpisode,
+  hasBanner,
   listErrorMessage,
   listQueryKey,
   malUrl,
   releaseLine,
   renditionLine,
+  sampleErrorMessage,
   useAnime,
   useAnimeSearch,
+  useCancelSample,
   useRemoveListEntry,
+  useRequestSample,
   useRetryTranscode,
   useSetListEntry,
   type AnimeDetail,
   type EpisodeOut,
 } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
+import { homeQueryKey } from '@/lib/schedule'
 import {
   CHOSEN_RELEASE,
+  EMPTY_HOME,
   FRIEREN,
   FRIEREN_DETAIL,
   FRIEREN_DETAIL_ON_LIST,
   FRIEREN_DETAIL_SETTLED,
+  FRIEREN_SAMPLE,
   listEntry,
   SEARCH_PAGE_1,
 } from '@/test/animeFixtures'
@@ -448,5 +456,126 @@ describe('useRetryTranscode', () => {
       expect(result.current.isSuccess).toBe(true)
     })
     expect(requestsMade(fetchMock)).toEqual(['POST /api/episodes/9001/transcode?force=true'])
+  })
+})
+
+describe('sampleErrorMessage', () => {
+  it("uses the server's own sentence for a refused sample (FR-A8)", () => {
+    const refusal =
+      'you are already following this show; the next episodes are fetched automatically'
+    expect(sampleErrorMessage(new ApiError(409, { detail: refusal }))).toBe(refusal)
+  })
+
+  it('falls back when the body carries no sentence', () => {
+    expect(sampleErrorMessage(new ApiError(500, {}))).toBe(
+      'Could not ask for that episode. Try again.',
+    )
+  })
+
+  it('reads anything that is not an ApiError as a reachability problem', () => {
+    expect(sampleErrorMessage(new Error('offline'))).toBe('Could not reach the server.')
+  })
+})
+
+describe('useRequestSample', () => {
+  it('asks for episode 1 and makes the show page and Watch Now ask again', async () => {
+    const fetchMock = mockApi({
+      [`POST /api/anime/${FRIEREN.id}/sample`]: { status: 202, body: FRIEREN_SAMPLE },
+    })
+    const client = createQueryClient()
+    seedShowCache(client)
+    client.setQueryData(homeQueryKey, EMPTY_HOME)
+
+    const { result } = renderHook(() => useRequestSample(FRIEREN.id), {
+      wrapper: wrapperFor(client),
+    })
+    act(() => {
+      result.current.mutate()
+    })
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+    expect(result.current.data).toEqual(FRIEREN_SAMPLE)
+    expect(requestsMade(fetchMock)).toEqual([`POST /api/anime/${FRIEREN.id}/sample`])
+
+    // The answer is written into the show page's cache, so the button and the
+    // episode row are right before the refetch behind them lands: the server
+    // started the search inside the request, and said so.
+    const cached = client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))
+    expect(cached?.sample).toEqual(FRIEREN_SAMPLE)
+    expect(
+      cached?.episodes.find((episode) => episode.id === FRIEREN_SAMPLE.episode_id)?.state,
+    ).toBe('wanted')
+    // And both views are asked again anyway; the patch is only the bridge.
+    expect(client.getQueryState(animeQueryKey(FRIEREN.id))?.isInvalidated).toBe(true)
+    expect(client.getQueryState(homeQueryKey)?.isInvalidated).toBe(true)
+  })
+})
+
+describe('useCancelSample', () => {
+  it('drops the sample and re-asks the same two views', async () => {
+    const fetchMock = mockApi({
+      [`DELETE /api/anime/${FRIEREN.id}/sample`]: { status: 204 },
+    })
+    const client = createQueryClient()
+    client.setQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id), {
+      ...FRIEREN_DETAIL,
+      sample: FRIEREN_SAMPLE,
+    })
+    client.setQueryData(homeQueryKey, EMPTY_HOME)
+
+    const { result } = renderHook(() => useCancelSample(FRIEREN.id), {
+      wrapper: wrapperFor(client),
+    })
+    act(() => {
+      result.current.mutate()
+    })
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+    expect(requestsMade(fetchMock)).toEqual([`DELETE /api/anime/${FRIEREN.id}/sample`])
+    // The sample is gone from the page at once; what the episode's state
+    // becomes is the server's to say, so that is left to the refetch.
+    expect(client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))?.sample).toBeNull()
+    expect(client.getQueryState(animeQueryKey(FRIEREN.id))?.isInvalidated).toBe(true)
+    expect(client.getQueryState(homeQueryKey)?.isInvalidated).toBe(true)
+  })
+})
+
+describe('bannerArt', () => {
+  it("prefers TMDB's backdrop over AniList's strip (owner, 2026-09-13)", () => {
+    expect(
+      bannerArt({
+        banner_url: 'https://example.test/strip.jpg',
+        backdrop_url: 'https://example.test/backdrop.jpg',
+      }),
+    ).toBe('https://example.test/backdrop.jpg')
+  })
+
+  it('falls back to the banner when the enrichment has not reached the show', () => {
+    expect(bannerArt({ banner_url: 'https://example.test/strip.jpg', backdrop_url: null })).toBe(
+      'https://example.test/strip.jpg',
+    )
+    expect(bannerArt({ banner_url: 'https://example.test/strip.jpg' })).toBe(
+      'https://example.test/strip.jpg',
+    )
+  })
+
+  it('is null when the show has neither, and reads an empty string as neither', () => {
+    expect(bannerArt({ banner_url: null, backdrop_url: null })).toBeNull()
+    expect(bannerArt({})).toBeNull()
+    expect(bannerArt({ banner_url: '', backdrop_url: '' })).toBeNull()
+    // An empty backdrop must not hide a banner that is really there.
+    expect(bannerArt({ banner_url: 'https://example.test/strip.jpg', backdrop_url: '' })).toBe(
+      'https://example.test/strip.jpg',
+    )
+  })
+
+  it('is what hasBanner answers, so the two can never disagree', () => {
+    expect(hasBanner({ banner_url: null, backdrop_url: 'https://example.test/b.jpg' })).toBe(true)
+    expect(hasBanner({ banner_url: 'https://example.test/s.jpg', backdrop_url: null })).toBe(true)
+    expect(hasBanner({ banner_url: null, backdrop_url: null })).toBe(false)
   })
 })

@@ -52,6 +52,7 @@ def anime(**kwargs: Any) -> Anime:
         "cover_url": "https://cdn.myanimelist.net/images/anime/1015/138006.jpg",
         "cover_large_url": None,
         "banner_url": None,
+        "backdrop_url": None,
         "credits": None,
     }
     return Anime(**(defaults | kwargs))
@@ -180,12 +181,14 @@ def test_no_credits_block_is_no_credits() -> None:
 
 
 def test_a_mal_row_gains_the_backdrop_the_poster_and_the_credits() -> None:
+    backdrop = f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}"
     plan = plan_enrichment(anime(), episodes(4), payloads())
-    assert plan.banner_url == f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}"
+    assert plan.backdrop_url == backdrop
+    assert plan.banner_url == backdrop
     assert plan.cover_large_url == f"{IMAGE_BASE}{POSTER_SIZE}{frieren_show()['poster_path']}"
     assert plan.credits is not None
     assert plan.credits[0] == {"role": STUDIO_ROLE, "name": "MADHOUSE"}
-    assert plan.columns() == ["banner_url", "cover_large_url", "credits"]
+    assert plan.columns() == ["backdrop_url", "banner_url", "cover_large_url", "credits"]
 
 
 def test_anilist_key_art_is_never_overwritten() -> None:
@@ -198,6 +201,47 @@ def test_anilist_key_art_is_never_overwritten() -> None:
     plan = plan_enrichment(row, episodes(4), payloads())
     assert plan.banner_url is None
     assert plan.cover_large_url is None
+
+
+def test_the_backdrop_lands_even_on_a_row_anilist_owns() -> None:
+    """``backdrop_url`` is TMDB's own column (owner, 2026-09-13).
+
+    The row the whole column exists for: AniList reached it first, so its
+    banner is a 4.75:1 strip no hero can show and rule 3 forbids replacing it.
+    The backdrop goes somewhere the heroes can read it instead.
+    """
+    row = anime(
+        detail_source="anilist",
+        summary_source="anilist",
+        banner_url="https://anilist.example/banner.jpg",
+        cover_large_url="https://anilist.example/cover.jpg",
+    )
+    plan = plan_enrichment(row, episodes(4), payloads())
+    assert plan.backdrop_url == f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}"
+    assert plan.banner_url is None
+    assert plan.cover_large_url is None
+
+
+def test_a_stale_tmdb_backdrop_is_replaced() -> None:
+    """The one overwrite TMDB is allowed: its own earlier answer."""
+    row = anime(backdrop_url="https://image.tmdb.org/t/p/w1280/something-older.jpg")
+    plan = plan_enrichment(row, episodes(4), payloads())
+    assert plan.backdrop_url == f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}"
+
+
+def test_the_same_backdrop_is_not_planned_again() -> None:
+    """A write that changes nothing is not a write — see :class:`Enrichment`."""
+    row = anime(backdrop_url=f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}")
+    plan = plan_enrichment(row, episodes(4), payloads())
+    assert plan.backdrop_url is None
+    assert "backdrop_url" not in plan.columns()
+
+
+def test_a_show_tmdb_has_no_backdrop_for_keeps_the_one_it_has() -> None:
+    row = anime(backdrop_url="https://image.tmdb.org/t/p/w1280/kept.jpg")
+    show = frieren_show() | {"backdrop_path": None}
+    plan = plan_enrichment(row, episodes(4), payloads(show=show))
+    assert plan.backdrop_url is None
 
 
 def test_anilist_credits_are_never_overwritten_even_when_thin() -> None:
@@ -267,11 +311,12 @@ def test_art_only_plans_the_key_art_and_nothing_else() -> None:
     than what the caller happened to have fetched.
     """
     plan = plan_enrichment(anime(), episodes(4), payloads(), art_only=True)
+    assert plan.backdrop_url is not None
     assert plan.banner_url is not None
     assert plan.cover_large_url is not None
     assert plan.credits is None
     assert plan.episodes == ()
-    assert plan.columns() == ["banner_url", "cover_large_url"]
+    assert plan.columns() == ["backdrop_url", "banner_url", "cover_large_url"]
 
 
 def test_art_only_still_never_overwrites_anilist_art() -> None:
@@ -283,6 +328,9 @@ def test_art_only_still_never_overwrites_anilist_art() -> None:
     plan = plan_enrichment(row, episodes(4), payloads(), art_only=True)
     assert plan.banner_url is None
     assert plan.cover_large_url is not None
+    # The season pass is the path that fills the hero's art, so the column the
+    # hero reads is the one it must not skip.
+    assert plan.backdrop_url is not None
 
 
 def test_no_season_means_no_stills_but_art_still_lands() -> None:
@@ -304,6 +352,7 @@ def test_an_empty_plan_knows_it_is_empty() -> None:
     row = anime(
         detail_source="anilist",
         banner_url="b",
+        backdrop_url=f"{IMAGE_BASE}{BACKDROP_SIZE}{frieren_show()['backdrop_path']}",
         cover_large_url="c",
         credits=[{"role": "Director", "name": "X"}],
     )
@@ -328,6 +377,7 @@ async def test_apply_writes_the_columns_and_the_episode_rows(db_session: Any) ->
     plan = plan_enrichment(row, await episodes_for(db_session, row.id), payloads())
     touched = await apply_enrichment(db_session, row, plan)
 
+    assert row.backdrop_url is not None
     assert row.banner_url is not None
     assert row.cover_large_url is not None
     assert touched == 6  # three episodes × (title + still)

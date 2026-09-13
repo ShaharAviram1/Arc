@@ -64,7 +64,10 @@ directly. Anything with logic goes through a Writer.
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
 - **Acquisition:** only the next N unwatched episodes of shows a user is
-  watching or has planned. Never fetch whole seasons.
+  watching or has planned, plus a single first episode a user explicitly asked
+  to sample (FR-A8). Never fetch whole seasons; imported list entries stay
+  dormant until touched in Arc (FR-A9), and never more than K shows per user at
+  once (FR-A10).
 - **Media routes** require a session. Paths are derived from ids, never from
   user input.
 - **Hosting is undecided.** Do not assume a provider; keep everything to a

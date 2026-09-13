@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -38,6 +37,7 @@ from arc.models import Anime, Episode, EpisodeState, Job
 from arc.services.catalog import preferred_title
 from arc.services.retention.names import enqueue_delete_files, enqueue_retention_sweep
 from arc.services.retention.sweep import PROTECTED_STATES, candidates, retained_usage
+from arc.services.storage import disk_usage
 
 log = logging.getLogger(__name__)
 
@@ -158,20 +158,19 @@ class DiskOut(BaseModel):
 
 
 def _disk_usage(path: Path) -> DiskUsageOut:
-    """Filesystem figures for ``path``, or for the nearest parent that exists.
+    """:func:`arc.services.storage.disk_usage`, in the shape this GET answers.
 
-    ``DATA_DIR`` may not have been created yet on a fresh install, and a GET
-    is the wrong place to create it. Walking up finds the filesystem it will
-    be created on, which is the number the admin is actually asking for; if
-    even the root is unreadable the figures are zeros rather than a 500.
+    The walk-up rule and the "``DATA_DIR`` may not exist yet" argument live in
+    that module now, because acquisition's storage guard (FR-T6) needs the same
+    measurement and a service cannot import a router's private helper.
+    Unmeasurable stays zeros here rather than an error, because that is what
+    this page has always shown and a 500 is not an answer to "how full is the
+    disk?".
     """
-    for candidate in (path, *path.parents):
-        try:
-            usage = shutil.disk_usage(candidate)
-        except OSError:
-            continue
-        return DiskUsageOut(total=usage.total, used=usage.used, free=usage.free)
-    return DiskUsageOut(total=0, used=0, free=0)
+    usage = disk_usage(path)
+    if usage is None:
+        return DiskUsageOut(total=0, used=0, free=0)
+    return DiskUsageOut(total=usage.total, used=usage.used, free=usage.free)
 
 
 @router.get(

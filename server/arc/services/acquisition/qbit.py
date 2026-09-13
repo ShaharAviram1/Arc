@@ -28,12 +28,15 @@ so the first call after an idle night gets a 403. :meth:`QbitClient.request`
 logs in again and retries once; a second 403 is a real authentication failure
 and raises.
 
-**Arc owns the client's seeding policy** (:meth:`QbitClient.apply_policy`,
-spec §9). Arc does not seed: the share-ratio limit is 0 and its action is
-"stop", the seeding-time limit is 0, and the upload rate is capped. That is a
-legal mitigation rather than a tuning knob, and it is applied to the *client*
-rather than to each torrent so that it also covers whatever was added before
-Arc got there.
+**Arc owns the client's seeding and queue policy**
+(:meth:`QbitClient.apply_policy`, spec §9). Arc does not seed: the share-ratio
+limit is 0 and its action is "stop", the seeding-time limit is 0, and the
+upload rate is capped. That is a legal mitigation rather than a tuning knob,
+and it is applied to the *client* rather than to each torrent so that it also
+covers whatever was added before Arc got there. The queue limits ride along for
+a duller reason: qBittorrent's defaults are three concurrent downloads and five
+active torrents, a fresh container comes back with them, and a limit Arc did
+not write is a limit Arc loses on every restart.
 """
 
 from __future__ import annotations
@@ -98,6 +101,59 @@ STOP_AT_SHARE_LIMIT: Final[int] = 0
 #: finished download, and waiting forever for the last bit would be silly.
 COMPLETE_PROGRESS: Final[float] = 0.999
 
+# --- What ``torrents.qbit_state`` may hold ----------------------------------
+#
+# Mostly it holds whatever qBittorrent last called the torrent. The four values
+# below are Arc's own, and they live here — beside :data:`COMPLETE_STATES` and
+# the client that reads the others — because there is exactly one column they
+# describe and three different modules write them. Keeping them together is
+# what lets :data:`DECIDED_STATES` be a single set rather than a set each
+# module assembles from the other two's imports.
+
+#: A person said in review that the delivered file was not this episode
+#: (:mod:`arc.services.acquisition.reject`). The client is still holding the
+#: file, deliberately: it is in the review queue and retention owns it.
+QBIT_REJECTED: Final[str] = "rejected"
+
+#: ``poll_qbit`` gave up on a torrent that was going nowhere and removed it
+#: with its files (:func:`arc.services.acquisition.jobs.stall_reason`).
+QBIT_STALLED: Final[str] = "stalled"
+
+#: The reconciler cancelled the download because nobody wanted the episode any
+#: more (:func:`arc.services.acquisition.wants.cancel_if_unwanted`). Read by
+#: the ``qbit_cancel`` job as its mandate, and the row is deleted once the
+#: client has been told.
+QBIT_CANCELLED: Final[str] = "cancelled"
+
+#: The torrent is not in Arc's category any more and Arc did not do it.
+QBIT_MISSING: Final[str] = "missing"
+
+#: The three values ``poll_qbit`` must never overwrite, in either direction:
+#: neither with a live state string from the client nor with
+#: :data:`QBIT_MISSING`. Each is a *decision* somebody or something made about
+#: this download, and the column is the only record of it — overwriting
+#: ``stalled`` with ``missing`` sixty seconds later, when Arc is the reason it
+#: is missing, would lose the answer to "why is this episode unavailable?".
+DECIDED_STATES: Final[frozenset[str]] = frozenset({QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED})
+
+#: Below what rate, in KiB/s, qBittorrent counts a torrent as "slow" and stops
+#: it occupying one of the active slots. 2 rather than 0: the client treats 0
+#: as "no threshold", and a torrent moving a kilobyte a second is not
+#: downloading in any sense that matters.
+SLOW_RATE_KIB: Final[int] = 2
+
+#: And for how long it must have been that slow first. Five minutes, so that a
+#: swarm going quiet over lunch does not cost a healthy download its slot.
+SLOW_INACTIVE_SECONDS: Final[int] = 300
+
+#: And the subset ``poll_qbit`` will *delete from the client* on sight, because
+#: it is the module that decided it and the deletion may not have happened yet
+#: (a client that went away between the flush and the request). Only
+#: ``stalled``: a ``rejected`` torrent is still holding a file a person is
+#: reviewing and retention owns that, and a ``cancelled`` one belongs to the
+#: ``qbit_cancel`` job, which deletes the row as well.
+DELETE_ON_SIGHT: Final[frozenset[str]] = frozenset({QBIT_STALLED})
+
 
 class QbitError(RuntimeError):
     """qBittorrent refused something. Not retryable on its own."""
@@ -135,10 +191,49 @@ class TorrentInfo:
     #: Bytes per second, right now, as the client reports them.
     dlspeed: int = 0
     upspeed: int = 0
+    #: How long the client has actually been **working on** this torrent,
+    #: seconds. Not its age: a torrent can sit in ``queuedDL`` for a day behind
+    #: :attr:`~arc.config.Settings.qbit_max_active_downloads` and have a
+    #: ``time_active`` of nothing, which is the difference between a download
+    #: that has failed and one that has not started (:func:`stall_reason`).
+    #: ``None`` when the client did not report it, and then nothing is a stall.
+    time_active: int | None = None
+    #: Seeders and peers **this client is connected to right now**. Always
+    #: reported, and routinely 0 between announces on a perfectly healthy
+    #: torrent, so no rule may read them as "the swarm is dead". Logged.
+    num_seeds: int | None = None
+    num_leechs: int | None = None
+    #: And the whole swarm, as the tracker last reported it. ``-1`` — mapped to
+    #: ``None`` here — means "not scraped yet", which is why these two are the
+    #: only figures :func:`stall_reason` will call a dead swarm on.
+    num_complete: int | None = None
+    num_incomplete: int | None = None
 
     @property
     def complete(self) -> bool:
         return self.progress >= COMPLETE_PROGRESS or self.state in COMPLETE_STATES
+
+    @property
+    def swarm_seeds(self) -> int | None:
+        """Seeders in the swarm per the tracker, or ``None`` if never scraped."""
+        return self.num_complete
+
+    @property
+    def swarm_peers(self) -> int | None:
+        """Leechers in the swarm per the tracker — a partial peer is a source."""
+        return self.num_incomplete
+
+    @property
+    def dead_swarm(self) -> bool:
+        """Whether the tracker says there is **nobody at all** on this torrent.
+
+        Both figures known and both zero, and nothing else counts. The
+        connected counts (``num_seeds``/``num_leechs``) are deliberately not
+        consulted: qBittorrent reports those as 0 whenever it happens to hold
+        no connections this instant, which a 60 %-downloaded torrent between
+        announces does, and treating that as a dead swarm would delete it.
+        """
+        return self.swarm_seeds == 0 and self.swarm_peers == 0
 
     @property
     def completed_at(self) -> datetime | None:
@@ -163,6 +258,11 @@ class TorrentInfo:
             size=_number(raw.get("size")),
             dlspeed=_number(raw.get("dlspeed")),
             upspeed=_number(raw.get("upspeed")),
+            time_active=_count(raw.get("time_active")),
+            num_seeds=_count(raw.get("num_seeds")),
+            num_leechs=_count(raw.get("num_leechs")),
+            num_complete=_count(raw.get("num_complete")),
+            num_incomplete=_count(raw.get("num_incomplete")),
         )
 
 
@@ -187,6 +287,20 @@ def _number(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return 0
     return max(int(value), 0)
+
+
+def _count(value: Any) -> int | None:
+    """A count out of a JSON field, or ``None`` for "the client did not say".
+
+    Negative is ``None`` too, and that is the whole reason this is not
+    :func:`_number`: qBittorrent reports ``num_complete``/``num_incomplete``
+    as ``-1`` until the tracker has been scraped, and clamping that to 0 would
+    turn "I do not know yet" into "there is nobody there".
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = int(value)
+    return None if number < 0 else number
 
 
 def _added(response: httpx.Response) -> bool:
@@ -443,12 +557,17 @@ class QbitClient:
         return save_path
 
     async def apply_policy(
-        self, *, seeding: bool = False, upload_limit_kib: int = 512
+        self,
+        *,
+        seeding: bool = False,
+        upload_limit_kib: int = 512,
+        max_active_downloads: int = 8,
+        max_active_torrents: int = 12,
     ) -> dict[str, object]:
-        """Write Arc's seeding policy to the client. Returns what it sent.
+        """Write Arc's seeding **and queue** policy to the client. Returns what it sent.
 
-        Three settings, and they are the mitigations spec §9 lists rather than
-        performance tuning:
+        Three settings for the seeding half, and they are the mitigations spec
+        §9 lists rather than performance tuning:
 
         * ``max_ratio 0`` with ``max_ratio_act`` = :data:`STOP_AT_SHARE_LIMIT`
           — the torrent is stopped as soon as it has finished, because a ratio
@@ -468,11 +587,47 @@ class QbitClient:
         to the point — leaving the ratio settings alone means Arc does not
         silently undo a limit the operator set by hand.
 
+        And four for the **queue**, which Arc owns for the same reason: they
+        are qBittorrent's defaults otherwise, and its defaults are three
+        concurrent downloads and five active torrents. Three slots is nothing
+        when a MAL import has produced four hundred wants, and a slot held by a
+        torrent that will never finish is a slot held for ever — production
+        spent a whole day with its three occupied by dead 2018 uploads while
+        everything anybody was actually watching queued behind them.
+
+        * ``queueing_enabled`` — without it the limits below are ignored and
+          the client starts everything at once, which is the other way to make
+          no progress;
+        * ``max_active_downloads`` and ``max_active_torrents`` — the two
+          ceilings, downloads inside the wider "active" count;
+        * ``dont_count_slow_torrents``, with its three thresholds set
+          deliberately (:data:`SLOW_RATE_KIB`, :data:`SLOW_INACTIVE_SECONDS`)
+          rather than left at whatever the client shipped — a torrent counts as
+          slow only after **five minutes** of moving essentially nothing in
+          either direction, so an ordinary lull never costs a download its
+          slot, and a dead one stops blocking the queue five minutes in. This
+          only changes what *counts*: the queue never removes anything, and
+          Arc's own stall rule
+          (:func:`~arc.services.acquisition.jobs.stall_reason`) is the only
+          thing that gets rid of a torrent that is going nowhere.
+
+        The queue half is sent whatever ``seeding`` says: how many downloads
+        run at once is not a statement about uploading.
+
         Preferences are sent as a JSON blob in a form field named ``json``,
         which is qBittorrent's own shape for this endpoint, and only the keys
         named here are touched.
         """
-        prefs: dict[str, object] = {"up_limit": upload_limit_kib * 1024}
+        prefs: dict[str, object] = {
+            "up_limit": upload_limit_kib * 1024,
+            "queueing_enabled": True,
+            "max_active_downloads": max_active_downloads,
+            "max_active_torrents": max_active_torrents,
+            "dont_count_slow_torrents": True,
+            "slow_torrent_dl_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_ul_rate_threshold": SLOW_RATE_KIB,
+            "slow_torrent_inactive_timer": SLOW_INACTIVE_SECONDS,
+        }
         if not seeding:
             prefs |= {
                 "max_ratio_enabled": True,
@@ -562,7 +717,15 @@ __all__ = [
     "API",
     "COMPLETE_PROGRESS",
     "COMPLETE_STATES",
+    "DECIDED_STATES",
+    "DELETE_ON_SIGHT",
+    "QBIT_CANCELLED",
+    "QBIT_MISSING",
+    "QBIT_REJECTED",
+    "QBIT_STALLED",
     "SEEDING_STATES",
+    "SLOW_INACTIVE_SECONDS",
+    "SLOW_RATE_KIB",
     "STOP_AT_SHARE_LIMIT",
     "QbitClient",
     "QbitError",

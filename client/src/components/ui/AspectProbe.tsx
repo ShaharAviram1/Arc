@@ -14,6 +14,12 @@ import { Artwork } from '@/components/ui/Artwork'
  * `useState` without a guard: a ref callback re-runs on every render, and a
  * fresh object each time would be a re-render that causes a re-render, where
  * the same number twice is a state update React bails out of.
+ *
+ * `eager`, and this is the whole reason the probe works: the copy sits in a
+ * 0×0 box, and Chrome never fetches a `loading="lazy"` image that has no box
+ * to scroll into view. Lazy, the ratio was never reported, so every hero
+ * whose banner had not already been cached by some other card stayed on the
+ * blurred-poster fallback for good (owner, 2026-09-13).
  */
 export interface AspectProbeProps {
   /** The image to measure. Fetched, never drawn anywhere a viewer can see. */
@@ -28,6 +34,7 @@ export function AspectProbe({ url, onAspect }: AspectProbeProps) {
       <Artwork
         url={url}
         shape="free"
+        eager
         className="h-px w-px"
         onNaturalSize={(size) => {
           onAspect(size.width / size.height)

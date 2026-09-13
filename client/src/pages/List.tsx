@@ -51,6 +51,10 @@ const EMPTY_MESSAGES: Record<ListStatus, string> = {
 
 const LIST_ERROR = 'Could not load your list.'
 
+/** The dormant-import badge (spec §4.2 FR-A9), and what hovering it explains. */
+const IMPORTED_BADGE = 'imported'
+const IMPORTED_TITLE = 'Imported from MyAnimeList — Arc fetches episodes once you open it and ask.'
+
 /** AniList's airing states, in the words the design uses for the column. */
 const AIRING_LABELS: Record<string, string> = {
   RELEASING: 'Airing',
@@ -120,6 +124,21 @@ function ListRow({ item }: { item: MyListItem }) {
         </p>
         <p className="truncate text-[13px] text-[var(--arc-text-muted)]">{meta}</p>
       </div>
+
+      {/*
+       * FR-A9: this row came from a MyAnimeList import and nobody has touched
+       * the show in Arc, so Arc is fetching nothing for it. Quiet on purpose —
+       * it is a fact about the row, not a warning — and the show page is where
+       * the "Fetch this show" button lives.
+       */}
+      {item.entry.dormant === true ? (
+        <span
+          className="hidden shrink-0 rounded-full border-[0.5px] border-[var(--arc-border)] px-2 py-0.5 text-[12px] text-[var(--arc-text-muted)] sm:inline"
+          title={IMPORTED_TITLE}
+        >
+          {IMPORTED_BADGE}
+        </span>
+      ) : null}
 
       <div className="hidden w-[160px] shrink-0 items-center gap-3 sm:flex">
         <span

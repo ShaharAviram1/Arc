@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
@@ -24,7 +25,10 @@ import {
   keyVisual,
   listErrorMessage,
   malUrl,
+  sampleErrorMessage,
   useAnime,
+  useCancelSample,
+  useRequestSample,
   useRetryTranscode,
   useSetListEntry,
   type AnimeCredit,
@@ -32,6 +36,7 @@ import {
   type AnimeRelation,
   type CatalogSource,
   type EpisodeOut,
+  type ListEntry,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
@@ -350,6 +355,261 @@ function ScoreControl({ animeId, score }: { animeId: number; score: number | nul
         </p>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The lowest-numbered episode, which is what "episode 1" means here.
+ *
+ * By number rather than by position: the list arrives in order today, and a
+ * button that fetches "the first episode" should not depend on that staying
+ * true for a show whose specials were written first.
+ */
+function firstEpisode(episodes: EpisodeOut[]): EpisodeOut | null {
+  return episodes.reduce<EpisodeOut | null>(
+    (lowest, episode) => (lowest === null || episode.number < lowest.number ? episode : lowest),
+    null,
+  )
+}
+
+/** What the one button says while each half of the toggle is in flight. */
+const SAMPLE_ASKING = 'Asking…'
+const SAMPLE_CANCELLING = 'Cancelling…'
+
+/** What it offers on hover once the sample is on: the other half of the toggle. */
+const SAMPLE_CANCEL = 'Cancel request'
+
+/**
+ * The accessible name of the pressed button — the *action*, since the state is
+ * already carried by `aria-pressed` and the visible label. Without it the
+ * button reads as a statement ("Episode 1 requested") and nothing tells a
+ * keyboard or screen-reader user that pressing it again takes the request back.
+ */
+const SAMPLE_CANCEL_HINT = 'Cancel the request'
+
+/**
+ * "Try episode 1" — with the episode's own number, which is not always 1: a
+ * show whose catalogue entry starts at 0 (a special published as episode 0) is
+ * sampled from that row, and a button naming an episode the server will not
+ * fetch would be the wrong promise.
+ */
+function sampleLabel(number: number): string {
+  return `Try episode ${String(number)}`
+}
+
+/** And what the same button says once the request is in. */
+function sampleRequestedLabel(number: number): string {
+  return `Episode ${String(number)} requested`
+}
+
+/**
+ * The tick on the pressed button. A text glyph, like the chevron on the pills
+ * and the ⓘ on an episode row: this design ships no icon set, and a character
+ * inherits `currentColor` and the line box for free.
+ */
+function CheckGlyph() {
+  return (
+    <span aria-hidden="true" className="text-[13px] leading-none">
+      ✓
+    </span>
+  )
+}
+
+/**
+ * "Try episode 1" (spec §4.2 FR-A8).
+ *
+ * The one way to cause a download without committing to the show: Arc fetches
+ * the first episode and nothing else, and the list and MyAnimeList are left
+ * exactly as they were. Deciding whether a show is worth adding is what the
+ * first episode is *for*, and the alternative was adding it as planned and
+ * remembering to take it off again.
+ *
+ * Shown only where it means something. A show the viewer is watching or plans
+ * to watch already has its window fetching episode 1 and the ones after it, so
+ * the button would duplicate a rule rather than offer one — **unless that entry
+ * is dormant** (FR-A9), in which case there is no window and nothing is being
+ * fetched, and one episode is a smaller thing to ask for than the whole show.
+ * Both offers then sit in the hero: "Try episode 1" here, and "Fetch this show"
+ * in the note below it. An episode that has not aired cannot be fetched by
+ * anything, and one that is already `ready` is sitting there to be played — the
+ * Play button above is the honest offer in both cases. Everything in between
+ * (not fetched, searching, downloading) is reported by the episode's own row
+ * (FR-A7), so this control says only whether the viewer has asked.
+ *
+ * **One button, both directions** (owner, 2026-09-13). Asking and taking it
+ * back are the same decision seen from two sides, so they are the same
+ * control: a toggle that carries `aria-pressed`, wears the pressed treatment
+ * once the request is in, and offers "Cancel request" in place of its label on
+ * hover or focus. The swap is two spans and `group-hover`/`group-focus-visible`
+ * rather than React state — a label that changes under the pointer is a
+ * styling concern, and a piece of state for it would be a second source of
+ * truth about what the button does.
+ */
+function SampleControl({ anime }: { anime: AnimeDetail }) {
+  const request = useRequestSample(anime.id)
+  const cancel = useCancelSample(anime.id)
+  const error = request.error ?? cancel.error
+
+  // A followed show's window covers episode 1 already — but a dormant entry
+  // has no window (FR-A9), so the offer stands and the server accepts it.
+  const following = anime.list_status === 'watching' || anime.list_status === 'planned'
+  if (following && anime.list_entry?.dormant !== true) return null
+
+  const sample = anime.sample
+  // The episode this would ask for, when there is an ask to make. The pressed
+  // half needs no episode: there is a request to take back whatever state the
+  // episode has reached.
+  const offer = sample === null ? firstEpisode(anime.episodes) : null
+  if (sample === null && (offer === null || !offer.aired || offer.state === 'ready')) return null
+
+  const pressed = sample !== null
+
+  let content: ReactNode = null
+  if (cancel.isPending) content = SAMPLE_CANCELLING
+  else if (request.isPending) content = SAMPLE_ASKING
+  else if (sample !== null) {
+    content = (
+      <>
+        <span className="inline-flex items-center gap-[8px] group-hover:hidden group-focus-visible:hidden">
+          <CheckGlyph />
+          {sampleRequestedLabel(sample.episode_number)}
+        </span>
+        <span className="hidden group-hover:inline group-focus-visible:inline">
+          {SAMPLE_CANCEL}
+        </span>
+      </>
+    )
+  } else if (offer !== null) content = sampleLabel(offer.number)
+
+  return (
+    <div className="flex flex-col items-start">
+      <Button
+        pressed={pressed}
+        disabled={request.isPending || cancel.isPending}
+        aria-label={pressed ? SAMPLE_CANCEL_HINT : undefined}
+        title={pressed ? SAMPLE_CANCEL_HINT : undefined}
+        className={pressed ? 'group' : undefined}
+        onClick={() => {
+          if (pressed) cancel.mutate()
+          else request.mutate()
+        }}
+      >
+        {content}
+      </Button>
+      {error === null ? null : (
+        <p role="alert" className="mt-1.5 text-[13px] text-[var(--arc-error)]">
+          {sampleErrorMessage(error)}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Imported from MyAnimeList" (spec §4.2 FR-A9).
+ *
+ * A MyAnimeList import is a baseline, not a request: the owner's brought 414
+ * wants into being in one afternoon, most of them shows planned years ago
+ * whose releases have no seeders left. So an imported entry fetches nothing
+ * until its owner touches the show *here* — and the one thing this note has to
+ * do is say so, because "Watching" with no episodes arriving is otherwise
+ * indistinguishable from Arc being broken.
+ *
+ * The button PUTs the status the entry already has, which is exactly what the
+ * server reads as the touch. Nothing about the list changes, so nothing is
+ * written to MyAnimeList either (the PUT queues no write for a field it did
+ * not move). The note disappears on the refetch, because `dormant` is derived
+ * from the stamp the PUT just wrote.
+ *
+ * A show that is currently *airing* is never dormant, so this never appears on
+ * one — which is the point of the exception: weekly use keeps working on an
+ * imported list without anybody pressing anything.
+ */
+const DORMANT_NOTE =
+  'Imported from MyAnimeList — Arc fetches episodes once you touch the show here.'
+const DORMANT_ACTION = 'Fetch this show'
+const DORMANT_WORKING = 'Waking it up…'
+
+function DormantNote({ anime }: { anime: AnimeDetail }) {
+  const set = useSetListEntry()
+  const entry = anime.list_entry
+
+  if (entry === null || entry === undefined || entry.dormant !== true) return null
+
+  return (
+    <div className="mt-3 flex flex-col items-start gap-2">
+      <p className="max-w-[74ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {DORMANT_NOTE}
+      </p>
+      <Button
+        variant="secondary"
+        disabled={set.isPending}
+        onClick={() => {
+          set.mutate({ animeId: anime.id, status: entry.status })
+        }}
+      >
+        {set.isPending ? DORMANT_WORKING : DORMANT_ACTION}
+      </Button>
+      {set.error === null ? null : (
+        <p role="alert" className="text-[13px] text-[var(--arc-error)]">
+          {listErrorMessage(set.error)}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Waiting for a slot" (spec §4.2 FR-A10).
+ *
+ * Each user fetches at most K shows at once, because one disk and a handful of
+ * download slots cannot answer forty shows asking for their next two episodes
+ * on the same afternoon. The shows over the cap are the ones this note is for:
+ * they are on the list, they are activated, Arc has agreed to fetch them, and
+ * nothing is happening — which without a line of explanation is
+ * indistinguishable from Arc being broken, exactly as an untouched import was.
+ *
+ * So the note says all three things a person needs: that the show is waiting,
+ * how full the cap is (the two numbers come with the entry, because the admin
+ * status endpoint needs a role a waiting user may not have), and that nobody
+ * has to do anything — the next show to finish is what starts this one. There
+ * is deliberately **no button**: unlike a dormant entry, there is nothing the
+ * viewer could press that would be honest, and "start this one anyway" is the
+ * rule being asked to stop existing.
+ *
+ * Except that "when one of them finishes" is a *promise*, and there are two
+ * states in which Arc cannot keep it: acquisition paused by an admin, and
+ * acquisition holding itself below the free-space floor (FR-T6). Nothing
+ * finishing starts anything then, because the reconciler is either not running
+ * or not starting searches — so the server says which of the three it is
+ * (`waiting_reason`) and the sentence changes rather than lying politely.
+ */
+const WAITING_SENTENCES: Record<'paused' | 'held', string> = {
+  paused: 'Waiting — acquisition is paused on this server, so nothing new is being fetched.',
+  held:
+    'Waiting — acquisition is holding: the server is low on free space. ' +
+    'It starts again on its own once room is freed.',
+}
+
+function waitingNote(entry: ListEntry): string {
+  const reason = entry.waiting_reason
+  if (reason === 'paused' || reason === 'held') return WAITING_SENTENCES[reason]
+  return (
+    `Waiting for a slot — ${String(entry.fetching_count ?? 0)} of your ` +
+    `${String(entry.slot_cap ?? 0)} shows are fetching. ` +
+    'Arc starts this one when one of them finishes.'
+  )
+}
+
+function WaitingNote({ anime }: { anime: AnimeDetail }) {
+  const entry = anime.list_entry
+
+  if (entry === null || entry === undefined || entry.waiting !== true) return null
+
+  return (
+    <p className="mt-3 max-w-[74ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+      {waitingNote(entry)}
+    </p>
   )
 }
 
@@ -830,8 +1090,12 @@ function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
           status={anime.list_status}
           className={PILL_WRAP_FORCED}
         />
+        <SampleControl anime={anime} />
         {entry === null ? null : <ScoreControl animeId={anime.id} score={entry.score} />}
       </div>
+
+      <DormantNote anime={anime} />
+      <WaitingNote anime={anime} />
 
       {anime.synopsis === null || anime.synopsis === '' ? null : (
         <p className="mt-[22px] max-w-[74ch] text-[16px] leading-[1.6] whitespace-pre-line text-[rgba(235,239,245,0.85)]">

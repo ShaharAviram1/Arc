@@ -53,7 +53,9 @@ async def index(
     return [
         ListRow(
             anime=AnimeSummary.from_anime(anime, entry.status),
-            entry=ListEntryOut.model_validate(entry),
+            # ``anime_status`` carries FR-A9's airing exception, so My List can
+            # badge the rows an import brought in and nobody has touched.
+            entry=ListEntryOut.build(entry, anime_status=anime.status),
         )
         for anime, entry in rows
     ]
@@ -78,7 +80,7 @@ async def put(
 ) -> ListEntryOut:
     """``anime_id`` is Arc's internal id, not AniList's (FR-C6)."""
     try:
-        entry, _anime = await set_list_entry(
+        entry, anime = await set_list_entry(
             session,
             catalog,
             user_id=user.id,
@@ -104,7 +106,10 @@ async def put(
         ) from exc
 
     await session.commit()
-    return ListEntryOut.model_validate(entry)
+    # Always ``dormant: false`` after this call — the PUT is itself the touch
+    # (FR-A9) — but built the same way as every other entry so the client reads
+    # one shape.
+    return ListEntryOut.build(entry, anime_status=anime.status)
 
 
 @router.delete(

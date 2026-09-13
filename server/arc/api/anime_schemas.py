@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,7 +32,10 @@ from arc.models import (
     ListStatus,
     Rendition,
     Torrent,
+    Want,
 )
+from arc.services.acquisition.dormancy import is_dormant
+from arc.services.acquisition.wants import SlotView
 from arc.services.catalog import preferred_title
 from arc.services.catalog.airing import (
     FINISHED,
@@ -115,10 +118,13 @@ class AnimeCore(BaseModel):
 class AnimeSummary(AnimeCore):
     """A search result or a list row: enough for a card.
 
-    Three of these fields — ``genres``, ``banner_url`` and ``studio`` — are
-    filled from **detail** columns, and are the one place this schema is not a
-    straight reading of "what a search returned" (M15: Home's hero needs the
-    banner, Browse's chips need the genres, My List's rows credit the studio).
+    Four of these fields — ``genres``, ``banner_url``, ``backdrop_url`` and
+    ``studio`` — are filled from columns no search payload carries, and are the
+    one place this schema is not a straight reading of "what a search returned"
+    (M15: Home's hero needs the banner, Browse's chips need the genres, My
+    List's rows credit the studio). Three of them are **detail** columns;
+    ``backdrop_url`` is the TMDB enrichment's alone (§5.8), which is why it is
+    the one field here that no catalogue write path can blank.
 
     They are read off the stored row, which is the only reason it is safe: the
     API renders ``anime`` rows, not payloads, so a row that has ever been
@@ -151,8 +157,16 @@ class AnimeSummary(AnimeCore):
     average_score: int | None = None
     #: From ``anime.genres``; empty on a row no detail fetch has reached.
     genres: list[str] = Field(default_factory=list)
-    #: The 21:9 key visual behind Home's and the show page's hero, or null.
+    #: AniList's banner behind Home's and the show page's hero, or null. A
+    #: 4.75:1 strip, which is why the client prefers ``backdrop_url`` and only
+    #: shows this one where its measured ratio allows it.
     banner_url: str | None = None
+    #: TMDB's 16:9 backdrop, or null (owner, 2026-09-13). The art the 21:9
+    #: heroes and the 16:9 cards prefer: ``bannerArt`` reads this first and
+    #: falls back to ``banner_url``. Null on a row the TMDB enrichment has not
+    #: reached, and on every row of a deployment with no ``TMDB_API_KEY`` —
+    #: which is why it is a preference and not a replacement.
+    backdrop_url: str | None = None
     #: The main studio, credited on a card like an auteur (M15), or null.
     studio: str | None = None
 
@@ -178,6 +192,7 @@ class AnimeSummary(AnimeCore):
             average_score=anime.average_score,
             genres=list(anime.genres or []),
             banner_url=anime.banner_url,
+            backdrop_url=anime.backdrop_url,
             studio=anime.studio,
             list_status=list_status,
         )
@@ -593,6 +608,50 @@ class MalSyncOut(BaseModel):
     last_write_at: datetime | None = None
 
 
+class SampleOut(BaseModel):
+    """The caller's live "try episode 1" want on this show (FR-A8).
+
+    Present on a show page only while the sample is live — cancelled, or
+    dropped for going unwatched for D days (FR-T2), and it is gone — so the
+    client reads its absence as "there is nothing to cancel". The episode's own
+    acquisition state is in ``episodes[]`` where it always was; this says who
+    asked for it, which no episode row can.
+    """
+
+    episode_id: int
+    episode_number: int
+    requested_at: datetime
+    #: The episode's state as of this response — ``wanted`` immediately after a
+    #: request, on an episode that was resting. Sent so the client can render
+    #: the row it just changed without waiting on a refetch to tell it
+    #: something the server already knew (FR-A7, FR-A8).
+    state: EpisodeState
+
+    @classmethod
+    def build(cls, want: Want, episode: Episode) -> SampleOut:
+        return cls(
+            episode_id=want.episode_id,
+            episode_number=episode.number,
+            requested_at=want.created_at,
+            state=episode.state,
+        )
+
+
+#: Why a show is waiting, in the order the page should believe them: a stopped
+#: reconciler outranks a full cap, because while acquisition is paused or held
+#: the cap is not what is keeping this show from fetching.
+WaitingReason = Literal["paused", "held", "slot"]
+
+
+def _waiting_reason(slots: SlotView | None) -> WaitingReason:
+    """Which sentence a waiting show's note should carry (FR-A10, FR-T6)."""
+    if slots is not None and slots.paused:
+        return "paused"
+    if slots is not None and slots.held:
+        return "held"
+    return "slot"
+
+
 class ListEntryOut(BaseModel):
     """(user, anime) → status, progress, score (FR-W2)."""
 
@@ -603,10 +662,71 @@ class ListEntryOut(BaseModel):
     progress: int
     score: int | None = None
     updated_at: datetime
+    #: When the user first touched this show in Arc, or null (FR-A9).
+    activated_at: datetime | None = None
+    #: Whether this entry is generating no wants: never touched here, and the
+    #: show is not airing (FR-A9). Derived rather than stored, because the
+    #: airing half of it changes on its own — a dormant entry stops being
+    #: dormant the day its show starts broadcasting, with nothing written.
+    dormant: bool = False
+    #: Whether the per-user slot cap is holding this show back (FR-A10): the
+    #: entry is activated and wanting, it has something to fetch, and K of the
+    #: user's shows are already fetching. Derived like ``dormant`` and stored
+    #: nowhere — a slot frees itself when an episode becomes ready.
+    waiting: bool = False
+    #: *Why* it is waiting, when it is: ``"slot"`` (K of the caller's shows are
+    #: fetching), ``"paused"`` (an admin stopped acquisition) or ``"held"`` (the
+    #: disk is under FR-T6's floor). Null when the show is not waiting. The
+    #: page needs it because "Arc starts this one when one of them finishes" is
+    #: a promise, and the last two make it a false one — nothing finishing
+    #: starts anything while the reconciler is stopped.
+    waiting_reason: WaitingReason | None = None
+    #: How many of the caller's shows are fetching right now, and K. The two
+    #: numbers the show page's waiting note says out loud ("5 of your 5 shows
+    #: are fetching"), which no user can read off the admin status endpoint.
+    #: Both 0 when the caller did not ask for the slot picture.
+    fetching_count: int = 0
+    slot_cap: int = 0
     #: MyAnimeList sync state (M9). Populated only on a show page, where one
     #: extra query per response is nothing; a list of fifty rows would be
     #: fifty, and none of them is rendered there.
     mal_sync: MalSyncOut | None = None
+
+    @classmethod
+    def build(
+        cls,
+        entry: ListEntry,
+        *,
+        anime_status: str | None,
+        mal_sync: MalSyncOut | None = None,
+        slots: SlotView | None = None,
+    ) -> ListEntryOut:
+        """One entry, with FR-A9's ``dormant`` worked out from the show.
+
+        ``anime_status`` rather than the ``Anime`` row because that is the only
+        field the rule reads, and every caller already has the show in hand —
+        these schemas take no session, so a field they had to look up would be
+        a query nobody expected.
+
+        ``slots`` is FR-A10's picture of the caller, and it is passed in for
+        exactly the same reason: working it out costs a pass over the user's
+        list. Like ``mal_sync`` it is populated **only on a show page**, which
+        is the one place the waiting note is rendered; everywhere else the
+        fields read as "nothing to say" rather than as "not waiting", which is
+        the honest answer from a response that did not ask.
+        """
+        waiting = slots is not None and entry.anime_id in slots.waiting
+        out = cls.model_validate(entry)
+        return out.model_copy(
+            update={
+                "dormant": is_dormant(entry, airing=anime_status == RELEASING),
+                "waiting": waiting,
+                "waiting_reason": _waiting_reason(slots) if waiting else None,
+                "fetching_count": 0 if slots is None else slots.fetching,
+                "slot_cap": 0 if slots is None else slots.cap,
+                "mal_sync": mal_sync,
+            }
+        )
 
 
 class ListEntryPatch(BaseModel):
@@ -627,17 +747,23 @@ class ListEntryPatch(BaseModel):
     score: int | None = Field(default=None, ge=1, le=10)
 
 
-def _entry_out(entry: ListEntry | None, mal_sync: MalSyncOut | None) -> ListEntryOut | None:
+def _entry_out(
+    entry: ListEntry | None,
+    mal_sync: MalSyncOut | None,
+    *,
+    anime_status: str | None = None,
+    slots: SlotView | None = None,
+) -> ListEntryOut | None:
     """A list entry with its MAL badge attached, or ``None`` if there is none.
 
     The badge is passed in rather than looked up here: these schemas take no
     session, deliberately, so that building a response can never turn into a
-    query nobody expected.
+    query nobody expected. ``anime_status`` is there for the same reason, and
+    carries FR-A9's airing exception; ``slots`` carries FR-A10's cap.
     """
     if entry is None:
         return None
-    out = ListEntryOut.model_validate(entry)
-    return out.model_copy(update={"mal_sync": mal_sync}) if mal_sync else out
+    return ListEntryOut.build(entry, anime_status=anime_status, mal_sync=mal_sync, slots=slots)
 
 
 class ListRow(BaseModel):
@@ -673,9 +799,15 @@ class AnimeDetail(AnimeCore):
     #: six rows. ``studio`` above is the same fact and stays for the meta line.
     credits: list[CreditOut] = Field(default_factory=list)
     banner_url: str | None = None
+    #: TMDB's 16:9 backdrop, or null — the same field ``AnimeSummary`` carries,
+    #: and what the show page's hero prefers over the banner strip above it.
+    backdrop_url: str | None = None
     next_airing: NextAiringOut | None = None
     relations: list[RelationOut] = Field(default_factory=list)
     list_entry: ListEntryOut | None = None
+    #: The caller's live sample want, or null (FR-A8). Null is the ordinary
+    #: case: a sample is something a user asked for on this one show.
+    sample: SampleOut | None = None
 
     @classmethod
     def build(
@@ -691,6 +823,8 @@ class AnimeDetail(AnimeCore):
         torrents: dict[int, Torrent] | None = None,
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
+        sample: SampleOut | None = None,
+        slots: SlotView | None = None,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -731,9 +865,11 @@ class AnimeDetail(AnimeCore):
             studio=anime.studio,
             credits=credits,
             banner_url=anime.banner_url,
+            backdrop_url=anime.backdrop_url,
             next_airing=NextAiringOut.from_blob(anime.next_airing),
             relations=relations,
-            list_entry=_entry_out(list_entry, mal_sync),
+            list_entry=_entry_out(list_entry, mal_sync, anime_status=anime.status, slots=slots),
+            sample=sample,
             episodes=[
                 EpisodeOut.from_episode(
                     episode,
@@ -776,8 +912,10 @@ __all__ = [
     "RelationOut",
     "ReleaseOut",
     "RenditionOut",
+    "SampleOut",
     "SearchPage",
     "TitleOut",
+    "WaitingReason",
     "aired_through",
     "is_aired",
 ]

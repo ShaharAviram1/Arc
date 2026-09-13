@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
@@ -38,6 +38,12 @@ class Want(Base):
     recompute, and both are what retention counts FR-T1's grace period from —
     an episode whose last want was dropped this morning is not a month-old file
     nobody ever asked for, however old its bytes are.
+
+    ``sample`` marks the one row the reconciler did not derive: "try episode 1"
+    (FR-A8), a want a user asked for by hand on a show that is not on their
+    list. Everything else about it is an ordinary want — the same states, the
+    same D-day drop, the same retention — which is why it is a flag on this
+    table rather than a table of its own.
     """
 
     __tablename__ = "wants"
@@ -63,6 +69,15 @@ class Want(Base):
     #: or the episode went unwatched for D days (FR-T2).
     dropped_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     drop_reason: Mapped[str | None] = mapped_column(String(64))
+    #: A want the user created explicitly for the show's first episode (FR-A8)
+    #: rather than one the reconciler derived from their list. It is the single
+    #: exception to "only the next N episodes of a watching/planned show": the
+    #: row survives a reconciliation that would otherwise have nothing to
+    #: justify it, and once it is dropped — cancelled, or gone unwatched for D
+    #: days (FR-T2) — the reconciler leaves it dropped rather than reviving it.
+    sample: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
 
 class Torrent(Base):
@@ -90,7 +105,13 @@ class Torrent(Base):
     #: Seeders *at pick time* — a ranking input, not a live figure (FR-A3).
     seeders: Mapped[int | None] = mapped_column(Integer)
     trusted: Mapped[bool | None] = mapped_column(Boolean)
-    #: qBittorrent's own state string (downloading, stalledDL, …).
+    #: qBittorrent's own state string (downloading, stalledDL, …), or one of
+    #: Arc's **decisions** about this download, which are not states the client
+    #: has an opinion about and are never overwritten by a poll: ``rejected``
+    #: (a person said the delivered file was not this episode), ``stalled``
+    #: (it was going nowhere and was removed with its files), ``cancelled``
+    #: (nobody wanted it any more) and ``missing`` (gone from the client for
+    #: some reason that was not Arc's).
     qbit_state: Mapped[str | None] = mapped_column(String(32))
     #: 0..1 download progress, polled every 60 s (§5.1 step 4).
     progress: Mapped[float | None] = mapped_column(Float)

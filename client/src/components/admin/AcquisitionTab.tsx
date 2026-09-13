@@ -40,6 +40,7 @@ import {
   useQbit,
   useSetPaused,
   useWants,
+  type AcquisitionStatus,
   type QbitStatus,
 } from '@/lib/admin'
 import { episodeStateClass, episodeStateLabel } from '@/lib/anime'
@@ -48,6 +49,41 @@ const PAUSE_EXPLANATION =
   'While acquisition is paused Arc computes no new wants and sends no new query to Nyaa. Downloads ' +
   'already running still finish and are still ingested, and searches already queued requeue ' +
   'themselves until it is resumed.'
+
+/**
+ * The storage hold (spec §4.9 FR-T6), in one sentence with the two numbers in
+ * it. It names the remedy because the remedy is *nothing*: unlike the pause
+ * beside it, this is not a switch anybody flipped and not one anybody has to
+ * flip back — which is the first thing an admin seeing "held" needs told.
+ */
+function holdExplanation(free: number, floor: number): string {
+  return (
+    `Acquisition is holding: ${formatBytes(free)} free, floor ${formatBytes(floor)}. ` +
+    'It resumes on its own when retention frees room.'
+  )
+}
+
+const DORMANT_EXPLANATION =
+  'Imported shows nobody has touched in Arc yet fetch nothing until someone does (FR-A9); a show ' +
+  'that is currently airing is the exception and keeps fetching.'
+
+const WAITING_EXPLANATION =
+  'Each user fetches at most K shows at once (FR-A10): what is airing first, then what they ' +
+  'touched most recently. The rest wait — visibly, on their own show page — and start as the ' +
+  'others finish. Nothing is ever cancelled to make room, so lowering K only stops new starts.'
+
+/**
+ * "2 waiting · cap 5". The cap travels with the figure because "2" on its own
+ * raises the question it should answer: out of what? Both halves are labelled,
+ * because "2 of 5" invites the reading "2 of the 5 that are fetching" — which
+ * is the opposite of what it counts. A server with no cap says so in words,
+ * since "cap 0" would read as "nothing may fetch".
+ */
+function waitingStat(status: AcquisitionStatus): string {
+  const waiting = String(status.waiting_shows ?? 0)
+  const cap = status.slot_cap_k ?? 0
+  return cap === 0 ? `${waiting} waiting · no cap` : `${waiting} waiting · cap ${String(cap)}`
+}
 
 const WANTS_EXPLANATION =
   'Every want that has not been dropped, across all users. One episode wanted by three people is ' +
@@ -79,14 +115,23 @@ function PausePanel() {
   }
 
   const paused = status.data.paused
+  // A hold is reported only while nothing louder is true: paused already
+  // explains why nothing is moving, and two brakes in one line reads as a
+  // fault rather than as two facts.
+  const held = status.data.storage_held === true
+  const pill = paused ? 'paused' : held ? 'held' : 'running'
 
   return (
     <div className={`mt-4 ${panelClass}`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Pill tone={paused ? 'warn' : 'ok'}>{paused ? 'paused' : 'running'}</Pill>
+          <Pill tone={paused || held ? 'warn' : 'ok'}>{pill}</Pill>
           <span className="text-[16px] text-[var(--arc-text)]">
-            {paused ? 'Acquisition is paused.' : 'Acquisition is running.'}
+            {paused
+              ? 'Acquisition is paused.'
+              : held
+                ? 'Acquisition is held by free space.'
+                : 'Acquisition is running.'}
           </span>
         </div>
         <button
@@ -102,6 +147,12 @@ function PausePanel() {
         </button>
       </div>
 
+      {held ? (
+        <p className="mt-3 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-warn)]">
+          {holdExplanation(status.data.free_bytes ?? 0, status.data.min_free_bytes ?? 0)}
+        </p>
+      ) : null}
+
       <p className="mt-3 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
         {PAUSE_EXPLANATION}
       </p>
@@ -110,11 +161,15 @@ function PausePanel() {
         <InlineError className="mt-2" message={adminErrorMessage(setPaused.error)} />
       ) : null}
 
-      <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {[
           ['Active wants', String(status.data.active_wants)],
           ['Searching', String(status.data.searching)],
           ['Downloading', String(status.data.downloading)],
+          ['Dormant imports', String(status.data.dormant_entries ?? 0)],
+          // FR-A10. The cap is beside the count because "3 waiting" says
+          // nothing on its own — the question it raises is "out of what?".
+          ['Waiting for a slot', waitingStat(status.data)],
           ['Retained', formatBytes(status.data.retained_bytes ?? 0)],
         ].map(([label, value]) => (
           <div
@@ -128,6 +183,14 @@ function PausePanel() {
           </div>
         ))}
       </dl>
+
+      <p className="mt-3 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {DORMANT_EXPLANATION}
+      </p>
+
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {WAITING_EXPLANATION}
+      </p>
     </div>
   )
 }

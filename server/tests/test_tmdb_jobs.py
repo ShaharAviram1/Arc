@@ -155,6 +155,9 @@ async def test_enrich_fills_the_holes_and_leaves_anilist_alone(
     await tmdb_jobs.tmdb_enrich(context(db_session, tmdb_settings, TMDB_ENRICH, anime_id=anime.id))
 
     assert anime.banner_url == "https://anilist.example/banner.jpg"
+    # The backdrop lands anyway, in the column that is TMDB's own: the strip
+    # AniList wrote is not something a 21:9 hero can show (owner, 2026-09-13).
+    assert anime.backdrop_url is not None
     assert anime.cover_large_url is not None
     assert anime.credits is not None
     assert any(entry["role"] == "Director" for entry in anime.credits)
@@ -174,10 +177,20 @@ async def test_enrich_is_idempotent(
     ctx = context(db_session, tmdb_settings, TMDB_ENRICH, anime_id=anime.id)
 
     await tmdb_jobs.tmdb_enrich(ctx)
-    first = (anime.banner_url, anime.cover_large_url, list(anime.credits or []))
+    first = (
+        anime.backdrop_url,
+        anime.banner_url,
+        anime.cover_large_url,
+        list(anime.credits or []),
+    )
     await tmdb_jobs.tmdb_enrich(ctx)
 
-    assert (anime.banner_url, anime.cover_large_url, list(anime.credits or [])) == first
+    assert (
+        anime.backdrop_url,
+        anime.banner_url,
+        anime.cover_large_url,
+        list(anime.credits or []),
+    ) == first
 
 
 async def test_enrich_without_a_key_is_a_no_op(
@@ -289,6 +302,7 @@ async def test_the_sweep_skips_a_show_with_nothing_missing(
     anime = await add_show(
         db_session,
         banner_url="b",
+        backdrop_url="d",
         cover_large_url="c",
         credits=[{"role": STUDIO_ROLE, "name": "Madhouse"}, {"role": "Director", "name": "X"}],
     )
@@ -300,6 +314,31 @@ async def test_the_sweep_skips_a_show_with_nothing_missing(
     assert await queued(db_session, TMDB_ENRICH) == []
 
 
+async def test_a_row_with_everything_but_a_backdrop_is_still_a_hole(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The row the column was added for (owner, 2026-09-13).
+
+    AniList filled it — banner, poster, credits — and TMDB has never been
+    asked, so the heroes and the 16:9 cards have nothing to show but the wash.
+    The sweep has to reach it, which is how the rows that predate the column
+    get filled.
+    """
+    anime = await add_show(
+        db_session,
+        detail_source="anilist",
+        banner_url="b",
+        cover_large_url="c",
+        credits=[{"role": STUDIO_ROLE, "name": "Madhouse"}, {"role": "Director", "name": "X"}],
+    )
+    await add_mapping(db_session)
+    await follow(db_session, anime)
+    await add_episodes(db_session, anime, 2, title="t", still_url="s")
+
+    await tmdb_jobs.tmdb_enrich_all(context(db_session, tmdb_settings, TMDB_ENRICH_ALL))
+    assert [job.payload["anime_id"] for job in await queued(db_session, TMDB_ENRICH)] == [anime.id]
+
+
 async def test_a_studio_only_credits_list_still_counts_as_missing(
     db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
@@ -307,6 +346,7 @@ async def test_a_studio_only_credits_list_still_counts_as_missing(
     anime = await add_show(
         db_session,
         banner_url="b",
+        backdrop_url="d",
         cover_large_url="c",
         credits=[{"role": STUDIO_ROLE, "name": "Madhouse"}],
     )
@@ -326,6 +366,7 @@ async def test_thin_anilist_credits_are_not_a_hole(
         db_session,
         detail_source="anilist",
         banner_url="b",
+        backdrop_url="d",
         cover_large_url="c",
         credits=[{"role": STUDIO_ROLE, "name": "Madhouse"}],
     )
@@ -343,6 +384,7 @@ async def test_an_unaired_episode_without_a_still_is_not_a_hole(
     anime = await add_show(
         db_session,
         banner_url="b",
+        backdrop_url="d",
         cover_large_url="c",
         credits=[{"role": STUDIO_ROLE, "name": "M"}, {"role": "Director", "name": "X"}],
     )
@@ -449,12 +491,14 @@ async def test_a_show_nobody_watches_or_holds_is_still_skipped(
 
 
 async def test_the_shelves_queue_a_full_enrichment_for_a_card_with_no_still(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     anime = await add_show(db_session)
     await add_mapping(db_session)
 
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id]) == 1
+    assert (
+        await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id], settings=tmdb_settings) == 1
+    )
 
     jobs = await queued(db_session, TMDB_ENRICH)
     assert [job.payload["anime_id"] for job in jobs] == [anime.id]
@@ -464,41 +508,80 @@ async def test_the_shelves_queue_a_full_enrichment_for_a_card_with_no_still(
 
 
 async def test_the_shelves_do_not_queue_a_second_job_for_one_show(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     """Every visit to the page calls this; the queue must not grow with it."""
     anime = await add_show(db_session)
     await add_mapping(db_session)
 
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id, anime.id]) == 1
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id]) == 0
+    assert (
+        await tmdb_jobs.enqueue_episode_stills(
+            db_session, [anime.id, anime.id], settings=tmdb_settings
+        )
+        == 1
+    )
+    assert (
+        await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id], settings=tmdb_settings) == 0
+    )
     assert len(await queued(db_session, TMDB_ENRICH)) == 1
 
 
 async def test_the_shelves_skip_a_show_the_id_map_cannot_reach(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     anime = await add_show(db_session)
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id]) == 0
+    assert (
+        await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id], settings=tmdb_settings) == 0
+    )
     assert await queued(db_session, TMDB_ENRICH) == []
 
 
 async def test_the_shelves_are_bounded_by_their_own_size(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     for index in range(1, 5):
         await add_show(db_session, anilist_id=index, mal_id=index)
         await add_mapping(db_session, anilist_id=index, mal_id=index, tmdb_tv_id=index)
     ids = [anime_id for anime_id in (await db_session.scalars(select(Anime.id))).all()]
 
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, ids, limit=2) == 2
+    assert (
+        await tmdb_jobs.enqueue_episode_stills(db_session, ids, settings=tmdb_settings, limit=2)
+        == 2
+    )
     assert len(await queued(db_session, TMDB_ENRICH)) == 2
 
 
 async def test_the_shelves_queue_nothing_for_an_empty_page(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
-    assert await tmdb_jobs.enqueue_episode_stills(db_session, []) == 0
+    assert await tmdb_jobs.enqueue_episode_stills(db_session, [], settings=tmdb_settings) == 0
+
+
+async def test_the_shelves_queue_nothing_without_a_tmdb_key(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """``settings`` rather than ``tmdb_settings``: a deployment with no key.
+
+    The handler skips itself anyway, but the row would still be written — and
+    on a keyless deployment nothing ever fills the hole, so every page load
+    would queue another (owner, 2026-09-13).
+    """
+    anime = await add_show(db_session)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_episode_stills(db_session, [anime.id], settings=settings) == 0
+    assert await queued(db_session, TMDB_ENRICH) == []
+
+
+async def test_one_show_queues_nothing_without_a_tmdb_key(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """The sample route's helper, held to the same gate (FR-A8)."""
+    anime = await add_show(db_session)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_show_enrichment(db_session, anime.id, settings=settings) is None
+    assert await queued(db_session, TMDB_ENRICH) == []
 
 
 async def test_the_sweep_without_a_key_queues_nothing(
@@ -587,11 +670,28 @@ async def test_a_refresh_queues_nothing_for_a_show_nobody_follows(
 async def test_a_refresh_queues_nothing_when_the_row_is_complete(
     db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
-    anime = await add_show(db_session, banner_url="b", cover_large_url="c")
+    anime = await add_show(db_session, banner_url="b", backdrop_url="d", cover_large_url="c")
     await follow(db_session, anime)
     await add_episodes(db_session, anime, 2, title="t", still_url="s")
     await catalog_jobs._maybe_enrich(context(db_session, tmdb_settings, "catalog_refresh"), anime)
     assert await queued(db_session, TMDB_ENRICH) == []
+
+
+async def test_a_refresh_queues_an_enrichment_for_a_row_with_no_backdrop(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The Python-side twin of :func:`_missing_key_art` (owner, 2026-09-13).
+
+    A refresh is when a followed show is closest to somebody's attention, and
+    an AniList-complete row still has nothing a hero can frame.
+    """
+    anime = await add_show(db_session, banner_url="b", cover_large_url="c")
+    await follow(db_session, anime)
+    await add_episodes(db_session, anime, 2, title="t", still_url="s")
+
+    await catalog_jobs._maybe_enrich(context(db_session, tmdb_settings, "catalog_refresh"), anime)
+
+    assert [job.payload["anime_id"] for job in await queued(db_session, TMDB_ENRICH)] == [anime.id]
 
 
 async def test_a_refresh_does_not_queue_a_second_enrichment(
@@ -656,7 +756,7 @@ async def test_the_season_pass_skips_a_show_that_already_has_key_art(
     db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     """Missing credits and stills are not the season pass's business."""
-    await season_show(db_session, banner_url="b", cover_large_url="c")
+    await season_show(db_session, banner_url="b", backdrop_url="d", cover_large_url="c")
     await add_mapping(db_session)
     await tmdb_jobs.tmdb_enrich_all(context(db_session, tmdb_settings, TMDB_ENRICH_ALL))
     assert await queued(db_session, TMDB_ENRICH) == []
@@ -727,6 +827,7 @@ async def test_an_art_only_enrichment_is_one_request_and_no_stills(
         context(db_session, tmdb_settings, TMDB_ENRICH, anime_id=anime.id, art_only=True)
     )
 
+    assert anime.backdrop_url is not None
     assert anime.banner_url is not None
     assert anime.cover_large_url is not None
     assert anime.credits is None
@@ -741,12 +842,12 @@ async def test_an_art_only_enrichment_is_one_request_and_no_stills(
 
 
 async def test_the_hero_queues_art_for_an_unfollowed_season_show(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     anime = await season_show(db_session)
     await add_mapping(db_session)
 
-    assert await tmdb_jobs.enqueue_hero_art(db_session) == 1
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 1
 
     jobs = await queued(db_session, TMDB_ENRICH)
     assert [job.payload["anime_id"] for job in jobs] == [anime.id]
@@ -755,40 +856,75 @@ async def test_the_hero_queues_art_for_an_unfollowed_season_show(
 
 
 async def test_the_hero_does_not_queue_a_second_job_for_one_show(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     """Every visit to the page calls this; the queue must not grow with it."""
     await season_show(db_session)
     await add_mapping(db_session)
 
-    assert await tmdb_jobs.enqueue_hero_art(db_session) == 1
-    assert await tmdb_jobs.enqueue_hero_art(db_session) == 0
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 1
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 0
     assert len(await queued(db_session, TMDB_ENRICH)) == 1
 
 
-async def test_the_hero_leaves_a_show_that_has_any_key_art_alone(
-    db_session: AsyncSession,
+async def test_the_hero_leaves_a_show_that_has_its_backdrop_alone(
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
-    """A poster is enough to frame a hero with; only nothing at all is not."""
-    await season_show(db_session, cover_large_url="c")
+    """The backdrop is what fills the frame, so having it is what settles it."""
+    await season_show(db_session, backdrop_url="d")
     await add_mapping(db_session)
-    assert await tmdb_jobs.enqueue_hero_art(db_session) == 0
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 0
     assert await queued(db_session, TMDB_ENRICH) == []
 
 
+async def test_the_hero_queues_art_for_a_show_with_a_banner_but_no_backdrop(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The owner's row (2026-09-13): AniList got there first.
+
+    A 4.75:1 strip and a poster is all the art there is, and the hero can show
+    neither — it falls back to the blurred-poster wash. Before ``backdrop_url``
+    this row was "has key art" and the hero left it alone for good.
+    """
+    anime = await season_show(db_session, banner_url="b", cover_large_url="c")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 1
+
+    jobs = await queued(db_session, TMDB_ENRICH)
+    assert [job.payload["anime_id"] for job in jobs] == [anime.id]
+    assert jobs[0].payload["art_only"] is True
+
+
 async def test_the_hero_skips_a_show_the_id_map_cannot_reach(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     await season_show(db_session)
-    assert await tmdb_jobs.enqueue_hero_art(db_session) == 0
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 0
 
 
 async def test_the_hero_is_bounded_by_its_own_size(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmdb_settings: Settings
 ) -> None:
     for index in range(1, 5):
         await season_show(db_session, anilist_id=index, mal_id=index, popularity=index)
         await add_mapping(db_session, anilist_id=index, mal_id=index, tmdb_tv_id=index)
 
-    assert await tmdb_jobs.enqueue_hero_art(db_session, limit=2) == 2
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings, limit=2) == 2
     assert len(await queued(db_session, TMDB_ENRICH)) == 2
+
+
+async def test_the_hero_queues_nothing_without_a_tmdb_key(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """The widest of the three on-demand paths, and the one that would repeat.
+
+    Without a key no row ever gains a backdrop, so every hole stays a hole and
+    every visit to Watch Now would queue twelve more jobs to log twelve more
+    skips (owner, 2026-09-13).
+    """
+    await season_show(db_session)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=settings) == 0
+    assert await queued(db_session, TMDB_ENRICH) == []

@@ -8,6 +8,10 @@ The bar these tests hold the writer to is higher than the readers': the rule
 readers accept a bad row and fall back with a warning, because they must never
 stop acquisition or turn a grace period into zero. The *write* path is the one
 place a mistake can still be reported to the person making it.
+
+:func:`arc.services.acquisition.rules.storage_hold` is here for the same
+reason — it is the other pure function over these values (FR-T6), so its whole
+matrix is a table rather than a filesystem.
 """
 
 from __future__ import annotations
@@ -17,7 +21,15 @@ from typing import Any
 import pytest
 
 from arc.models import DEFAULT_SETTINGS
-from arc.services.acquisition.rules import MAX_LOOK_AHEAD
+from arc.services.acquisition.rules import (
+    BYTES_PER_GB as GB,
+)
+from arc.services.acquisition.rules import (
+    MAX_LOOK_AHEAD,
+    MAX_MIN_FREE_GB,
+    MAX_SLOT_CAP,
+    storage_hold,
+)
 from arc.services.settings import (
     FALLBACK_EQUALS_PREFERRED,
     MAX_DAYS,
@@ -223,3 +235,59 @@ def test_the_pause_switch_takes_a_boolean(value: bool) -> None:
 def test_the_pause_switch_refuses_anything_else(value: Any) -> None:
     """A truthy string here would silently mean "paused" for ever."""
     assert "acquisition_paused" in refused({"acquisition_paused": value})
+
+
+# --- The storage floor (FR-T6) ----------------------------------------------
+
+
+@pytest.mark.parametrize("value", [0, 1, 10, MAX_MIN_FREE_GB])
+def test_the_storage_floor_takes_whole_gb(value: int) -> None:
+    """0 is legal and means "no reserve"; the ceiling is a typo guard."""
+    assert validate({"min_free_gb": value}) == {"min_free_gb": value}
+
+
+@pytest.mark.parametrize("value", [-1, MAX_MIN_FREE_GB + 1, "10", 10.5, None, True])
+def test_a_bad_storage_floor_is_refused(value: Any) -> None:
+    assert "min_free_gb" in refused({"min_free_gb": value})
+
+
+# --- The slot cap K (FR-A10) ------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [0, 1, 5, MAX_SLOT_CAP])
+def test_the_slot_cap_takes_a_whole_number(value: int) -> None:
+    """0 is legal and means *unlimited* here, unlike N's 0 (FR-A10)."""
+    assert validate({"slot_cap_k": value}) == {"slot_cap_k": value}
+
+
+@pytest.mark.parametrize("value", [-1, MAX_SLOT_CAP + 1, "5", 5.5, None, True])
+def test_a_bad_slot_cap_is_refused(value: Any) -> None:
+    assert "slot_cap_k" in refused({"slot_cap_k": value})
+
+
+# --- storage_hold(), pure ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("free", "floor", "held"),
+    [
+        # Under the floor: held.
+        (1 * GB, 10 * GB, True),
+        (0, 10 * GB, True),
+        # Exactly at it is not: the floor is what must be left free, and
+        # leaving exactly that much has left it.
+        (10 * GB, 10 * GB, False),
+        (11 * GB, 10 * GB, False),
+        # A floor of zero never holds, whatever the disk says — that is what
+        # "no reserve" means, and it keeps "the guard is off" and "the disk is
+        # full" from sharing an answer.
+        (0, 0, False),
+        (1, 0, False),
+        # A negative floor cannot be written but can be hand-edited; it reads
+        # as off rather than as "hold for ever".
+        (0, -1, False),
+    ],
+)
+def test_the_storage_hold_rule(free: int, floor: int, held: bool) -> None:
+    """FR-T6's whole arithmetic, as a table."""
+    assert storage_hold(free, floor) is held
