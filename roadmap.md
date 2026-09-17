@@ -892,6 +892,11 @@ the finish work (bugs found that way are fixed inside M16).
         glyph is the action and the fill/outline pair stays the Show page's
         pressed-pill treatment; the `watched_source == 'progress'` pill keeps
         the non-actionable filled ✓ and its tooltip. 65 Player tests. Verified 2026-09-18 (orchestrator): on dev an unwatched episode shows ✓ "Mark watched", an Arc-completed one ✕ "Mark unwatched" (label and hover), and one covered by list progress keeps the non-actionable ✓ with the FR-W5 tooltip
+  - Batch 4 deployed 2026-09-18 as 3b1662b (no migration; host head
+    4f2ab7c91d68). Post-deploy: `/api/health` ok with 0 config warnings,
+    no orphaned running job, and the first Watch Now load queued the
+    art-only TMDB jobs for the carried-in shows — One Piece had a
+    backdrop within seconds.
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
