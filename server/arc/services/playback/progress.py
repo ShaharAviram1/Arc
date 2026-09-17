@@ -82,7 +82,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import false, func, literal_column, or_, select, update
+from sqlalchemy import and_, false, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -127,12 +127,19 @@ CONTINUE_LIMIT = 20
 #: rather than sampling.
 CONTINUE_MIN_POSITION_S = 30.0
 
-#: The shelf's other end, on top of :data:`RESUME_MAX_FRACTION`. Ninety-five
-#: per cent of a forty-minute episode still leaves two minutes; of a five-minute
-#: short it leaves fifteen seconds. A fixed minute is what makes "there is
-#: something left to watch" mean the same thing at both lengths, and the
-#: tighter of the two bounds is the one that applies.
-CONTINUE_END_MARGIN_S = 60.0
+#: The shelf's other end, and it is **tighter than the resume ceiling on
+#: purpose** (owner, 2026-09-17). Resuming into the last three minutes of an
+#: episode is a thing a viewer may ask for — they chose that episode — but
+#: *offering* it unprompted is Arc putting a credits roll on the home page and
+#: calling it something left to watch. Three minutes is about an outro and a
+#: next-episode preview, which is the part nobody comes back for.
+#:
+#: A fixed tail rather than a fraction, so "there is something left to watch"
+#: means the same thing on a forty-minute episode and a five-minute short. The
+#: consequence at the short end is deliberate and worth knowing: a file under
+#: three minutes long never reaches this shelf at all, because it is never more
+#: than three minutes from its own end.
+CONTINUE_TAIL_S = 180.0
 
 
 def is_completed(position_s: float, duration_s: float) -> bool:
@@ -605,12 +612,30 @@ async def continue_watching(
     The question is "is there something left to watch here?", and the answer
     is the saved position and nothing else. Three conditions, each excluding a
     different kind of noise: at least :data:`CONTINUE_MIN_POSITION_S` in (a
-    player that was open for four seconds started nothing), short of the end —
-    the tighter of :data:`RESUME_MAX_FRACTION` and
-    :data:`CONTINUE_END_MARGIN_S`, which is deliberately no looser than the
-    resume rule so that everything this shelf offers actually resumes where it
-    says — and the episode still ``ready`` (retention deletes renditions, and a
-    row offering to resume a file that is gone is worse than no row).
+    player that was open for four seconds started nothing), short of the end
+    (below), and the episode still ``ready`` (retention deletes renditions, and
+    a row offering to resume a file that is gone is worse than no row).
+
+    **Short of the end is two rules, and the first of them to bite wins**
+    (FR-W1, owner 2026-09-17, from production). An episode leaves the shelf
+    once the viewer is past the completion mark — :data:`COMPLETION_FRACTION`,
+    the same 90 % FR-S4 calls watched, because a shelf that keeps offering an
+    episode Arc has already written down as watched is arguing with itself —
+    **or** once it has less than :data:`CONTINUE_TAIL_S` left, whichever comes
+    first. The tail is what covers the long episode: 90 % of fifty minutes
+    still leaves five, and 90 % of a short leaves seconds. Both bounds are
+    tighter than :data:`RESUME_MAX_FRACTION`, so everything this shelf offers
+    still resumes where it says it will; the reverse is not true, and
+    deliberately so — an episode at 92 % resumes if the viewer opens it
+    themselves and is simply not *offered*.
+
+    What takes its place is the next episode, on Ready to watch
+    (:func:`arc.services.catalog.progress.ready_to_watch`): past the completion
+    mark the episode has a completion row, so that shelf excludes it too, and
+    the list advance FR-S4 made puts its successor above
+    ``list_entries.progress`` where that shelf looks. The one row the two
+    shelves never both hold is still guaranteed by the floor —
+    ``RESUME_MIN_S < CONTINUE_MIN_POSITION_S``.
 
     **``completed`` is not one of them.** It used to be, and the case that
     broke was the ordinary one: rewatch an episode, stop at the midpoint, and
@@ -639,8 +664,15 @@ async def continue_watching(
                 # which the floor above has already excluded anyway.
                 duration.is_(None),
                 duration <= 0,
-                WatchProgress.position_s
-                < func.least(duration * RESUME_MAX_FRACTION, duration - CONTINUE_END_MARGIN_S),
+                and_(
+                    # Two bounds rather than one ``least``, because the two
+                    # rules do not have the same edge: the completion mark is
+                    # reached *at* 90 % (FR-S4 is ``>=``), while "less than
+                    # three minutes left" still leaves an episode with exactly
+                    # three minutes left on the shelf.
+                    WatchProgress.position_s < duration * COMPLETION_FRACTION,
+                    WatchProgress.position_s <= duration - CONTINUE_TAIL_S,
+                ),
             ),
             Episode.state == EpisodeState.READY,
         )
@@ -664,7 +696,7 @@ async def continue_watching(
 
 __all__ = [
     "COMPLETION_FRACTION",
-    "CONTINUE_END_MARGIN_S",
+    "CONTINUE_TAIL_S",
     "CONTINUE_LIMIT",
     "CONTINUE_MIN_POSITION_S",
     "RESUME_MAX_FRACTION",

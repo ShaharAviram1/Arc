@@ -964,10 +964,39 @@ and gradients.
   (Chrome answers "maybe" to the HLS mime check yet cannot play a playlist
   natively, so `canPlayType` alone is not a signal); only a browser with no
   MediaSource (iOS Safari) gets the native `src` path; the player page renders outside the app shell; resume is
-  automatic with a dismissible "Resumed from m:ss" notice; a framework-free
+  automatic with a dismissible "Resumed from m:ss" notice; playback starts
+  itself (below); a framework-free
   `ProgressReporter` posts every 10 s while playing, on pause, on seek
   (debounced), and on `pagehide` via `sendBeacon`, with a 2 s floor between
   ordinary reports.
+- **Autoplay, as built (M16 batch 4, FR-S1, owner 2026-09-17).** `onReady`
+  (i.e. `loadedmetadata`) does the resume seek and then calls `beginPlayback`,
+  behind a ref so it happens once per page and never in a loop: `await
+  video.play()`; on rejection `video.muted = true` and one more attempt, which
+  raises the "Tap to unmute" pill; on a second rejection `muted` goes back to
+  false and nothing else happens — the control bar's play button is already on
+  screen and is the fallback, and no error is drawn, because a policy refusing
+  audio is not a fault. The pill and the completion receipt share one shelf
+  108 px above the bottom edge (a flex column, so both can be up), and the pill
+  is retired by *anything* that unmutes: its own press, or `m`, which reaches
+  it through `HlsVideo`'s `onVolumeChange` — the element stays the truth about
+  mute and the flag only follows it. `playQuietly` wraps the other two
+  `play()` callers (the play button, the space shortcut) so a refusal there is
+  not an unhandled rejection either. Two consequences worth knowing: the first
+  progress report of a session is now the *resume* position rather than the
+  pause that used to start playback, and `?paused=1` was **not** added — no
+  route in the app has a reason to open the player without playing, and a flag
+  nothing sets is a branch nothing tests.
+- **The mark-watched control (M16 batch 4, FR-W3/FR-W5, owner 2026-09-17).**
+  One button, and the glyph inside it is the *action*, not the state: an
+  outlined ✓ labelled "Mark watched" before, a filled ✕ labelled and titled
+  "Mark unwatched" after. The fill/outline pair is the Show page's
+  pressed-pill treatment, so the two places Arc offers this agree about which
+  state is which; only the glyph differs, because the player has room for a
+  glyph and no word. The third state is untouched: an episode watched by list
+  progress alone (`watched_source == 'progress'`) keeps the non-actionable
+  filled ✓ pill with the "Unwatch from the latest watched episode down"
+  tooltip — there is no action there to name.
 - **The end of an episode, as built (M16 batch 3, FR-S5, owner 2026-09-17).**
   Two moments, and the client tells them apart by *which fact it is reacting
   to* rather than by a threshold of its own.
@@ -1016,15 +1045,28 @@ and gradients.
   bounded to int64 (422 beyond). A partial index on in-progress watch rows
   backs continue-watching (migration 3).
 - Continue watching is decided by the saved position alone and ignores
-  `completed`: a row is listed when its position is ≥ 30 s and short of the
-  tighter of 95 % of the duration and duration − 60 s, newest `updated_at`
-  first, so a rewatch stopped half-way is offered and resumes where it
-  stopped (`/play` carries `resume_position` for completed rows too), while an
-  episode watched to the end falls off by the ceiling rather than by the flag.
-  Nothing else reads the shelf's rule: completion still drives the MAL push,
-  the once-only list advance, and the watched marks. The query no longer
-  matches migration 3's `completed = false` predicate, so it is served by the
-  full `(user_id, updated_at)` index instead.
+  `completed`: a row is listed when its position is ≥ 30 s
+  (`CONTINUE_MIN_POSITION_S`) and short of **both** ends of the episode —
+  `position < duration × COMPLETION_FRACTION` (the same 90 % FR-S4 calls
+  watched) **and** `position <= duration − CONTINUE_TAIL_S` (three minutes),
+  whichever bites first (M16 batch 4, owner 2026-09-17). Two comparisons
+  rather than one `least`, because the edges differ: the completion mark is
+  reached *at* 90 %, while "less than three minutes left" still lists an
+  episode with exactly three minutes left. Newest `updated_at` first, so a
+  rewatch stopped half-way is offered and resumes where it stopped (`/play`
+  carries `resume_position` for completed rows too), while an episode watched
+  to the end falls off by the bounds rather than by the flag. Both bounds are
+  tighter than `RESUME_MAX_FRACTION`, so everything the shelf offers resumes
+  where the card says; the reverse does not hold, and deliberately — an episode
+  at 92 % resumes if the viewer opens it and is simply not *offered*. A file
+  under three minutes long therefore never reaches this shelf at all. What
+  replaces a finished episode is its successor on Ready to watch: past the
+  completion mark the row is `completed` (so `ready_to_watch`'s `NOT EXISTS`
+  excludes it) and the FR-S4 advance has put the next number above
+  `list_entries.progress`. Nothing else reads the shelf's rule: completion
+  still drives the MAL push, the once-only list advance, and the watched marks.
+  The query no longer matches migration 3's `completed = false` predicate, so
+  it is served by the full `(user_id, updated_at)` index instead.
 
 ### 5.5 Progress and MAL writes
 1. `POST /progress` {episode_id, position, duration} every 10 s and on
@@ -1112,7 +1154,9 @@ and gradients.
   actionable when it does. Both are `arc`. An episode **below** the progress is
   `progress`: nothing there would move, because the un-mark only ever takes the
   line down by one, and the Show page renders a non-actionable "Watched" with
-  the tooltip "Unwatch from the latest watched episode down". A progress of
+  the tooltip "Unwatch from the latest watched episode down" — as does the
+  player, which is the one place its control keeps a ✓ rather than the ✕ of
+  "Mark unwatched" (§5.4a). A progress of
   zero means nothing is watched, whatever the numbering (a show starting at
   episode 0). One field, not a second `unwatchable` boolean beside it: the
   client's only question is whether the pill is a button, the two could never
@@ -1494,8 +1538,11 @@ outage skips that episode for this sweep only. Admin:
   known air time within `AIRING_WINDOW` (7 days either side of now) — the
   cached `next_airing` blob's `airingAt`, compared as epoch seconds in SQL,
   or, only where the row has no blob at all, an `EXISTS` over `episodes.air_at`
-  in the same window. One extra query, merged by `anime.id` with the season's
-  own rows winning; still cache-only, no live call. The trailing edge is the
+  in the same window. The rule itself lives in `on_air_this_week(now)`, a
+  `WHERE` clause `airing_this_week` wraps in a statement and the TMDB art
+  passes compose into one of their own (§5.8, 2026-09-17) — one definition, two
+  callers. One extra query, merged by `anime.id` with the season's own rows
+  winning; still cache-only, no live call. The trailing edge is the
   same 7 days as the staleness rule below, so a row is never pulled in for a
   slot placement then discards. A `RELEASING` row with no air time anywhere is
   not carried in — nothing would place it on a weekday — and its own season's
@@ -1661,18 +1708,41 @@ id at all, which is why the offline import is a prerequisite for this.
      added on 2026-09-12: Arc plays what it holds whether or not the show was
      ever added to a list, and a show watched off-list could otherwise never
      gain a single episode still.
-  2. **This season's and next season's** shows (`catalog/seasons.py`) that the
-     id map can reach and that are missing any of the three art columns, most
-     popular first (`popularity DESC NULLS LAST`). **Art only**: one
-     `/tv/{id}`, backdrop + poster, no season and no credits call —
-     `{"anime_id": N, "art_only": true}` in the payload, honoured by `_fetch`
-     and by `plan_enrichment(..., art_only=True)`.
+  2. Shows **the Home hero can offer** — `hero_pool_members` — that the id map
+     can reach and that are missing any of the three art columns, most popular
+     first (`popularity DESC NULLS LAST`). **Art only**: one `/tv/{id}`,
+     backdrop + poster, no season and no credits call — `{"anime_id": N,
+     "art_only": true}` in the payload, honoured by `_fetch` and by
+     `plan_enrichment(..., art_only=True)`. The statement also returns a
+     `carried_in` flag per row (`_in_current_seasons(now) IS NOT TRUE` — `NOT
+     NULL` is `NULL`, and a long-runner may carry no season tag at all), which
+     is the count on the sweep's INFO line.
 
   Pass 2 exists because the Home hero offers shows the viewer does *not*
   follow, so under the followed-only rule nothing it showed could ever be
   enriched (owner, 2026-09-12). The client paces at 4 req/s and shares one
   process-wide breaker, so a 429 or a 5xx stops the rest of the night instead
   of timing out three hundred times.
+- **The hero pool (2026-09-17).** `services/tmdb/jobs.py::hero_pool_members` is
+  the one predicate both art paths — pass 2 and `enqueue_hero_art` — select on:
+  `(current season OR next season)` **OR** on air this week, the second clause
+  *composed from* `catalog/schedule.py::on_air_this_week` rather than restated,
+  so the set that gets asked for art cannot drift from the set the hero picks
+  from. It was "this season or next" alone until One Piece turned up on a
+  production slide with the blurred-poster wash: AniList 21, `RELEASING`, tagged
+  `FALL 1999`, mapped to TMDB 37854, `backdrop_url` null, and **no `tmdb_enrich`
+  job ever queued for it** in the queue's whole history. The hero's pool on the
+  client is the cached current-season grid (`Home.tsx::seasonShows` over
+  `GET /api/schedule`, `carried_over` rows included) plus the last
+  recommendation run's picks, and those picks are filtered to the current or
+  next season before they can reach a slide — so the grid's carried-in rows
+  (§5.0, "Season grid membership") were exactly the shows the hero could offer
+  and neither art path could ever reach. The predicate is a superset of the
+  client's pool by one thing, all of next season rather than only the picks from
+  it, which pass 2 already wanted; it is narrower nowhere, which is the property
+  that matters. Backfill needs nothing of its own: `SWEEP_LIMIT` and
+  `HERO_ART_LIMIT` are unchanged and both queries are popularity-ordered, so a
+  long-runner is at the front of the first sweep and the first page load.
 - **What counts as a hole.** A mapped row missing *any* of `backdrop_url`,
   `banner_url` or `cover_large_url` (`_missing_key_art`), or with an aired
   episode that has no still, or — in the nightly sweep only — with no credits
@@ -1692,12 +1762,14 @@ id at all, which is why the offline import is a prerequisite for this.
      most likely to be missing for; the order is the page's, so the eight the
      limit allows go to the cards nearest the top.) The nightly sweep reaches these shows too, but "tonight" is the
      wrong answer for the card somebody is looking at now (owner, 2026-09-12).
-  2. **Art-only** enrichments for up to 12 shows of this or next season with
-     no `backdrop_url` (`_missing_hero_art`) — the pool the client's hero picks
-     its six slides from, ranked the same way. Until 2026-09-13 the test was
-     "no artwork at all", which this subsumes: a row with nothing has no
-     backdrop either, and the rows it adds are the ones the hero could only
-     ever wash (an AniList strip and a poster).
+  2. **Art-only** enrichments for up to 12 shows of the hero pool
+     (`hero_pool_members`, above) with no `backdrop_url`
+     (`_missing_hero_art`) — the pool the client's hero picks its six slides
+     from, ranked the same way. Until 2026-09-13 the test was "no artwork at
+     all", which this subsumes: a row with nothing has no backdrop either, and
+     the rows it adds are the ones the hero could only ever wash (an AniList
+     strip and a poster). Until 2026-09-17 the *pool* was this season and next,
+     which is narrower than the hero itself.
 
   And `POST /api/anime/{id}/sample` queues a **full** enrichment for that one
   show (`enqueue_show_enrichment`, FR-A8, owner 2026-09-13): the episode it is
@@ -3366,3 +3438,56 @@ two together.
   instead (`jobs._prequel_offset` supplies the SQLAlchemy one), which keeps
   every function in that module a pure function of an `anime` row and a release
   name — the property the offline query corpus is built on.
+- 2026-09-17 — **Hero art follows the hero's pool, not a season tag** (FR-C6,
+  M16 batch 4; §5.0, §5.8). Both TMDB art paths — the nightly sweep's second
+  pass (`_needs_hero_pool_art`) and Watch Now's on-demand
+  `enqueue_hero_art` — selected shows tagged with the current or next season,
+  while the hero's pool is the *current week's grid*, which since 2026-09-13
+  carries in every `RELEASING` show with a weekly format and an air time within
+  seven days whatever season it is tagged with. Every long-runner the hero
+  could offer was therefore unreachable by both passes for ever. Found on
+  production: One Piece (AniList 21, `RELEASING`, `FALL 1999`, mapped to TMDB
+  37854) on a slide with the blurred-poster wash, `backdrop_url` null, and not
+  one `tmdb_enrich` job in the queue's history. Fixed with **one** predicate,
+  `tmdb/jobs.py::hero_pool_members` = `(current OR next season) OR
+  on_air_this_week`, the second clause extracted out of `catalog/schedule.py`
+  and composed rather than restated — a second copy of the air-time rule would
+  be a rule that could drift, which is the bug this is. The existing `_mapped`,
+  `_missing_key_art`/`_missing_hero_art` and `tmdb_configured` gates are
+  unchanged, so nothing new can queue a job whose only outcome is a logged
+  skip, and the caps (`SWEEP_LIMIT` 300, `HERO_ART_LIMIT` 12) are unchanged
+  too: both queries order by popularity, so the backfill reaches the
+  long-runners on the first sweep and the first page load with no migration and
+  no one-off script. `sweep_candidates` now returns a `SweepCandidate`
+  named tuple whose `carried_in` says the row is in the sweep for being on air
+  rather than for its season tag, counted on the sweep's own INFO line so the
+  arrival (and then the disappearance) of the long-runners is visible in the
+  logs. Two shapes were rejected: widening `_in_current_seasons` to "any season
+  whose shows might still be airing", which is the guess the carried-in rule
+  exists to avoid; and driving the art passes off `GET /api/schedule`'s
+  response, which would make a background job depend on a route and on a
+  caller's timezone.
+- 2026-09-17 — **Three player and shelf corrections** (§5.4a, spec
+  FR-W1/FR-S1/FR-W3, owner, M16 batch 4; all three from the owner's own use).
+  (1) **Continue watching stops offering finished episodes.**
+  `playback/progress.continue_watching` gained a second end bound beside the
+  fraction one and both got tighter: `position < duration ×
+  COMPLETION_FRACTION` **and** `position <= duration − CONTINUE_TAIL_S`
+  (180 s), replacing `least(95 %, duration − 60 s)`. The old pair could offer
+  an episode Arc had already written down as watched — 94 % of a 24-minute
+  episode is past the completion mark — which is the shelf arguing with the
+  MAL push about the same row. Two comparisons rather than one `least` because
+  the two rules have different edges (FR-S4 is `>=`, "less than three minutes
+  left" is not). `CONTINUE_END_MARGIN_S` is gone: every value it excluded the
+  new pair excludes. The hand-over to Ready to watch needed no code — a
+  completion row and the FR-S4 advance are exactly that shelf's two exclusion
+  clauses read from the other side — and is now asserted as one test.
+  (2) **The player autoplays**, two attempts and no loop, with a muted retry
+  and a "Tap to unmute" pill; `?paused=1` was deliberately not added, since
+  nothing in the app opens the player without wanting it to play. The
+  measurable side effect is that a session's first progress report is now the
+  resume position instead of the first pause.
+  (3) **The mark-watched control draws the verb, not the state**: ✓ "Mark
+  watched" → ✕ "Mark unwatched", keeping the Show page's fill/outline pair,
+  and keeping the ✓ for the one state that is not a button (`watched_source ==
+  'progress'`). No server change in (2) or (3); no migration in any of them.

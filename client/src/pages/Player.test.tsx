@@ -2,7 +2,16 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+  type MockInstance,
+} from 'vitest'
 import type { PlayInfo } from '@/lib/playback'
 import { createQueryClient } from '@/lib/queryClient'
 import { Player } from '@/pages/Player'
@@ -48,15 +57,49 @@ function renderPlayer(routes: MockRoutes = { [PLAY_PATH]: { body: PLAY_INFO } })
 }
 
 /**
+ * What the browser's autoplay policy does with `play()` (owner, 2026-09-17).
+ * `muted-only` is the common desktop case: sound needs a gesture, silence does
+ * not. `blocked` is the strict one, where nothing plays until something is
+ * pressed.
+ */
+type AutoplayPolicy = 'allowed' | 'muted-only' | 'blocked'
+
+/**
+ * The `play()` mock the most recent `equipVideo` installed, so a test can
+ * count the attempts — "never loop the retries" is a claim about that count.
+ */
+let playMock: Mock<() => Promise<void>> | null = null
+
+function playAttempts(): number {
+  return playMock?.mock.calls.length ?? 0
+}
+
+/**
  * jsdom's media element is inert: `play`, `pause` and setting `currentTime`
  * are all unimplemented, and `duration` is NaN. These own properties shadow
  * the prototype so the shortcuts and the resume have something real to move.
  */
-function equipVideo(video: HTMLVideoElement, duration = 1436.8): void {
+function equipVideo(
+  video: HTMLVideoElement,
+  duration = 1436.8,
+  policy: AutoplayPolicy = 'allowed',
+): void {
   let paused = true
   let currentTime = 0
   let muted = false
   let playbackRate = 1
+
+  // A rejected promise is exactly what a browser hands back when its autoplay
+  // policy says no, and the name is the one Chrome and Safari both use.
+  const play = vi.fn((): Promise<void> => {
+    if (policy === 'blocked' || (policy === 'muted-only' && !muted)) {
+      return Promise.reject(new Error('NotAllowedError'))
+    }
+    paused = false
+    fireEvent.play(video)
+    return Promise.resolve()
+  })
+  playMock = play
 
   Object.defineProperties(video, {
     paused: { configurable: true, get: () => paused },
@@ -82,14 +125,7 @@ function equipVideo(video: HTMLVideoElement, duration = 1436.8): void {
         muted = value
       },
     },
-    play: {
-      configurable: true,
-      value: () => {
-        paused = false
-        fireEvent.play(video)
-        return Promise.resolve()
-      },
-    },
+    play: { configurable: true, value: play },
     pause: {
       configurable: true,
       value: () => {
@@ -101,14 +137,31 @@ function equipVideo(video: HTMLVideoElement, duration = 1436.8): void {
 }
 
 /** Waits for the lazy `import('hls.js')` to land, then returns the video. */
-async function readyVideo(equip = true): Promise<HTMLVideoElement> {
+async function readyVideo(
+  equip = true,
+  policy: AutoplayPolicy = 'allowed',
+): Promise<HTMLVideoElement> {
   await waitFor(() => {
     expect(instances).toHaveLength(1)
   })
   const video = document.querySelector('video')
   if (video === null) throw new Error('no video element rendered')
-  if (equip) equipVideo(video)
+  if (equip) equipVideo(video, 1436.8, policy)
   return video
+}
+
+/**
+ * `loadedmetadata`, and everything the page does in answer to it — the resume
+ * seek and then the autoplay attempts, which are promises, so the act has to
+ * be an async one or the muted retry lands after the assertions.
+ */
+async function loadMetadata(video: HTMLVideoElement): Promise<void> {
+  await act(async () => {
+    fireEvent.loadedMetadata(video)
+    // Two hops, one per attempt: the refused audible one and the muted retry.
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
 
 /** Moves the playhead and lets the page see it, as a tick of playback would. */
@@ -183,6 +236,7 @@ function enterFullscreen(): void {
 
 beforeEach(() => {
   resetHls()
+  playMock = null
 })
 
 afterEach(() => {
@@ -391,8 +445,11 @@ describe('Player', () => {
     await waitFor(() => {
       expect(requestsMade(fetchMock)).toContain('POST /api/progress')
     })
-    const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
-    expect(jsonBodyOf(post?.[1])).toEqual({
+    // The *last* write, not the first: since the page autoplays (owner,
+    // 2026-09-17) the resumed position is reported when playback starts, so
+    // the pause is the second report rather than the only one.
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+    expect(jsonBodyOf(posts.at(-1)?.[1])).toEqual({
       episode_id: EPISODE_ID,
       position_s: 900,
       duration_s: 1436.8,
@@ -601,6 +658,12 @@ describe('Player', () => {
     // Nothing inside the card took focus away from the page.
     expect(document.activeElement).toBe(document.body)
 
+    // The episode is already running (the page autoplays), so the proof that
+    // space reached the page rather than a button in the card is that it
+    // moved playback — both ways.
+    expect(video.paused).toBe(false)
+    fireEvent.keyDown(window, { key: ' ' })
+    expect(video.paused).toBe(true)
     fireEvent.keyDown(window, { key: ' ' })
     expect(video.paused).toBe(false)
   })
@@ -1089,6 +1152,12 @@ describe('Player controls', () => {
     }
   })
 
+  /**
+   * The control's two faces (owner, 2026-09-17): before, a tick and "Mark
+   * watched"; after, a **cross** and "Mark unwatched" — the verb the press
+   * would carry out, rather than a second statement of what the filled disc
+   * already says.
+   */
   it('marks the episode watched from the bar, and takes the mark off (FR-W3)', async () => {
     const unwatched: PlayInfo = { ...PLAY_INFO, episode: { ...PLAY_INFO.episode, watched: false } }
     const { fetchMock } = renderPlayer({
@@ -1103,22 +1172,30 @@ describe('Player controls', () => {
 
     const mark = await screen.findByRole('button', { name: 'Mark watched' })
     expect(mark).toHaveAttribute('aria-pressed', 'false')
+    expect(mark).toHaveAttribute('title', 'Mark watched')
+    // Unwatched: one tick, on an outlined disc.
+    expect(mark.querySelectorAll('svg path')).toHaveLength(1)
+    expect(mark.querySelector('circle')).toHaveClass('fill-none')
     await userEvent.click(mark)
 
     await waitFor(() => {
       expect(requestsMade(fetchMock)).toContain('POST /api/episodes/9001/watched')
     })
-    const unmark = await screen.findByRole('button', { name: 'Unmark watched' })
+    const unmark = await screen.findByRole('button', { name: 'Mark unwatched' })
     expect(unmark).toHaveAttribute('aria-pressed', 'true')
+    expect(unmark).toHaveAttribute('title', 'Mark unwatched')
+    // Watched: the cross is two strokes, on a filled disc — the show page's
+    // pressed-pill treatment, with the action as the glyph.
+    expect(unmark.querySelectorAll('svg path')).toHaveLength(2)
+    expect(unmark.querySelector('circle')).toHaveClass('fill-current')
 
     await userEvent.click(unmark)
     await waitFor(() => {
       expect(requestsMade(fetchMock)).toContain('DELETE /api/episodes/9001/watched')
     })
-    expect(await screen.findByRole('button', { name: 'Mark watched' })).toHaveAttribute(
-      'aria-pressed',
-      'false',
-    )
+    const again = await screen.findByRole('button', { name: 'Mark watched' })
+    expect(again).toHaveAttribute('aria-pressed', 'false')
+    expect(again.querySelectorAll('svg path')).toHaveLength(1)
   })
 
   it('offers no undo for an episode under the latest watched one (FR-W5)', async () => {
@@ -1140,13 +1217,16 @@ describe('Player controls', () => {
     expect(pill).toHaveAttribute('aria-pressed', 'true')
     expect(pill).toHaveAttribute('aria-disabled', 'true')
     expect(pill).toHaveAttribute('title', 'Unwatch from the latest watched episode down')
-    expect(screen.queryByRole('button', { name: 'Unmark watched' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Mark unwatched' })).not.toBeInTheDocument()
 
     await userEvent.click(pill)
 
     expect(requestsMade(fetchMock)).not.toContain('DELETE /api/episodes/9001/watched')
-    // The glyph stays filled: the viewer has watched it either way.
+    // The glyph stays filled: the viewer has watched it either way. And it
+    // stays a *tick* — the cross names an action, and this pill has none
+    // (owner, 2026-09-17).
     expect(pill.querySelector('circle')).toHaveClass('fill-current')
+    expect(pill.querySelectorAll('svg path')).toHaveLength(1)
   })
 
   /**
@@ -1215,10 +1295,11 @@ describe('Player controls', () => {
     expect(fullscreen).toHaveAttribute('title', 'Fullscreen')
     expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
 
-    // This fixture's episode is already watched, so the mark is pressed.
-    const watched = screen.getByRole('button', { name: 'Unmark watched' })
+    // This fixture's episode is already watched, so the mark is pressed and
+    // the control offers the undo by name.
+    const watched = screen.getByRole('button', { name: 'Mark unwatched' })
     expect(watched).toHaveAttribute('aria-pressed', 'true')
-    expect(watched).toHaveAttribute('title', 'Unmark watched')
+    expect(watched).toHaveAttribute('title', 'Mark unwatched')
 
     // The two neighbours, and nothing else, still live in the Episodes nav.
     const nav = screen.getByRole('navigation', { name: 'Episodes' })
@@ -1261,7 +1342,7 @@ describe('Player controls', () => {
 
     expect(groups).toEqual([
       ['Back 10 seconds', 'Play or pause', 'Forward 10 seconds'],
-      ['Previous episode', 'Next episode 2', 'Unmark watched'],
+      ['Previous episode', 'Next episode 2', 'Mark unwatched'],
       ['Fullscreen'],
     ])
 
@@ -1278,6 +1359,97 @@ describe('Player controls', () => {
       await screen.findByRole('heading', { name: FRIEREN.title.preferred }),
     ).toBeInTheDocument()
     expect(screen.getByText(/The Journey’s End · subs en, audio ja/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * Autoplay (owner, 2026-09-17). Opening an episode is the decision, so the page
+ * plays it — but the browser has the last word, and the whole of this is about
+ * losing that argument gracefully: muted rather than silent-and-stopped, and a
+ * play button rather than an error, with the attempt never repeated.
+ */
+describe('Player autoplay', () => {
+  const UNMUTE = 'Tap to unmute'
+
+  it('starts playing once the source is attached, from the resumed position', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+    expect(video.paused).toBe(true)
+
+    await loadMetadata(video)
+
+    expect(video.paused).toBe(false)
+    expect(video.muted).toBe(false)
+    // After the seek, not before it: the episode must not start at zero and
+    // then jump to where the viewer was.
+    expect(video.currentTime).toBe(PLAY_INFO.resume_position)
+    expect(playAttempts()).toBe(1)
+    expect(screen.queryByText(UNMUTE)).not.toBeInTheDocument()
+  })
+
+  it('retries muted when sound is refused, and offers the sound back', async () => {
+    renderPlayer()
+
+    const video = await readyVideo(true, 'muted-only')
+    await loadMetadata(video)
+
+    // Playing, silently, after exactly two attempts — audible, then muted.
+    await waitFor(() => {
+      expect(video.paused).toBe(false)
+    })
+    expect(video.muted).toBe(true)
+    expect(playAttempts()).toBe(2)
+
+    const pill = await screen.findByRole('button', { name: UNMUTE })
+    // Quiet: it is a pill over the bar, not an alert.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await userEvent.click(pill)
+    expect(video.muted).toBe(false)
+    // And it keeps playing: unmuting is not a restart.
+    expect(video.paused).toBe(false)
+    expect(screen.queryByText(UNMUTE)).not.toBeInTheDocument()
+    expect(playAttempts()).toBe(2)
+  })
+
+  it('takes the pill away when the viewer unmutes from the keyboard instead', async () => {
+    renderPlayer()
+
+    const video = await readyVideo(true, 'muted-only')
+    await loadMetadata(video)
+    await screen.findByRole('button', { name: UNMUTE })
+
+    // `m` is the shortcut the pill is only a second way to reach (FR-S6).
+    fireEvent.keyDown(window, { key: 'm' })
+    fireEvent.volumeChange(video)
+
+    await waitFor(() => {
+      expect(screen.queryByText(UNMUTE)).not.toBeInTheDocument()
+    })
+    expect(video.muted).toBe(false)
+  })
+
+  it('falls back to the play button when even muted playback is refused', async () => {
+    renderPlayer()
+
+    const video = await readyVideo(true, 'blocked')
+    await loadMetadata(video)
+
+    // Two attempts and then it stops: a policy does not change its mind
+    // because it was asked a third time.
+    await waitFor(() => {
+      expect(playAttempts()).toBe(2)
+    })
+    expect(video.paused).toBe(true)
+    // The mute is undone, so the viewer's first press has sound.
+    expect(video.muted).toBe(false)
+    expect(screen.queryByText(UNMUTE)).not.toBeInTheDocument()
+    // No error: nothing went wrong, and the bar's play button is the answer.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Play or pause' }))
+    expect(playAttempts()).toBe(3)
   })
 })
 

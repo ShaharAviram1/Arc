@@ -784,7 +784,8 @@ async def test_the_followed_pass_comes_first_and_is_never_art_only(
     await follow(db_session, watched)
 
     candidates = await tmdb_jobs.sweep_candidates(db_session)
-    assert candidates == [(watched.id, False), (popular.id, True)]
+    # Neither is carried in: both are tagged with the season Arc is in.
+    assert candidates == [(watched.id, False, False), (popular.id, True, False)]
 
 
 async def test_a_followed_season_show_is_swept_once_in_full(
@@ -813,7 +814,7 @@ async def test_the_season_pass_takes_the_most_popular_first(
     await add_mapping(db_session, anilist_id=3, mal_id=3, tmdb_tv_id=3)
 
     candidates = await tmdb_jobs.sweep_candidates(db_session)
-    assert [anime_id for anime_id, _ in candidates] == [loud.id, middling.id, quiet.id]
+    assert [candidate.anime_id for candidate in candidates] == [loud.id, middling.id, quiet.id]
 
 
 async def test_an_art_only_enrichment_is_one_request_and_no_stills(
@@ -927,4 +928,161 @@ async def test_the_hero_queues_nothing_without_a_tmdb_key(
     await add_mapping(db_session)
 
     assert await tmdb_jobs.enqueue_hero_art(db_session, settings=settings) == 0
+    assert await queued(db_session, TMDB_ENRICH) == []
+
+
+# --- Carried-in long-runners (owner, 2026-09-17) -----------------------------
+#
+# The hero's pool is the *current week's* grid, which since 2026-09-13 carries
+# in every show on air whatever season it is tagged with (§5.0, "Season grid
+# membership"). Both art paths were still scoped to "this season or next", so
+# every long-runner the hero could offer was unreachable by either of them for
+# ever. Found on production: One Piece on a slide with the blurred-poster wash,
+# ``backdrop_url`` null, mapped to TMDB 37854, and not one ``tmdb_enrich`` job
+# in the queue's whole history.
+
+
+def slot(days: int) -> dict[str, Any]:
+    """A cached ``next_airing`` blob whose broadcast is ``days`` from now."""
+    return {
+        "episode": 1150,
+        "airingAt": int((datetime.now(UTC) + timedelta(days=days)).timestamp()),
+        "timeUntilAiring": 0,
+    }
+
+
+async def long_runner(session: AsyncSession, **kwargs: Any) -> Anime:
+    """One Piece as production holds it: ``RELEASING``, ``FALL 1999``, on air Sunday.
+
+    Nobody follows it, its season tag is twenty-seven years old, and the hero
+    can still put it on a slide — which is the whole of the case.
+    """
+    defaults: dict[str, Any] = {
+        "season": "FALL",
+        "season_year": 1999,
+        "status": "RELEASING",
+        "format": "TV",
+        "next_airing": slot(2),
+    }
+    return await add_show(session, **(defaults | kwargs))
+
+
+async def test_an_airing_long_runner_is_a_sweep_candidate_art_only(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    anime = await long_runner(db_session)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == [(anime.id, True, True)]
+
+
+async def test_the_sweep_queues_the_long_runner_and_counts_it_as_carried_in(
+    db_session: AsyncSession, tmdb_settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The backfill: the first nightly sweep after this ships asks for the art."""
+    anime = await long_runner(db_session)
+    await add_mapping(db_session)
+
+    with caplog.at_level(logging.INFO, logger="test.tmdb"):
+        await tmdb_jobs.tmdb_enrich_all(context(db_session, tmdb_settings, TMDB_ENRICH_ALL))
+
+    jobs = await queued(db_session, TMDB_ENRICH)
+    assert [job.payload["anime_id"] for job in jobs] == [anime.id]
+    assert jobs[0].payload["art_only"] is True
+    lines = [record for record in caplog.records if record.msg == "tmdb enrichment sweep"]
+    assert [record.carried_in for record in lines] == [1]
+
+
+async def test_a_long_runner_with_no_season_tag_at_all_is_carried_in(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The NULL case: ``NOT NULL`` is ``NULL``, so the flag has to be ``IS NOT TRUE``."""
+    anime = await long_runner(db_session, season=None, season_year=None)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == [(anime.id, True, True)]
+
+
+async def test_a_long_runner_that_already_has_its_key_art_is_not_swept(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    await long_runner(db_session, banner_url="b", backdrop_url="d", cover_large_url="c")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == []
+
+
+async def test_a_finished_old_show_is_not_carried_in(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """Whatever dates it carries: a finished show is not on this week."""
+    await long_runner(db_session, status="FINISHED")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == []
+
+
+async def test_a_releasing_show_with_no_air_time_this_week_is_not_carried_in(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """A month out is not this week, and the hero's pool does not hold it."""
+    await long_runner(db_session, next_airing=slot(30))
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == []
+
+
+async def test_a_releasing_film_is_not_carried_in(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """A release date is not a weekly slot, so the grid never carries a film in."""
+    await long_runner(db_session, format="MOVIE")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == []
+
+
+async def test_a_carried_in_long_runner_somebody_watches_is_swept_in_full(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The followed pass still wins the row, and never reports it as carried in."""
+    anime = await long_runner(db_session)
+    await add_mapping(db_session)
+    await follow(db_session, anime)
+
+    assert await tmdb_jobs.sweep_candidates(db_session) == [(anime.id, False, False)]
+
+
+async def test_the_hero_queues_art_for_a_carried_in_long_runner(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """The on-demand half: a visit to Watch Now asks for One Piece's backdrop."""
+    anime = await long_runner(db_session)
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 1
+
+    jobs = await queued(db_session, TMDB_ENRICH)
+    assert [job.payload["anime_id"] for job in jobs] == [anime.id]
+    assert jobs[0].payload["art_only"] is True
+
+
+async def test_the_hero_leaves_a_carried_in_long_runner_with_a_backdrop_alone(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    await long_runner(db_session, backdrop_url="d")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 0
+    assert await queued(db_session, TMDB_ENRICH) == []
+
+
+async def test_the_hero_leaves_a_finished_old_show_alone(
+    db_session: AsyncSession, tmdb_settings: Settings
+) -> None:
+    """Nothing the hero cannot offer is queued on a GET."""
+    await long_runner(db_session, status="FINISHED")
+    await add_mapping(db_session)
+
+    assert await tmdb_jobs.enqueue_hero_art(db_session, settings=tmdb_settings) == 0
     assert await queued(db_session, TMDB_ENRICH) == []

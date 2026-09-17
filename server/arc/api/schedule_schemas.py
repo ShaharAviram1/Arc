@@ -278,10 +278,12 @@ class ContinueWatchingEntry(BaseModel):
     ``position_s`` is what the player seeks to, and it is the *stored*
     position rather than the resume rule's answer: the row is only here at all
     because it is past :data:`~arc.services.playback.progress.
-    CONTINUE_MIN_POSITION_S` and short of the shelf's ceiling, which is no
-    looser than the resume rule's — and a card that says "6 minutes left"
-    while the player would start from zero is the sort of disagreement worth
-    not having.
+    CONTINUE_MIN_POSITION_S` and short of both of the shelf's end bounds — the
+    completion mark and :data:`~arc.services.playback.progress.CONTINUE_TAIL_S`
+    — each of which is tighter than the resume rule's ceiling, so the player
+    always resumes where the card says. A card reading "6 minutes left" while
+    the player would start from zero is the sort of disagreement worth not
+    having.
     """
 
     anime: AnimeSummary

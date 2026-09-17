@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-17 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-18 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -458,7 +458,7 @@ the finish work (bugs found that way are fixed inside M16).
         server tests on the touched modules and 556 client tests green
   - [x] Stalled torrents are removed and the episode retried on the FR-A6
         schedule; a release is never chosen twice; 0-seeder releases are
-        rejected — awaiting orchestrator validation
+        rejected — verified
   - [x] Downloads nobody wants any more are cancelled; qBittorrent queue
         policy applied by Arc — verified
         (both verified 2026-09-13 by the orchestrator: Reviewer's three
@@ -781,7 +781,7 @@ the finish work (bugs found that way are fixed inside M16).
         lookup by show is gone. Verified 2026-09-17 (orchestrator) on dev: the eight upcoming
         appointments carry no tick; the API sends `watched` only for an
         aired named episode; 290 home/schedule/catalogue/playback tests
-  - [ ] Absolute episode numbering on sequels — approved by the owner; the
+  - [x] Absolute episode numbering on sequels — approved by the owner; the
         item above moves into this batch with its own Reviewer.
         Built 2026-09-17 (spec FR-A4, architecture §5.1a/§6/§10):
         `nyaa.absolute_offset` sums the `PREQUEL` chain's episode counts
@@ -801,8 +801,10 @@ the finish work (bugs found that way are fixed inside M16).
         `search_release` logs at INFO which offset it used; `rank` explains the
         pick with "absolute numbering: release 25 = episode 1". Reviewer's
         three should-fixes and two nits applied the same day. 177 nyaa tests,
-        query corpus 18 cases, 121 acquisition-job tests, ruff/mypy clean —
-        awaiting orchestrator validation
+        query corpus 18 cases, 121 acquisition-job tests, ruff/mypy clean.
+        Verified 2026-09-17 (orchestrator, shipped in 8cd03e4): full server
+        suite and query corpus green, Reviewer fixes read; the marker below
+        was left unticked by mistake and corrected 2026-09-18
   - [x] Schedule redesign (owner, 2026-09-17, replacing the dimming idea):
         show three days at a time instead of seven, starting with today;
         arrows on the day-and-date bar move through the week (the season's
@@ -829,6 +831,67 @@ the finish work (bugs found that way are fixed inside M16).
         (aired 2026-08-27, impossible under the old 7-day rule) beside the
         current-season episodes, and the This-week panel shows no tick on
         any upcoming appointment
+  - **Batch 4 (owner, 2026-09-17, after the batch-3 deploy):**
+  - [x] Hero art for long-runners (One Piece on production: AniList strip
+        only, `backdrop_url` null, mapped to TMDB 37854, and NO enrichment
+        job ever ran). Cause: the nightly art pass and Watch Now's on-demand
+        hero enrichment are scoped to shows tagged this/next season, while
+        the hero pool and the Schedule now carry in every airing show
+        whatever season it started. Fix: the art passes target the same set
+        the hero can pick — current/next season OR `RELEASING` with a
+        recent air time — so a carried-in show is enriched the first time
+        it is offered; backfill runs on the next sweep.
+        Built 2026-09-17: one predicate, `tmdb/jobs.py::hero_pool_members`
+        = `(current OR next season) OR on_air_this_week`, with the second
+        clause extracted out of `catalog/schedule.py` and composed rather
+        than restated (so the schedule's grid and the art passes cannot
+        drift). Both art paths use it — the sweep's pass 2
+        (`_needs_hero_pool_art`, art-only, popularity desc) and
+        `enqueue_hero_art` (cap 12) — behind the unchanged `_mapped`,
+        `_missing_key_art`/`_missing_hero_art` and `TMDB_API_KEY` gates;
+        `sweep_candidates` now returns `SweepCandidate(anime_id, art_only,
+        carried_in)` and the sweep logs `carried_in`. No migration, no
+        backfill script: both queries are popularity-ordered, so One Piece
+        is first on the next sweep and the next Watch Now load. 11 new
+        tmdb-jobs tests and 2 new home tests; 219 pass across
+        test_tmdb_jobs / test_home_api / test_schedule_api /
+        test_catalog_jobs, ruff + mypy clean. Verified 2026-09-18 (orchestrator): 219 TMDB/home/schedule/catalogue
+        tests green; on dev, one Watch Now load queued art-only jobs for the
+        carried-in long-runners and Star Detective Precure, The Drops of God
+        and BEYBLADE X had backdrops within seconds; One Piece on production
+        gets its backdrop on the first Home load after the deploy
+  - [x] Continue watching must not offer an episode that is effectively
+        finished: past the completion mark or with less than 3 minutes
+        left it leaves the shelf (and the next episode takes its place via
+        Ready to watch).
+        Built 2026-09-17: `continue_watching`'s end bound is now
+        `position < duration × COMPLETION_FRACTION` **and**
+        `position <= duration − CONTINUE_TAIL_S` (180 s, documented beside
+        the resume ceiling), replacing `least(95 %, duration − 60 s)`;
+        `CONTINUE_END_MARGIN_S` deleted. The hand-over needed no code — a
+        completion row and the FR-S4 advance are Ready to watch's own two
+        exclusions — and is asserted end to end: 89 % with 4:24 left listed,
+        91 % not, 85 % with 2:30 left not, exactly 3:00 left listed, and a
+        92 %-watched episode on neither shelf with its successor on Ready to
+        watch. 161 playback + home API tests. Verified 2026-09-18 (orchestrator): 225 playback/home/TMDB tests green; on dev, a row seeded at 92 % left the shelf and one with exactly 3:00 left stayed, checked through GET /api/home
+  - [x] The player starts playback when the page loads instead of waiting
+        for a click (subject to the browser's autoplay policy: muted-start
+        fallback or a one-click prompt only when the browser refuses).
+        Built 2026-09-17, client-only (`Player.tsx` `beginPlayback`): the
+        attempt is made after the resume seek, once per page behind a ref —
+        audible, then one muted retry that raises a quiet "Tap to unmute"
+        pill (retired by the pill or by `m`, through `onVolumeChange`), then
+        nothing, leaving the existing play button and no error. `?paused=1`
+        deliberately not added: no route opens the player without wanting it
+        to play. Four autoplay tests (resolves / rejects-then-muted /
+        rejects twice / unmuted from the keyboard). Verified 2026-09-18 (orchestrator): 679 client tests green; on dev, opening an episode from the Continue watching card resumed at 4:43 and played unmuted with no click, progress POSTs held back during the check
+  - [x] The player's mark-watched control shows ✕ once the episode is
+        watched, with hover/label "Mark unwatched"; ✓ with "Mark watched"
+        before.
+        Built 2026-09-17: one `WatchedGlyph` with a `cross` variant, so the
+        glyph is the action and the fill/outline pair stays the Show page's
+        pressed-pill treatment; the `watched_source == 'progress'` pill keeps
+        the non-actionable filled ✓ and its tooltip. 65 Player tests. Verified 2026-09-18 (orchestrator): on dev an unwatched episode shows ✓ "Mark watched", an Arc-completed one ✕ "Mark unwatched" (label and hover), and one covered by list progress keeps the non-actionable ✓ with the FR-W5 tooltip
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

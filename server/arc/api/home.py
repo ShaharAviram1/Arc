@@ -26,10 +26,13 @@ actually hurt.
 
 Like the schedule, this endpoint reads the local cache and the caller's own
 rows. Nothing here calls a catalogue source — it *queues* two pieces of work
-and waits for neither. The page's hero is the season's shows, and a season show
-with no backdrop to fill the 21:9 frame is the "hero posters are still bad" the
-owner reported on 2026-09-12 and again on 2026-09-13, when the frame gained a
-column of its own to read (:func:`~arc.services.tmdb.jobs.enqueue_hero_art`);
+and waits for neither. The page's hero picks from the shows on air this week
+and the two seasons around it
+(:func:`~arc.services.tmdb.jobs.hero_pool_members`), and one of those with no
+backdrop to fill the 21:9 frame is the "hero posters are still bad" the owner
+reported on 2026-09-12, again on 2026-09-13 when the frame gained a column of
+its own to read, and a third time on 2026-09-17 for the long-runners the pool
+carries in (:func:`~arc.services.tmdb.jobs.enqueue_hero_art`);
 the shelves
 under it are 16:9 episode cards, and an episode with no still is a card framed
 around the show's poster rather than the scene it is for
@@ -127,7 +130,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # only to log a skip, and on a keyless deployment every row is a hole for
     # ever, so the page would write twenty of them per visit.
     queued = await enqueue_episode_stills(session, no_still, settings=settings)
-    # One SELECT that returns nothing once the season's art is in.
+    # One SELECT that returns nothing once the hero pool's art is in.
     queued += await enqueue_hero_art(session, settings=settings, now=at)
     if queued:
         await session.commit()

@@ -763,10 +763,12 @@ async def test_an_episode_barely_started_is_not_continue_watching(
 @pytest.mark.parametrize(
     ("position", "duration", "listed"),
     [
-        (1340.0, 1420.0, True),  # 94 %, and eighty seconds left
-        (1349.0, 1420.0, False),  # the 95 % ceiling on a 24-minute episode
-        (200.0, 300.0, True),  # a five-minute short with a hundred left
-        (250.0, 300.0, False),  # 83 %, but under a minute left: it is over
+        # The owner's four cases (2026-09-17), on a forty-minute episode where
+        # the two rules are far enough apart to be told from each other.
+        (2136.0, 2400.0, True),  # 89 %, 4:24 left: still something to watch
+        (2184.0, 2400.0, False),  # 91 %: past the completion mark, whatever is left
+        (850.0, 1000.0, False),  # 85 %, but 2:30 left: the tail bites first
+        (820.0, 1000.0, True),  # exactly three minutes left is still three minutes
         (700.0, None, True),  # nothing to measure against, so only the floor
     ],
 )
@@ -778,7 +780,12 @@ async def test_an_episode_near_its_end_is_not_continue_watching(
     duration: float | None,
     listed: bool,
 ) -> None:
-    """The tighter of 95 % and the last minute, so shorts behave like episodes."""
+    """Past the completion mark or inside the last three minutes (FR-W1).
+
+    Whichever comes first: 90 % is the rule for a short, the three-minute tail
+    is the rule for anything over half an hour, and an episode that trips
+    either of them is finished as far as the shelf is concerned.
+    """
     anime_id = await airing_show(api_factory, title="Show A", anilist_id=910039)
     await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
     episode = await episode_number(api_factory, anime_id, 2)
@@ -1097,6 +1104,29 @@ async def test_ready_to_watch_is_capped(
     assert [row["episode"]["number"] for row in rows] == list(range(1, READY_LIMIT + 1))
 
 
+async def test_an_effectively_finished_episode_hands_over_to_the_next_one(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The two shelves, from the owner's case (FR-W1, 2026-09-17).
+
+    An episode at 92 % is on **neither** shelf — continue watching is past its
+    completion mark and ready to watch will not offer something started and
+    watched — and the episode that takes its place is the next one, which the
+    FR-S4 advance has just put above the list's progress.
+    """
+    anime_id = await old_show(api_factory, title="Handover", anilist_id=910073)
+    # Where the list stands after finishing episode 2: FR-S4's advance.
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=2)
+    second = await episode_number(api_factory, anime_id, 2)
+    await start_watching(api_factory, user, second, position_s=1306.4, completed=True)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 3))
+
+    body = await home(client)
+
+    assert body["continue_watching"] == []
+    assert ready_numbers(body) == [3]
+
+
 async def test_another_users_ready_episode_is_not_on_this_shelf(
     client: AsyncClient, api_factory: SessionFactory
 ) -> None:
@@ -1323,6 +1353,54 @@ async def test_a_show_the_id_map_cannot_reach_is_not_queued(
 ) -> None:
     await add_anime(api_factory, title="Unmapped", anilist_id=910043)
     await home(client)
+    assert await enrichments(api_factory) == []
+
+
+async def test_the_page_queues_art_for_a_carried_in_long_runner(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """One Piece on production (owner, 2026-09-17): the hero could offer it, nothing asked.
+
+    ``RELEASING``, a weekly slot two days from now, and a season tag from 1999,
+    so it is in the hero's pool for being on air and was in neither art pass
+    while both were scoped to this season and next.
+    """
+    anime_id = await add_anime(
+        api_factory,
+        title="One Piece",
+        anilist_id=910048,
+        season="FALL",
+        season_year=1999,
+        next_at=NOW + timedelta(days=2),
+        next_episode=1150,
+    )
+    await map_to_tmdb(api_factory, anilist_id=910048, tmdb_tv_id=37854)
+
+    await home(client)
+
+    jobs = await enrichments(api_factory)
+    assert [job.payload["anime_id"] for job in jobs] == [anime_id]
+    assert jobs[0].payload["art_only"] is True
+
+
+async def test_the_page_leaves_a_finished_old_show_alone(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The other half of the rule: an old show off the air is in no pool."""
+    await add_anime(
+        api_factory,
+        title="Long Finished",
+        anilist_id=910049,
+        status="FINISHED",
+        season="FALL",
+        season_year=1999,
+        next_at=NOW + timedelta(days=2),
+        next_episode=1150,
+    )
+    await map_to_tmdb(api_factory, anilist_id=910049, tmdb_tv_id=37855)
+
+    await home(client)
+
     assert await enrichments(api_factory) == []
 
 

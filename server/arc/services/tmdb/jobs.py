@@ -12,12 +12,19 @@ Two handlers:
   poster — which is what a show nobody follows is worth.
 * ``tmdb_enrich_all`` — the nightly sweep (04:10 UTC, after the catalogue's
   own). Two passes, in this order: the shows somebody is **watching** that are
-  still missing key art, credits or stills, in full; then the shows of the
-  **current and next season** that are mapped and still have no backdrop or no
-  key-art poster, art-only, most popular first. The second pass is why the
-  Home hero has artwork at all — the hero offers shows the viewer does *not*
-  follow (``client/src/pages/Home.tsx``), and under the old followed-only rule
-  none of them could ever be reached (owner, 2026-09-12).
+  still missing key art, credits or stills, in full; then the shows the **Home
+  hero can offer** (:func:`hero_pool_members`) that are mapped and still have
+  no backdrop or no key-art poster, art-only, most popular first. The second
+  pass is why the Home hero has artwork at all — the hero offers shows the
+  viewer does *not* follow (``client/src/pages/Home.tsx``), and under the old
+  followed-only rule none of them could ever be reached (owner, 2026-09-12).
+
+The hero's pool was "this season and next" until 2026-09-17, when it turned out
+to be narrower than the hero itself: the current season's grid carries in every
+show on air this week whatever season it is tagged with, so One Piece could be
+offered a slide and had never once been asked for a backdrop. Both art paths —
+the sweep's second pass and ``enqueue_hero_art`` below — now select on
+:func:`hero_pool_members`, which composes the schedule's own clause.
 
 "Watching" is wider than "on a list" (:func:`_worth_enriching`): a list entry,
 playback progress on an episode, or a ready episode in the library. Arc plays
@@ -34,7 +41,7 @@ in the queue view for ever.
 Four paths ask for an enrichment **on demand** rather than waiting for the
 sweep, all of them cheap SELECTs that answer nothing once the art is in:
 ``GET /api/home`` (:func:`enqueue_episode_stills` for the cards on screen, then
-:func:`enqueue_hero_art` for the season behind the hero), the sample route
+:func:`enqueue_hero_art` for the pool behind the hero), the sample route
 (:func:`enqueue_show_enrichment` for the one show a user has just asked Arc to
 fetch — FR-A8) and ``GET /api/anime/{id}`` (the same call, for the show whose
 page is being opened — owner, 2026-09-13: a series nobody follows and no shelf
@@ -55,7 +62,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Coroutine, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from sqlalchemy import ColumnElement, Select, Text, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +80,7 @@ from arc.models import (
 )
 from arc.services.catalog.cache import episodes_for
 from arc.services.catalog.jobs import FOLLOWED_STATUSES
+from arc.services.catalog.schedule import on_air_this_week
 from arc.services.catalog.seasons import current_season, next_season
 from arc.services.jobs.queue import ACTIVE_STATUSES, DEDUPE_FIELD, enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
@@ -333,6 +341,41 @@ def _in_current_seasons(now: datetime | None = None) -> ColumnElement[bool]:
     )
 
 
+def hero_pool_members(now: datetime | None = None) -> ColumnElement[bool]:
+    """Every show the Home hero can put in its frame — the set both art passes target.
+
+    Two ways in, and the second is the fix of 2026-09-17. The hero's pool on
+    the client is the cached season grid plus the season-tagged picks of the
+    last recommendation run (``client/src/pages/Home.tsx``: ``heroPool``,
+    ``seasonShows``), and since 2026-09-13 the *current* grid is a calendar
+    rather than a catalogue listing — the schedule router carries in every
+    ``RELEASING`` show with a weekly format and an air time inside
+    :data:`~arc.services.catalog.schedule.AIRING_WINDOW`, whatever season the
+    row is tagged with (§5.0, "Season grid membership"). So:
+
+    * ``(current season OR next season)`` — :func:`_in_current_seasons`, which
+      also covers the recommendation picks, since those are filtered to exactly
+      those two seasons before they can reach a slide.
+    * ``OR`` on air this week — :func:`~arc.services.catalog.schedule.
+      on_air_this_week`, *composed* rather than restated: one rule, written in
+      the module the grid is built in, so the pool the hero picks from and the
+      pool that gets asked for art cannot drift apart.
+
+    Without the second clause every long-runner the hero could offer was
+    unreachable by both art passes for ever. Found on production: One Piece
+    (AniList 21, ``RELEASING``, tagged ``FALL 1999``, mapped to TMDB 37854) was
+    on a slide with the blurred-poster wash, its ``backdrop_url`` null, and no
+    ``tmdb_enrich`` job had ever been queued for it (owner, 2026-09-17).
+
+    A superset of the client's pool by exactly one thing: all of next season
+    rather than only the picks from it, which :func:`_in_current_seasons`
+    already explains. Narrower nowhere — which is the property that matters,
+    since the point is that anything the hero can offer has been asked for art.
+    """
+    at = now if now is not None else datetime.now(UTC)
+    return or_(_in_current_seasons(at), on_air_this_week(now=at))
+
+
 def _missing_key_art() -> ColumnElement[bool]:
     """No TMDB backdrop, no banner, or no key-art poster. Any is a hole TMDB fills.
 
@@ -480,22 +523,31 @@ def _needs_enrichment() -> Select[tuple[int]]:
     return select(Anime.id).where(wanted, mapped, incomplete).order_by(Anime.id).limit(SWEEP_LIMIT)
 
 
-def _needs_season_art(now: datetime | None = None) -> Select[tuple[int]]:
-    """Mapped shows of this season and the next that still have no key art.
+def _needs_hero_pool_art(now: datetime | None = None) -> Select[tuple[int, bool]]:
+    """Mapped shows the hero can offer that still have no key art, and whether each is carried in.
 
     The sweep's second pass, and the one the Home hero depends on: the hero
-    offers the season's shows to somebody who follows *none* of them, so the
-    followed-only rule above could never reach a single one of them (owner,
-    2026-09-12 — "the hero posters are still bad").
+    offers shows to somebody who follows *none* of them, so the followed-only
+    rule above could never reach a single one of them (owner, 2026-09-12 — "the
+    hero posters are still bad"). :func:`hero_pool_members` is what "the hero
+    can offer" means, and since 2026-09-17 that is wider than a season tag.
 
-    Most popular first, because that is the order the client ranks a season in
+    Most popular first, because that is the order the client ranks the pool in
     once its own genre test has nothing to say, so the shows a hero is most
-    likely to pick are the ones a capped sweep reaches. Art only: see
-    :func:`_fetch`.
+    likely to pick are the ones a capped sweep reaches — and a long-runner is
+    the most popular row there is, so the backfill reaches One Piece on the
+    first night. Art only: see :func:`_fetch`.
+
+    The second column says the row is here for being **on air** rather than for
+    its season tag, which is the count the sweep logs. ``IS NOT TRUE`` rather
+    than a plain ``NOT``: a long-runner the catalogue tags with no season at all
+    makes :func:`_in_current_seasons` ``NULL``, and ``NOT NULL`` is ``NULL``,
+    which would come back as ``None`` and be counted as "in season".
     """
+    at = now if now is not None else datetime.now(UTC)
     return (
-        select(Anime.id)
-        .where(_in_current_seasons(now), _mapped(), _missing_key_art())
+        select(Anime.id, _in_current_seasons(at).is_not(True).label("carried_in"))
+        .where(hero_pool_members(at), _mapped(), _missing_key_art())
         .order_by(Anime.popularity.desc().nullslast(), Anime.id)
         .limit(SWEEP_LIMIT)
     )
@@ -566,7 +618,7 @@ async def enqueue_hero_art(
     The hero is built on the client out of the season grid and the last
     recommendation run (``client/src/pages/Home.tsx``), so the server cannot
     name the six shows it will land on — but it knows the pool they come from,
-    and it is the same one: the season's shows, most popular first. This
+    and it is the same one: :func:`hero_pool_members`, most popular first. This
     queues art-only enrichments for the top :data:`HERO_ART_LIMIT` of them
     that have no backdrop — the only art the frame can show at its own size
     (:func:`_missing_hero_art`).
@@ -583,7 +635,7 @@ async def enqueue_hero_art(
     candidates = await session.scalars(
         select(Anime.id)
         .where(
-            _in_current_seasons(now),
+            hero_pool_members(now),
             _mapped(),
             _missing_hero_art(),
             ~_already_queued(),
@@ -686,12 +738,27 @@ async def enqueue_show_enrichment(
     return await enqueue_enrichment(session, anime_id)
 
 
+class SweepCandidate(NamedTuple):
+    """One row of a night's sweep plan: which show, how much, and why it is here.
+
+    ``carried_in`` is only ever true in the art pass, and says the row is in the
+    sweep for being **on air this week** rather than for its season tag — the
+    long-runners of 2026-09-17. The followed pass does not ask the question at
+    all: a show somebody is watching is swept whatever its season, and "carried
+    in" would be describing a clause that had no part in selecting it.
+    """
+
+    anime_id: int
+    art_only: bool
+    carried_in: bool
+
+
 async def sweep_candidates(
     session: AsyncSession, *, now: datetime | None = None
-) -> list[tuple[int, bool]]:
-    """``(anime_id, art_only)`` for one night's sweep, best claim first.
+) -> list[SweepCandidate]:
+    """One night's sweep plan, best claim first.
 
-    The watched shows in full, then the season's in art-only mode, each show
+    The watched shows in full, then the hero pool's in art-only mode, each show
     once and the whole list capped at :data:`SWEEP_LIMIT`. Order is the policy:
     a show somebody is watching is worth three requests and a show nobody has
     heard of is worth one, and when the cap bites it is the second pass that
@@ -700,13 +767,11 @@ async def sweep_candidates(
     """
     followed = list((await session.scalars(_needs_enrichment())).all())
     seen = set(followed)
-    season = [
-        anime_id
-        for anime_id in (await session.scalars(_needs_season_art(now))).all()
-        if anime_id not in seen
-    ]
-    ordered: list[tuple[int, bool]] = [(anime_id, False) for anime_id in followed]
-    ordered += [(anime_id, True) for anime_id in season]
+    ordered = [SweepCandidate(anime_id, False, False) for anime_id in followed]
+    for anime_id, carried_in in (await session.execute(_needs_hero_pool_art(now))).all():
+        if anime_id in seen:
+            continue
+        ordered.append(SweepCandidate(anime_id, True, bool(carried_in)))
     return ordered[:SWEEP_LIMIT]
 
 
@@ -719,20 +784,24 @@ async def tmdb_enrich_all(ctx: JobContext) -> None:
     candidates = await sweep_candidates(ctx.session)
     start = await _next_free_slot(ctx.session, datetime.now(UTC))
     queued = 0
-    for anime_id, art_only in candidates:
+    for candidate in candidates:
         job = await enqueue_enrichment(
             ctx.session,
-            anime_id,
+            candidate.anime_id,
             run_after=start + timedelta(seconds=queued * SPACING_SECONDS),
-            art_only=art_only,
+            art_only=candidate.art_only,
         )
         if job is not None:
             queued += 1
+    # ``carried_in`` is on the line so an operator can see the long-runners
+    # arriving: the night after this shipped it should be non-zero and then
+    # fall back to nothing as their backdrops land (owner, 2026-09-17).
     ctx.log.info(
         "tmdb enrichment sweep",
         extra={
             "candidates": len(candidates),
-            "art_only": sum(1 for _, art_only in candidates if art_only),
+            "art_only": sum(1 for candidate in candidates if candidate.art_only),
+            "carried_in": sum(1 for candidate in candidates if candidate.carried_in),
             "queued": queued,
         },
     )
@@ -747,12 +816,14 @@ __all__ = [
     "SWEEP_LIMIT",
     "TMDB_ENRICH",
     "TMDB_ENRICH_ALL",
+    "SweepCandidate",
     "TmdbError",
     "TmdbUnavailable",
     "enqueue_enrichment",
     "enqueue_episode_stills",
     "enqueue_hero_art",
     "enqueue_show_enrichment",
+    "hero_pool_members",
     "sweep_candidates",
     "tmdb_configured",
     "tmdb_enrich",

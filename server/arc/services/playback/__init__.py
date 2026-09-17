@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from arc.services.playback.progress import (
     COMPLETION_FRACTION,
-    CONTINUE_END_MARGIN_S,
     CONTINUE_LIMIT,
     CONTINUE_MIN_POSITION_S,
+    CONTINUE_TAIL_S,
     RESUME_MAX_FRACTION,
     RESUME_MIN_S,
     ContinueRow,
@@ -43,9 +43,9 @@ from arc.services.playback.watched import (
 
 __all__ = [
     "COMPLETION_FRACTION",
-    "CONTINUE_END_MARGIN_S",
     "CONTINUE_LIMIT",
     "CONTINUE_MIN_POSITION_S",
+    "CONTINUE_TAIL_S",
     "RESUME_MAX_FRACTION",
     "RESUME_MIN_S",
     "WATCHED_BY_ARC",

@@ -229,6 +229,16 @@ async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRo
       which is FR-W5 read backwards: a completion row of Arc's own, or a
       number at or below the list's progress.
 
+    The started rule is also why an episode that falls off continue watching by
+    its tail rule (past 90 %, or under three minutes left — owner 2026-09-17,
+    :func:`~arc.services.playback.progress.continue_watching`) does not reappear
+    here: it has a position, so it is started, and past the completion mark it
+    has a completion row and a list progress covering it as well. What this
+    shelf offers in its place is the **next** episode, which the FR-S4 advance
+    has just put above ``list_entries.progress``. An episode between the two
+    rules — 85 % with two minutes left, say — is on neither shelf, which is the
+    point: nobody needs to be offered the last two minutes of something.
+
     ``ready_at`` is null for a rendition written before the column was filled
     and for one a test seeds by hand, so nulls sort last rather than first and
     the episode id breaks the tie: an order that is not total is an order that

@@ -107,7 +107,11 @@ any time, and the owner uses it daily.
   manami anime-offline-database plus Fribb's cross-id map) is consulted first
   for search, matching and id mapping, so those never depend on a live API;
   TMDB, reached through that id map, supplies key art, episode stills and
-  credits when AniList has not, and never overwrites AniList-provided values;
+  credits when AniList has not, and never overwrites AniList-provided values,
+  and the art it is asked for covers every show the home page's hero can offer
+  — including the long-runners carried into the week by being on air rather
+  than by a season tag (owner, 2026-09-17: One Piece had never once been asked
+  for a backdrop);
   opening a show's page asks for its missing pictures (they appear without a
   reload), and where the id map cannot reach the show — or the deployment has
   no TMDB key — an episode row or card with no still of its own falls back to
@@ -275,6 +279,14 @@ any time, and the owner uses it daily.
 ### 4.5 Streaming and player
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
   Playlists and segments are served by the server behind auth.
+  **The player starts playing on its own** (owner, 2026-09-17): opening an
+  episode is the decision, and the page presses play as soon as the source is
+  attached and the resume seek (FR-S2) has been made. The browser's autoplay
+  policy has the last word, so there are exactly two attempts and no loop — if
+  audible playback is refused, one muted retry with a small, quiet "Tap to
+  unmute" pill over the control bar that turns the sound on without
+  interrupting playback; if even muted playback is refused, the existing play
+  button is the answer and no error is shown, because nothing went wrong.
 - FR-S2 Resume: on open, the player seeks to the user's last position if it
   is > 10 s and < 95 % of duration. The "Resumed from M:SS" notice auto-hides
   after five seconds; Dismiss closes it sooner.
@@ -320,7 +332,15 @@ any time, and the owner uses it daily.
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
   is past the start and short of the end, most recent first — whether or not
   the episode is also marked watched, so a rewatch stopped half-way is offered
-  and resumes where it stopped; owner, 2026-09-11), **Behind on** (followed airing shows with unwatched
+  and resumes where it stopped; owner, 2026-09-11). **Short of the end means
+  two things, and the first of them to happen wins** (owner, 2026-09-17): an
+  episode leaves the shelf once the viewer is past the **completion mark**
+  (FR-S4's 90 %) or once it has **less than three minutes left**, whichever
+  comes first. Both are tighter than the resume ceiling of FR-S2 on purpose —
+  an episode may still be *resumed* into its last minutes, because the viewer
+  chose it, but Arc will not *offer* a credits roll as something left to watch.
+  What takes its place is the next episode, under Ready to watch, which the
+  FR-S4 advance has just made eligible. Home also shows **Behind on** (followed airing shows with unwatched
   aired episodes), and **New this week** (episodes that aired in the last 7
   days for followed shows). As shelved since M15
   those are Continue watching, Catch up, and This week plus **Ready to watch**:
@@ -351,6 +371,11 @@ any time, and the owner uses it daily.
   the episodes below it — FR-W5's progress half already counts them. Its undo
   is FR-S4's un-mark, which lowers the progress by one when the episode is the
   latest watched.
+  In the player it is **one control with the action as its glyph** (owner,
+  2026-09-17): ✓ and "Mark watched" before, ✕ and "Mark unwatched" (label and
+  hover) once the episode is watched, by either half of FR-W5. The one episode
+  that keeps a ✓ is the one with nothing to press — watched by list progress
+  alone, where FR-W5 says the control is not a button.
 - FR-W4 Dropped, completed and on-hold shows generate no acquisition wants.
 - FR-W5 **What "watched" means, and when a show completes itself** (owner,
   2026-09-13). An episode counts as watched for a user when its number is at
@@ -478,7 +503,7 @@ any time, and the owner uses it daily.
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons |
-| Player | 1 | HLS player, resume, progress reporting; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
+| Player | 1 | HLS player, autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -985,3 +1010,26 @@ is and the grace period decides.
   chosen release's log line says `absolute numbering: release 25 = episode 1`,
   because a file named 25 landing in an episode row numbered 1 is the one pick
   nobody would otherwise be able to explain.
+- 2026-09-17 — **Three corrections from the owner's own use** (FR-W1, FR-S1,
+  FR-W3, owner, M16 batch 4).
+  (1) **Continue watching must not offer an episode that is effectively
+  finished.** It was listing episodes at 94 % — past the point at which Arc
+  itself has recorded them as watched and told MyAnimeList so — because the
+  shelf's end bound was 95 % or the last minute. It is now the completion mark
+  (90 %) *or* three minutes left, whichever comes first, and the episode that
+  takes its place is the next one under Ready to watch. Resuming into the last
+  minutes is still allowed when the viewer asks for that episode themselves:
+  what changed is what Arc *offers* unprompted.
+  (2) **The player starts playing when the page loads.** Choosing the episode
+  was the decision; a play button waiting to be found afterwards is a second
+  one. The browser's autoplay policy is respected rather than fought: one
+  audible attempt, one muted retry with a quiet "Tap to unmute" pill, and then
+  the ordinary play button, with no error shown for a refusal that is the
+  browser's prerogative.
+  (3) **The mark-watched control says what pressing it does.** It was a tick
+  that stayed a tick, so on a watched episode the only control on the bar with
+  two states looked like an invitation to watch it again. It is now ✓ "Mark
+  watched" before and ✕ "Mark unwatched" after. The exception is the one
+  episode where there is nothing to press — watched because the list's progress
+  has passed it (FR-W5) — which keeps the ✓ and the tooltip pointing at where
+  the undo lives.

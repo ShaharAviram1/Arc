@@ -63,6 +63,12 @@ import { ProgressReporter } from '@/player/ProgressReporter'
  * — playing or paused alike. The line of keyboard hints that used to sit under
  * the controls is gone from the screen and lives in the play button's tooltip.
  *
+ * The page also **starts playing on its own** (owner, 2026-09-17): opening an
+ * episode is the decision, and a second press on a play button is a step
+ * nothing was waiting for. The browser has the last word, so the attempt is
+ * made once, falls back to muted once, and then stops and leaves the play
+ * button — see :func:`beginPlayback`.
+ *
  * Nothing below the chrome changed: the same reporter, the same shortcuts, the
  * same resume, the same warning strip — a button is simply a second way to
  * reach what the keyboard already did.
@@ -116,6 +122,21 @@ const MARKED_TOAST_MS = 4000
 
 /** The receipt itself. Six words, no action: nothing is being asked. */
 const MARKED_WATCHED = 'Marked as watched'
+
+/**
+ * The offer after a muted autoplay (owner, 2026-09-17).
+ *
+ * "Tap", not "click": the browsers that refuse audible autoplay refuse it
+ * hardest on a phone, which is where most of these pills will be read, and a
+ * tap works on a mouse too.
+ */
+const TAP_TO_UNMUTE = 'Tap to unmute'
+
+/** The mark-watched control's two labels (FR-W3, owner 2026-09-17). */
+const MARK_WATCHED = 'Mark watched'
+const MARK_UNWATCHED = 'Mark unwatched'
+/** …and the non-actionable third state's, which says a fact, not an action. */
+const WATCHED = 'Watched'
 
 /** Fields that own their keystrokes; a shortcut must not fire inside one. */
 const EDITABLE = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
@@ -171,6 +192,17 @@ const PLAYER_ICON = cx(
   'transition-colors duration-200 hover:bg-[rgba(255,255,255,0.2)]',
   'disabled:cursor-not-allowed disabled:opacity-40',
   FOCUS_RING,
+)
+
+/**
+ * The clothes both of the small corner messages wear — the completion receipt
+ * and the unmute offer. One class list because they share a shelf above the
+ * control bar and a pill that is nearly the same as its neighbour is worse
+ * than one that is identical.
+ */
+const PILL = cx(
+  'rounded-full border-[0.5px] border-[rgba(255,255,255,0.16)] px-4 py-2 text-[13px]',
+  'bg-[rgba(18,23,34,0.72)] text-[var(--arc-text-muted)] shadow-bar backdrop-blur-bar',
 )
 
 /* --- Glyphs ------------------------------------------------------------
@@ -305,11 +337,24 @@ function SkipForwardGlyph() {
 }
 
 /**
- * A check in a circle: outlined while the episode is unwatched, filled once it
- * is. The filled tick is punched out in the bar's own colour rather than drawn
- * in white, which would disappear into the disc behind it.
+ * The mark-watched control's face: a glyph in a circle, outlined while the
+ * episode is unwatched and filled once it is — the same pressed / not-pressed
+ * treatment the show page's pill wears, so the two places Arc offers this
+ * agree about which state is which.
+ *
+ * The glyph inside is the *action*, not the state (owner, 2026-09-17). Before:
+ * a check, for "mark watched". After: a **cross**, for "mark unwatched" — a
+ * second tick said only what the filled disc already says, and on a control
+ * that is a button in both states the viewer is owed the verb rather than the
+ * fact. The one place the tick survives is the non-actionable pill for an
+ * episode watched by list progress (FR-W5): nothing is being offered there, so
+ * a fact is all there is to draw.
+ *
+ * Either glyph is punched out in the bar's own colour on a filled disc rather
+ * than drawn in white, which would disappear into it.
  */
-function WatchedGlyph({ filled }: { filled: boolean }) {
+function WatchedGlyph({ filled, cross = false }: { filled: boolean; cross?: boolean }) {
+  const ink = filled ? 'fill-none stroke-[#121722]' : 'fill-none stroke-current'
   return (
     <svg
       aria-hidden
@@ -326,12 +371,30 @@ function WatchedGlyph({ filled }: { filled: boolean }) {
         r="8.6"
         className={filled ? 'fill-current stroke-none' : 'fill-none stroke-current'}
       />
-      <path
-        d="m8.1 12.3 2.7 2.7 5.1-5.6"
-        className={filled ? 'fill-none stroke-[#121722]' : 'fill-none stroke-current'}
-      />
+      {cross ? (
+        <>
+          <path d="m9.2 9.2 5.6 5.6" className={ink} />
+          <path d="m14.8 9.2-5.6 5.6" className={ink} />
+        </>
+      ) : (
+        <path d="m8.1 12.3 2.7 2.7 5.1-5.6" className={ink} />
+      )}
     </svg>
   )
+}
+
+/**
+ * Press play and do not care what the browser thinks of it.
+ *
+ * `play()` answers with a promise that **rejects** when the autoplay policy
+ * refuses — and a rejection nobody catches is an unhandled one in the console,
+ * which is noise about a decision the browser is entitled to make. (Older
+ * browsers, and jsdom, answer with nothing at all, hence the `Promise.resolve`
+ * around it.) The one caller that has something to *do* about a refusal is
+ * :func:`beginPlayback`, which awaits it itself.
+ */
+function playQuietly(video: HTMLVideoElement): void {
+  void Promise.resolve(video.play()).catch(() => undefined)
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -487,16 +550,28 @@ function MarkedToast({ onDismiss }: { onDismiss: () => void }) {
       aria-live="polite"
       title="Dismiss"
       onClick={onDismiss}
-      className={cx(
-        // 108px up, the same shelf the fatal-error strip uses: clear of the
-        // bar whether the bar is showing or has faded out from under it.
-        'absolute bottom-[108px] left-3 z-10 cursor-pointer md:left-6',
-        'rounded-full border-[0.5px] border-[rgba(255,255,255,0.16)] px-4 py-2 text-[13px]',
-        'bg-[rgba(18,23,34,0.72)] text-[var(--arc-text-muted)] shadow-bar backdrop-blur-bar',
-      )}
+      className={cx(PILL, 'cursor-pointer')}
     >
       {MARKED_WATCHED}
     </div>
+  )
+}
+
+/**
+ * The offer to turn the sound on, after the browser refused to start with it
+ * (owner, 2026-09-17).
+ *
+ * The same glass as the receipt beside it, and deliberately as quiet: a muted
+ * start is a browser policy, not a fault, and a viewer who wanted silence can
+ * leave it alone. It is a button because it does something — unmuting, while
+ * the episode keeps playing — which also means the keyboard can reach it; `m`
+ * does the same and takes the pill away with it.
+ */
+function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
+  return (
+    <button type="button" onClick={onUnmute} title={TAP_TO_UNMUTE} className={cx(PILL, FOCUS_RING)}>
+      {TAP_TO_UNMUTE}
+    </button>
   )
 }
 
@@ -589,6 +664,13 @@ function PlayerView({ id }: { id: number }) {
   const reporterRef = useRef<ProgressReporter | null>(null)
   /** A resume is a one-off: re-seeking on every metadata event would trap the viewer. */
   const resumedRef = useRef(false)
+  /**
+   * And so is the autoplay attempt: two at most (audible, then muted), once
+   * per page, never in a loop. A browser that refuses is not going to change
+   * its mind because it was asked a third time, and a page that keeps calling
+   * `play()` is a page that fights the viewer who has just pressed pause.
+   */
+  const autoplayedRef = useRef(false)
   /** The last pointer move that counted; the rest are dropped on the floor. */
   const lastMoveRef = useRef(0)
   const draggingRef = useRef(false)
@@ -622,6 +704,15 @@ function PlayerView({ id }: { id: number }) {
   const [markedToast, setMarkedToast] = useState(false)
   const [ended, setEnded] = useState(false)
   const [endDismissed, setEndDismissed] = useState(false)
+  /**
+   * Whether playback started muted because the browser would not allow sound
+   * (owner, 2026-09-17). It is the only reason the unmute pill is ever up —
+   * a viewer who muted the episode themselves is not offered their own
+   * decision back — and it is cleared by anything that unmutes, the pill and
+   * the `m` shortcut alike, because the media element is the truth about mute
+   * and this flag is only an offer about it.
+   */
+  const [autoplayMuted, setAutoplayMuted] = useState(false)
   /**
    * Consecutive failed progress writes, and whether the viewer has waved the
    * warning away. Both live here rather than in `ProgressReporter`: the
@@ -672,6 +763,51 @@ function PlayerView({ id }: { id: number }) {
   /** "Keep watching", from the card's own button and from Escape. */
   const keepWatching = useCallback(() => {
     setEndDismissed(true)
+  }, [])
+
+  /**
+   * Start the episode, without waiting to be asked (FR-S1, owner 2026-09-17).
+   *
+   * Opening an episode is the decision; a play button the viewer then has to
+   * find is a second one nothing was waiting for. The browser disagrees in
+   * two different ways and this handles each of them exactly once:
+   *
+   * 1. `play()` rejects because there has been **no user gesture on this
+   *    page** — following a link from Home is a gesture on the *other* page —
+   *    or because audible autoplay is not allowed here. Neither is an error
+   *    and neither deserves a toast.
+   * 2. So it asks again **muted**, which every autoplay policy permits, and
+   *    puts up the quiet "Tap to unmute" pill: the episode is running, the
+   *    viewer has one press to get the sound, and nothing was lost.
+   * 3. If even that is refused it stops. The bar's play button is already on
+   *    screen and is now the answer; the mute is undone so that the first
+   *    press has sound, and no error is shown, because nothing went wrong.
+   *
+   * Two attempts, never a loop: a policy is not going to change its mind
+   * because it was asked a third time.
+   */
+  const beginPlayback = useCallback(async (video: HTMLVideoElement) => {
+    try {
+      await video.play()
+      return
+    } catch {
+      // Refused with sound. Fall through to the muted attempt.
+    }
+
+    video.muted = true
+    try {
+      await video.play()
+      setAutoplayMuted(true)
+    } catch {
+      video.muted = false
+    }
+  }, [])
+
+  /** The pill's press, and the one place the flag is cleared by hand. */
+  const unmute = useCallback(() => {
+    const video = videoRef.current
+    if (video !== null) video.muted = false
+    setAutoplayMuted(false)
   }, [])
 
   /** The one place `chromeShown` moves, so the ref never drifts from the state. */
@@ -741,7 +877,7 @@ function PlayerView({ id }: { id: number }) {
   const togglePlay = useCallback(() => {
     const video = videoRef.current
     if (video === null) return
-    if (video.paused) void video.play()
+    if (video.paused) playQuietly(video)
     else video.pause()
   }, [])
 
@@ -817,7 +953,7 @@ function PlayerView({ id }: { id: number }) {
         case ' ':
         case 'Spacebar':
           event.preventDefault()
-          if (video.paused) void video.play()
+          if (video.paused) playQuietly(video)
           else video.pause()
           return
         case 'ArrowLeft':
@@ -1056,7 +1192,8 @@ function PlayerView({ id }: { id: number }) {
    * un-mark only ever moves the list by one from the top (FR-S4, revised
    * 2026-09-13), so there is nothing here to press. The toggle becomes the same
    * non-actionable control the show page's rows use, tooltip and all, with the
-   * glyph still filled because the viewer has still watched it.
+   * glyph still filled because the viewer has still watched it — and still a
+   * **tick**, because the cross names an action and this state has none.
    *
    * `watchedOverride` settles the question on its own: it is only ever set by
    * pressing this control, which a `progress` episode never offers.
@@ -1107,11 +1244,18 @@ function PlayerView({ id }: { id: number }) {
     resumedRef.current = true
 
     const start = info.resume_position
-    if (!shouldResume(start, resolveDuration(duration, serverDuration)) || start === null) return
+    if (shouldResume(start, resolveDuration(duration, serverDuration)) && start !== null) {
+      video.currentTime = start
+      setPosition(start)
+      setResumedAt(start)
+    }
 
-    video.currentTime = start
-    setPosition(start)
-    setResumedAt(start)
+    // And then play, from wherever that left the playhead: autoplay comes
+    // *after* the resume seek so the episode never starts at zero and jumps.
+    if (!autoplayedRef.current) {
+      autoplayedRef.current = true
+      void beginPlayback(video)
+    }
   }
 
   /** Where along the track a pointer landed, 0–1. */
@@ -1172,6 +1316,12 @@ function PlayerView({ id }: { id: number }) {
           // longer *stays*: the idle timer runs while paused too, and takes it
           // away again if nothing else happens (owner, 2026-09-12).
           setChrome(true)
+        }}
+        onVolumeChange={(muted) => {
+          // The pill is an offer to undo a *muted start*, so anything that
+          // takes the sound back — the pill itself, or `m` — retires it. The
+          // element is the truth about mute; this only follows it.
+          if (!muted) setAutoplayMuted(false)
         }}
         onSeeked={(nextPosition, duration) => {
           reporterRef.current?.seek(nextPosition, resolveDuration(duration, serverDuration))
@@ -1399,25 +1549,26 @@ function PlayerView({ id }: { id: number }) {
               {watchedByList ? (
                 <button
                   type="button"
-                  aria-label="Watched"
+                  aria-label={WATCHED}
                   aria-pressed
                   aria-disabled
                   title={WATCHED_BY_PROGRESS_HINT}
                   className={PLAYER_ICON}
                 >
+                  {/* A tick, not a cross: there is no action to name here. */}
                   <WatchedGlyph filled />
                 </button>
               ) : (
                 <button
                   type="button"
-                  aria-label={watched ? 'Unmark watched' : 'Mark watched'}
+                  aria-label={watched ? MARK_UNWATCHED : MARK_WATCHED}
                   aria-pressed={watched}
-                  title={watched ? 'Unmark watched' : 'Mark watched'}
+                  title={watched ? MARK_UNWATCHED : MARK_WATCHED}
                   disabled={watchedPending}
                   onClick={toggleWatched}
                   className={PLAYER_ICON}
                 >
-                  <WatchedGlyph filled={watched} />
+                  <WatchedGlyph filled={watched} cross={watched} />
                 </button>
               )}
             </div>
@@ -1445,16 +1596,28 @@ function PlayerView({ id }: { id: number }) {
       </div>
 
       {/*
-        The receipt stands down when the card comes up: the card says more
+        The shelf above the bar, where the page's two small messages live: the
+        unmute offer, and the completion receipt. A column rather than one
+        corner each, so that on the occasion both are up neither is sitting on
+        the other — and 108px up, the same shelf the fatal-error strip uses:
+        clear of the bar whether the bar is showing or has faded out from
+        under it.
+
+        The receipt stands down when the end card comes up: the card says more
         than the pill does, and on a narrow screen they want the same corner.
+        The unmute pill does not, because muted playback is still wrong while
+        the card is up.
       */}
-      {markedToast && !endOverlayShown ? (
-        <MarkedToast
-          onDismiss={() => {
-            setMarkedToast(false)
-          }}
-        />
-      ) : null}
+      <div className="absolute bottom-[108px] left-3 z-10 flex flex-col items-start gap-2 md:left-6">
+        {autoplayMuted ? <UnmutePill onUnmute={unmute} /> : null}
+        {markedToast && !endOverlayShown ? (
+          <MarkedToast
+            onDismiss={() => {
+              setMarkedToast(false)
+            }}
+          />
+        ) : null}
+      </div>
 
       {endOverlayShown ? <EndOverlay info={info} onKeepWatching={keepWatching} /> : null}
     </div>

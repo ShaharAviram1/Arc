@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer, Select, and_, exists, or_, select
+from sqlalchemy import ColumnElement, Integer, Select, and_, exists, or_, select
 
 from arc.models import Anime, Episode, ListStatus
 from arc.services.catalog.airing import (
@@ -197,8 +197,8 @@ def season_members(year: int, season: str) -> Select[tuple[Anime]]:
     return select(Anime).where(Anime.season == season, Anime.season_year == year).order_by(Anime.id)
 
 
-def airing_this_week(*, now: datetime) -> Select[tuple[Anime]]:
-    """Every show on air within :data:`AIRING_WINDOW` of ``now``, any season.
+def on_air_this_week(*, now: datetime) -> ColumnElement[bool]:
+    """The ``WHERE`` clause for "on air within :data:`AIRING_WINDOW` of ``now``".
 
     The second half of the current week's membership (see the module
     docstring). Three conditions, and each of them earns its place:
@@ -217,6 +217,14 @@ def airing_this_week(*, now: datetime) -> Select[tuple[Anime]]:
       ``unscheduled``, and the current season's unscheduled list is its own
       films and OVAs — a releasing ONA from two seasons ago belongs on a
       weekday or nowhere.
+
+    Separated from the statement below because the *schedule* is no longer the
+    only thing that asks the question. The TMDB art passes target the pool the
+    Home hero picks from, and that pool is this week's grid — so
+    :func:`~arc.services.tmdb.jobs.hero_pool_members` composes this clause into
+    a query of its own rather than restating the rule (owner, 2026-09-17: One
+    Piece, carried into the grid and reached by neither art pass). One
+    definition, two callers; a second version would be a rule that could drift.
     """
     lower = int((now - AIRING_WINDOW).timestamp())
     upper = int((now + AIRING_WINDOW).timestamp())
@@ -230,15 +238,20 @@ def airing_this_week(*, now: datetime) -> Select[tuple[Anime]]:
             Episode.air_at <= now + AIRING_WINDOW,
         ),
     )
-    return (
-        select(Anime)
-        .where(
-            Anime.status == RELEASING,
-            Anime.format.in_(sorted(SCHEDULED_FORMATS)),
-            or_(published, dated_episode),
-        )
-        .order_by(Anime.id)
+    return and_(
+        Anime.status == RELEASING,
+        Anime.format.in_(sorted(SCHEDULED_FORMATS)),
+        or_(published, dated_episode),
     )
+
+
+def airing_this_week(*, now: datetime) -> Select[tuple[Anime]]:
+    """Every show on air within :data:`AIRING_WINDOW` of ``now``, any season.
+
+    The rows behind :func:`on_air_this_week`, which is where the rule itself
+    is written down.
+    """
+    return select(Anime).where(on_air_this_week(now=now)).order_by(Anime.id)
 
 
 def _next_airing(row: ScheduleRow, *, now: datetime) -> tuple[int | None, datetime | None, bool]:
@@ -302,6 +315,7 @@ __all__ = [
     "airing_this_week",
     "current_season",
     "next_season",
+    "on_air_this_week",
     "place_entries",
     "prev_season",
     "season_members",
