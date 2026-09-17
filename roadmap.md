@@ -939,6 +939,16 @@ the finish work (bugs found that way are fixed inside M16).
         transcode/probe tests green. Verified 2026-09-18 (orchestrator): diff read, 96 transcode plan/job
         tests and make lint green; the ffmpeg argument list is unchanged apart
         from the mapped audio index
+  - Demo account + audio fallback deployed 2026-09-18 as 69f6a90 (migration
+    b63c05a9f1d2 applied on the host). Post-deploy: `/api/health` ok, head
+    b63c05a9f1d2. The owner created demo@arc.atomworks.dev by invite; the
+    orchestrator flagged and seeded it (One Piece, Attack on Titan, Demon
+    Slayer, Jujutsu Kaisen, Frieren watching; Death Note and FMA:
+    Brotherhood completed; Solo Leveling planned) and ran one
+    recommendation pass (11 entries, gemini-3.5-flash). Ten wants appeared
+    within a minute, four downloading; zero MAL writes, no MAL link. One
+    Piece needed its progress reseeded at 1176 because the cached episodes
+    past 1178 are 2027 air dates.
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
