@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, column, func, true
+from sqlalchemy import ForeignKey, Index, String, column, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
@@ -42,6 +42,14 @@ class User(Base):
         server_default=UserRole.USER.value,
     )
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True, server_default=true())
+    #: The account the course professor signs in to (M16, owner 2026-09-18).
+    #: It gates presentation and nothing else: a "How Arc works" entry in the
+    #: nav and a one-line strip on Watch Now pointing at it. A column rather
+    #: than an email match in the client, because "which account is the demo"
+    #: is a fact about the deployment and the only place a deployment keeps
+    #: facts is the database; an admin flips it from the Users tab and
+    #: ``arc.cli demo-list --demo`` sets it while seeding the list.
+    is_demo: Mapped[bool] = mapped_column(nullable=False, default=False, server_default=false())
     # IANA name; drives the schedule page's weekday grouping (FR-C3).
     timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, default="UTC", server_default="UTC"

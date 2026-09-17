@@ -13,9 +13,12 @@ Three rules, and each one exists because of a real file.
 * **The video is the first stream that is not a cover.** A release with an
   embedded poster carries it as a video stream with ``disposition
   .attached_pic``; mapping ``0:v:0`` would encode the poster.
-* **The audio is the first stream in the wanted language, else the first
-  audio.** A dual-audio release lists English first as often as not, and the
-  configured default is Japanese (FR-P2).
+* **The audio is the wanted language, else the original, else anything.** A
+  dual-audio release lists English first as often as not, and the configured
+  default is Japanese (FR-P2); when the muxer tagged no Japanese track the
+  fallback prefers any track that is *not* English over the first one, because
+  the original audio of an anime is almost never English. The full order is
+  spelled out in :func:`_pick_audio`.
 * **The subtitle is chosen, not defaulted.** A ``MultiSub`` release has
   sixteen text tracks in fourteen languages, and among the ones in the right
   language there is often a "Signs & Songs" track that renders nothing but
@@ -86,6 +89,10 @@ LANGUAGE_ALIASES: Final[Mapping[str, frozenset[str]]] = {
     "hi": frozenset({"hi", "hin", "hindi"}),
 }
 
+#: The one language an anime's original audio is essentially never in, and so
+#: the one the audio fallback has to steer around (:func:`_pick_audio`).
+ENGLISH: Final[str] = "en"
+
 #: File names inside the job's work directory. Relative, and deliberately
 #: boring: ffmpeg's filter graph parser gives ``:``, ``'``, ``[`` and ``\`` a
 #: meaning of their own, and a release called
@@ -110,7 +117,11 @@ SEGMENT_GLOB: Final[str] = "seg_*.m4s"
 NOTE_NO_SUBTITLES = "the source has no subtitle track; nothing was burned in"
 NOTE_BITMAP_ONLY = "the only subtitle tracks are bitmap ({codecs}); nothing was burned in"
 NOTE_NO_SUB_LANGUAGE = "no {lang} subtitle track; used {chosen} instead"
-NOTE_NO_AUDIO_LANGUAGE = "no {lang} audio track; used {chosen} instead"
+#: The audio note says which of :func:`_pick_audio`'s fallback rules fired,
+#: not only which language came out: this line in the job row is what the
+#: operator reads when an episode sounds wrong, and "took the ko track" and
+#: "took the first track, en" call for very different reactions.
+NOTE_NO_AUDIO_LANGUAGE = "no {lang} audio track; {took}"
 NOTE_NO_AUDIO = "the source has no audio track"
 
 
@@ -385,18 +396,58 @@ def _pick_subtitle(streams: Sequence[Stream], *, sub_lang: str) -> tuple[Stream 
     return chosen, notes
 
 
+def _audio_name(stream: Stream) -> str:
+    """How a note refers to an audio track: by its language, or by having none."""
+    language = canonical_language(stream.language)
+    return f"the {language} track" if language else "an untagged track"
+
+
 def _pick_audio(streams: Sequence[Stream], *, audio_lang: str) -> tuple[Stream | None, list[str]]:
+    """The audio track to encode, and any note about how that went.
+
+    Four rules, first match wins (owner, 2026-09-18: "series default language
+    is jap, and sub is en. if there is no jap and the default is korean so be
+    it, but jap is preferred"):
+
+    1. a stream in the configured language — Japanese by default (FR-P2);
+    2. otherwise a stream that is **not** English, the container's default
+       first and then the first such stream. The original audio of an anime is
+       almost never English, so "not English" is the best proxy available for
+       "the original" once the muxer has failed to tag Japanese — and it is
+       what makes a Korean original the pick rather than the English dub
+       sitting in front of it. An **untagged** track counts as not English: on
+       an anime release an ``und`` track is far more often the original than a
+       dub;
+    3. otherwise the container's default stream;
+    4. otherwise the first stream, which is where this rule used to start.
+
+    Only rule 1 is silent. The rest exist because the rendition is the only
+    copy Arc keeps: a dual-audio release lists English first as often as not,
+    so taking the first track burned the dub in for good.
+    """
     if not streams:
         return None, [NOTE_NO_AUDIO]
     for stream in streams:
         if language_matches(stream.language, audio_lang):
             return stream, []
-    chosen = streams[0]
-    return chosen, [
-        NOTE_NO_AUDIO_LANGUAGE.format(
-            lang=audio_lang, chosen=canonical_language(chosen.language) or "an untagged track"
+
+    original = [s for s in streams if not language_matches(s.language, ENGLISH)]
+    if original:
+        chosen = next((s for s in original if s.default), original[0])
+        took = f"took {_audio_name(chosen)}"
+        if chosen.default:
+            took += " (the container's default)"
+    else:
+        # Every track is an English dub. Say so plainly — this is the case an
+        # operator may want to fix by fetching a different release.
+        chosen = next((s for s in streams if s.default), streams[0])
+        language = canonical_language(chosen.language) or "untagged"
+        took = (
+            f"took the default {language} track"
+            if chosen.default
+            else f"took the first track, {language}"
         )
-    ]
+    return chosen, [NOTE_NO_AUDIO_LANGUAGE.format(lang=audio_lang, took=took)]
 
 
 def _duration(payload: Mapping[str, Any]) -> float | None:
@@ -672,6 +723,7 @@ __all__ = [
     "ASS_CODECS",
     "ASS_FILE",
     "BITMAP_SUBTITLE_CODECS",
+    "ENGLISH",
     "FONTS_DIR",
     "INIT_NAME",
     "LANGUAGE_ALIASES",

@@ -33,6 +33,7 @@ export const ADMIN_SELF: AdminAccount = {
   timezone: 'Europe/Berlin',
   created_at: '2026-08-01T09:00:00Z',
   is_active: true,
+  is_demo: false,
 }
 
 export const OTHER_USER: AdminAccount = {
@@ -42,6 +43,7 @@ export const OTHER_USER: AdminAccount = {
   timezone: 'Europe/Berlin',
   created_at: '2026-08-14T09:00:00Z',
   is_active: true,
+  is_demo: false,
 }
 
 export const DISABLED_USER: AdminAccount = {
@@ -51,6 +53,7 @@ export const DISABLED_USER: AdminAccount = {
   timezone: 'UTC',
   created_at: '2026-08-20T09:00:00Z',
   is_active: false,
+  is_demo: false,
 }
 
 export const ACCOUNTS: AdminAccount[] = [ADMIN_SELF, OTHER_USER, DISABLED_USER]

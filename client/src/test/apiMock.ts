@@ -22,9 +22,18 @@ export const TEST_USER: User = {
   role: 'user',
   timezone: 'Europe/Berlin',
   created_at: '2026-09-01T10:00:00Z',
+  is_demo: false,
 }
 
 export const TEST_ADMIN: User = { ...TEST_USER, id: 2, email: 'admin@example.com', role: 'admin' }
+
+/** The account the professor signs in to (M16): the one that sees the extras. */
+export const TEST_DEMO_USER: User = {
+  ...TEST_USER,
+  id: 3,
+  email: 'demo@example.com',
+  is_demo: true,
+}
 
 function pathOf(input: string | URL | Request): string {
   if (typeof input === 'string') return input

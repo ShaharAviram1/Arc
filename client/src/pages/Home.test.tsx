@@ -33,6 +33,7 @@ import {
   jsonBodyOf,
   mockApi,
   requestsMade,
+  TEST_DEMO_USER,
   TEST_USER,
   type MockRoutes,
 } from '@/test/apiMock'
@@ -1251,5 +1252,78 @@ describe('Watch Now failures', () => {
 
     // The shared query defaults retry once with a ~1s backoff, so allow for that.
     expect(await screen.findByText('API: unreachable', {}, { timeout: 5000 })).toBeInTheDocument()
+  })
+})
+
+/**
+ * The demo account's one-line strip (M16, owner 2026-09-18). It is the only
+ * thing on Watch Now that renders for one account and not the others, so the
+ * tests are about exactly that and about the dismissal sticking.
+ */
+describe('Watch Now — the demo account’s How Arc works strip', () => {
+  const HINT_KEY = `arc:how-arc-works-dismissed:${String(TEST_DEMO_USER.id)}`
+
+  afterEach(() => {
+    // `restoreMocks` is not on, and one of these tests makes `getItem` throw.
+    vi.restoreAllMocks()
+    window.localStorage.clear()
+  })
+
+  it('offers the page to the demo account, above everything else', async () => {
+    renderHome({
+      'GET /api/auth/me': { body: TEST_DEMO_USER },
+      'GET /api/home': { body: EMPTY_HOME },
+    })
+
+    expect(await screen.findByText('New here?')).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'See how Arc works' })
+    expect(link).toHaveAttribute('href', '/how-arc-works')
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
+  })
+
+  it('says nothing to anybody else', async () => {
+    renderHome({ 'GET /api/home': { body: EMPTY_HOME } })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(screen.queryByText('New here?')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'See how Arc works' })).not.toBeInTheDocument()
+  })
+
+  it('goes away when dismissed, and stays away on the next visit', async () => {
+    renderHome({
+      'GET /api/auth/me': { body: TEST_DEMO_USER },
+      'GET /api/home': { body: EMPTY_HOME },
+    })
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss' }))
+
+    expect(screen.queryByText('New here?')).not.toBeInTheDocument()
+    // Remembered per account, in this browser and nowhere else.
+    expect(window.localStorage.getItem(HINT_KEY)).toBe('1')
+  })
+
+  it('is absent from the start for an account that dismissed it before', async () => {
+    window.localStorage.setItem(HINT_KEY, '1')
+    renderHome({
+      'GET /api/auth/me': { body: TEST_DEMO_USER },
+      'GET /api/home': { body: EMPTY_HOME },
+    })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(screen.queryByText('New here?')).not.toBeInTheDocument()
+  })
+
+  it('renders even where the browser refuses to say what it remembers', async () => {
+    // A private window, or a browser set to block site data: the accessor
+    // itself throws, and the page must still be a page.
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('access denied')
+    })
+    renderHome({
+      'GET /api/auth/me': { body: TEST_DEMO_USER },
+      'GET /api/home': { body: EMPTY_HOME },
+    })
+
+    expect(await screen.findByText('New here?')).toBeInTheDocument()
   })
 })

@@ -1,6 +1,6 @@
-"""Operator commands: ``python -m arc.cli <command>`` (roadmap M11).
+"""Operator commands: ``python -m arc.cli <command>`` (roadmap M11, M16).
 
-Four things an operator has to do on a host with no browser session yet, and
+Five things an operator has to do on a host with no browser session yet, and
 one thing they always want to know:
 
 * ``invite``            — issue an invite link and print it.
@@ -8,27 +8,36 @@ one thing they always want to know:
                           schedule and covers, instead of waiting for 03:30 UTC.
 * ``import-catalogue``  — import the offline catalogue **now**, in the
                           foreground, instead of waiting for Monday (M15.5).
-* ``demo-list``         — put a show on somebody's list, by title.
+* ``demo-list``         — put shows on somebody's list, by title, in one
+                          status; optionally flag the account as the demo one.
+* ``recs``              — produce one recommendation run for an account, so
+                          its Recommendations page and Home's "Picked for you"
+                          shelf have something on them (M16).
 * ``status``            — a one-screen summary of the deployment.
 
-Every one is **idempotent**: ``demo-list`` twice leaves one entry, the two
-enqueueing commands deduplicate on the job type, ``import-catalogue`` replaces
-what it imported last time (and skips the work entirely when the files have not
-changed), and ``status`` writes nothing. Re-running the lot after a failed
-deploy is a supported thing to do.
+Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
+and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
+type, ``import-catalogue`` replaces what it imported last time (and skips the
+work entirely when the files have not changed), and ``status`` writes nothing.
+``recs`` is the exception and says so below — a run is an event, and a second
+invocation is a second run against the daily budget (FR-R5).
 
 These are thin wrappers over the same services the API calls — nothing here
 reimplements a rule. ``demo-list`` in particular goes through
 :func:`~arc.services.catalog.lists.set_list_entry`, so it recomputes the
-acquisition window and respects the MAL write rules exactly as the endpoint
-does (FR-C2, FR-W2, FR-M7).
+acquisition window, stamps FR-A9's activation and respects the MAL write rules
+exactly as the endpoint does (FR-C2, FR-W2, FR-M7); ``recs`` calls the same
+:func:`~arc.services.recs.run_recommendations` as ``POST /api/recs/runs``.
 
 Run it from ``server/``::
 
     uv run python -m arc.cli status
     uv run python -m arc.cli invite --email prof@example.edu
-    uv run python -m arc.cli demo-list --user-email prof@example.edu \\
+    uv run python -m arc.cli demo-list --user-email prof@example.edu --demo \\
         --add "Sousou no Frieren" --add "Vinland Saga"
+    uv run python -m arc.cli demo-list --user-email prof@example.edu \\
+        --status completed --progress 12 --add "Bocchi the Rock!"
+    uv run python -m arc.cli recs --user-email prof@example.edu
     uv run python -m arc.cli warm-catalogue
     uv run python -m arc.cli import-catalogue
 
@@ -45,6 +54,7 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -68,12 +78,28 @@ from arc.models import (
 )
 from arc.services.acquisition.rules import is_paused
 from arc.services.auth import DEFAULT_EXPIRY_HOURS, create_invite, get_by_email, normalize_email
-from arc.services.catalog import SourceUnavailable, preferred_title, set_list_entry
+from arc.services.catalog import (
+    ListEntryError,
+    SourceUnavailable,
+    preferred_title,
+    set_list_entry,
+)
 from arc.services.catalog.cache import upsert_summaries
 from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import CATALOG_PRIORITY, REFRESH_ALL, SEASON_SWEEP
 from arc.services.catalog.offline.jobs import import_all
 from arc.services.jobs import enqueue
+from arc.services.recs import (
+    DAILY_LIMIT,
+    RecsEmptyPool,
+    RecsFailed,
+    RecsRateLimited,
+    RecsRefused,
+    RecsUnavailable,
+    model_for,
+    remaining_today,
+    run_recommendations,
+)
 from arc.services.retention.sweep import retained_bytes
 
 #: Exit code for "the command could not do what was asked" — no such user, no
@@ -223,24 +249,56 @@ async def cmd_import_catalogue(
 
 
 async def cmd_demo_list(session: AsyncSession, settings: Settings, args: argparse.Namespace) -> int:
-    """Add shows to a user's list as *watching*, looked up by title.
+    """Add shows to a user's list in one status, looked up by title.
 
     The point is a fresh deployment where the person who is about to log in
     has an empty Home page and an empty schedule. One command puts real shows
     on their list, which is what Home, the schedule highlights and acquisition
     all key off.
 
+    One invocation seeds **one status group** (``--status``, default
+    ``watching``) with **one progress** (``--progress``, optional), because
+    that is the shape of a plausible list: several shows finished at their
+    episode count, several part-way through, a couple planned. Four or five
+    invocations make a list a person recognises; one flag per title would make
+    a command line nobody can read (owner, 2026-09-18, for the M16 demo
+    account).
+
+    ``--demo`` sets ``users.is_demo`` on that account, which is what turns on
+    the "How Arc works" entry in its nav and the strip on its Watch Now. It is
+    a separate flag rather than implied by the command because seeding a list
+    and nominating the demo account are two decisions, and the owner seeds their
+    own list with this too.
+
     The lookup is the catalogue's own search, so it needs AniList (or MAL) to
     be reachable; the top hit is taken and printed, and a title that matches
     nothing is reported rather than guessed at. Adding the same show twice is
     a no-op beyond a touched ``updated_at``, because ``set_list_entry``
-    describes a state rather than an event.
+    describes a state rather than an event — and it is ``set_list_entry`` that
+    does all of it: the acquisition window, FR-A9's ``activated_at`` stamp (so
+    a seeded entry is active and actually fetches, unlike an imported one) and
+    the FR-M4 write rules. The demo account has no MyAnimeList link, so no
+    write is queued for it at all; that is asserted in ``tests/test_cli.py``
+    rather than trusted.
     """
     email = normalize_email(args.user_email)
     user = await get_by_email(session, email)
     if user is None:
         print(f"no user with the address {email}", file=sys.stderr)
         return EXIT_FAILED
+
+    status = ListStatus(args.status)
+
+    if args.demo:
+        # Idempotent, and reported either way: an operator re-running the
+        # seeding script wants to see that the flag is on, not to wonder
+        # whether the second run took it off.
+        if user.is_demo:
+            print(f"= {email} is already the demo account (user {user.id})")
+        else:
+            user.is_demo = True
+            await session.commit()
+            print(f"+ {email} flagged as the demo account (user {user.id})")
 
     failures = 0
     async with catalog_for(settings) as catalog:
@@ -261,17 +319,119 @@ async def cmd_demo_list(session: AsyncSession, settings: Settings, args: argpars
             # internal id that the list entry is keyed on (FR-C6).
             rows = await upsert_summaries(session, page.results[:1])
             anime = rows[0]
-            await set_list_entry(
-                session,
-                catalog,
-                user_id=user.id,
-                anime_id=anime.id,
-                status=ListStatus.WATCHING,
-            )
+            try:
+                entry, anime = await set_list_entry(
+                    session,
+                    catalog,
+                    user_id=user.id,
+                    anime_id=anime.id,
+                    status=status,
+                    progress=args.progress,
+                )
+            except ListEntryError as exc:
+                # The same rule the endpoint's 422 reports, from the same
+                # function. Rolled back so one refused title does not leave a
+                # half-written entry behind for the next one.
+                await session.rollback()
+                print(f"! {title!r}: {exc}", file=sys.stderr)
+                failures += 1
+                continue
             await session.commit()
-            print(f"+ {preferred_title(anime)}  (anime {anime.id}) → watching")
+            print(f"+ {preferred_title(anime)}  (anime {anime.id}) → {_entry_line(entry, anime)}")
+            # Not refused — the endpoint accepts it too, and a stale episode
+            # count is the likelier of the two explanations — but said out
+            # loud, because a seeded list that reads "14 / 12" is the kind of
+            # thing nobody notices until it is on a projector.
+            if anime.episodes and entry.progress > int(anime.episodes):
+                print(
+                    f"  note: progress {entry.progress} is past the catalogue's "
+                    f"{int(anime.episodes)} episodes for this show",
+                    file=sys.stderr,
+                )
 
     return EXIT_FAILED if failures else 0
+
+
+def _entry_line(entry: ListEntry, anime: Anime) -> str:
+    """``completed · 12 / 12`` — what the entry now says, for the operator."""
+    if entry.progress == 0:
+        return entry.status.value
+    total = str(int(anime.episodes)) if anime.episodes else "?"
+    return f"{entry.status.value} · {entry.progress} / {total}"
+
+
+# --- recs -------------------------------------------------------------------
+
+
+async def cmd_recs(session: AsyncSession, settings: Settings, args: argparse.Namespace) -> int:
+    """Produce one recommendation run for a user (FR-R1…FR-R5, M16).
+
+    The same call ``POST /api/recs/runs`` makes, with the same service, the
+    same provider chain (``RECS_PROVIDER``) and the same daily budget — so the
+    demo account's Recommendations page and Home's "Picked for you" shelf have
+    content without anybody signing in as it and pressing the button.
+
+    The one command here that is **not** idempotent, deliberately: a run is an
+    event, FR-R5 stores it so the page is instant, and a second invocation
+    spends a second of the ten runs a user gets per day. That is what the
+    refresh button does too.
+
+    Every way it can fail is one of the five the router turns into a status
+    code (``arc/api/recs.py``); here they are one line on stderr and exit 1,
+    because there is nobody to branch on a status code.
+    """
+    email = normalize_email(args.user_email)
+    user = await get_by_email(session, email)
+    if user is None:
+        print(f"no user with the address {email}", file=sys.stderr)
+        return EXIT_FAILED
+
+    async with model_for(settings) as model:
+        if model is None:
+            print(
+                "no recommendation provider is configured; set the API key for "
+                f"RECS_PROVIDER={settings.recs_provider}",
+                file=sys.stderr,
+            )
+            return EXIT_FAILED
+
+        async with catalog_for(settings) as catalog:
+            try:
+                run = await run_recommendations(
+                    session,
+                    catalog,
+                    model,
+                    user_id=user.id,
+                    prompt=args.prompt,
+                    now=datetime.now(UTC),
+                )
+            except RecsRateLimited as exc:
+                print(f"! {email}: {exc}", file=sys.stderr)
+                return EXIT_FAILED
+            except RecsEmptyPool:
+                print(
+                    f"! {email}: nothing to recommend from — seed a list first "
+                    "(arc.cli demo-list) and let the catalogue sweep run",
+                    file=sys.stderr,
+                )
+                return EXIT_FAILED
+            except (RecsRefused, RecsUnavailable, RecsFailed) as exc:
+                print(f"! {email}: the model did not answer ({exc})", file=sys.stderr)
+                return EXIT_FAILED
+
+    await session.commit()
+    picks = run.picks or []
+    print(f"run {run.id} for {email} — model {run.model or '(unknown)'}")
+    print(f"  {len(picks)} entries from a pool of {len(run.candidates or [])} candidates")
+    for pick in picks:
+        title = str(pick.get("title") or f"anime {pick.get('anime_id')}")
+        # A continuation carries ``because`` and a model pick carries ``case``
+        # (FR-R6): two different claims, and the operator should see which.
+        kind = "pick" if pick.get("case") else "franchise"
+        print(f"  {kind:<10} {title}")
+    remaining = await remaining_today(session, user_id=user.id, now=datetime.now(UTC))
+    print(f"  {remaining} of {DAILY_LIMIT} runs left for this user today")
+    return 0
 
 
 # --- status -----------------------------------------------------------------
@@ -390,7 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     catalogue.set_defaults(handler=cmd_import_catalogue)
 
-    demo = sub.add_parser("demo-list", help="add shows to a user's list as watching")
+    demo = sub.add_parser("demo-list", help="add shows to a user's list in one status")
     demo.add_argument("--user-email", required=True, help="whose list to add to")
     demo.add_argument(
         "--add",
@@ -399,7 +559,34 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TITLE",
         help="a show title to search for and add; repeat for several",
     )
+    demo.add_argument(
+        "--status",
+        choices=[state.value for state in ListStatus],
+        default=ListStatus.WATCHING.value,
+        help=f"the status every title here gets (default {ListStatus.WATCHING.value})",
+    )
+    demo.add_argument(
+        "--progress",
+        type=int,
+        default=None,
+        metavar="N",
+        help="episodes watched, applied to every title in this invocation",
+    )
+    demo.add_argument(
+        "--demo",
+        action="store_true",
+        help="flag this account as the demo one (users.is_demo); idempotent",
+    )
     demo.set_defaults(handler=cmd_demo_list)
+
+    recs = sub.add_parser("recs", help="produce one recommendation run for a user")
+    recs.add_argument("--user-email", required=True, help="whose picks to produce")
+    recs.add_argument(
+        "--prompt",
+        default=None,
+        help="an optional mood prompt, exactly as the page's box (FR-R1)",
+    )
+    recs.set_defaults(handler=cmd_recs)
 
     status = sub.add_parser("status", help="print a summary of the deployment")
     status.set_defaults(handler=cmd_status)

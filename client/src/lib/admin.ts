@@ -52,12 +52,15 @@ export interface AdminAccount {
   timezone: string
   created_at: string
   is_active: boolean
+  /** The demo account (M16): a "How Arc works" entry and a Watch Now strip. */
+  is_demo: boolean
 }
 
 /** `PATCH /api/users/{id}` — omitted fields are left alone. */
 export interface UserPatch {
   is_active?: boolean
   role?: Role
+  is_demo?: boolean
 }
 
 /** Where an invite stands, as the server computes it. */

@@ -28,6 +28,13 @@ export interface User {
   role: Role
   timezone: string
   created_at: string
+  /**
+   * The demo account (`users.is_demo`, M16). Presentation only: it adds the
+   * "How Arc works" entry to the nav and a one-line strip to Watch Now, and
+   * it changes nothing about what the account may do. Every other account
+   * reads `false` here.
+   */
+  is_demo: boolean
 }
 
 /** `GET /api/invites/{token}`: an unredeemed invite. `email` may be unset. */

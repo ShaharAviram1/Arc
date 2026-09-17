@@ -390,12 +390,35 @@ the finish work (bugs found that way are fixed inside M16).
       and MAL writes, dismissable per failure, linking to the episode or job
       (admins see the same view of their own; the Admin jobs tab stays the
       global view) — email/push remain out of scope
-- [ ] Demo account seeded by `arc.cli demo-list` (plausible list, a few ready
+- [x] Demo account seeded by `arc.cli demo-list` (plausible list, a few ready
       episodes, a recommendation run) so every page has content without a MAL
       link; a "How Arc works" page with the pipeline diagram and one sentence
       per external service (AniList, MAL, TMDB, offline catalogue, Nyaa,
       qBittorrent, the LLM) — both visible only when the demo account is
-      signed in
+      signed in.
+      Built 2026-09-18 (FR-D5, owner decisions of the same date):
+      `users.is_demo` (revision `b63c05a9f1d2`, NOT NULL DEFAULT false) on
+      `UserOut` and on the admin `PATCH /api/users/{id}`, with a Demo column
+      and a Make demo / Clear demo control in the admin Users tab;
+      `arc.cli demo-list` gained `--status`, `--progress` and `--demo` (one
+      status group and one progress per invocation, all of it through
+      `set_list_entry` so wants, FR-A9 activation and the MAL rules are the
+      endpoint's) and a new `arc.cli recs --user-email` produces one
+      recommendation run through the same service `POST /api/recs/runs` uses;
+      `client/src/pages/HowArcWorks.tsx` on `/how-arc-works` (eight-step
+      pipeline in CSS, eight services, three rules, four places to look), a
+      fourth nav entry in the toolbar and the phone sheet for `is_demo`
+      accounts only, and a dismissable one-line strip above Watch Now's hero
+      for the same. The route itself is open to any session so a shared link
+      opens. Tests: server 3408 (CLI seeding/flag/idempotence/no-MAL-write, the
+      `recs` command, `is_demo` on `/api/auth/me` and the admin PATCH), client
+      696.. Verified 2026-09-18 (orchestrator): server 3408 / client 696 / lint clean;
+      dev migrated to b63c05a9f1d2; in Chrome the nav entry, the Watch Now strip
+      and the page appear for a flagged account and vanish when the flag is
+      cleared, the Admin Make demo / Clear demo toggle round-trips, and the
+      page's claims were checked against architecture §5.3a; the pipeline strip
+      was changed to a four-column grid by the orchestrator. Seeding on
+      production is a separate step after the deploy
 - [ ] Kinks from the owner's daily use (tracked here as they come in)
   - [x] "Try episode 1" sample want (FR-A8) — one explicit exception to
         FR-A1, decided by the owner 2026-09-12. Verified 2026-09-13
@@ -897,6 +920,25 @@ the finish work (bugs found that way are fixed inside M16).
     no orphaned running job, and the first Watch Now load queued the
     art-only TMDB jobs for the carried-in shows — One Piece had a
     backdrop within seconds.
+  - [x] Audio track choice prefers the original over the first track
+        (owner, 2026-09-18): *"series default language is jap, and sub is en.
+        if there is no jap and the default is korean so be it, but jap is
+        preferred."* `_pick_audio` was "the configured language, else the
+        first audio stream", which burned the English dub into the rendition
+        whenever a dual-audio release listed it first and the original track
+        was untagged, Korean or Chinese. Built 2026-09-18, pure and
+        server-only (`media/plan.py`): configured language (ja) → any
+        non-English track, the container's default first, an untagged track
+        counting as non-English → the container's default → the first track.
+        `NOTE_NO_AUDIO_LANGUAGE` now names the rule that fired ("took the ko
+        track (the container's default)", "took an untagged track", "took the
+        first track, en") because that note is what the operator reads in the
+        job row. No migration, no change to subtitles, acquisition, matching,
+        MAL or the ffmpeg arguments. Eight audio tests, one per rule plus the
+        configurable-language case; 65 plan tests and 89
+        transcode/probe tests green. Verified 2026-09-18 (orchestrator): diff read, 96 transcode plan/job
+        tests and make lint green; the ffmpeg argument list is unchanged apart
+        from the mapped audio index
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

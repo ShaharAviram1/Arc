@@ -28,12 +28,18 @@ import { useReviewSummary } from '@/lib/review'
  * `useIsPhone` branch instead of `hidden md:flex`. The tab bar holds four
  * tabs and no more, so Schedule lives at the top of the sheet. Nothing hides
  * on a phone: every account item in the avatar menu is in the sheet too.
+ *
+ * One entry is conditional (M16, owner 2026-09-18): the demo account — the one
+ * the course professor signs in to — gets a fourth destination, "How Arc
+ * works", in the toolbar and at the top of the phone sheet. Nobody else sees
+ * it, and the page behind it is reachable by anybody who has the link.
  */
 
 const BROWSE_PATH = '/search'
 const REVIEW_PATH = '/review'
 const LIST_PATH = '/list'
 const SCHEDULE_PATH = '/schedule'
+const HOW_PATH = '/how-arc-works'
 
 /** Long enough that a typed word is one navigation, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 300
@@ -51,6 +57,22 @@ const MAIN_NAV: NavItem[] = [
   { to: BROWSE_PATH, label: 'Browse' },
   { to: SCHEDULE_PATH, label: 'Schedule' },
 ]
+
+/**
+ * The demo account's fourth entry (M16, owner 2026-09-18).
+ *
+ * A nav entry rather than something behind the avatar because the person it is
+ * for has never seen Arc before and will not go looking under a letter in a
+ * circle. It is gated on `is_demo` and on nothing else, so the owner's own
+ * toolbar is the three it has always been — and the *route* is not gated at
+ * all, so a bookmarked link keeps working for whoever follows it.
+ */
+const HOW_NAV: NavItem = { to: HOW_PATH, label: 'How Arc works' }
+
+/** The toolbar's destinations for this viewer. */
+function mainNav(isDemo: boolean): NavItem[] {
+  return isDemo ? [...MAIN_NAV, HOW_NAV] : MAIN_NAV
+}
 
 /* --- Account menu ------------------------------------------------------ */
 
@@ -72,6 +94,14 @@ interface AccountMenu {
    * storage guard (spec §4.9 FR-T6). `null` when nothing is.
    */
   acquisitionBrake: 'paused' | 'held' | null
+  /**
+   * Whether this is the demo account (M16). Not an account-menu entry — it
+   * decides whether the toolbar and the "More" sheet carry "How Arc works" —
+   * but it is derived here because this is the one place in the shell that
+   * reads `me`, and two components asking the same question separately is how
+   * two components come to disagree about it.
+   */
+  isDemo: boolean
   logout: () => void
   loggingOut: boolean
 }
@@ -132,6 +162,7 @@ function useAccountMenu(): AccountMenu | null {
     entries,
     acquisitionBrake:
       acquisition?.paused === true ? 'paused' : acquisition?.storage_held === true ? 'held' : null,
+    isDemo: me.is_demo,
     logout: () => {
       logout.mutate()
     },
@@ -494,7 +525,7 @@ function Toolbar({ account, isPhone }: { account: AccountMenu | null; isPhone: b
 
             {isPhone ? null : (
               <nav aria-label="Main" className="mx-auto flex items-center gap-0.5">
-                {MAIN_NAV.map((item) => (
+                {mainNav(account?.isDemo === true).map((item) => (
                   <NavLink key={item.to} to={item.to} end={item.end} className={navPillClass}>
                     {item.label}
                   </NavLink>
@@ -603,7 +634,8 @@ function TabBar({ moreOpen, onMore }: { moreOpen: boolean; onMore: () => void })
  * concession this design makes and "somewhere else entirely" is not. Schedule
  * is a destination rather than an account item, so it sits first and above the
  * hairline: the tab bar is four tabs and a fifth would crowd them, and this is
- * the phone's version of the toolbar entry (owner, 2026-09-11).
+ * the phone's version of the toolbar entry (owner, 2026-09-11). "How Arc
+ * works" joins it there on the demo account, for the same reason.
  */
 function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null)
@@ -636,14 +668,24 @@ function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => 
           aria-hidden
           className="mx-auto mb-3 h-1 w-9 rounded-full bg-[rgba(255,255,255,0.22)]"
         />
-        <Link
-          to={SCHEDULE_PATH}
-          data-menu-item
-          onClick={onClose}
-          className={cx(MENU_ITEM, FOCUS_RING, 'min-h-12')}
-        >
-          <span>Schedule</span>
-        </Link>
+        {/*
+         * The toolbar's destinations that the four tabs have no room for —
+         * Schedule always, and "How Arc works" on the demo account (M16).
+         * Same order as the toolbar, so the phone is the same app.
+         */}
+        {mainNav(account.isDemo)
+          .filter((item) => item.to === SCHEDULE_PATH || item.to === HOW_PATH)
+          .map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              data-menu-item
+              onClick={onClose}
+              className={cx(MENU_ITEM, FOCUS_RING, 'min-h-12')}
+            >
+              <span>{item.label}</span>
+            </Link>
+          ))}
         <MenuSeparator />
         <AccountItems account={account} onNavigate={onClose} itemClassName="min-h-12" />
         <button

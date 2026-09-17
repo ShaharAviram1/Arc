@@ -1,12 +1,19 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { routes } from '@/app/router'
 import { PHONE_MEDIA_QUERY } from '@/lib/media'
 import { createQueryClient } from '@/lib/queryClient'
-import { mockApi, requestsMade, TEST_ADMIN, TEST_USER, type MockResponse } from '@/test/apiMock'
+import {
+  mockApi,
+  requestsMade,
+  TEST_ADMIN,
+  TEST_DEMO_USER,
+  TEST_USER,
+  type MockResponse,
+} from '@/test/apiMock'
 
 const HEALTH = { body: { status: 'ok', version: '0.1.0', env: 'test' } }
 const REVIEW_SUMMARY = 'GET /api/review/summary'
@@ -140,6 +147,28 @@ describe('Toolbar', () => {
 
     await screen.findByRole('link', { name: 'Watch Now' })
     expect(screen.queryByRole('link', { name: 'Recommendations' })).not.toBeInTheDocument()
+  })
+
+  it('gives the demo account a fourth destination, and nobody else one', async () => {
+    renderShell({ me: TEST_DEMO_USER })
+
+    const entry = await screen.findByRole('link', { name: 'How Arc works' })
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(nav).toContainElement(entry)
+    expect(entry).toHaveAttribute('href', '/how-arc-works')
+    // Last, after the three every account has.
+    expect(
+      within(nav)
+        .getAllByRole('link')
+        .map((link) => link.textContent),
+    ).toEqual(['Watch Now', 'Browse', 'Schedule', 'How Arc works'])
+  })
+
+  it('keeps it out of an ordinary account’s toolbar', async () => {
+    renderShell()
+
+    await screen.findByRole('link', { name: 'Watch Now' })
+    expect(screen.queryByRole('link', { name: 'How Arc works' })).not.toBeInTheDocument()
   })
 
   it('sends a typed query to Browse', async () => {
@@ -406,6 +435,33 @@ describe('Phone chrome', () => {
     expect(
       schedule.compareDocumentPosition(screen.getByRole('link', { name: 'MyAnimeList' })),
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('puts How Arc works in the More sheet for the demo account alone', async () => {
+    renderShell({ me: TEST_DEMO_USER, phone: true })
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More' }))
+
+    const entry = screen.getByRole('link', { name: 'How Arc works' })
+    expect(entry).toHaveAttribute('href', '/how-arc-works')
+    // Beneath Schedule and above the account items, same order as the toolbar.
+    expect(screen.getByRole('link', { name: 'Schedule' }).compareDocumentPosition(entry)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(entry.compareDocumentPosition(screen.getByRole('link', { name: 'MyAnimeList' }))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
+  it('leaves the sheet as it was for an ordinary account', async () => {
+    renderShell({ phone: true })
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More' }))
+
+    expect(screen.getByRole('link', { name: 'Schedule' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'How Arc works' })).not.toBeInTheDocument()
   })
 
   it('opens the account items in the More sheet, and closes it on Escape', async () => {

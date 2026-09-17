@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-17. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-09-18. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -267,7 +267,13 @@ any time, and the owner uses it daily.
   track **burned in**, and packaged as HLS (fMP4 segments, ~6 s).
 - FR-P2 Subtitle track choice: prefer the first English (or configured
   language) text track; fall back to no subtitles and flag the episode.
-  Audio track choice: prefer Japanese; configurable.
+  Audio track choice: prefer Japanese (configurable); otherwise the
+  **original** — any track that is not an English dub, the muxer's default
+  track first; otherwise the muxer's default; and the first track only as a
+  last resort (owner, 2026-09-18). A track with no language tag counts as
+  "not English". Every choice below the first rule is noted on the job, naming
+  the language and the rule that produced it, because the rendition is the
+  only copy kept and a dub burned in is only discoverable by ear.
 - FR-P3 Preparation is scheduled to finish before the user is likely to ask:
   new downloads are transcoded immediately; the job queue prioritises
   episodes users are closest to reaching.
@@ -493,6 +499,22 @@ any time, and the owner uses it daily.
   and audio language preferences.
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
+- FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
+  the demo one (`users.is_demo`), from the admin Users tab or by
+  `arc.cli demo-list --demo`. The flag gates **presentation and nothing else**:
+  a fourth top-nav entry, **How Arc works** (and the same entry at the top of
+  the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
+  hero pointing at it — dismissal is remembered per account in that browser.
+  The page is informational: the pipeline from a list entry to a MAL write, one
+  sentence per external service, the three rules that matter (the acquisition
+  window, the review queue, MAL writes), and where to look. It offers no
+  action, reads no per-user data, and the **route** is open to any signed-in
+  account so that a shared link opens rather than 404s; only the nav entry and
+  the strip are gated. The demo account has **no MyAnimeList link**, so no MAL
+  write can originate from it whatever it does; its list, progress and
+  recommendation run are seeded by `arc.cli demo-list` and `arc.cli recs`, and
+  a seeded entry is active rather than dormant (FR-A9) so acquisition runs for
+  it exactly as for anybody else.
 
 ## 5. Client pages
 
@@ -509,6 +531,7 @@ any time, and the owner uses it daily.
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
 | Admin | 2 | Users/invites, rules, jobs, disk, review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
+| How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
 
 Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
 sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
@@ -516,7 +539,9 @@ Schedule and the search field; the avatar menu holds My List, MyAnimeList,
 Match review (with the pending count), Admin and Log out; Recommendations is a
 button inside Browse and a shelf action on Home. On phones a bottom tab bar
 (Watch Now · Browse · My List · More) replaces the toolbar nav, with Schedule
-at the top of the "More" sheet.
+at the top of the "More" sheet. The **demo account** carries one more
+destination in both chromes — How Arc works, after Schedule (FR-D5); no other
+account sees it, and the four phone tabs are unchanged.
 
 Attribution: where a deployment has a TMDB key (FR-C6), the shell carries
 TMDB's required line — "This product uses the TMDB API but is not endorsed or
@@ -1033,3 +1058,44 @@ is and the grace period decides.
   episode where there is nothing to press — watched because the list's progress
   has passed it (FR-W5) — which keeps the ✓ and the tooltip pointing at where
   the undo lives.
+- 2026-09-18 — **The demo account** (FR-D5, owner, M16). Four decisions, in the
+  owner's words. (1) *"A dedicated demo account, invite-created by the owner,
+  that the professor — who does not know anime and has no MyAnimeList account —
+  will log into."* (2) *"Arc knows it is the demo account through a new
+  `users.is_demo` boolean column (NOT NULL, default false)."* (3) *"The demo
+  list is seeded with the existing CLI (`python -m arc.cli demo-list`), which
+  must grow enough to seed a plausible list."* (4) *"'How Arc works' lives as a
+  top-nav entry (demo account only) plus a one-line dismissable first-visit
+  strip on Watch Now (demo account only) pointing at it."*
+  A column rather than a configured address, because which account is the
+  professor's is a fact about the deployment and the database is where a
+  deployment keeps facts — and because it has to be removable from the Users
+  tab when the course ends. Presentation only, and deliberately: the page reads
+  no per-user data and offers no action, so there is nothing for the flag to
+  get wrong. The *route* is not gated even though the entry is, because a link
+  that 404s for the person it was sent to is worse than a page one extra
+  account can read. `demo-list` grew `--status`, `--progress` and `--demo`
+  (one status group and one progress per invocation, because that is the shape
+  of a plausible list) and a sibling `recs` command produces one recommendation
+  run for an account through the same service `POST /api/recs/runs` uses — so
+  every page of the demo account has content without anybody signing in as it.
+  Nothing about acquisition, matching or MAL changed: a seeded entry goes
+  through `set_list_entry` like any other, which is what stamps FR-A9's
+  activation, and the demo account has no MAL link for a write to reach.
+- 2026-09-18 — **Audio track choice prefers the original, not the first track**
+  (FR-P2, owner, M16). In the owner's words: *"series default language is jap,
+  and sub is en. if there is no jap and the default is korean so be it, but jap
+  is preferred."* The order is therefore: the configured language (Japanese),
+  then any track that is not an English dub with the muxer's default first,
+  then the muxer's default, then the first track. Only the last rule is what
+  Arc used to do after the first one failed, and it was wrong often enough to
+  matter: a dual-audio release lists English first as often as not, so an
+  episode whose original track was untagged — or whose original language is
+  Korean or Chinese, which is most webtoon adaptations and every donghua — had
+  the dub burned into the only rendition Arc keeps. "Not English" is a proxy
+  for "the original" rather than a fact about the file, and it is the best one
+  available from an ffprobe payload: the original audio of a show Arc acquires
+  is essentially never English. An untagged (`und`) track counts as not
+  English for the same reason. Subtitles are untouched (English text track,
+  already correct), and so is acquisition, which has ranked English dubs below
+  every subbed release since the FR-A3 amendment of 2026-09-14.

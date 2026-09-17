@@ -1,7 +1,7 @@
 # Arc — Architecture
 
 > Living document. Update whenever the stack, a component boundary, or an
-> integration changes. Last updated: 2026-09-17.
+> integration changes. Last updated: 2026-09-18.
 > Companions: [spec.md](spec.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Stack at a glance
@@ -208,6 +208,20 @@ avatar, as a disclosure rather than an ARIA menu so its links keep the link
 role. `/recs` keeps working and is reached from Browse and from Home's
 "Picked for you" shelf.
 
+A **fourth toolbar entry, How Arc works (`/how-arc-works`), is drawn only for
+an account whose `me.is_demo` is true** (M16, spec FR-D5) — `mainNav()` in
+`components/Layout.tsx` appends it, and the same function feeds the phone
+"More" sheet, so the sheet gains it beside Schedule and the four tabs are
+untouched. The flag is read once, in `useAccountMenu`, because that is the one
+place in the shell that reads `me`. The **route** is an ordinary child of the
+layout behind `RequireAuth` and is gated on nothing: a link somebody sends on
+should open, and the page (`pages/HowArcWorks.tsx`) is static prose — an
+eight-step pipeline drawn as a four-column grid with two aria-hidden arrow
+glyphs (two even rows on `md:`, a column below, no library and no icon set), one sentence per external
+service, three rules, and four places to look. Watch Now carries the same
+account's one-line strip above the hero, dismissed into `localStorage` under
+`arc:how-arc-works-dismissed:<user id>` with every access wrapped.
+
 Below 768px (`useIsPhone`, `client/src/lib/media.ts`) the same set becomes a
 bottom tab bar — Watch Now · Browse · My List · More — with Schedule at the
 top of the "More" sheet above the account items, and the toolbar collapsed to
@@ -352,7 +366,7 @@ strip, so nothing on the page moves when they appear.
 
 | Table | Key columns |
 |---|---|
-| `users` | id, email (unique on lower(email)), password_hash, role, is_active, timezone, created_at |
+| `users` | id, email (unique on lower(email)), password_hash, role, is_active, is_demo (M16's demo-account flag, NOT NULL DEFAULT false, spec FR-D5: it gates the "How Arc works" nav entry and the Watch Now strip and is read by nothing else — no acquisition, matching, media or MAL path looks at it; written by `PATCH /api/users/{id}` and by `arc.cli demo-list --demo`, and published on `UserOut` so the account itself is told), timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
 | `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url (AniList's 4.75:1 strip), backdrop_url (TMDB's 16:9 backdrop — **only** the TMDB enrichment ever writes it, §5.8, and it is what the 21:9 heroes and 16:9 cards prefer; null until the enrichment reaches the row), genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
@@ -880,7 +894,11 @@ strip, so nothing on the page moves when they appear.
   any `matched` episode without a rendition and re-queues `failed` ones
   with attempts left.
 - Plan (pure, `media/plan.py`): video = first non-attached-picture stream;
-  audio = first stream matching `audio_lang` (default ja) else first;
+  audio = first stream matching `audio_lang` (default ja), else the first
+  stream that is **not** English with the container's default preferred (an
+  untagged track counts as not English), else the container's default, else
+  the first stream — the last three all note which rule fired
+  (owner, 2026-09-18);
   subtitle = text tracks only (ass/ssa/srt/webvtt/mov_text), prefer
   `sub_lang` (en), ASS over SRT, non-forced, "full/dialogue" over
   "signs/songs"; bitmap subs → prepared without subtitles and flagged.
@@ -1942,10 +1960,10 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|
 | `GET /api/health` | public | liveness |
 | `GET /api/events` | any | the live event stream (M16, §5.9): `text/event-stream`, a comment line on open and every 25 s, `data:` frames of `{kind: episode_state\|art, anime_id, episode_id, state, ts}` — ids only, no user data, no per-user filtering. `Cache-Control: no-cache, no-store, must-revalidate` and `X-Accel-Buffering: no`; Caddy proxies it with `flush_interval -1` and excludes it from `encode` (§8). 503 `too many live connections` above 100 streams per api process. Nothing depends on it: every page that reacts to an event also polls |
-| `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | public / any | session |
+| `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | public / any | session. `login` and `me` answer `UserOut`: id, email, role, timezone, created_at and `is_demo` — the last so the client knows whether to draw M16's "How Arc works" entry and Watch Now strip (spec FR-D5) |
 | `POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/{id}` | admin | invite management |
 | `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
-| `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard) |
+| `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard). The PATCH body takes `is_active`, `role` and `is_demo`; the first two carry the self-lockout and last-admin guards, `is_demo` carries none — it takes nothing away from anybody and there is no last demo account to protect, so an admin may set it on any row including their own (spec FR-D5) |
 | `PATCH /api/users/me` | any | change own timezone (IANA, validated) |
 | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue; the listing takes `status=`, `type=`, `limit=` (≤ 200), `offset=`, newest id first |
 | `GET /api/jobs/summary` | admin | `{by_status: {pending, running, done, failed, cancelled}, by_type_pending: {type: count}, worker: {heartbeat_at, alive}}` — `alive` is the heartbeat file younger than 90 s, the same decision the container healthcheck makes |
@@ -2076,7 +2094,21 @@ Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
 heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
 `caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
 `api` container → up. Ops runbook: `deploy/README.md`; CLI:
-`python -m arc.cli {status,invite,warm-catalogue,demo-list}`.
+`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs}`.
+`demo-list` takes `--user-email`, one or more `--add TITLE`, `--status`
+(any `ListStatus` value, default `watching`), `--progress N` and `--demo`
+(sets `users.is_demo`): **one status group and one progress per invocation**,
+so a plausible list is four or five runs rather than one unreadable command
+line. Every title goes through `set_list_entry`, which is what recomputes the
+acquisition window and stamps FR-A9's `activated_at` — a seeded entry is
+active, unlike an imported one — and the progress rule is the endpoint's own
+(non-negative, and raised to the episode count on a `completed` entry); a
+progress past the catalogue's episode count is accepted, as the endpoint
+accepts it, with a note on stderr. `recs` takes `--user-email` and an optional
+`--prompt` and produces one recommendation run through the same
+`run_recommendations` as `POST /api/recs/runs`, on the `RECS_PROVIDER` chain —
+the one command here that is not idempotent, because a run is an event and
+spends one of the ten a user gets per day (FR-R5).
 
 Host (decided 2026-09-08, revised 2026-09-09 when Hetzner's cost-optimised
 line went out of stock): Hetzner Cloud CPX22 (2 AMD vCPU, 4 GB, 80 GB NVMe;
@@ -3491,3 +3523,44 @@ two together.
   watched" → ✕ "Mark unwatched", keeping the Show page's fill/outline pair,
   and keeping the ✓ for the one state that is not a button (`watched_source ==
   'progress'`). No server change in (2) or (3); no migration in any of them.
+- 2026-09-18 — **Demo account and "How Arc works"** (spec FR-D5, owner, M16).
+  One column (`users.is_demo`, revision `b63c05a9f1d2`, NOT NULL DEFAULT false,
+  no backfill), one field on `UserOut`, one optional field on the admin
+  `UserPatch`, one page and one strip. The column is the *only* new state: no
+  table, no setting, no env var, and nothing in `arc/services` reads it, which
+  is what keeps a demo flag from becoming a second kind of account. It is
+  unguarded on the PATCH where `is_active` and `role` are not, because both of
+  those guards exist to stop an admin locking Arc's last admin out and this
+  flag takes nothing away from anybody.
+  The nav entry is gated and the route is not (see §3): the entry answers "is
+  this the account the professor uses", the route answers "may this session
+  read a page of prose", and those are different questions. Content comes from
+  spec.md and architecture.md rather than from memory, and the configurable
+  numbers are described rather than quoted — "the next few episodes", not
+  "two", because an admin can change N and a page that contradicts the setting
+  is worse than a vaguer one.
+  `arc.cli` grew `--status`/`--progress`/`--demo` on `demo-list` and a new
+  `recs` command (§8). Both are wrappers: `demo-list` still goes through
+  `set_list_entry` — which is what recomputes wants, stamps FR-A9's
+  `activated_at` and decides about MAL — and `recs` through the same
+  `run_recommendations` the router calls, with `model_for` (the one-off
+  contextmanager built for scripts) rather than the worker's shared chain.
+  Nothing in the seeding path can write to MyAnimeList: the demo account has no
+  link, `is_linked` is false, and a test asserts the empty `mal_write_log`
+  rather than trusting it.
+- 2026-09-18 — **`_pick_audio` has four rules, not two** (spec FR-P2, owner,
+  M16). `media/plan.py::_pick_audio` was "the configured language, else the
+  first audio stream"; it is now the configured language, else any stream that
+  is not English (`language_matches(…, ENGLISH)`, the container's `disposition
+  .default` preferred), else the default stream, else the first. Untagged
+  tracks fall through `normalise_language` to `None`, so they match no
+  preference and are therefore "not English" — which is what rule 2 wants on
+  an anime release. `NOTE_NO_AUDIO_LANGUAGE` changed shape from "used {chosen}
+  instead" to "no ja audio track; {took}", where the tail names both the
+  language and the rule ("took the ko track (the container's default)", "took
+  an untagged track", "took the first track, en"): the note is surfaced as
+  `rendition.notes` and is the only thing that explains a wrong-sounding
+  episode without re-probing the source. Pure change, no migration, nothing
+  new in the ffmpeg argument list — `-map 0:a:<type_index>` is built from the
+  chosen stream exactly as before. `Stream.default` already carried the
+  disposition (M7), so no parsing changed either.

@@ -84,7 +84,8 @@ async def test_login_returns_the_user_and_sets_a_hardened_cookie(
     assert body["email"] == ADMIN_EMAIL
     assert body["role"] == "admin"
     assert body["timezone"] == "UTC"
-    assert set(body) == {"id", "email", "role", "timezone", "created_at"}
+    assert body["is_demo"] is False
+    assert set(body) == {"id", "email", "role", "timezone", "created_at", "is_demo"}
 
     cookie = set_cookie_header(response)
     assert "HttpOnly" in cookie

@@ -26,6 +26,11 @@ class UserOut(BaseModel):
     role: UserRole
     timezone: str
     created_at: datetime
+    #: The demo account (M16, owner 2026-09-18). On ``UserOut`` rather than on
+    #: the admin view below because the account that needs to know is the one
+    #: reading its own row: the client shows it a "How Arc works" entry and a
+    #: strip on Watch Now, and everybody else a false it never renders.
+    is_demo: bool
 
 
 class UserAdminOut(UserOut):

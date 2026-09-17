@@ -5,6 +5,7 @@ import { RequireAuth } from '@/components/RequireAuth'
 import { RouteError } from '@/components/RouteError'
 import { Admin } from '@/pages/Admin'
 import { Home } from '@/pages/Home'
+import { HowArcWorks } from '@/pages/HowArcWorks'
 import { Invite } from '@/pages/Invite'
 import { List } from '@/pages/List'
 import { Login } from '@/pages/Login'
@@ -43,6 +44,10 @@ export const routes = [
           { path: '/list', element: <List /> },
           { path: '/anime/:id', element: <Show /> },
           { path: '/mal', element: <Mal /> },
+          // The nav entry that leads here belongs to the demo account alone
+          // (`Layout.tsx`), but the route does not: a link somebody sends on
+          // should open, and the page says nothing an account may not read.
+          { path: '/how-arc-works', element: <HowArcWorks /> },
           { path: '/recs', element: <Recs /> },
           // Review is per-user in phase 1 (spec §2: users resolve review items
           // for their own shows); only /admin is role-gated.

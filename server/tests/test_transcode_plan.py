@@ -238,15 +238,29 @@ def test_a_subtitle_in_the_wrong_language_is_used_and_flagged() -> None:
     assert any("no en subtitle track" in note for note in plan.notes)
 
 
-def test_no_audio_in_the_wanted_language_falls_back_to_the_first() -> None:
+# --- Audio track selection (owner, 2026-09-18) ------------------------------
+#
+# One test per rule of ``_pick_audio``: the configured language, then anything
+# that is not an English dub (the container's default first, an untagged track
+# included), then the default, then the first track. The note is asserted as
+# well as the index — it is the only thing that tells the operator which rule
+# fired when an episode sounds wrong. Every payload carries an English ASS
+# track so that the only note in play is the audio one.
+
+SUBS = stream(9, "subtitle", codec_name="ass", language="eng")
+
+
+def test_the_configured_language_wins_wherever_it_sits() -> None:
     plan = plan_for(
         stream(0, "video", codec_name="h264"),
-        stream(1, "audio", codec_name="aac", language="eng", title="English Dub"),
+        stream(1, "audio", codec_name="aac", language="eng", default=1),
         stream(2, "audio", codec_name="ac3", language="spa"),
+        stream(3, "audio", codec_name="aac", language="jpn"),
+        SUBS,
     )
-    assert plan.audio is not None and plan.audio.index == 1
-    assert plan.audio_lang == "en"
-    assert any("no ja audio track" in note for note in plan.notes)
+    assert plan.audio is not None and plan.audio.index == 3
+    assert plan.audio_lang == "ja"
+    assert plan.notes == ()
 
 
 def test_the_configured_audio_language_is_honoured() -> None:
@@ -254,10 +268,85 @@ def test_the_configured_audio_language_is_honoured() -> None:
         stream(0, "video", codec_name="h264"),
         stream(1, "audio", codec_name="aac", language="eng"),
         stream(2, "audio", codec_name="aac", language="jpn"),
+        SUBS,
         audio_lang="ja",
     )
     assert plan.audio is not None and plan.audio.index == 2
     assert plan.audio.type_index == 1
+    assert plan.notes == ()
+
+
+def test_a_configured_language_other_than_japanese_still_wins() -> None:
+    """FR-P2 calls the audio language configurable, so ``en`` has to mean ``en``."""
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="jpn"),
+        stream(2, "audio", codec_name="aac", language="eng"),
+        SUBS,
+        audio_lang="en",
+    )
+    assert plan.audio is not None and plan.audio.index == 2
+    assert plan.audio_lang == "en"
+    assert plan.notes == ()
+
+
+def test_a_korean_original_beats_the_english_dub_in_front_of_it() -> None:
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="eng", title="English Dub", default=1),
+        stream(2, "audio", codec_name="aac", language="kor"),
+        SUBS,
+    )
+    assert plan.audio is not None and plan.audio.index == 2
+    assert plan.audio_lang == "ko"
+    assert plan.notes == ("no ja audio track; took the ko track",)
+
+
+def test_the_default_track_leads_among_the_non_english_ones() -> None:
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="eng"),
+        stream(2, "audio", codec_name="ac3", language="spa"),
+        stream(3, "audio", codec_name="aac", language="kor", default=1),
+        SUBS,
+    )
+    assert plan.audio is not None and plan.audio.index == 3
+    assert plan.notes == ("no ja audio track; took the ko track (the container's default)",)
+
+
+def test_an_untagged_track_is_preferred_to_an_english_one() -> None:
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="eng"),
+        stream(2, "audio", codec_name="aac"),
+        SUBS,
+    )
+    assert plan.audio is not None and plan.audio.index == 2
+    assert plan.audio_lang is None
+    assert plan.notes == ("no ja audio track; took an untagged track",)
+
+
+def test_an_all_english_file_takes_the_default_english_track() -> None:
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="eng", title="English Dub 5.1"),
+        stream(2, "audio", codec_name="aac", language="eng", default=1),
+        SUBS,
+    )
+    assert plan.audio is not None and plan.audio.index == 2
+    assert plan.audio_lang == "en"
+    assert plan.notes == ("no ja audio track; took the default en track",)
+
+
+def test_an_english_only_file_takes_the_dub_and_says_so() -> None:
+    plan = plan_for(
+        stream(0, "video", codec_name="h264"),
+        stream(1, "audio", codec_name="aac", language="english"),
+        SUBS,
+    )
+    assert plan.audio is not None and plan.audio.index == 1
+    assert plan.audio_lang == "en"
+    assert plan.notes == ("no ja audio track; took the first track, en",)
 
 
 def test_an_attached_cover_is_not_the_video_stream() -> None:
