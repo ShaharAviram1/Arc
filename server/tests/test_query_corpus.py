@@ -23,6 +23,7 @@ the cases added for a bug cannot be quietly deleted along with the fix.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,7 @@ from arc.models import Anime
 from arc.services.acquisition.nyaa import (
     Candidate,
     NyaaItem,
+    absolute_offset,
     acceptable,
     anime_season,
     anime_titles,
@@ -46,7 +48,7 @@ CORPUS = Path(__file__).parent / "fixtures" / "query_corpus.txt"
 
 #: Where the corpus stands. A floor, not a snapshot: new cases are welcome and
 #: the ones already here are the evidence behind a query form.
-MIN_CASES = 17
+MIN_CASES = 18
 
 #: Fields a block may carry once, and the ones it must.
 SINGLE_FIELDS = frozenset(
@@ -59,10 +61,14 @@ SINGLE_FIELDS = frozenset(
         "episodes",
         "year",
         "prequel",
+        "prequel_episodes",
         "number",
         "prefer",
     }
 )
+
+#: The AniList id the block's synthetic prequel is filed under.
+PREQUEL_ID = 1
 REQUIRED_FIELDS = ("case", "romaji", "format", "number")
 
 #: And the ones it may repeat.
@@ -113,6 +119,10 @@ class Case:
     accepted: tuple[Release, ...] = ()
     rejected: tuple[Release, ...] = ()
     prefer: str | None = None
+    #: What :func:`absolute_offset` answered for this entry, computed from the
+    #: block's own ``prequel_episodes`` through the real walk rather than
+    #: declared: the corpus asserts the *rule*, not a number typed beside it.
+    offset: int | None = None
 
     @property
     def id(self) -> str:
@@ -126,11 +136,38 @@ class _Block:
     lists: dict[str, list[str]] = field(default_factory=lambda: {key: [] for key in LIST_FIELDS})
 
 
-def _relations(prequel: str | None) -> list[dict[str, object]] | None:
-    """``anime.relations``, carrying a ``PREQUEL`` when the block says so."""
-    if (prequel or "no").strip().lower() not in {"yes", "true"}:
+def _relations(prequel: str | None, prequel_episodes: int | None) -> list[dict[str, object]] | None:
+    """``anime.relations``, carrying a ``PREQUEL`` when the block says so.
+
+    ``prequel_episodes`` implies one: a block that declares how long the
+    previous season ran is a block whose entry has a previous season.
+    """
+    if prequel_episodes is None and (prequel or "no").strip().lower() not in {"yes", "true"}:
         return None
-    return [{"anilist_id": 1, "relation_type": "PREQUEL", "format": "TV"}]
+    return [{"anilist_id": PREQUEL_ID, "relation_type": "PREQUEL", "format": "TV"}]
+
+
+def _offset(anime: Anime, prequel_episodes: int | None) -> int | None:
+    """:func:`absolute_offset` over a one-hop chain the block described.
+
+    The prequel row is synthesised here rather than cached anywhere, which is
+    the whole reason the corpus can stay offline: ``absolute_offset`` takes its
+    resolver, so "Arc has this row and it ran 24 episodes" is two lines.
+    """
+    if prequel_episodes is None:
+        return None
+    prequel = Anime(
+        anilist_id=PREQUEL_ID,
+        title_romaji="the previous season",
+        format="TV",
+        status="FINISHED",
+        episodes=prequel_episodes,
+    )
+
+    async def resolve(anilist_id: int | None, _mal_id: int | None) -> Anime | None:
+        return prequel if anilist_id == PREQUEL_ID else None
+
+    return asyncio.run(absolute_offset(anime, resolve))
 
 
 def _count(raw: str | None) -> int | None:
@@ -143,6 +180,7 @@ def _case(block: _Block) -> Case:
     for required in REQUIRED_FIELDS:
         assert required in block.single, f"{CORPUS.name}:{block.line} has no {required}"
     single = block.single
+    prequel_episodes = _count(single.get("prequel_episodes"))
     anime = Anime(
         anilist_id=block.line,
         title_romaji=single["romaji"],
@@ -152,9 +190,10 @@ def _case(block: _Block) -> Case:
         format=single["format"],
         episodes=_count(single.get("episodes")),
         season_year=_count(single.get("year")),
-        relations=_relations(single.get("prequel")),
+        relations=_relations(single.get("prequel"), prequel_episodes),
     )
     return Case(
+        offset=_offset(anime, prequel_episodes),
         line=block.line,
         name=single["case"],
         anime=anime,
@@ -223,12 +262,13 @@ def _accept(case: Case, release: Release) -> Candidate | None:
         season=anime_season(case.anime),
         single=is_single(case.anime),
         year=case.anime.season_year,
+        offset=case.offset,
     )
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
 def test_case(case: Case) -> None:
-    built = queries(case.anime, case.number)
+    built = queries(case.anime, case.number, offset=case.offset)
 
     for form in case.query_forms:
         assert form in built, f"{case.id}: {form!r} is not among {built}"

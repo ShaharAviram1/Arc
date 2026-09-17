@@ -22,6 +22,12 @@ second set of rows — everything on air this week, whatever season it carries
 (:func:`~arc.services.catalog.schedule.airing_this_week`) — and the prev/next
 views do not. The current week is a calendar and the others are a catalogue
 browse; see the service's module docstring.
+
+The one thing here that is about the *caller* rather than the season is
+:func:`watched_marks`: FR-W5's answer for the episode each slot names, and only
+where that episode has already aired. It is what Watch Now's "✓ Watched" is
+drawn from, and confining it to aired slots is the whole of the rule (owner,
+2026-09-17).
 """
 
 from __future__ import annotations
@@ -30,14 +36,16 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.deps import CurrentUser, SessionDep
 from arc.api.schedule_schemas import SchedulePage, SeasonName
 from arc.models import Anime, Episode
-from arc.services.catalog import list_status_for
+from arc.services.catalog import list_progress_for, list_status_for
 from arc.services.catalog.schedule import (
     ScheduleRow,
+    WeekPlacement,
     adjacent_seasons,
     airing_this_week,
     current_season,
@@ -45,6 +53,8 @@ from arc.services.catalog.schedule import (
     season_members,
     user_timezone,
 )
+from arc.services.playback.progress import completed_episode_ids
+from arc.services.playback.watched import watched_source
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
@@ -150,7 +160,63 @@ async def schedule(
         prev=previous,
         upcoming=upcoming,
         timezone=timezone.key,
+        watched=await watched_marks(session, user_id=user.id, placement=placement, now=at),
     )
 
 
-__all__ = ["MAX_YEAR", "MIN_YEAR", "now", "router"]
+async def watched_marks(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    placement: WeekPlacement,
+    now: datetime,
+) -> dict[int, bool]:
+    """FR-W5's answer for every slot whose named episode has already aired.
+
+    **Only for those slots**, which is the whole rule (owner, 2026-09-17). A
+    broadcast that has not happened cannot have been watched, so an upcoming
+    appointment gets no entry here and its ``watched`` goes over the wire as
+    null — Watch Now used to draw "Episode 23 ✓ Watched" beside Friday's slot,
+    having read the tick off the show's latest *aired* episode instead of the
+    one the card names.
+
+    Almost always empty, and free when it is: a week's slots point at the next
+    broadcast, so the only ones in the past are the show that aired earlier
+    today and the row a refresh has not caught up with yet. Three queries when
+    there is one of those — the episode ids behind the ``(anime, number)``
+    pairs, then FR-W5's two halves through the same helpers every other page
+    uses — and none at all when there is not.
+    """
+    entries = [*placement.unscheduled, *(entry for day in placement.days for entry in day)]
+    pairs = [
+        (entry.anime.id, entry.next_episode)
+        for entry in entries
+        if entry.next_episode is not None and entry.next_at is not None and entry.next_at <= now
+    ]
+    if not pairs:
+        return {}
+
+    rows = await session.execute(
+        select(Episode.id, Episode.anime_id, Episode.number).where(
+            tuple_(Episode.anime_id, Episode.number).in_(pairs)
+        )
+    )
+    found = list(rows.all())
+    completed = await completed_episode_ids(
+        session, user_id=user_id, episode_ids=[episode_id for episode_id, _, _ in found]
+    )
+    progress = await list_progress_for(
+        session, user_id=user_id, anime_ids=[anime_id for _, anime_id, _ in found]
+    )
+    return {
+        anime_id: watched_source(
+            number,
+            completed=episode_id in completed,
+            list_progress=progress.get(anime_id, 0),
+        )
+        is not None
+        for episode_id, anime_id, number in found
+    }
+
+
+__all__ = ["MAX_YEAR", "MIN_YEAR", "now", "router", "watched_marks"]

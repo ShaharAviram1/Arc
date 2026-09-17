@@ -64,10 +64,11 @@ import {
  * recommendation run suggested. Every shelf hides itself when it is empty,
  * because a page of empty shelves says "broken", not "quiet week".
  *
- * The data is the same three-section `/api/home` aggregate as before, plus the
- * season grid the Schedule page already asks for, the stored recommendation
- * run the Recs page already holds, and the viewer's list as My List already
- * fetches it — four shared caches, no new call shape and no new endpoint.
+ * The data is the `/api/home` aggregate — one shelf per section, all four
+ * decided server-side since 2026-09-17 — plus the season grid the Schedule
+ * page already asks for, the stored recommendation run the Recs page already
+ * holds, and the viewer's list as My List already fetches it: four shared
+ * caches, no new call shape and no new endpoint.
  */
 
 /** Where you stopped, then the first thing that is ready. Eight is a shelf. */
@@ -655,25 +656,23 @@ function continueWatching(home: HomePage): EpisodeItem[] {
 }
 
 /**
- * Episodes that arrived this week, are playable, and have not been opened.
- * An episode already on the Continue watching shelf is left out: it is the
- * same episode, and the shelf above it is the one that says what to do.
+ * Episodes Arc holds a file for that the viewer has not started (FR-W1).
+ *
+ * The server decides the whole shelf — ready, on a followed show, unstarted
+ * and unwatched, newest file first — and this only cuts it to a shelf's worth.
+ * It used to be a filter over `new_this_week`, which meant the shelf quietly
+ * also required the episode to have been broadcast in the last seven days: a
+ * ready episode of a show that finished airing a fortnight ago could not reach
+ * Watch Now at all (owner, 2026-09-17, from production). Deriving one shelf
+ * from another's window was the bug, so the derivation is gone.
  */
 function readyToWatch(home: HomePage): EpisodeItem[] {
-  const started = new Set(home.continue_watching.map((entry) => entry.episode.id))
-
-  return home.new_this_week
-    .filter(
-      (entry) =>
-        entry.episode.state === 'ready' && !entry.episode.watched && !started.has(entry.episode.id),
-    )
-    .slice(0, SHELF_LIMIT)
-    .map((entry) => ({
-      anime: entry.anime,
-      episode: entry.episode,
-      position: null,
-      duration: null,
-    }))
+  return home.ready_to_watch.slice(0, SHELF_LIMIT).map((entry) => ({
+    anime: entry.anime,
+    episode: entry.episode,
+    position: null,
+    duration: null,
+  }))
 }
 
 /**
@@ -786,13 +785,19 @@ interface Appointment {
   weekday: number
   time: string
   episode: string
-  /** True once the viewer has watched this week's episode (FR-W5). */
+  /**
+   * True once the viewer has watched the episode this card names (FR-W5).
+   * Always false for a broadcast that has not happened yet — the server sends
+   * null for those, and null is not a tick.
+   */
   watched: boolean
   tonight: boolean
 }
 
 /**
- * Whether the viewer has already watched this week's episode of a show.
+ * The week ahead, starting today and wrapping round to yesterday: the shelf is
+ * read left to right as "tonight, then tomorrow", so a Thursday viewer should
+ * not have to scroll past Monday to find it.
  *
  * **This shelf carries no acquisition state** (owner, 2026-09-13). It used to
  * label every tile with the episode's state, which meant most of a following
@@ -803,22 +808,15 @@ interface Appointment {
  * page, where FR-A7's per-episode state still lives in full.
  *
  * What is left is the one fact a viewer wants from a week's calendar: have I
- * seen it? The home aggregate carries the episodes that aired in the last
- * seven days with FR-W5's watched flag on each, so an episode covered only by
- * an imported list progress ticks too — which on the owner's own list is most
- * of them.
+ * seen it? That is `entry.watched`, which the server answers **about the
+ * episode the card names** and leaves null for one that has not aired. The
+ * page used to look the tick up by show in `new_this_week` — the newest aired
+ * episode of that show, whichever episode the card happened to be about — so
+ * Friday's slot read "Episode 23 ✓ Watched" on a list standing at 22 (owner,
+ * 2026-09-17, from production). Nobody has watched a broadcast that has not
+ * happened.
  */
-function watchedThisWeek(home: HomePage, animeId: number): boolean {
-  const found = home.new_this_week.find((entry) => entry.anime.id === animeId)
-  return found !== undefined && found.episode.watched
-}
-
-/**
- * The week ahead, starting today and wrapping round to yesterday: the shelf is
- * read left to right as "tonight, then tomorrow", so a Thursday viewer should
- * not have to scroll past Monday to find it.
- */
-function appointments(schedule: SchedulePage, home: HomePage, today: number): Appointment[] {
+function appointments(schedule: SchedulePage, today: number): Appointment[] {
   // -1 means the viewer's timezone did not resolve to a weekday; the week then
   // starts on Monday and nothing is "tonight", which is the honest fallback.
   const start = today < 0 ? 0 : today
@@ -837,7 +835,7 @@ function appointments(schedule: SchedulePage, home: HomePage, today: number): Ap
         episode:
           entry.next_episode === null ? 'Next episode' : `Episode ${String(entry.next_episode)}`,
         tonight: weekday === today,
-        watched: watchedThisWeek(home, entry.anime.id),
+        watched: entry.watched === true,
       })
     }
   }
@@ -993,9 +991,7 @@ export function Home() {
   const started = continueWatching(data)
   const ready = readyToWatch(data)
   const week =
-    schedule.data === undefined
-      ? []
-      : appointments(schedule.data, data, weekdayInTimezone(timezone))
+    schedule.data === undefined ? [] : appointments(schedule.data, weekdayInTimezone(timezone))
   const picks = recs.data?.run?.picks ?? []
 
   // Built as a list rather than five conditionals in the tree, so the 72px

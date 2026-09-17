@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Artwork, type ArtworkShape } from '@/components/ui/Artwork'
+import { Artwork, type ArtworkRadius, type ArtworkShape } from '@/components/ui/Artwork'
 import { cx } from '@/components/ui/styles'
 
 /**
@@ -16,7 +16,12 @@ import { cx } from '@/components/ui/styles'
  * (owner, 2026-09-12, "continue watching posters need adjustment").
  *
  * The ground is the poster by default; a caller with something else to blur —
- * a hero holding a banner too wide to fill its frame — passes `ground`.
+ * a hero holding a banner too wide to fill its frame — passes `ground`. A
+ * caller that wants **no** wash at all passes `ground={null}`, which leaves the
+ * crisp poster letterboxed on the frame's own surface: the show page's episode
+ * list takes that form, because a list is fifty rows deep and fifty 40px blurs
+ * is a lot of compositing for a ground nobody is looking at (owner,
+ * 2026-09-17).
  *
  * A poster is never scaled up to fill the frame, which is the whole point: the
  * wash is a ground rather than a picture, so its resolution stops mattering,
@@ -46,6 +51,8 @@ export interface PosterWashProps {
   ground?: string | null
   /** The frame's ratio: `hero` for a hero, `still` for an episode card. */
   shape: ArtworkShape
+  /** Overrides the radius the shape would pick, exactly as `Artwork` does. */
+  radius?: ArtworkRadius
   /** Loads both copies at once. For a hero, which is above the fold. */
   eager?: boolean
   /** Playback progress, passed through to the frame's strip. */
@@ -66,6 +73,7 @@ export function PosterWash({
   poster,
   ground,
   shape,
+  radius,
   eager = false,
   progress = null,
   padding,
@@ -77,7 +85,7 @@ export function PosterWash({
   const wash = ground === undefined ? poster : ground
 
   return (
-    <Artwork url={null} shape={shape} progress={progress} className={className}>
+    <Artwork url={null} shape={shape} radius={radius} progress={progress} className={className}>
       {wash === null ? null : (
         <img
           data-hero-backdrop

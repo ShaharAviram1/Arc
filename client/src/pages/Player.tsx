@@ -46,6 +46,15 @@ import { ProgressReporter } from '@/player/ProgressReporter'
  * 10), what-to-watch in the middle (previous, next, watched), and fullscreen
  * on its own at the right.
  *
+ * The end of an episode is **two moments**, not one (owner, 2026-09-17). The
+ * completion mark (FR-S4, 90 %) is bookkeeping: Arc has recorded the episode,
+ * and all the viewer needs is a receipt, so it gets a small "Marked as
+ * watched" toast for four seconds and nothing else. The *end* is the decision
+ * — with 1:30 left, and again once the media ends, a card offers the next
+ * episode, staying put, and the show page. The overlay used to arrive at the
+ * completion mark, which put a decision on screen ten minutes before there was
+ * anything to decide.
+ *
  * The bar's second pass is about what it *covers*. Subtitles are burned into
  * the picture just above the bottom edge, so the bar sits 12px off it, is
  * barely there (0.22, carried by the blur rather than the fill, with the
@@ -88,6 +97,25 @@ const ACTIVITY_THROTTLE_MS = 400
  * six words; Dismiss still works for anyone who wants it gone sooner.
  */
 const RESUME_NOTICE_MS = 5000
+
+/**
+ * How much has to be left before the end-of-episode card comes up (owner,
+ * 2026-09-17). A minute and a half is the end of an episode as a viewer
+ * experiences it — the outro is running and the decision about what happens
+ * next is live — where the completion mark is merely where Arc's bookkeeping
+ * happens, ten minutes earlier on a 24-minute episode.
+ *
+ * `total > END_OVERLAY_SECONDS` guards the card: on something shorter than the
+ * window itself the rule would put it up at the first frame, which is the
+ * opposite of an *end*-of-episode card. Such a file still gets it on `ended`.
+ */
+const END_OVERLAY_SECONDS = 90
+
+/** How long the completion receipt stays up before it takes itself away. */
+const MARKED_TOAST_MS = 4000
+
+/** The receipt itself. Six words, no action: nothing is being asked. */
+const MARKED_WATCHED = 'Marked as watched'
 
 /** Fields that own their keystrokes; a shortcut must not fire inside one. */
 const EDITABLE = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
@@ -213,10 +241,17 @@ function FullscreenGlyph({ exit }: { exit: boolean }) {
  * with the number reading through the middle of it so the button says how far
  * without a word of text beside it.
  *
- * One drawing, mirrored for the forward case, and only the arc is mirrored:
- * the number has to stay the right way round. The arc is three quarters of a
- * circle with the gap at the top, and the open chevron sitting in that gap is
- * the head, pointing the way the playhead is about to move.
+ * One drawing, mirrored for the forward case, and only the ring and its head
+ * are mirrored: the number has to stay the right way round, so it sits outside
+ * the mirrored group.
+ *
+ * The rewind is the drawing (owner, 2026-09-17: the arc was on the wrong side).
+ * Its ring **opens on the left** — three quarters of a circle running from
+ * half past ten, the long way over the top and down the right, to half past
+ * seven — and the head sits at the top of that opening pointing down into it,
+ * which is counter-clockwise, which is backwards. The forward glyph is that
+ * flipped about the vertical: the opening on the right and the head turning
+ * clockwise.
  */
 function SkipSecondsGlyph({ back }: { back: boolean }) {
   return (
@@ -233,8 +268,8 @@ function SkipSecondsGlyph({ back }: { back: boolean }) {
         strokeLinejoin="round"
         transform={back ? undefined : 'translate(24 0) scale(-1 1)'}
       >
-        <path d="M12 5.1A7.6 7.6 0 1 0 19.6 12.7" />
-        <path d="M15.1 1.9 11.9 5.1l3.2 3.2" />
+        <path d="M6.7 7.3A7.5 7.5 0 1 1 6.7 17.9" />
+        <path d="M10.3 7.3H6.7V3.7" />
       </g>
       <text
         x="12"
@@ -435,52 +470,105 @@ function Notice({
 }
 
 /**
- * What happens next, once the episode is finished (FR-S5). The next episode is
- * offered when it is playable and named when it is not, so the viewer knows
- * whether to wait or to leave.
+ * The receipt for crossing the completion mark (FR-S4).
+ *
+ * Quiet by construction: a pill of the same glass the notices wear, in the
+ * corner the bar already owns, gone in four seconds. It carries **no button**
+ * — nothing is being asked, and an OK on a statement of fact is one more thing
+ * to dismiss — but the pill itself takes a click for anyone who wants it gone
+ * sooner. It is a `role="status"` live region, so the announcement a sighted
+ * viewer gets from the corner of their eye is the one a screen reader gets in
+ * words, and neither interrupts the episode.
  */
-function EndOverlay({ info, onDismiss }: { info: PlayInfo; onDismiss: () => void }) {
+function MarkedToast({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      title="Dismiss"
+      onClick={onDismiss}
+      className={cx(
+        // 108px up, the same shelf the fatal-error strip uses: clear of the
+        // bar whether the bar is showing or has faded out from under it.
+        'absolute bottom-[108px] left-3 z-10 cursor-pointer md:left-6',
+        'rounded-full border-[0.5px] border-[rgba(255,255,255,0.16)] px-4 py-2 text-[13px]',
+        'bg-[rgba(18,23,34,0.72)] text-[var(--arc-text-muted)] shadow-bar backdrop-blur-bar',
+      )}
+    >
+      {MARKED_WATCHED}
+    </div>
+  )
+}
+
+/**
+ * What happens next, with the episode nearly over (FR-S5, owner 2026-09-17).
+ *
+ * A card rather than the black wash it replaces: the video is still playing
+ * underneath during the last ninety seconds, and blanking the picture to ask a
+ * question about it is the wrong trade. The wash is a gradient off the bottom
+ * edge, the card sits above the control bar on the side the toast does not
+ * use, and the whole scrim is `pointer-events-none` so a click on the picture
+ * still plays and pauses it.
+ *
+ * Three actions, in the order a viewer wants them. **Next episode** is the
+ * primary and appears only when there is one and it is ready; when the next
+ * episode exists but is still being prepared, or there is no next episode, the
+ * line above says which, and no dead button is drawn under a sentence that has
+ * already explained itself. **Keep watching** puts the card away for the rest
+ * of this playback. **Back to the show** leaves.
+ *
+ * Nothing here is focused on mount: the playback shortcuts live on the window
+ * and must keep working (FR-S6), and space landing on a focused button instead
+ * of the video would be exactly the theft this card is meant to avoid.
+ */
+function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: () => void }) {
   const next = info.next
+  const heading =
+    next === null
+      ? 'This was the last episode'
+      : next.ready
+        ? `Next: Episode ${String(next.number)}`
+        : `Episode ${String(next.number)} isn’t ready yet`
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5 bg-black/80 p-6 text-center">
-      {next === null ? (
-        <p className="text-[20px] font-semibold text-[var(--arc-text)]">
-          This was the last episode
-        </p>
-      ) : next.ready ? (
-        <>
-          <p className="text-[20px] font-semibold text-[var(--arc-text)]">
-            {`Next: Episode ${String(next.number)}`}
-          </p>
-          <Link to={`/watch/${String(next.id)}`} className={buttonClass('primary')}>
-            Play
-          </Link>
-        </>
-      ) : (
-        <p className="text-[20px] font-semibold text-[var(--arc-text)]">
-          {`Episode ${String(next.number)} isn’t ready yet`}
-        </p>
+    <div
+      className={cx(
+        'pointer-events-none absolute inset-0 z-20 flex items-end justify-end p-3 md:p-6',
+        'bg-gradient-to-t from-[rgba(0,0,0,0.72)] via-[rgba(0,0,0,0.22)] to-transparent',
       )}
-
-      <div className="flex items-center gap-5 text-[14px]">
-        <Link
-          to={`/anime/${String(info.anime.id)}`}
-          className={cx('text-[var(--arc-text)] underline-offset-4 hover:underline', FOCUS_RING)}
-        >
-          Back to show
-        </Link>
-        <button
-          type="button"
-          onClick={onDismiss}
-          className={cx(
-            'text-[var(--arc-text-muted)] hover:text-[var(--arc-text)]',
-            'underline-offset-4 hover:underline',
-            FOCUS_RING,
+    >
+      <div
+        role="group"
+        aria-label="End of episode"
+        className={cx(
+          'pointer-events-auto mb-[96px] w-full max-w-[26rem] rounded-card border-[0.5px]',
+          'border-[rgba(255,255,255,0.16)] bg-[rgba(18,23,34,0.72)] p-5 shadow-bar backdrop-blur-bar',
+        )}
+      >
+        <p className="text-[17px] font-semibold text-[var(--arc-text)]">{heading}</p>
+        <div className="mt-4 flex flex-wrap items-center gap-2.5">
+          {next === null || !next.ready ? null : (
+            <Link
+              to={`/watch/${String(next.id)}`}
+              className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
+            >
+              Next episode
+            </Link>
           )}
-        >
-          Dismiss
-        </button>
+          <button
+            type="button"
+            onClick={onKeepWatching}
+            className={buttonClass('chip', 'text-[var(--arc-text)]')}
+          >
+            Keep watching
+          </button>
+          <Link
+            to={`/anime/${String(info.anime.id)}`}
+            className={buttonClass('chip', 'text-[var(--arc-text)]')}
+          >
+            Back to the show
+          </Link>
+        </div>
       </div>
     </div>
   )
@@ -488,8 +576,9 @@ function EndOverlay({ info, onDismiss }: { info: PlayInfo; onDismiss: () => void
 
 /**
  * The page for one episode. Mounted under a `key` of that episode's id, so
- * moving to the next one starts from scratch — no resume flag, no end overlay
- * and no reporter left over from the episode just finished.
+ * moving to the next one starts from scratch — no resume flag, no end overlay,
+ * no "Keep watching" still in force, and no reporter left over from the
+ * episode just finished.
  */
 function PlayerView({ id }: { id: number }) {
   const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id)
@@ -518,7 +607,21 @@ function PlayerView({ id }: { id: number }) {
   const clickTimerRef = useRef<number | null>(null)
 
   const [resumedAt, setResumedAt] = useState<number | null>(null)
-  const [finished, setFinished] = useState(false)
+  /**
+   * The three pieces the end of an episode is made of (owner, 2026-09-17).
+   *
+   * `markedToast` is the completion receipt and nothing more — it is raised by
+   * the one report the server calls `newly_completed`, which is exactly once
+   * per (user, episode), so a rewatch never raises it and the client needs no
+   * rule of its own for that. `ended` is the media's own end. `endDismissed`
+   * is "Keep watching", which holds for the rest of *this* playback: the page
+   * is keyed on the episode id, so the next episode starts with it cleared,
+   * and nothing in between — a tick, the media ending — brings the card back
+   * to someone who has just said they did not want it.
+   */
+  const [markedToast, setMarkedToast] = useState(false)
+  const [ended, setEnded] = useState(false)
+  const [endDismissed, setEndDismissed] = useState(false)
   /**
    * Consecutive failed progress writes, and whether the viewer has waved the
    * warning away. Both live here rather than in `ProgressReporter`: the
@@ -551,9 +654,25 @@ function PlayerView({ id }: { id: number }) {
 
   const serverDuration = data?.duration ?? 0
   const total = mediaDuration > 0 ? mediaDuration : serverDuration
+  const remaining = total > 0 ? Math.max(0, total - position) : 0
+
+  /**
+   * Whether the end-of-episode card is up. Derived rather than stored, so the
+   * only thing that has to be remembered is the viewer's "no" — it comes up on
+   * its own with 1:30 left and again if the media ends, and a seek backwards
+   * out of the window takes it away again by the same rule that brought it.
+   */
+  const endOverlayShown =
+    !endDismissed && (ended || (total > END_OVERLAY_SECONDS && remaining <= END_OVERLAY_SECONDS))
+
   const { mutate: reportProgress } = useReportProgress()
   const markWatched = useMarkWatched()
   const unmarkWatched = useUnmarkWatched()
+
+  /** "Keep watching", from the card's own button and from Escape. */
+  const keepWatching = useCallback(() => {
+    setEndDismissed(true)
+  }, [])
 
   /** The one place `chromeShown` moves, so the ref never drifts from the state. */
   const setChrome = useCallback((next: boolean) => {
@@ -571,7 +690,9 @@ function PlayerView({ id }: { id: number }) {
             // failures ends and the warning is armed again for the next one.
             setProgressFailures(0)
             setProgressWarningDismissed(false)
-            if (result.newly_completed) setFinished(true)
+            // The completion mark is a receipt, not a decision: a toast, and
+            // no overlay (owner, 2026-09-17).
+            if (result.newly_completed) setMarkedToast(true)
           },
           onError: () => {
             setProgressFailures((count) => count + 1)
@@ -734,6 +855,14 @@ function PlayerView({ id }: { id: number }) {
           event.preventDefault()
           video.muted = !video.muted
           return
+        case 'Escape':
+          // Escape is the card's Keep watching — but only while the card is
+          // up, or a viewer leaving fullscreen at minute three would silently
+          // spend a dismissal they never made. It is deliberately *not*
+          // prevented: in fullscreen the browser reads the same key as "get
+          // out", and both of those are wanted at once.
+          if (endOverlayShown) keepWatching()
+          return
         default:
       }
     }
@@ -742,7 +871,7 @@ function PlayerView({ id }: { id: number }) {
     return () => {
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [serverDuration, toggleFullscreen])
+  }, [endOverlayShown, keepWatching, serverDuration, toggleFullscreen])
 
   // Any sign of a person brings the chrome back. Moves are throttled, because
   // a pointer move fires dozens of times a second and none of them need a
@@ -798,12 +927,13 @@ function PlayerView({ id }: { id: number }) {
    * Each of the three is a case where taking the bar away would either break a
    * gesture in progress or hide the answer to a question the page has just
    * asked. A drag would have the track pulled out from under the finger
-   * dragging it. The end overlay and the unsaved-progress strip are both the
-   * page saying something playback cannot show, and both offer a control —
-   * Play, Dismiss — that has to stay reachable while they are up.
+   * dragging it. The end-of-episode card and the unsaved-progress strip are
+   * both the page saying something playback cannot show, and both offer a
+   * control — Next episode, Dismiss — that has to stay reachable while they
+   * are up.
    */
   const progressWarning = progressFailures >= PROGRESS_FAILURE_LIMIT && !progressWarningDismissed
-  const chromeHeld = scrubbing || finished || progressWarning
+  const chromeHeld = scrubbing || endOverlayShown || progressWarning
 
   /**
    * The chrome hides itself after a second and a half of an idle pointer, and
@@ -861,6 +991,22 @@ function PlayerView({ id }: { id: number }) {
       window.clearTimeout(timer)
     }
   }, [resumedAt])
+
+  /**
+   * And so does the completion receipt, after four (owner, 2026-09-17). Same
+   * shape as the resume notice above: keyed on the flag, so a click that puts
+   * it away early cancels the pending timeout rather than leaving one armed.
+   */
+  useEffect(() => {
+    if (!markedToast) return
+
+    const timer = window.setTimeout(() => {
+      setMarkedToast(false)
+    }, MARKED_TOAST_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [markedToast])
 
   if (isPending) {
     return (
@@ -938,7 +1084,6 @@ function PlayerView({ id }: { id: number }) {
           .join(', ')
 
   const played = total > 0 ? Math.min(1, Math.max(0, position / total)) : 0
-  const remaining = total > 0 ? Math.max(0, total - position) : 0
 
   function onReady(duration: number) {
     const video = videoRef.current
@@ -1036,7 +1181,7 @@ function PlayerView({ id }: { id: number }) {
           reporterRef.current?.end(nextPosition, resolveDuration(duration, serverDuration))
           setPlaying(false)
           setChrome(true)
-          setFinished(true)
+          setEnded(true)
         }}
       />
 
@@ -1299,14 +1444,19 @@ function PlayerView({ id }: { id: number }) {
         </div>
       </div>
 
-      {finished ? (
-        <EndOverlay
-          info={info}
+      {/*
+        The receipt stands down when the card comes up: the card says more
+        than the pill does, and on a narrow screen they want the same corner.
+      */}
+      {markedToast && !endOverlayShown ? (
+        <MarkedToast
           onDismiss={() => {
-            setFinished(false)
+            setMarkedToast(false)
           }}
         />
       ) : null}
+
+      {endOverlayShown ? <EndOverlay info={info} onKeepWatching={keepWatching} /> : null}
     </div>
   )
 }

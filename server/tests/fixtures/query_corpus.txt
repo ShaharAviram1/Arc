@@ -21,6 +21,14 @@
 #   prequel    `yes` when the catalogue says something comes *before* this
 #              entry, which is what withholds the bare-head query forms.
 #              Defaults to no.
+#   prequel_episodes
+#              how many episodes that prequel ran. Implies `prequel: yes`,
+#              and is what `absolute_offset()` adds up for the absolute
+#              query forms and the absolute acceptance rule — the count is
+#              the block's own fact, so the corpus stays offline and states
+#              no catalogue number it cannot show. The synthetic prequel it
+#              builds is a FINISHED TV row, since only a finished season's
+#              episode count is a fact rather than an announcement.
 #   number     the episode being searched for. Required.
 #   query      a query form `queries()` MUST build for it; repeat the line.
 #   absent     a form it must NOT build — a bare head that would return the
@@ -291,3 +299,31 @@ accept: [Moozzi2] Kizumonogatari III Reiketsu-hen Movie [BD 1920x1080 x264 FLAC]
 reject: [Coalgirls] Kizumonogatari I Tekketsu-hen Movie [BD 1080p FLAC]
 reject: [Coalgirls] Kizumonogatari II Nekketsu-hen Movie [BD 1080p FLAC]
 reject: [Coalgirls] Kizumonogatari [BD 1080p]
+
+case: jujutsu-kaisen-s2-absolute
+# AniList 145064, and the case absolute numbering was built for (2026-09-17).
+# SubsPlease released season two as `- 25` through `- 47` while the catalogue
+# numbers that entry 1-23, so `Jujutsu Kaisen S2 - 01` matched nothing and
+# `Jujutsu Kaisen - 01` was season *one's* first episode: the episode was
+# either not fetched or fetched wrong. Season one ran 24 (the block's own
+# count, which is what the offset is read off - never a number guessed from
+# the release in front of it), so `- 25` is episode 1 here and `- 24` is still
+# season one's last. Both accepted releases pass `acceptable()` on their own;
+# which of the two is *taken* when both come back is `filter_items()`' rule,
+# and the marked one wins.
+romaji: Jujutsu Kaisen 2nd Season
+english: Jujutsu Kaisen Season 2
+format: TV
+episodes: 23
+prequel_episodes: 24
+number: 1
+query: Jujutsu Kaisen S2 - 01
+query: Jujutsu Kaisen - 01
+query: Jujutsu Kaisen - 25
+query: Jujutsu Kaisen 25
+accept: [SubsPlease] Jujutsu Kaisen - 25 (1080p) [F7B4A1C2].mkv
+accept: [SubsPlease] Jujutsu Kaisen S2 - 01 (1080p) [A1B2C3D4].mkv
+reject: [SubsPlease] Jujutsu Kaisen - 01 (1080p) [B2C3D4E5].mkv
+reject: [SubsPlease] Jujutsu Kaisen - 24 (1080p) [C3D4E5F6].mkv
+reject: [SubsPlease] Jujutsu Kaisen S2 - 25 (1080p) [D4E5F6A7].mkv
+reject: [Erai-raws] Jujutsu Kaisen 2nd Season - 25 ~ 47 [1080p][Multiple Subtitle]

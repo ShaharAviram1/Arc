@@ -1,7 +1,7 @@
 # Arc — Architecture
 
 > Living document. Update whenever the stack, a component boundary, or an
-> integration changes. Last updated: 2026-09-14.
+> integration changes. Last updated: 2026-09-17.
 > Companions: [spec.md](spec.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Stack at a glance
@@ -218,6 +218,33 @@ because the two are different elements, and rendering both would put a second
 `<nav>`, a second search field and a duplicate set of account links into the
 accessibility tree on every page. The player renders outside the shell and has
 no chrome at all.
+
+**Schedule shows a three-day window** (`pages/Schedule.tsx`, owner
+2026-09-17). The API is unchanged — it still answers with the whole
+Monday–Sunday week grouped by weekday in the viewer's zone — and the page
+renders three of those days at a time, starting on today: `DayWindow` holds
+the chevrons and the three `DayColumn`s, and the row of column headings, with
+an arrow at each end, *is* the day-and-date bar (a `role="group"` labelled
+"Days shown"). The state it keeps is an **offset from today**, not a start
+index: the zone arrives with the response, so today is unknown on the first
+render, and an offset lets the window land on today the moment the answer does
+and follow it across midnight with the existing one-minute tick (`useClock`,
+which now returns the weekday *and* the week's dates from that one interval).
+The offset is clamped so the window never runs off either end of the week the
+server sent. Dates come from `weekDates` in `lib/schedule.ts` — pure, read in
+the schedule's own zone, arithmetic at noon UTC so a clock change cannot move
+a day, and composed as "17 Sep" rather than formatted whole because `en-GB`
+spells this month "Sept". Season prev/next is a different axis and is
+untouched — but **only the live season's grid gets dates and a today**: the
+response says which season it is, not whether that is the current one, so
+`currentSeason` / `isCurrentSeason` (also in `lib/schedule.ts`) repeat the
+server's quarter arithmetic from `services/catalog/seasons.py`, in UTC as it
+does, and the page compares that with `data.year`/`data.season` rather than
+with the URL — a pinned `?year=2026&season=FALL` in Fall 2026 is the live week
+however it was arrived at. A browse shows weekday names alone and opens on
+Monday, because there is no today in a season that is over. The room three columns buy (~350px against 158px) goes into the
+rows: the whole title, never clamped, a 15px air time, a 56px key visual, and
+for a followed show a quiet ember left rule with an `sr-only` "On your list".
 
 Tokens live in `client/src/index.css` (`:root` for the `--arc-*` values,
 `@theme inline` for the Tailwind namespaces) per the design handoff in
@@ -533,6 +560,55 @@ strip, so nothing on the page moves when they appear.
   the client by Arc's own hand — dragged an episode that had since been
   retried from `downloading` back to `unavailable` on every tick, and the
   release that was working was never handed to the library.
+- **Absolute numbering on sequels (FR-A4, 2026-09-17).** `nyaa.absolute_offset`
+  is how many episodes ran *before* a catalogue entry, and it is the one input
+  to the rule that must never be inferred. It walks `anime.relations` →
+  `PREQUEL` through **cached `anime` rows**, adding `episodes` at each hop, and
+  answers `None` — declining the whole feature for that entry, which is to say
+  leaving it exactly as it behaved before — when any of these holds: the entry
+  is a single (`is_single`); a prequel edge that is not a
+  `MOVIE`/`OVA`/`SPECIAL`/`MUSIC` (`ABSOLUTE_SKIPPED_FORMATS`) resolves to no
+  cached row; that row's format is not `TV`/`ONA` (`ABSOLUTE_COUNTED_FORMATS`
+  — a `TV_SHORT`, a null format, anything unclassifiable) or its `episodes` is
+  null or zero; that row's `status` is not `FINISHED`
+  (`ABSOLUTE_FINISHED_STATUS`; every source normalises into AniList's
+  vocabulary on the way in, so there is one spelling — a `RELEASING` season's
+  count is an *announced* total, the number likeliest to be wrong, and being
+  one out puts the absolute number inside the prequel's own band where the
+  season check cannot see it); **two** countable prequel edges sit at one hop;
+  the chain revisits a row or exceeds `MAX_PREQUEL_HOPS` (10). Films and OVAs in the chain
+  are *skipped* (the walk stops at one rather than reaching around it), which is
+  what lets *Jujutsu Kaisen* season two — `PREQUEL` edges to season one **and**
+  to *Jujutsu Kaisen 0* — be answered 24 instead of abandoned. Zero is never
+  returned: "nothing came before" and "do not use this" are one answer.
+  The function is pure and takes an injected async resolver, so the query corpus
+  still runs offline; `jobs._prequel_offset` is the database half (AniList id
+  first, MAL id second, never one `OR` over both) and `search_release` computes
+  it once before the first request, logs at INFO whether an offset applies and
+  which, and hands it to `search_for_episode`. `_prequel_offset` **cannot fail
+  a search**: `relations` is JSONB written by whichever source answered, so an
+  id that is not a number is skipped without a query being issued and anything
+  else is caught once, logged at WARNING, and answered `None` — an entry with no
+  offset is the documented ordinary outcome, and an exception here would put the
+  episode back on the retry schedule over a field the search never needed.
+  With an offset, `queries()` adds `"<season-stripped base> - <N+offset>"` and
+  the dashless `"<base> <N+offset>"` **directly behind the romaji short forms**
+  (padded against the *combined* episode count, so a franchise past 100 is
+  written the way a long show is) — but **only where stripping the season
+  marker actually shortened the title**: an unmarked sequel whose title names an
+  arc (*Made in Abyss: Retsujitsu no Ougonkyou*) has no marker to strip, so its
+  "base" is the whole nine-word name and the pair would spend two of ten slots
+  on a form nobody writes. The acceptance route below still applies to such an
+  entry if one of the forms that *are* asked returns an absolute release.
+  `acceptable()` gains one route to a
+  candidate: a release whose parsed episode is exactly `N + offset`, that
+  **names no season at all**, and whose title clears the same 0.90 bar. A
+  release that names a season is judged by the ordinary per-season rule and
+  nothing else. `filter_items` then applies the rule a single release cannot
+  state: where any season-marked candidate for this episode survives, every
+  absolute one is dropped — explicit beats inferred, and a pool holding both
+  would let seeders settle it. `Candidate.offset` carries the arithmetic into
+  `rank`, whose reasons say `absolute numbering: release 25 = episode 1`.
 - **A release is chosen once.** `jobs._pick` skips any candidate whose info
   hash already has a `torrents` row — any episode, any state. A row only
   exists because an earlier attempt *committed* (`search_release` is one
@@ -891,8 +967,48 @@ and gradients.
   automatic with a dismissible "Resumed from m:ss" notice; a framework-free
   `ProgressReporter` posts every 10 s while playing, on pause, on seek
   (debounced), and on `pagehide` via `sendBeacon`, with a 2 s floor between
-  ordinary reports; the end-of-episode overlay offers the next episode when
-  it is ready.
+  ordinary reports.
+- **The end of an episode, as built (M16 batch 3, FR-S5, owner 2026-09-17).**
+  Two moments, and the client tells them apart by *which fact it is reacting
+  to* rather than by a threshold of its own.
+  - The **completion receipt** is raised by the one progress response whose
+    `newly_completed` is true — the server's once-per-(user, episode) answer
+    (below) — so a rewatch never raises it and the client carries no rule
+    about rewatches at all. It is a `role="status" aria-live="polite"` pill of
+    the same glass the resume notice wears, bottom-left and 108 px up so it
+    clears the control bar whether or not the bar has faded, reading "Marked
+    as watched". Four seconds on a timer keyed to the flag, a click on the
+    pill puts it away sooner, and it carries **no button**: nothing is being
+    asked. The manual "mark watched" control raises no toast — it flips its
+    own glyph, which is a receipt already.
+  - The **end-of-episode card** is derived, not stored: it is up while
+    `ended || (total > 90 && total − position <= 90)` and the viewer has not
+    dismissed it. Deriving it means a seek backwards out of the window takes
+    it away by the same rule that brought it, and the only thing that has to
+    be remembered is the viewer's "no". *Keep watching* — and `Escape`, which
+    is deliberately not `preventDefault`ed so the browser can still leave
+    fullscreen on the same key — sets that flag for the rest of the playback;
+    the page is keyed on the episode id, so the next episode starts with it
+    cleared. The card is a glass panel above the control bar over a bottom
+    gradient, not the black wash it replaces: the episode is still playing
+    during the last ninety seconds, and the scrim is `pointer-events-none` so
+    a click on the picture still pauses it. **Next episode** is the primary
+    and is drawn only when there is a next episode and it is ready; when it
+    exists but is unprepared, or there is none, the card's line says which and
+    no dead button is drawn under a sentence that has already explained
+    itself. Nothing is focused on mount, so FR-S6's window shortcuts keep
+    answering, and `ended` advances nothing on its own. Both the pill and the
+    card are children of the element the page hands to `requestFullscreen`,
+    which is what keeps them visible in the mode an episode is most likely to
+    be finished in. The `>90 s` guard keeps a file shorter than the window
+    itself from opening with its own end-of-episode card; such a file still
+    gets it on `ended`.
+  - The ⟲10 / ⟳10 skip glyphs were redrawn in the same pass (owner: the arc
+    was on the wrong side). One drawing — a ring open on the **left**, running
+    the long way over the top, with a corner arrowhead at the top of the
+    opening pointing down into it, which is anticlockwise — mirrored about the
+    vertical for the forward control. The digits sit outside the mirrored
+    group so "10" never comes out backwards.
 - `newly_completed` is derived from the upsert's `RETURNING old.completed`
   (PostgreSQL 18), so it fires exactly once per (user, episode) even when
   concurrent reports share a timestamp; this pins the database floor at 18. Media routes resolve the target path and refuse anything not
@@ -1569,8 +1685,12 @@ id at all, which is why the offline import is a prerequisite for this.
   waiting for neither:
   1. **Full** enrichments (`enqueue_episode_stills`, up to `STILL_LIMIT` = 8)
      for the shows on the page's 16:9 shelves — Continue watching, then Ready
-     to watch — whose card episode has no `still_url` and which the id map can
-     reach. The nightly sweep reaches these shows too, but "tonight" is the
+     to watch, then the week's episodes — whose card episode has no
+     `still_url` and which the id map can reach. (The third is no longer a
+     16:9 card since the This-week shelf became a broadcast time and a 2:3
+     thumb, but it is still the week's episodes, which are the ones a still is
+     most likely to be missing for; the order is the page's, so the eight the
+     limit allows go to the cards nearest the top.) The nightly sweep reaches these shows too, but "tonight" is the
      wrong answer for the card somebody is looking at now (owner, 2026-09-12).
   2. **Art-only** enrichments for up to 12 shows of this or next season with
      no `backdrop_url` (`_missing_hero_art`) — the pool the client's hero picks
@@ -1608,11 +1728,19 @@ id at all, which is why the offline import is a prerequisite for this.
   re-asks every 5 s for 30 s (`STILL_POLL_MS`, `STILL_POLL_WINDOW_MS` — six
   tries), which is how the stills the open just queued appear without a reload;
   whichever of that and the acquisition poll (FR-A7) wants the sooner answer
-  wins. It never polls an unmapped show — TMDB cannot answer for one — and
-  where `tmdb_mapped` is false, or `/api/health` says `tmdb_enabled` is false,
-  the episode list gains one muted line, "No episode pictures for this show".
-  The line is *absent* on a mapped show precisely because the pictures are
-  coming; the stripe placeholder itself is unchanged either way.
+  wins. It never polls an unmapped show — TMDB cannot answer for one.
+
+  There is **no caption** about missing pictures any more (owner, 2026-09-17).
+  A row or card with no `still_url` falls back to the show's `backdrop_url`
+  (16:9 by construction, so it fills the slot untouched) and then to the key
+  visual framed inside it, so a show the id map cannot reach — One-Room TA,
+  AniList 205068 — carries its own artwork down the list instead of fourteen
+  stripes under a sentence explaining them. `tmdb_mapped` stays on the response
+  for the polling rule above, which is the only thing that still reads it.
+  The two surfaces differ in the *frame*, not in the chain: Home's 16:9 tiles
+  keep `PosterWash`'s blurred ground (a shelf is eight tiles), and the show
+  page's rows pass `ground={null}` for a plain letterboxed poster (a page is
+  fifty rows, and fifty 40 px blurs buy a ground nobody looks at).
 
   Each is one SELECT that also filters out anything already queued, and
   returns nothing once the artwork is in. Everything deduplicates on
@@ -1756,13 +1884,13 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/catalogue/offline` | admin | offline-catalogue import status (M15.5, §5.0a): `{sources: [{source, version, imported_at, rows, checksum}] (newest first), stale, anime_rows, id_rows}`. `stale` is manami's alone — the id map without the titles is not a catalogue — and is true when it has never been imported or is older than `OFFLINE_CATALOGUE_STALE_DAYS`. Reads three counts and nothing else; the import itself is a job |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert. The revert writes `updated_by=arc`, `mal_dirty=true` and stamps `activated_at` if null (FR-A9: it is FR-M7's third user-originated event), on the entry it recreates as well as the one it edits |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come", which is the one thing the client says out loud above an episode list of striped placeholders), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column), and `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8) |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column), and `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8) |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
-| `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. The **current** season's grid also holds every `RELEASING` weekly-format show with an air time inside 7 days, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
-| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8) |
+| `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every `RELEASING` weekly-format show with an air time inside 7 days, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
+| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `ready_to_watch` (episodes in state `ready` on a watching/planned/**on-hold** list, with no `watch_progress` row past `RESUME_MIN_S` = 10 s and none completed, and a number above the entry's progress — FR-W5 read backwards; ordered by `renditions.ready_at DESC NULLS LAST, episodes.id DESC`, max `READY_LIMIT` = 20; **any air date**, which is the point: it was the client filtering `new_this_week` until 2026-09-17, so a ready episode of a show that stopped airing a fortnight ago could not reach the page), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8) |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
@@ -1784,7 +1912,7 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|---|
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). **Interactive calls do not wait on 429**: the app's catalogue is built with `wait_on_rate_limit=False` (`create_catalog`), so a 429 on a search or a show page raises `SourceRateLimited` at once and falls straight through to MAL/offline instead of holding the request open — and, being a burst limit rather than an outage, it leaves the breaker closed, only noting a per-client "rate-limited until" so the next interactive call inside the window skips AniList without a request. The worker's `catalog_for()` keeps the wait. Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
-| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. Items parsed with the same filename parser; kept only when kind=episode, episode number equal, title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked** (FR-A4): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected (§10). |
+| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then — only where `absolute_offset` answered **and** the season marker left a shorter base behind — the **absolute pair** `<season-stripped base> - <N+offset>` and the dashless `<base> <N+offset>` (§5.1a: SubsPlease numbered *Jujutsu Kaisen* season two 25–47, and it writes the romaji franchise name, which is why the pair sits ahead of every english form; an unmarked sequel whose base *is* its whole title gets neither form, since nine words plus a running number is a query with no answer, and only a **finished** prequel chain produces an offset at all), then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. Items parsed with the same filename parser; kept only when kind=episode, episode number equal — **or equal to `N + offset` on a release that names no season at all**, the absolute rule of §5.1a, which is then dropped outright if any season-marked candidate for the same episode also survived — title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked** (FR-A4): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected (§10). |
 | qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
@@ -2016,7 +2144,11 @@ two together.
   whether it has a prequel), the episode being searched for, the query forms
   `queries()` must build, the forms it must **not** build, real nyaa.si release
   names `acceptable()` must accept and reject, and which of the accepted ones
-  `rank()` must prefer. Seventeen cases, every one of them a show that sat in
+  `rank()` must prefer. A block may also declare `prequel_episodes`, which the
+  reader feeds through the real `absolute_offset()` walk (2026-09-17) so the
+  absolute forms and the absolute acceptance rule are asserted from the block's
+  own counts rather than from a catalogue fact the file cannot show.
+  Eighteen cases, every one of them a show that sat in
   `searching` on production (or a film that quietly stood in for one): Rakudai
   (the head form), Mushoku Tensei S3 (the
   short forms), Frieren S1 and S2, One-Room TA (`SxxEyy` and its two batches),
@@ -2024,7 +2156,9 @@ two together.
   not be asked), Cowboy Bebop's year pair, Yarichin☆Bitch-bu and Love Live!
   Superstar!! (symbols), Fate/Zero (the slash), two dub-versus-sub pairs, three
   films and the *Kizumonogatari* trilogy, whose three parts share one name and
-  carry no episode number — the case the strict single title rule exists for. It runs **offline** — `queries`, `acceptable` and `rank` are
+  carry no episode number — the case the strict single title rule exists for —
+  and *Jujutsu Kaisen* season two, whose releases are numbered 25–47 where the
+  catalogue numbers them 1–23. It runs **offline** — `queries`, `acceptable` and `rank` are
   pure functions of an `anime` row — so a query form is a claim about what
   release groups write, dated and written down where it can be argued with.
 - Acquisition window: property tests over progress/N/aired combos.
@@ -3114,3 +3248,121 @@ two together.
   ordering of (2). **Absolute episode numbering is still out of scope** and is its own
   roadmap item: episode 40 of a two-season franchise really is episode 15 of
   the sequel, and working that out needs the relation graph the matcher walks.
+- 2026-09-17 — **The player's end-of-episode flow is two moments, not one**
+  (§5.4a, FR-S5, M16 batch 3). The next-episode overlay was raised by
+  `newly_completed` — the 90 % completion — so on a 24-minute episode it
+  blacked out the picture and asked what to watch next with two and a half
+  minutes still to run. Splitting it costs one derived boolean and one
+  remembered "no": the completion keeps the client reaction it deserves, a
+  four-second `role="status"` pill saying "Marked as watched" with nothing to
+  press, and the card moves to where the decision actually is — 1:30 left, or
+  the media ending. The card is a panel over a gradient rather than a wash,
+  because the episode is still playing underneath it, and `pointer-events-none`
+  on the scrim keeps the click-to-pause gesture working through it. Keep
+  watching (and Escape) holds for the rest of that playback and no longer; the
+  page is keyed on the episode id, so nothing carries into the next one. **No
+  server change and no change to FR-S4**: `newly_completed` is still the
+  server's once-only answer, which is also why a rewatch says nothing without
+  the client owning a rule about rewatches. Nothing auto-advances — the next
+  episode stays something the viewer asks for. The ⟲10 / ⟳10 glyphs were
+  redrawn in the same pass: one rewind, mirrored, with the digits outside the
+  mirrored group.
+
+- 2026-09-17 — **The schedule is three days wide** (FR-C3, owner, M16 batch
+  3; client-only, `pages/Schedule.tsx` and two pure helpers in
+  `lib/schedule.ts`). Seven columns of the 1180px measure are 158px each, and
+  since the current week started carrying every airing show (2026-09-13) that
+  was a page of abbreviations. Three columns, starting on today, with chevron
+  arrows — the hero's own `GLASS_CIRCLE` — at the ends of the day-and-date
+  bar, and left/right arrow keys doing the same from anywhere in the group
+  except inside a field, where the arrows belong to the `<select>`. **The API
+  did not change**: the whole Monday–Sunday week still arrives in one
+  response, the window is a slice of it, and the arrows stop at its ends
+  rather than asking for an eighth day. Two things are worth writing down.
+  (1) The page keeps an **offset from today**, not a start index, because the
+  timezone arrives with the response: a start pinned on the first render would
+  be Monday for ever, and an offset lands on today the moment the answer does
+  and follows it past midnight on the tick that already existed. (2) `useToday`
+  became `useClock` and returns the weekday and the week's dates together —
+  they answer the same question and two intervals would tick apart. Dates are
+  read in the schedule's zone (at 23:00 UTC on a Sunday a Tokyo viewer is
+  already in next week), computed at noon UTC so a clock change cannot move a
+  day, and composed as "17 Sep" because `en-GB` spells September "Sept", which
+  is a character wider than every other month in a heading that has to line up
+  three times across. (3) **A browsed season has no dates and no today**
+  (owner, 2026-09-17, correcting the first build): only the live season's grid
+  is a real week — it is the one the server fills with every show on air —
+  and this week's dates printed over Spring 2026's shows would be a claim
+  about when they air. The response does not say whether the season on screen
+  is the current one, so `currentSeason`/`isCurrentSeason` repeat
+  `services/catalog/seasons.py`'s quarter arithmetic in UTC and the page
+  compares seasons rather than reading the URL, which keeps a pinned
+  `?year=2026&season=FALL` in Fall 2026 the live week. The list-status control
+  keeps its `lg:hidden` rule: the columns are roomier, not infinite, and the
+  design's answer for the wide grid is still one tap on the show page.
+- 2026-09-17 — **Two Watch Now shelves stop borrowing another shelf's answer**
+  (§5b, §5.8, spec FR-W1/FR-W5, owner, M16 batch 3; both found on production).
+  The bug is the same twice: a shelf derived from a neighbour's data inherits
+  the neighbour's `WHERE` clause.
+  **Ready to watch** was `home.new_this_week.filter(ready && !watched &&
+  !started)` in `Home.tsx`, so the shelf silently also required "aired in the
+  last seven days" — One-Room TA (AniList 205068) finished airing on
+  2026-08-27 with two episodes ready, and the page could not show either. It
+  is now `services/catalog/progress.ready_to_watch`: `episodes.state = ready`,
+  the entry in watching/planned/**on_hold**, `NOT EXISTS` a `watch_progress`
+  row past `RESUME_MIN_S` or completed, and `episodes.number >
+  list_entries.progress` — FR-W5 read backwards, so the schema's `completed`
+  argument is a constant `False` rather than a third round trip. Ordered by
+  `renditions.ready_at DESC NULLS LAST, episodes.id DESC` (the *file's* clock,
+  since the shelf is about the file) and capped at 20, on a new
+  `ready_to_watch` array. The 10 s floor is deliberately looser than continue
+  watching's 30 s: `RESUME_MIN_S < CONTINUE_MIN_POSITION_S`, so the two shelves
+  can never both offer one episode, and the client's own exclusion by
+  `continue_watching` id is gone rather than duplicated. On-hold is in this
+  set where `NEW_STATUSES` excludes it — a paused show is exactly the one "the
+  file is here" might restart, and it costs one tile, not a week of slots.
+  **The This-week tick** was `new_this_week.find(entry => entry.anime.id ===
+  id).episode.watched` — an answer about that show's newest aired episode,
+  drawn beside a card naming the *next* one, which is why Friday's Slime slot
+  read "Episode 23 ✓ Watched" on a list standing at 22. `ScheduleEntry` now
+  carries `watched: bool | null`, filled by `api/schedule.watched_marks` only
+  for slots whose `next_at` is already past: three queries (the episode ids for
+  the `(anime_id, number)` pairs, then `completed_episode_ids` and
+  `list_progress_for`) and none at all in the ordinary case, where every slot
+  is in the future. `watched_source` is still the only implementation of
+  FR-W5. Rejected: computing the tick client-side from `new_this_week` matched
+  on episode *number* (it works only while the slot is inside the seven-day
+  window, which is a coincidence of `STALE_NEXT_AIRING` being the same seven
+  days), and adding `list_progress_for` unconditionally to the schedule route
+  (a season is two hundred shows and the answer is wanted for one of them).
+  Also this pass: episode art gains its fallback chain (still → `backdrop_url`
+  → key visual framed in the 16:9 slot) on both the show page's rows and
+  Home's tiles, and the "No episode pictures for this show" caption is gone —
+  see §5.8. `PosterWash` gained a `radius` prop and a documented
+  `ground={null}` form so the show page can letterbox without the blurred
+  ground a fifty-row list would pay for fifty times.
+- 2026-09-17 — **Absolute episode numbering on sequels** (FR-A4, M16 batch 3;
+  §5.1a, §6, §10). Built as an *offset read off the catalogue*, never an
+  inference from the release in front of it: `nyaa.absolute_offset` sums the
+  episode counts of the entry's `PREQUEL` chain through cached `anime` rows and
+  answers `None` — declining the whole feature for that entry — at the first
+  thing it cannot be sure of (an uncached prequel, a null count, a prequel that
+  has not finished airing, two countable prequels at one hop, a loop, more than
+  ten hops, a format it cannot classify). Films and OVAs in the chain are skipped rather than counted, since
+  no group counts *Jujutsu Kaisen 0*, and the walk stops at one rather than
+  reaching past it. With an offset the search asks two more forms (`Jujutsu
+  Kaisen - 25`, `Jujutsu Kaisen 25`, behind the romaji short forms) and accepts
+  a release numbered `N + offset` **only** when it names no season, and never
+  when a season-marked release for the same episode came back in the same
+  search — an explicit answer beats an inferred one, which is a rule about a
+  result *set* and therefore lives in `filter_items` rather than `acceptable`.
+  Three shapes were rejected. Resolving the offset inside `acceptable` from the
+  numbers alone ("25 > 23 episodes, so subtract"): that is the guess the
+  2026-09-14 entry refused, and it turns a missing file into a wrong one.
+  Reusing `matcher.offset_candidates`: it is the *ingest* side, one hop, over a
+  candidate pool, scored with a penalty — a different question with different
+  inputs, and coupling them would make each one's fix the other's regression.
+  And giving `nyaa` a database session for the walk: the resolver is injected
+  instead (`jobs._prequel_offset` supplies the SQLAlchemy one), which keeps
+  every function in that module a pure function of an `anime` row and a release
+  name — the property the offline query corpus is built on.

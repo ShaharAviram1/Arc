@@ -547,6 +547,20 @@ export function heroArt(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>
   return { url: art(anime.banner_url), aspect: null }
 }
 
+/**
+ * TMDB's 16:9 backdrop alone — never AniList's banner in its place.
+ *
+ * What an episode row falls back to when the episode has no still of its own
+ * (owner, 2026-09-17): a backdrop is 16:9 by construction, so it fills a
+ * still's frame without being measured and without the wash a frame of unknown
+ * shape has to hold. A banner deliberately does not qualify here, where
+ * {@link heroArt} would offer one: a 4.75:1 strip in a 152 px row is a 3× zoom
+ * of a sliver, and the row has the poster to fall back to instead.
+ */
+export function backdropArt(anime: Pick<AnimeSummary, 'backdrop_url'>): string | null {
+  return art(anime.backdrop_url)
+}
+
 /** {@link heroArt} without its shape, for a caller that only draws the url. */
 export function bannerArt(anime: Pick<AnimeSummary, 'banner_url' | 'backdrop_url'>): string | null {
   return heroArt(anime).url

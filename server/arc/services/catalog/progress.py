@@ -1,13 +1,19 @@
 """What the home page says about a user (FR-C4, FR-W1).
 
-Two questions, both asked of the local cache and the user's own rows and
-neither of them of a catalogue source:
+Three questions, all asked of the local cache and the user's own rows and none
+of them of a catalogue source:
 
 * **Behind on** — shows the user is watching that have aired episodes past
   their progress, with the count. This is FR-C4's "behind by N", and it is
   what the acquisition window of M6 will be computed from.
 * **New this week** — episodes of followed shows that aired in the last seven
   days, newest first.
+* **Ready to watch** — episodes Arc holds a playable file for that the viewer
+  has neither started nor watched, whenever they aired (FR-W1, owner
+  2026-09-17). Deliberately *not* a slice of "new this week": the shelf is
+  about the file, not the broadcast, and deriving it from the seven-day window
+  hid every ready episode of an older show — One-Room TA, aired 2026-08-27,
+  two episodes ready and neither of them on the page.
 
 "Aired" means the same thing here as it does on the show page: the rule lives
 in :mod:`arc.services.catalog.airing` and is read from there rather than
@@ -23,11 +29,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Anime, Episode, ListEntry, ListStatus, User
+from arc.models import (
+    Anime,
+    Episode,
+    EpisodeState,
+    ListEntry,
+    ListStatus,
+    Rendition,
+    User,
+    WatchProgress,
+)
 from arc.services.catalog.airing import aired_episodes, effective_air_at
+from arc.services.playback.progress import RESUME_MIN_S
 
 #: How far back "new this week" looks (FR-W1).
 NEW_WINDOW = timedelta(days=7)
@@ -41,6 +57,19 @@ NEW_LIMIT = 50
 #: nothing is being watched, and a paused show filling the list is noise. It
 #: still counts as *followed* for the schedule's highlight (FR-C3).
 NEW_STATUSES = (ListStatus.WATCHING, ListStatus.PLANNED)
+
+#: The states "ready to watch" reports on — the three following states
+#: (FR-C3's set), on-hold included this time. The shelf is Arc saying "the file
+#: is here"; a show somebody paused is exactly the one that answer might
+#: restart, and unlike a week's broadcasts it is one tile rather than a column
+#: of them. Dropped and completed are absent for FR-W4's reason: they generate
+#: no wants, so anything ready under them is a leftover, not an offer.
+READY_STATUSES = (ListStatus.WATCHING, ListStatus.PLANNED, ListStatus.ON_HOLD)
+
+#: How many episodes "ready to watch" will name. The client shows eight; twenty
+#: is the same ceiling continue watching uses, and leaves the shelf room to
+#: filter without a second round trip.
+READY_LIMIT = 20
 
 #: Sort position of a "behind on" row whose episodes carry no air dates at
 #: all. Older than any real air time, so those rows land at the bottom of a
@@ -66,7 +95,14 @@ class BehindRow:
 
 @dataclass(frozen=True, slots=True)
 class NewEpisodeRow:
-    """One episode that aired in the last week, on a show the user follows."""
+    """One show and one of its episodes: what an episode shelf is made of.
+
+    Shared by "new this week" and "ready to watch" because it is the same row —
+    a show, an episode of it, and nothing else. What differs is the question
+    each query asks, not the answer's shape, and a second dataclass with the
+    same two fields would only be a second thing to keep in step with
+    :class:`~arc.api.schedule_schemas.NewEpisodeEntry`.
+    """
 
     anime: Anime
     episode: Episode
@@ -168,12 +204,70 @@ async def new_this_week(session: AsyncSession, user: User, *, now: datetime) -> 
     return [NewEpisodeRow(anime=anime, episode=episode) for anime, episode in rows.all()]
 
 
+async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRow]:
+    """Ready episodes the viewer has neither started nor watched (FR-W1).
+
+    **Whenever they aired.** This shelf used to be the ready, unstarted half of
+    "new this week", which meant an episode had to have been broadcast in the
+    last seven days to be offered — so a back catalogue the user is working
+    through, or a show whose file arrived a fortnight after the broadcast, had
+    a playable episode nothing on the home page mentioned (owner, 2026-09-17,
+    from production). The file is what the shelf is about, so the file is what
+    it is ordered by: the rendition's ``ready_at``, newest first.
+
+    Three conditions, each the exact rule a shelf that says "press play" needs:
+
+    * the show is on the viewer's list in a following state
+      (:data:`READY_STATUSES`) — dropped and completed shows offer nothing;
+    * Arc holds a playable file, which is ``EpisodeState.READY`` and nothing
+      looser: an episode still preparing is not something to press play on;
+    * the viewer has neither **started** it — a ``watch_progress`` row past
+      :data:`~arc.services.playback.progress.RESUME_MIN_S`, which is the same
+      floor the player resumes from and is strictly below continue watching's
+      own :data:`~arc.services.playback.progress.CONTINUE_MIN_POSITION_S`, so
+      the two shelves can never both offer one episode — nor **watched** it,
+      which is FR-W5 read backwards: a completion row of Arc's own, or a
+      number at or below the list's progress.
+
+    ``ready_at`` is null for a rendition written before the column was filled
+    and for one a test seeds by hand, so nulls sort last rather than first and
+    the episode id breaks the tie: an order that is not total is an order that
+    changes between two identical requests.
+    """
+    seen = exists().where(
+        WatchProgress.user_id == user.id,
+        WatchProgress.episode_id == Episode.id,
+        or_(WatchProgress.position_s > RESUME_MIN_S, WatchProgress.completed.is_(True)),
+    )
+    rows = await session.execute(
+        select(Anime, Episode)
+        .join(Episode, Episode.anime_id == Anime.id)
+        .join(
+            ListEntry,
+            and_(ListEntry.anime_id == Anime.id, ListEntry.user_id == user.id),
+        )
+        .join(Rendition, Rendition.episode_id == Episode.id, isouter=True)
+        .where(
+            ListEntry.status.in_(READY_STATUSES),
+            Episode.state == EpisodeState.READY,
+            Episode.number > ListEntry.progress,
+            ~seen,
+        )
+        .order_by(Rendition.ready_at.desc().nullslast(), Episode.id.desc())
+        .limit(READY_LIMIT)
+    )
+    return [NewEpisodeRow(anime=anime, episode=episode) for anime, episode in rows.all()]
+
+
 __all__ = [
     "NEW_LIMIT",
     "NEW_STATUSES",
     "NEW_WINDOW",
+    "READY_LIMIT",
+    "READY_STATUSES",
     "BehindRow",
     "NewEpisodeRow",
     "behind_for_user",
     "new_this_week",
+    "ready_to_watch",
 ]

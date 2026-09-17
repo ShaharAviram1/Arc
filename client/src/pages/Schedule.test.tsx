@@ -1,5 +1,5 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -25,8 +25,34 @@ import {
   type MockRoutes,
 } from '@/test/apiMock'
 
-/** A Wednesday, 12:00 in Europe/Berlin — the fixture's timezone. */
-const WEDNESDAY = new Date('2026-09-09T10:00:00Z')
+/**
+ * A Tuesday, 12:00 in Europe/Berlin — the fixture's timezone. The week it
+ * falls in runs Mon 5 Oct to Sun 11 Oct, so the three-day window opens on
+ * Tue 6, Wed 7, Thu 8, which is where both fixture shows air.
+ *
+ * October is Fall, which is the season `SCHEDULE_PAGE` carries: the dates and
+ * the "Today" chip belong to the live week, so the fixture clock has to be
+ * inside the fixture's own season for the page to be showing one.
+ */
+const TUESDAY = new Date('2026-10-06T10:00:00Z')
+
+/** The day-and-date bar, and the two chevrons that move it. */
+function dayBar(): HTMLElement {
+  return screen.getByRole('group', { name: 'Days shown' })
+}
+
+function previousDay(): HTMLElement {
+  return screen.getByRole('button', { name: 'Previous day' })
+}
+
+function nextDay(): HTMLElement {
+  return screen.getByRole('button', { name: 'Next day' })
+}
+
+/** The weekday names on screen, in the order the window shows them. */
+function daysShown(): (string | null)[] {
+  return screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)
+}
 
 function renderSchedule(path = '/schedule', client: QueryClient = createQueryClient()) {
   const router = createMemoryRouter(
@@ -104,7 +130,7 @@ function carriedOverPage(anime: Partial<AnimeSummary>): SchedulePage {
 beforeEach(() => {
   // Only `Date` is faked: react-query and user-event still need real timers.
   vi.useFakeTimers({ toFake: ['Date'] })
-  vi.setSystemTime(WEDNESDAY)
+  vi.setSystemTime(TUESDAY)
 })
 
 afterEach(() => {
@@ -113,7 +139,7 @@ afterEach(() => {
 })
 
 describe('Schedule', () => {
-  it('renders the season, the timezone note and seven weekday columns', async () => {
+  it('renders the season, the timezone note and three days starting today', async () => {
     mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
 
     renderSchedule()
@@ -121,16 +147,76 @@ describe('Schedule', () => {
     expect(await screen.findByText('Fall 2026')).toBeInTheDocument()
     expect(screen.getByText('Times in Europe/Berlin')).toBeInTheDocument()
 
-    const headings = screen.getAllByRole('heading', { level: 2 })
-    expect(headings.map((heading) => heading.textContent)).toEqual([
-      'Monday',
-      'Tuesday',
-      'Wednesday· today',
-      'Thursday',
-      'Friday',
-      'Saturday',
-      'Sunday',
-    ])
+    // Today, tomorrow and the day after, each named with its own date
+    // (owner, 2026-09-17). The other four days of the week are an arrow away.
+    expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
+    expect(screen.queryByRole('region', { name: 'Monday' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Friday' })).not.toBeInTheDocument()
+  })
+
+  it('moves the window one day at a time with the bar’s arrows', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    await userEvent.click(nextDay())
+    expect(daysShown()).toEqual(['Wed 7 Oct', 'Thu 8 Oct', 'Fri 9 Oct'])
+
+    await userEvent.click(previousDay())
+    expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
+
+    await userEvent.click(previousDay())
+    expect(daysShown()).toEqual(['Mon 5 Oct', 'Tue 6 OctToday', 'Wed 7 Oct'])
+  })
+
+  it('stops at both ends of the week the server sent', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    // Tuesday is a day in, so both arrows are live to begin with.
+    expect(previousDay()).toBeEnabled()
+    expect(nextDay()).toBeEnabled()
+
+    await userEvent.click(previousDay())
+    expect(daysShown()[0]).toBe('Mon 5 Oct')
+    expect(previousDay()).toBeDisabled()
+
+    // Friday is as far as three columns reach: Saturday and Sunday are the
+    // other two, and a fourth column of nothing is not what the arrow offers.
+    for (let step = 0; step < 4; step += 1) {
+      await userEvent.click(nextDay())
+    }
+    expect(daysShown()).toEqual(['Fri 9 Oct', 'Sat 10 Oct', 'Sun 11 Oct'])
+    expect(nextDay()).toBeDisabled()
+  })
+
+  it('moves the window with the left and right arrow keys', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    fireEvent.keyDown(dayBar(), { key: 'ArrowRight' })
+    expect(daysShown()).toEqual(['Wed 7 Oct', 'Thu 8 Oct', 'Fri 9 Oct'])
+
+    fireEvent.keyDown(dayBar(), { key: 'ArrowLeft' })
+    expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
+  })
+
+  it('leaves the arrow keys to the list-status select', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    const select = within(dayColumn('Tuesday')).getByRole('combobox')
+    fireEvent.keyDown(select, { key: 'ArrowRight' })
+
+    // The window has not moved: inside a field the arrows belong to the field.
+    expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
   })
 
   it('puts each show under the day the server grouped it into', async () => {
@@ -153,7 +239,24 @@ describe('Schedule', () => {
     // The Apothecary's slot came from MAL, so the time carries "est." (FR-C6).
     expect(thursday.getByRole('listitem')).toHaveTextContent('22:00 est. · Ep 2')
 
-    expect(within(dayColumn('Monday')).getByText('Nothing airing')).toBeInTheDocument()
+    expect(within(dayColumn('Wednesday')).getByText('Nothing airing')).toBeInTheDocument()
+  })
+
+  it('gives a row the whole title rather than clamping it', async () => {
+    mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    // Three columns are ~350px each, so the name fits: nothing truncates it
+    // and nothing clamps it to a line count (owner, 2026-09-17).
+    const title = within(dayColumn('Tuesday')).getByText(FRIEREN.title.preferred)
+    expect(title.textContent).toBe(FRIEREN.title.preferred)
+    expect(title.className).not.toMatch(/truncate|line-clamp|text-ellipsis/)
+
+    // And the times are readable at arm's length rather than 12px.
+    const slot = within(dayColumn('Tuesday')).getByText('18:30 · Ep 5')
+    expect(slot.className).toContain('text-[15px]')
   })
 
   it('marks an estimated air time and leaves a real one unmarked', async () => {
@@ -211,19 +314,79 @@ describe('Schedule', () => {
     expect(screen.queryByText(/^Since /)).not.toBeInTheDocument()
   })
 
-  it('highlights today in the schedule’s timezone, not the browser’s', async () => {
+  it('marks today in the schedule’s timezone, not the browser’s', async () => {
     mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
 
     renderSchedule()
     await screen.findByText('Fall 2026')
 
-    expect(dayColumn('Wednesday')).toHaveAttribute('data-today', 'true')
-    expect(dayColumn('Tuesday')).not.toHaveAttribute('data-today')
+    const today = dayColumn('Tuesday')
+    expect(today).toHaveAttribute('data-today', 'true')
+    expect(within(today).getByText('Today')).toBeInTheDocument()
+    // The accent underline and the label are the same ember, and today's
+    // column is the only place on this page it appears.
+    expect(today.querySelector('h2')?.innerHTML).toContain('--arc-ember')
+
+    const tomorrow = dayColumn('Wednesday')
+    expect(tomorrow).not.toHaveAttribute('data-today')
+    expect(within(tomorrow).queryByText('Today')).not.toBeInTheDocument()
+    expect(tomorrow.querySelector('h2')?.innerHTML).not.toContain('--arc-ember')
   })
 
-  it('moves the highlight when the viewer’s zone is already on the next day', async () => {
-    // 23:00 UTC on that Wednesday is Thursday in Tokyo.
-    vi.setSystemTime(new Date('2026-09-09T23:00:00Z'))
+  it('gives a browsed season weekday names alone — no dates, no today', async () => {
+    // Summer 2026 is a catalogue browse: its grid is the shows of that season
+    // by weekday, so this week's dates would be a claim about when they air,
+    // and there is no "today" in a season that is over (owner, 2026-09-17).
+    mockApi({
+      'GET /api/schedule?year=2026&season=SUMMER': {
+        body: { ...SCHEDULE_PAGE, year: 2026, season: 'SUMMER' },
+      },
+    })
+
+    renderSchedule('/schedule?year=2026&season=SUMMER')
+    await screen.findByText('Summer 2026')
+
+    // Monday-first, because a browse has no today to open on.
+    expect(daysShown()).toEqual(['Monday', 'Tuesday', 'Wednesday'])
+    expect(screen.queryByText('Today')).not.toBeInTheDocument()
+    expect(document.body.querySelectorAll('[data-today="true"]')).toHaveLength(0)
+
+    // The arrows still walk the same seven days.
+    expect(previousDay()).toBeDisabled()
+    await userEvent.click(nextDay())
+    expect(daysShown()).toEqual(['Tuesday', 'Wednesday', 'Thursday'])
+  })
+
+  it('dates the bar again as soon as the live season is back on screen', async () => {
+    mockApi({
+      'GET /api/schedule?year=2026&season=SUMMER': {
+        body: {
+          ...SCHEDULE_PAGE,
+          year: 2026,
+          season: 'SUMMER',
+          next: { year: 2026, season: 'FALL' },
+        },
+      },
+      'GET /api/schedule?year=2026&season=FALL': { body: SCHEDULE_PAGE },
+    })
+
+    renderSchedule('/schedule?year=2026&season=SUMMER')
+    await screen.findByText('Summer 2026')
+    expect(daysShown()).toEqual(['Monday', 'Tuesday', 'Wednesday'])
+
+    // Fall 2026 is the season the clock is in, however it was arrived at: the
+    // page compares the grid's season with the live one, not the URL.
+    await userEvent.click(screen.getByRole('button', { name: 'Next season' }))
+
+    expect(await screen.findByText('Fall 2026')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
+    })
+  })
+
+  it('opens on the viewer’s day when their zone is already on the next one', async () => {
+    // 23:00 UTC on that Tuesday is Wednesday morning in Tokyo.
+    vi.setSystemTime(new Date('2026-10-06T23:00:00Z'))
     mockApi({
       'GET /api/schedule': { body: { ...SCHEDULE_PAGE, timezone: 'Asia/Tokyo' } },
     })
@@ -231,8 +394,9 @@ describe('Schedule', () => {
     renderSchedule()
     await screen.findByText('Fall 2026')
 
-    expect(dayColumn('Thursday')).toHaveAttribute('data-today', 'true')
-    expect(dayColumn('Wednesday')).not.toHaveAttribute('data-today')
+    expect(daysShown()).toEqual(['Wed 7 OctToday', 'Thu 8 Oct', 'Fri 9 Oct'])
+    expect(dayColumn('Wednesday')).toHaveAttribute('data-today', 'true')
+    expect(screen.queryByRole('region', { name: 'Tuesday' })).not.toBeInTheDocument()
   })
 
   it('marks followed shows and leaves the rest plain', async () => {
@@ -243,26 +407,34 @@ describe('Schedule', () => {
 
     const followed = document.body.querySelectorAll('[data-following="true"]')
     expect(followed).toHaveLength(1)
-    // M15: the grouped surface arrives under a followed row instead of the old
-    // accent edge — colour in this design means state, not membership.
-    expect(followed[0]?.className).toContain('bg-[var(--arc-surface)]')
+    // A quiet ember left rule over a 7% tint — "a little highlight" (owner,
+    // 2026-09-17), not a badge.
+    expect(followed[0]?.className).toContain('border-l-2')
+    expect(followed[0]?.className).toContain('var(--arc-ember)')
     expect(followed[0]?.textContent).toContain(FRIEREN.title.preferred)
 
-    // The Apothecary is not followed, so it gets no accent edge.
+    // And it says so in words as well as in colour. The text sits outside the
+    // link, whose accessible name is the title alone.
+    const note = within(dayColumn('Tuesday')).getByText('On your list')
+    expect(note).toHaveClass('sr-only')
+    expect(note.closest('a')).toBeNull()
+
+    // The Apothecary is not followed, so it gets no rule and no note.
     const thursdayRow = within(dayColumn('Thursday')).getByRole('listitem')
     expect(thursdayRow).not.toHaveAttribute('data-following')
+    expect(within(dayColumn('Thursday')).queryByText('On your list')).not.toBeInTheDocument()
   })
 
-  it('carries the “via MAL” caveat as a tooltip and lights today in ember', async () => {
+  it('carries the “via MAL” caveat as a tooltip', async () => {
     mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
 
     renderSchedule()
     await screen.findByText('Fall 2026')
 
-    // The caveat still travels with the row (FR-C6), but a seven-column week
-    // is ~168px per column and a bordered warning pill was the loudest thing
-    // on the page for the smallest piece of information on it. It is the
-    // link's `title` now, and nothing on an AniList row.
+    // The caveat still travels with the row (FR-C6), but a bordered warning
+    // pill was the loudest thing on the page for the smallest piece of
+    // information on it. It is the link's `title` now, and nothing at all on
+    // an AniList row.
     await userEvent.click(
       screen.getByRole('button', { name: 'Show Movies, OVAs and unscheduled (1)' }),
     )
@@ -274,13 +446,9 @@ describe('Schedule', () => {
     expect(
       within(dayColumn('Tuesday')).getByRole('link', { name: FRIEREN.title.preferred }),
     ).not.toHaveAttribute('title')
-
-    // Ember means "this is happening now"; today's column is the one place on
-    // this page it appears.
-    expect(dayColumn('Wednesday').querySelector('h2')?.innerHTML).toContain('--arc-ember')
   })
 
-  it('keeps the week readable: no status control in the grid, 38px thumbs', async () => {
+  it('keeps the row readable: no status control in the grid, 56px thumbs', async () => {
     mockApi({ 'GET /api/schedule': { body: SCHEDULE_PAGE } })
 
     renderSchedule()
@@ -291,11 +459,11 @@ describe('Schedule', () => {
     const row = within(dayColumn('Tuesday')).getByRole('listitem')
     const link = within(row).getByRole('link', { name: FRIEREN.title.preferred })
     expect(link).toHaveAttribute('href', `/anime/${String(FRIEREN.id)}`)
-    expect(link.querySelector('.w-\\[38px\\]')).not.toBeNull()
+    expect(link.querySelector('.w-\\[56px\\]')).not.toBeNull()
     expect(link.textContent).toContain('18:30 · Ep 5')
 
-    // The control is out of the seven-column grid from `lg` up; it is one tap
-    // away on the show page, and it stays put on the stacked phone layout.
+    // The control is out of the day columns from `lg` up; it is one tap away
+    // on the show page, and it stays put on the stacked phone layout.
     const control = within(row).getByRole('combobox')
     expect(control.closest('.lg\\:hidden')).not.toBeNull()
   })
@@ -570,26 +738,27 @@ describe('Schedule "today" while the tab stays open', () => {
     renderSchedule('/schedule', client)
   }
 
-  it('moves the highlight when the clock rolls past midnight', () => {
+  it('moves the window on with the clock past midnight', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
     // 23:59 in Europe/Berlin, the fixture's zone.
-    vi.setSystemTime(new Date('2026-09-09T21:59:00Z'))
+    vi.setSystemTime(new Date('2026-10-06T21:59:00Z'))
 
     renderSeeded()
-    expect(dayColumn('Wednesday')).toHaveAttribute('data-today', 'true')
+    expect(daysShown()).toEqual(['Tue 6 OctToday', 'Wed 7 Oct', 'Thu 8 Oct'])
 
     act(() => {
-      vi.setSystemTime(new Date('2026-09-09T22:01:00Z'))
+      vi.setSystemTime(new Date('2026-10-06T22:01:00Z'))
       vi.advanceTimersByTime(60_000)
     })
 
-    expect(dayColumn('Thursday')).toHaveAttribute('data-today', 'true')
-    expect(dayColumn('Wednesday')).not.toHaveAttribute('data-today')
+    // A tab left open overnight opens on the new today, dates and all.
+    expect(daysShown()).toEqual(['Wed 7 OctToday', 'Thu 8 Oct', 'Fri 9 Oct'])
+    expect(dayColumn('Wednesday')).toHaveAttribute('data-today', 'true')
   })
 
   it('stops the interval when the page goes away', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
-    vi.setSystemTime(WEDNESDAY)
+    vi.setSystemTime(TUESDAY)
 
     renderSeeded()
     expect(vi.getTimerCount()).toBe(1)

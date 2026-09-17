@@ -638,6 +638,121 @@ async def test_an_empty_season_is_seven_empty_days(user_client: AsyncClient) -> 
     assert body["unscheduled"] == []
 
 
+# --- The tick on a slot (FR-W5, owner 2026-09-17) -----------------------------
+#
+# ``ScheduleEntry.watched`` is FR-W5 applied to the episode the slot *names*,
+# and only once that episode has aired. Watch Now's appointment cards read it,
+# and before this they read the show's latest aired episode instead — so a
+# Friday broadcast that has not happened carried "✓ Watched" off last week's.
+
+#: Three hours before :data:`NOW`, which is a Wednesday: a broadcast that has
+#: already happened today, on a row nothing has refreshed since.
+WEDNESDAY_0900Z = NOW - timedelta(hours=3)
+
+WEDNESDAY = 2
+
+
+async def aired_today(
+    factory: SessionFactory, *, title: str, anilist_id: int, number: int = 5
+) -> int:
+    """A show whose cached slot points at a broadcast earlier today."""
+    anime_id = await add_anime(
+        factory,
+        title=title,
+        anilist_id=anilist_id,
+        format="TV",
+        episodes=12,
+        next_at=WEDNESDAY_0900Z,
+        next_episode=number,
+    )
+    await add_episodes(
+        factory,
+        anime_id,
+        count=number,
+        first_at=WEDNESDAY_0900Z - timedelta(weeks=number - 1),
+    )
+    return anime_id
+
+
+async def test_an_upcoming_slot_never_carries_a_watched_mark(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The bug, in one test: a list past the named episode, and still no tick.
+
+    Nobody has watched a broadcast that has not happened. The viewer here is at
+    episode 12 of a show whose slot names episode 7 on Friday — every rule that
+    asks about the *show* says "watched", and the only one that matters asks
+    about the episode on the card.
+    """
+    anime_id = await add_anime(
+        api_factory,
+        title="Friday Night Show",
+        anilist_id=900101,
+        format="TV",
+        episodes=12,
+        next_at=FRIDAY_1400Z,
+        next_episode=7,
+    )
+    await add_episodes(api_factory, anime_id, count=12, first_at=FRIDAY_1400Z - timedelta(weeks=6))
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=12)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert body["days"][FRIDAY]["entries"][0]["next_episode"] == 7
+    assert body["days"][FRIDAY]["entries"][0]["watched"] is None
+
+
+async def test_a_slot_whose_episode_has_aired_carries_the_viewers_mark(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Tonight's broadcast, already watched: this is the tick's one true case."""
+    anime_id = await aired_today(api_factory, title="Tonight Watched", anilist_id=900102)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=5)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    entry = body["days"][WEDNESDAY]["entries"][0]
+    assert entry["next_episode"] == 5
+    assert entry["watched"] is True
+
+
+async def test_an_aired_slot_the_viewer_has_not_reached_says_so(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """False, not null: the episode aired, and the answer is "not yet"."""
+    anime_id = await aired_today(api_factory, title="Tonight Unwatched", anilist_id=900103)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=4)
+
+    entry = (await user_client.get("/api/schedule")).json()["days"][WEDNESDAY]["entries"][0]
+
+    assert entry["watched"] is False
+
+
+async def test_a_slot_that_names_no_episode_carries_no_mark(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory, season: dict[str, int]
+) -> None:
+    """FR-C6's synthesised slot knows when, not which; there is nothing to tick."""
+    await follow(api_factory, user, season["saturday"], ListStatus.WATCHING, progress=13)
+
+    entry = (await user_client.get("/api/schedule")).json()["days"][SATURDAY]["entries"][0]
+
+    assert entry["next_episode"] is None
+    assert entry["watched"] is None
+
+
+async def test_another_users_progress_does_not_tick_this_slot(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await aired_today(api_factory, title="Theirs Tonight", anilist_id=900104)
+    other = await add_user(api_factory, "sched.other@arc.test", "other-password")
+    await follow(api_factory, other, anime_id, ListStatus.WATCHING, progress=5)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+
+    entry = (await user_client.get("/api/schedule")).json()["days"][WEDNESDAY]["entries"][0]
+
+    assert entry["watched"] is False
+
+
 # --- The admin season sweep ---------------------------------------------------
 
 

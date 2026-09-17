@@ -39,6 +39,17 @@ title and the check is "is this one release of this title", with the year as
 the tie-break. Until 2026-09-14 Arc asked Nyaa for ``Servamp Movie: Alice in
 the Garden - 01``.
 
+**Some groups never restart the count** (:func:`absolute_offset`, 2026-09-17).
+SubsPlease released *Jujutsu Kaisen* season 2 as ``- 25`` … ``- 47`` while the
+catalogue numbers that entry 1–23, so ``Jujutsu Kaisen S2 - 01`` found nothing
+and ``Jujutsu Kaisen - 01`` was season one's first episode. The offset is
+**read off the catalogue, never guessed**: the episode counts of the entry's
+``PREQUEL`` chain, walked through cached rows, and the whole feature declines
+for an entry whose chain Arc cannot add up. Then ``- 25`` is asked for as well
+as ``- 01``, and accepted as episode 1 — but only from a release that names no
+season at all, and never while an explicitly season-marked release for the same
+episode is in the same pool.
+
 **Ranking is FR-A3's four rules in order**: preferred group, then resolution,
 then seeders, then Nyaa's trusted flag — behind one rule that comes first, an
 **English dub ranks below every subbed candidate** and is only ever chosen for
@@ -53,7 +64,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Final, Self
@@ -256,6 +267,40 @@ _TRIM: Final[str] = " \t._-~:–—〜"
 #: MAL's ``lower_snake`` is upper-cased on the way in — and read the same way
 #: the matcher and the recommender read it.
 PREQUEL_RELATION: Final[str] = "PREQUEL"
+
+#: Prequel formats whose episodes a release group **counts** when it numbers a
+#: sequel absolutely (:func:`absolute_offset`). The assumption, written down
+#: because it is an assumption: a group continuing the count of *Jujutsu
+#: Kaisen* counts the television seasons and nothing else.
+ABSOLUTE_COUNTED_FORMATS: Final[frozenset[str]] = frozenset({"TV", "ONA"})
+
+#: And the ones it **skips**: a film, an OVA and a bonus special sit beside the
+#: run rather than inside it. ``[SubsPlease] Jujutsu Kaisen - 25`` is episode 1
+#: of season 2 after season one's 24 — *Jujutsu Kaisen 0*, a ``PREQUEL`` edge of
+#: the same entry, is not one of them.
+ABSOLUTE_SKIPPED_FORMATS: Final[frozenset[str]] = frozenset({"MOVIE", "OVA", "SPECIAL", "MUSIC"})
+
+#: The only airing status a prequel may carry and still be counted. Every
+#: source normalises into AniList's vocabulary on the way in (MAL's
+#: ``finished_airing`` and manami's own word both become this), so there is one
+#: spelling to check. A ``RELEASING`` prequel's ``episodes`` is an **announced**
+#: total, which is the number likeliest to be wrong — a twelve-episode cour
+#: that runs to thirteen, a split season counted whole — and being one out here
+#: lands the absolute number inside the prequel's own band, where the season
+#: check cannot catch it. A null status is no evidence and declines too.
+ABSOLUTE_FINISHED_STATUS: Final[str] = "FINISHED"
+
+#: How far back an offset may be walked before the chain is called a franchise
+#: and abandoned. Ten is far more than any real series and exists only so a
+#: relation graph that loops cannot spin: the cycle check below catches the
+#: ordinary loop, and this catches the pathological one.
+MAX_PREQUEL_HOPS: Final[int] = 10
+
+#: How a prequel row is fetched: by AniList id, then by MAL id, answering
+#: ``None`` when Arc has never cached it. Injected rather than imported,
+#: because everything else in this module is a pure function of an ``anime``
+#: row and a release name — which is what lets the query corpus run offline.
+PrequelResolver = Callable[[int | None, int | None], Awaitable["Anime | None"]]
 
 
 class NyaaUnavailable(RuntimeError):
@@ -655,6 +700,138 @@ def has_prequel(anime: Anime) -> bool:
     )
 
 
+def _prequel_edges(anime: Anime) -> list[dict[str, Any]]:
+    """Every ``PREQUEL`` blob of this entry, in the order the source wrote them."""
+    return [
+        relation
+        for relation in anime.relations or ()
+        if isinstance(relation, dict)
+        and str(relation.get("relation_type") or "").upper() == PREQUEL_RELATION
+    ]
+
+
+def _row_key(anime: Anime) -> tuple[int | None, int | None]:
+    """What identifies a row while the chain is being walked."""
+    return (anime.anilist_id, anime.mal_id)
+
+
+async def absolute_offset(anime: Anime, resolve: PrequelResolver) -> int | None:
+    """How many episodes ran **before** this entry, or ``None`` to decline.
+
+    Some groups never restart the count. SubsPlease released *Jujutsu Kaisen*
+    season 2 as ``[SubsPlease] Jujutsu Kaisen - 25 (1080p)`` through ``- 47``,
+    while the catalogue entry for that season numbers its episodes 1–23. So
+    ``Jujutsu Kaisen S2 - 01`` matched nothing on Nyaa and ``Jujutsu Kaisen -
+    01`` was season *one's* first episode: the episode was either not fetched
+    or fetched wrong, and the second of those is the outcome CLAUDE.md forbids.
+
+    The offset is the sum of the episode counts of the entry's ``PREQUEL``
+    chain, **taken from the catalogue and never guessed**, which is the whole
+    difference between this and the arithmetic a person does in their head.
+    Every hop must be a row Arc has cached, with a format that says the group
+    counted it and an episode count to add; anything else returns ``None`` and
+    the entry simply keeps the behaviour it had before 2026-09-17. A feature
+    that declines is a missing file, and a missing file is visible and fixable.
+
+    Declined, therefore, when:
+
+    * the entry is a **single** (:func:`is_single`) — a film has no count to
+      continue;
+    * a prequel edge is not one of :data:`ABSOLUTE_SKIPPED_FORMATS` and Arc has
+      **no cached row** for it, so its length is unknown;
+    * that row's ``episodes`` is null or zero, or its format is neither counted
+      nor skipped — a ``TV_SHORT``, a ``MUSIC`` video, a row with no format at
+      all: guessing which side of the line it falls on is guessing the offset;
+    * that row has **not finished airing** (:data:`ABSOLUTE_FINISHED_STATUS`),
+      because a ``RELEASING`` season's episode count is an announcement rather
+      than a fact, and an announcement that turns out one short puts the
+      absolute number inside the prequel's own run — where the season check
+      cannot see it and the file that lands is the wrong episode;
+    * **two** prequel edges survive the format filter at one hop, because
+      which of them the group was counting is exactly the thing that must not
+      be inferred;
+    * the chain revisits a row (AniList's graph does contain loops) or runs
+      past :data:`MAX_PREQUEL_HOPS`.
+
+    Films, OVAs and specials in the chain are **skipped rather than declined**
+    (:data:`ABSOLUTE_SKIPPED_FORMATS`): *Jujutsu Kaisen 0* is a ``PREQUEL`` edge
+    of season 2 and no group has ever counted it, so an entry whose only other
+    prequel is season one is answered rather than abandoned. The walk stops
+    there — it does not reach around a film for whatever precedes it — which is
+    the conservative half of the same decision.
+
+    Returns a positive number of episodes, or ``None``. Zero is never returned:
+    "nothing came before" and "do not use this" are the same answer here.
+    """
+    if is_single(anime):
+        return None
+
+    total = 0
+    hops = 0
+    current = anime
+    seen: set[tuple[int | None, int | None]] = {_row_key(anime)}
+
+    while True:
+        edges = [
+            edge
+            for edge in _prequel_edges(current)
+            if str(edge.get("format") or "").upper() not in ABSOLUTE_SKIPPED_FORMATS
+        ]
+        if not edges:
+            return total or None
+        if len(edges) > 1:
+            log.debug(
+                "absolute numbering declined: two prequels at one hop",
+                extra={"anime_id": anime.id, "edges": len(edges)},
+            )
+            return None
+        hops += 1
+        if hops > MAX_PREQUEL_HOPS:
+            log.debug(
+                "absolute numbering declined: the prequel chain is too long",
+                extra={"anime_id": anime.id, "hops": MAX_PREQUEL_HOPS},
+            )
+            return None
+
+        row = await resolve(edges[0].get("anilist_id"), edges[0].get("mal_id"))
+        if row is None:
+            log.debug(
+                "absolute numbering declined: a prequel is not cached",
+                extra={"anime_id": anime.id, "relation": edges[0].get("anilist_id")},
+            )
+            return None
+
+        fmt = str(row.format or edges[0].get("format") or "").upper()
+        if fmt in ABSOLUTE_SKIPPED_FORMATS:
+            # The edge carried no format and the row turns out to be a film.
+            return total or None
+        if fmt not in ABSOLUTE_COUNTED_FORMATS or not row.episodes or row.episodes <= 0:
+            log.debug(
+                "absolute numbering declined: a prequel cannot be counted",
+                extra={"anime_id": anime.id, "format": fmt, "episodes": row.episodes},
+            )
+            return None
+        if str(row.status or "").upper() != ABSOLUTE_FINISHED_STATUS:
+            # An airing prequel's count is a promise rather than a fact
+            # (:data:`ABSOLUTE_FINISHED_STATUS`), and one episode out here is a
+            # number that lands *inside* the prequel's own run.
+            log.debug(
+                "absolute numbering declined: a prequel has not finished airing",
+                extra={"anime_id": anime.id, "status": row.status},
+            )
+            return None
+        if _row_key(row) in seen:
+            log.debug(
+                "absolute numbering declined: the prequel chain loops",
+                extra={"anime_id": anime.id},
+            )
+            return None
+
+        seen.add(_row_key(row))
+        total += row.episodes
+        current = row
+
+
 def head_of(name: str) -> str:
     """The title in front of its subtitle, or ``""`` when there is no subtitle.
 
@@ -744,8 +921,22 @@ def _synonym_forms(anime: Anime) -> list[str]:
     return kept
 
 
-def queries(anime: Anime, number: int) -> list[str]:
+def queries(anime: Anime, number: int, *, offset: int | None = None) -> list[str]:
     """What to ask Nyaa for, best first, at most :data:`MAX_QUERIES`.
+
+    ``offset`` is :func:`absolute_offset`'s answer — the episodes that ran
+    before this entry — and when there is one, two more forms are built from
+    the season-stripped base with the **absolute** number on them: ``Jujutsu
+    Kaisen - 25`` and ``Jujutsu Kaisen 25`` for episode 1 of a second season
+    that follows 24. They sit directly behind the romaji short forms, because
+    that is the shape of the name the group that numbers this way writes
+    (SubsPlease writes exactly ``[SubsPlease] Jujutsu Kaisen - 25 (1080p)``),
+    and the number is padded against the *combined* length of the franchise so
+    that a show which passes 100 episodes across its seasons is asked for the
+    way a 100-episode show is written. They are built **only where stripping
+    the season marker actually shortened the title**: an unmarked sequel has no
+    marker to strip, so its "base" is its whole nine-word name, and nine words
+    followed by an absolute number is a form nobody writes.
 
     **A film, an OVA or an ONA with one episode** (:func:`is_single`) is a
     different list and a short one: the bare titles, their symbol-stripped
@@ -856,6 +1047,28 @@ def queries(anime: Anime, number: int) -> list[str]:
         if season is not None and romaji:
             for form in _short_forms(romaji, season, padded):
                 add(form)
+        if offset:
+            # Right behind the romaji short forms, because a group that
+            # numbers absolutely writes the franchise name and the running
+            # number and nothing else (:func:`absolute_offset`). The base is
+            # romaji's where there is one: it is what release groups write, and
+            # a second language's absolute form would cost two of ten slots to
+            # say the same thing twice.
+            #
+            # **Only where the base is shorter than the title**: an unmarked
+            # sequel whose title names an arc (*Made in Abyss: Retsujitsu no
+            # Ougonkyou*) has no marker to strip, so the "base" is the whole
+            # nine-word name — and nobody writes nine words followed by an
+            # absolute number. Those two slots buy nothing, and the acceptance
+            # route still applies if such a release turns up under another
+            # form.
+            full = " ".join((romaji or english or "").split())
+            base = strip_season(full).base
+            if base and " ".join(base.split()) != full:
+                combined = anime.episodes + offset if anime.episodes else None
+                running = pad(number + offset, total_episodes=combined)
+                add(f"{base} - {running}")
+                add(f"{base} {running}")
         if not has_prequel(anime):
             for name in (romaji, english):
                 if not name:
@@ -970,6 +1183,15 @@ class Candidate:
     item: NyaaItem
     parsed: ParsedName
     title_similarity: float
+    #: The prequel total subtracted to read this release's number as the
+    #: entry's own (:func:`absolute_offset`). Zero for every candidate whose
+    #: number needed no arithmetic at all, which is nearly all of them.
+    offset: int = 0
+
+    @property
+    def absolute(self) -> bool:
+        """Whether this release was accepted by the absolute-numbering rule."""
+        return self.offset > 0
 
     @property
     def group(self) -> str | None:
@@ -1004,6 +1226,7 @@ def acceptable(
     threshold: float = TITLE_THRESHOLD,
     single: bool = False,
     year: int | None = None,
+    offset: int | None = None,
 ) -> Candidate | None:
     """``item`` as a :class:`Candidate`, or ``None`` with a reason logged.
 
@@ -1052,11 +1275,28 @@ def acceptable(
     marker makes :attr:`~arc.services.library.parser.ParsedName.kind` ``batch``
     — and the filter's job is only to refuse to look past it.
 
-    Absolute numbering is deliberately **not** resolved here: episode 40 of a
-    two-season franchise really is episode 15 of the sequel, but working that
-    out needs the relation graph the matcher walks, and getting it wrong here
-    means a wrong download rather than a review item. The exact number only —
-    the matcher still has the offset rule for files that arrive anyway.
+    **Absolute numbering** (``offset``, 2026-09-17) is the one way a release
+    whose number is *not* ``number`` may still be this episode: with an offset
+    of 24, ``[SubsPlease] Jujutsu Kaisen - 25 (1080p)`` is episode 1 of season
+    two. Four things have to hold at once, and each of them closes a way of
+    being wrong:
+
+    * the offset came from :func:`absolute_offset`, which read it off the
+      catalogue rather than inferring it from the number in front of it;
+    * the release **names no season**. One that does is judged by the ordinary
+      per-season rule and nothing else: a group that writes ``S2`` has told Arc
+      which season it means, and arithmetic cannot improve on that;
+    * the number is exactly ``number + offset`` — which is above the prequel
+      total by construction, so an absolute match can never collide with the
+      prequel's own numbering (``- 24``, season one's last, is episode 24 of
+      season one and is rejected here);
+    * and the title still reaches ``threshold`` against the entry's own names,
+      season markers stripped from both sides as always.
+
+    The rule that this function cannot enforce, because it sees one release at
+    a time, lives in :func:`filter_items`: an absolute match is dropped
+    outright when a season-marked release for the same episode came back in the
+    same search. An explicit answer beats an inferred one every time.
     """
     if item.remake:
         _rejected(item, "nyaa flagged it a remake")
@@ -1113,9 +1353,21 @@ def acceptable(
     if parsed.kind != "episode":
         _rejected(item, f"parsed as {parsed.kind}, not a single episode")
         return None
-    if parsed.episode != number:
-        _rejected(item, f"episode {parsed.episode}, not {number}")
+    # The absolute reading, and only where the release itself offers no season:
+    # one that names a season has said which episode it is, and the ordinary
+    # rule below is a better answer than any arithmetic.
+    running = number + offset if offset else None
+    absolute = running is not None and parsed.season is None and parsed.episode == running
+    if parsed.episode != number and not absolute:
+        wanted = f"{number} or {running}" if running is not None else f"{number}"
+        _rejected(item, f"episode {parsed.episode}, not {wanted}")
         return None
+    if absolute:
+        similarity = title_score(parsed.title_key, titles)
+        if similarity < threshold:
+            _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+            return None
+        return Candidate(item=item, parsed=parsed, title_similarity=similarity, offset=offset or 0)
     # Season 1 is what *both* sides mean when neither says otherwise, and the
     # comparison is symmetric because of it. A catalogue entry with no marker
     # is season 1 of that entry — AniList files each season as its own row —
@@ -1147,8 +1399,17 @@ def filter_items(
     threshold: float = TITLE_THRESHOLD,
     single: bool = False,
     year: int | None = None,
+    offset: int | None = None,
 ) -> list[Candidate]:
-    """Every acceptable item, in the order the feed gave them."""
+    """Every acceptable item, in the order the feed gave them.
+
+    With one rule that only a whole result set can state (2026-09-17): where a
+    release **names its season** and is this episode, every
+    absolute-numbered candidate is dropped. The two readings cannot both be
+    right about the same episode, one of them is a group's own statement of
+    which season it uploaded and the other is Arc's arithmetic, and a pool
+    holding both would let the ranker settle it on seeders. Explicit wins.
+    """
     kept = []
     for item in items:
         candidate = acceptable(
@@ -1159,10 +1420,24 @@ def filter_items(
             threshold=threshold,
             single=single,
             year=year,
+            offset=offset,
         )
         if candidate is not None:
             kept.append(candidate)
-    return kept
+    explicit = [
+        candidate
+        for candidate in kept
+        if not candidate.absolute and candidate.parsed.season is not None
+    ]
+    if not explicit or not any(candidate.absolute for candidate in kept):
+        return kept
+    for candidate in kept:
+        if candidate.absolute:
+            _rejected(
+                candidate.item,
+                f"absolute numbering, and {explicit[0].item.title!r} names the season outright",
+            )
+    return [candidate for candidate in kept if not candidate.absolute]
 
 
 # --- Ranking ----------------------------------------------------------------
@@ -1234,6 +1509,14 @@ def _reasons(
         reasons.append(f"{resolution} is neither preferred nor fallback")
 
     reasons.append(f"{candidate.item.seeders} seeders")
+    if candidate.absolute and candidate.parsed.episode is not None:
+        # The one reason that is about *which episode this is* rather than
+        # which copy of it: a chosen release whose name says 25 lands in an
+        # episode row numbered 1, and the log line has to say why.
+        reasons.append(
+            f"absolute numbering: release {candidate.parsed.episode}"
+            f" = episode {candidate.parsed.episode - candidate.offset}"
+        )
     if candidate.dubbed:
         reasons.append("english dub, so ranked below every subbed release")
     if candidate.item.trusted:
@@ -1295,8 +1578,14 @@ async def search_for_episode(
     rules: Rules,
     *,
     threshold: float = TITLE_THRESHOLD,
+    offset: int | None = None,
 ) -> Search:
     """Run **every** :func:`queries` form, merge by info hash, filter and rank.
+
+    ``offset`` is :func:`absolute_offset`'s answer for this entry, computed by
+    the caller because it is the caller that has a database session
+    (``jobs._prequel_offset``). ``None`` — the default, and what every search
+    did before 2026-09-17 — asks and accepts exactly what it always did.
 
     This used to stop at the first query that produced any candidate, on the
     theory that the romaji ``- 07`` form is what the weekly release is named
@@ -1320,7 +1609,7 @@ async def search_for_episode(
 
     merged: dict[str, NyaaItem] = {}
     counts: list[int] = []
-    for query in queries(anime, number):
+    for query in queries(anime, number, offset=offset):
         items = await client.search(query)
         before = len(merged)
         for item in items:
@@ -1345,6 +1634,7 @@ async def search_for_episode(
         threshold=threshold,
         single=is_single(anime),
         year=anime.season_year,
+        offset=offset,
     )
     ranked = rank(candidates, rules)
     log.info(
@@ -1352,6 +1642,7 @@ async def search_for_episode(
         extra={
             "anime_id": anime.id,
             "number": number,
+            "offset": offset,
             "queries": len(counts),
             "per_query": counts,
             "merged": len(merged),
@@ -1378,8 +1669,11 @@ def as_dict(ranked: Ranked) -> dict[str, Any]:
 
 
 __all__ = [
+    "ABSOLUTE_COUNTED_FORMATS",
+    "ABSOLUTE_SKIPPED_FORMATS",
     "CACHE_TTL",
     "CATEGORY",
+    "MAX_PREQUEL_HOPS",
     "MAX_QUERIES",
     "MAX_SYNONYM_QUERIES",
     "MIN_INTERVAL",
@@ -1395,10 +1689,13 @@ __all__ = [
     "NyaaClient",
     "NyaaItem",
     "NyaaUnavailable",
+    "PREQUEL_RELATION",
+    "PrequelResolver",
     "Ranked",
     "SINGLE_KINDS",
     "Search",
     "TYPE_WORDS",
+    "absolute_offset",
     "acceptable",
     "anime_season",
     "anime_titles",

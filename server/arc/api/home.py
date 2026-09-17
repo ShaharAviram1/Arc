@@ -1,9 +1,19 @@
 """The home page (FR-W1).
 
-``GET /api/home`` — one call for the three rows the client renders: continue
-watching, behind on, new this week. One call rather than three because they
-are one screen and a home page that paints in three stages is worse than one
-that paints once; the queries behind them are small and share the caller.
+``GET /api/home`` — one call for the four shelves the client renders: continue
+watching, ready to watch, behind on, new this week. One call rather than four
+because they are one screen and a home page that paints in four stages is worse
+than one that paints once; the queries behind them are small and share the
+caller.
+
+**Every shelf is decided here, not in the client.** "Ready to watch" was the
+exception until 2026-09-17: the client filtered ``new_this_week`` for the ready
+episodes it had not started, which quietly added "and it aired in the last seven
+days" to a shelf whose whole subject is the file. A ready episode of a show that
+finished airing a fortnight ago could not appear on Watch Now at all (owner,
+from production). It is now :func:`~arc.services.catalog.progress.ready_to_watch`
+— its own query, its own ordering, its own cap — and the client renders what it
+is given.
 
 The episodes on this page are the *same shape* as the ones on a show page, and
 are filled in the same way: one batched lookup each for the torrents, the
@@ -41,7 +51,7 @@ from arc.api.schedule_schemas import (
     NewEpisodeEntry,
 )
 from arc.services.catalog import list_progress_for, list_status_for
-from arc.services.catalog.progress import behind_for_user, new_this_week
+from arc.services.catalog.progress import behind_for_user, new_this_week, ready_to_watch
 from arc.services.playback.progress import completed_episode_ids, continue_watching
 from arc.services.tmdb.jobs import enqueue_episode_stills, enqueue_hero_art
 
@@ -57,15 +67,21 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-@router.get("", response_model=HomePage, summary="Continue watching, behind on, new this week")
+@router.get(
+    "",
+    response_model=HomePage,
+    summary="Continue watching, ready to watch, behind on, new this week",
+)
 async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) -> HomePage:
     at = now()
     behind = await behind_for_user(session, user, now=at)
     fresh = await new_this_week(session, user, now=at)
     started = await continue_watching(session, user_id=user.id)
+    ready = await ready_to_watch(session, user)
 
-    anime_ids = [row.anime.id for row in fresh] + [row.anime.id for row in started]
-    episode_ids = [row.episode.id for row in fresh] + [row.episode.id for row in started]
+    shelves = (fresh, started, ready)
+    anime_ids = [row.anime.id for shelf in shelves for row in shelf]
+    episode_ids = [row.episode.id for shelf in shelves for row in shelf]
     # One lookup for the list badges on the cards: those rows are all on the
     # caller's list by construction, but which state they are in is what the
     # badge says.
@@ -94,8 +110,19 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # its own — Continue watching and Ready to watch — is a card framed around
     # the show's poster instead (``client/src/pages/Home.tsx``), which is
     # honest but is not the picture the card is for (owner, 2026-09-12).
-    no_still = [row.anime.id for row in started if row.episode.still_url is None]
-    no_still += [row.anime.id for row in fresh if row.episode.still_url is None]
+    # Continue watching first, then Ready to watch: the two 16:9 shelves, in
+    # the order the page draws them, so the eight the limit allows go to the
+    # cards nearest the top. ``new_this_week`` is last and is no longer a 16:9
+    # card at all — the This-week shelf is a broadcast time and a 2:3 thumb —
+    # but it is still the week's episodes, which are the ones a still is most
+    # likely to be missing for, and a show page opened from one of those tiles
+    # wants the pictures too.
+    no_still = [
+        row.anime.id
+        for shelf in (started, ready, fresh)
+        for row in shelf
+        if row.episode.still_url is None
+    ]
     # Both are no-ops without a ``TMDB_API_KEY``: the queue row would exist
     # only to log a skip, and on a keyless deployment every row is a hole for
     # ever, so the page would write twenty of them per visit.
@@ -117,6 +144,23 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
             )
             for row in started
+        ],
+        ready_to_watch=[
+            NewEpisodeEntry.from_row(
+                row,
+                now=at,
+                list_status=statuses.get(row.anime.id),
+                # Never completed and never at or below the progress: the query
+                # excludes both (FR-W5 read backwards), so the flag is false by
+                # construction and asking the database again would be a third
+                # round trip for an answer the ``WHERE`` clause already gave.
+                completed=False,
+                list_progress=progress.get(row.anime.id, 0),
+                torrent=extras.torrents.get(row.episode.id),
+                rendition=extras.renditions.get(row.episode.id),
+                transcode_job=extras.transcode_jobs.get(row.episode.id),
+            )
+            for row in ready
         ],
         behind=[BehindEntry.from_row(row) for row in behind],
         new_this_week=[

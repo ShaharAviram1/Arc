@@ -29,12 +29,15 @@ from arc.models import Anime
 from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition.nyaa import (
     CATEGORY,
+    MAX_PREQUEL_HOPS,
     MIN_INTERVAL,
     TRACKERS,
     Candidate,
     NyaaClient,
     NyaaItem,
     NyaaUnavailable,
+    PrequelResolver,
+    absolute_offset,
     acceptable,
     anime_season,
     anime_titles,
@@ -56,13 +59,13 @@ from arc.services.library.parser import parse, strip_season
 from tests.acquisition_helpers import NyaaStub, force_transport, no_sleep, read_fixture
 
 
-def relation(kind: str, *, anilist_id: int) -> dict[str, Any]:
+def relation(kind: str, *, anilist_id: int, fmt: str | None = "TV") -> dict[str, Any]:
     """One ``anime.relations`` blob, shaped as ``catalog.cache`` stores it."""
     return {
         "anilist_id": anilist_id,
         "mal_id": None,
         "relation_type": kind,
-        "format": "TV",
+        "format": fmt,
         "title": {"romaji": None, "english": None, "native": None, "preferred": None},
     }
 
@@ -1236,6 +1239,498 @@ def test_the_title_threshold_is_what_rejects_a_near_miss() -> None:
 
     assert acceptable(item, titles=titles, number=7, season=2) is not None
     assert acceptable(item, titles=titles, number=7, season=2, threshold=1.01) is None
+
+
+# --- Absolute numbering on sequels (2026-09-17) ------------------------------
+
+#: *Jujutsu Kaisen*, the case the rule was written for. SubsPlease released
+#: season two as ``- 25`` … ``- 47`` while AniList numbers that entry 1–23, and
+#: the entry carries **two** ``PREQUEL`` edges: season one (TV, 24 episodes) and
+#: *Jujutsu Kaisen 0* (a film, which no group has ever counted).
+JJK_S1 = Anime(
+    id=1,
+    anilist_id=113415,
+    title_romaji="Jujutsu Kaisen",
+    title_english="Jujutsu Kaisen",
+    format="TV",
+    status="FINISHED",
+    episodes=24,
+)
+JJK_ZERO = Anime(
+    id=2,
+    anilist_id=142329,
+    title_romaji="Jujutsu Kaisen 0",
+    format="MOVIE",
+    status="FINISHED",
+    episodes=1,
+)
+JJK_S2 = Anime(
+    id=3,
+    anilist_id=145064,
+    title_romaji="Jujutsu Kaisen 2nd Season",
+    title_english="Jujutsu Kaisen Season 2",
+    format="TV",
+    episodes=23,
+    relations=[
+        relation("PREQUEL", anilist_id=113415),
+        relation("PREQUEL", anilist_id=142329, fmt="MOVIE"),
+    ],
+)
+JJK_TITLES = ("Jujutsu Kaisen 2nd Season", "Jujutsu Kaisen Season 2")
+#: The release that started it, verbatim in shape from nyaa.si.
+JJK_ABSOLUTE = "[SubsPlease] Jujutsu Kaisen - 25 (1080p) [F7B4A1C2].mkv"
+JJK_MARKED = "[SubsPlease] Jujutsu Kaisen S2 - 01 (1080p) [A1B2C3D4].mkv"
+#: Season one's own episode 1, and season one's own episode 24 — the two
+#: releases an offset must never turn into season two's first.
+JJK_SEASON_ONE_FIRST = "[SubsPlease] Jujutsu Kaisen - 01 (1080p) [B2C3D4E5].mkv"
+JJK_SEASON_ONE_LAST = "[SubsPlease] Jujutsu Kaisen - 24 (1080p) [C3D4E5F6].mkv"
+
+
+def cached(*rows: Anime) -> PrequelResolver:
+    """A resolver over rows Arc is pretending to have cached."""
+    by_anilist = {row.anilist_id: row for row in rows if row.anilist_id is not None}
+    by_mal = {row.mal_id: row for row in rows if row.mal_id is not None}
+
+    async def resolve(anilist_id: int | None, mal_id: int | None) -> Anime | None:
+        if anilist_id is not None and anilist_id in by_anilist:
+            return by_anilist[anilist_id]
+        if mal_id is not None:
+            return by_mal.get(mal_id)
+        return None
+
+    return resolve
+
+
+def chain(*counts: int) -> tuple[Anime, PrequelResolver]:
+    """A franchise of ``len(counts) + 1`` seasons, newest first in the return.
+
+    ``chain(12, 24)`` is a third season whose two prequels ran 12 and 24
+    episodes, so its episode 1 is the franchise's 37th.
+    """
+    rows: list[Anime] = []
+    for index, count in enumerate(counts):
+        rows.append(
+            Anime(
+                id=index + 2,
+                anilist_id=900 + index,
+                title_romaji=f"A Show {index + 1}",
+                format="TV",
+                status="FINISHED",
+                episodes=count,
+                relations=(
+                    [relation("PREQUEL", anilist_id=900 + index + 1)]
+                    if index + 1 < len(counts)
+                    else None
+                ),
+            )
+        )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji=f"A Show {len(counts) + 1}",
+        format="TV",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900)] if counts else None,
+    )
+    return newest, cached(*rows)
+
+
+async def test_the_offset_is_the_sum_of_the_whole_prequel_chain() -> None:
+    """12 + 24 in front of a third season, so its episode 1 is the 37th."""
+    newest, resolve = chain(24, 12)
+
+    assert await absolute_offset(newest, resolve) == 36
+
+
+async def test_an_entry_with_nothing_in_front_of_it_has_no_offset() -> None:
+    """A first season, and the common case: ``None``, never zero."""
+    newest, resolve = chain()
+
+    assert await absolute_offset(newest, resolve) is None
+    assert await absolute_offset(FRIEREN_S1, cached(FRIEREN_S2)) is None
+
+
+async def test_a_prequel_arc_has_never_cached_declines_the_rule() -> None:
+    """Its length is unknown, so the offset would be a guess — and is refused."""
+    newest, _resolve = chain(24)
+
+    assert await absolute_offset(newest, cached()) is None
+
+
+async def test_a_prequel_with_no_episode_count_declines_it_too() -> None:
+    """An airing prequel nobody has published a count for."""
+    prequel = Anime(
+        id=2, anilist_id=900, title_romaji="A Show 1", format="TV", status="FINISHED", episodes=None
+    )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="A Show 2",
+        format="TV",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900)],
+    )
+
+    assert await absolute_offset(newest, cached(prequel)) is None
+
+
+async def test_a_film_prequel_is_skipped_and_the_television_one_counted() -> None:
+    """*Jujutsu Kaisen 0* is a ``PREQUEL`` of season two and nobody counts it."""
+    assert await absolute_offset(JJK_S2, cached(JJK_S1, JJK_ZERO)) == 24
+
+
+async def test_a_film_prequel_is_skipped_without_being_cached_at_all() -> None:
+    """It is skipped by its edge's own format, so its row is never needed."""
+    assert await absolute_offset(JJK_S2, cached(JJK_S1)) == 24
+
+
+async def test_two_countable_prequels_at_one_hop_decline() -> None:
+    """Which of them the group was counting is exactly what must not be guessed."""
+    first = Anime(
+        id=2, anilist_id=900, title_romaji="A", format="TV", status="FINISHED", episodes=12
+    )
+    other = Anime(
+        id=3, anilist_id=901, title_romaji="B", format="TV", status="FINISHED", episodes=13
+    )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="C",
+        format="TV",
+        episodes=12,
+        relations=[
+            relation("PREQUEL", anilist_id=900),
+            relation("PREQUEL", anilist_id=901),
+        ],
+    )
+
+    assert await absolute_offset(newest, cached(first, other)) is None
+
+
+async def test_a_prequel_chain_that_loops_declines() -> None:
+    """AniList's relation graph does contain loops; the walk must not spin."""
+    first = Anime(
+        id=2,
+        anilist_id=900,
+        title_romaji="A",
+        format="TV",
+        status="FINISHED",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=899)],
+    )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="B",
+        format="TV",
+        status="FINISHED",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900)],
+    )
+
+    assert await absolute_offset(newest, cached(first, newest)) is None
+
+
+async def test_a_chain_longer_than_the_cap_declines() -> None:
+    """Eleven hops is a franchise, and a franchise-wide guess is not an offset."""
+    newest, resolve = chain(*([12] * (MAX_PREQUEL_HOPS + 1)))
+
+    assert await absolute_offset(newest, resolve) is None
+
+
+async def test_a_chain_exactly_as_long_as_the_cap_is_still_answered() -> None:
+    """The other side of the same boundary."""
+    newest, resolve = chain(*([12] * MAX_PREQUEL_HOPS))
+
+    assert await absolute_offset(newest, resolve) == 12 * MAX_PREQUEL_HOPS
+
+
+async def test_a_prequel_of_a_format_nobody_can_classify_declines() -> None:
+    """``TV_SHORT`` is neither counted nor skipped, so the chain is abandoned."""
+    prequel = Anime(
+        id=2, anilist_id=900, title_romaji="A", format="TV_SHORT", status="FINISHED", episodes=12
+    )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="B",
+        format="TV",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900, fmt=None)],
+    )
+
+    assert await absolute_offset(newest, cached(prequel)) is None
+
+
+async def test_a_prequel_still_airing_declines_the_offset() -> None:
+    """Its episode count is an announcement, and one short lands inside its run."""
+    releasing = Anime(
+        id=2,
+        anilist_id=900,
+        title_romaji="A Show 1",
+        format="TV",
+        status="RELEASING",
+        episodes=12,
+    )
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="A Show 2",
+        format="TV",
+        status="RELEASING",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900)],
+    )
+
+    assert await absolute_offset(newest, cached(releasing)) is None
+
+    finished = Anime(
+        id=2,
+        anilist_id=900,
+        title_romaji="A Show 1",
+        format="TV",
+        status="FINISHED",
+        episodes=12,
+    )
+
+    assert await absolute_offset(newest, cached(finished)) == 12
+
+
+async def test_a_prequel_with_no_status_at_all_declines_too() -> None:
+    """A row nobody has filled is no evidence that it finished."""
+    unknown = Anime(id=2, anilist_id=900, title_romaji="A", format="TV", episodes=12)
+    newest = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="B",
+        format="TV",
+        status="FINISHED",
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=900)],
+    )
+
+    assert await absolute_offset(newest, cached(unknown)) is None
+
+
+async def test_a_film_entry_never_gets_an_offset() -> None:
+    """A single has no count to continue, whatever came before it."""
+    film = Anime(
+        id=1,
+        anilist_id=899,
+        title_romaji="A Film",
+        format="MOVIE",
+        episodes=1,
+        relations=[relation("PREQUEL", anilist_id=900)],
+    )
+
+    assert await absolute_offset(film, cached(JJK_S1)) is None
+
+
+def test_the_absolute_forms_sit_behind_the_romaji_short_forms() -> None:
+    """What SubsPlease writes, after what everybody else writes."""
+    built = queries(JJK_S2, 1, offset=24)
+
+    assert built == [
+        "Jujutsu Kaisen 2nd Season - 01",
+        "Jujutsu Kaisen Season 2 - 01",
+        "Jujutsu Kaisen S02E01",
+        "Jujutsu Kaisen S2 - 01",
+        "Jujutsu Kaisen II - 01",
+        "Jujutsu Kaisen - 01",
+        "Jujutsu Kaisen - 25",
+        "Jujutsu Kaisen 25",
+    ]
+
+
+def test_no_offset_means_no_absolute_forms() -> None:
+    """A first season, and an entry whose chain declined, ask exactly as before."""
+    assert queries(JJK_S2, 1) == queries(JJK_S2, 1, offset=None)
+    assert "Jujutsu Kaisen - 25" not in queries(JJK_S2, 1)
+    assert queries(FRIEREN_S1, 7, offset=None) == queries(FRIEREN_S1, 7)
+
+
+def test_an_unmarked_sequel_spends_no_slots_on_an_absolute_form() -> None:
+    """Nine words and a running number is a form nobody writes.
+
+    *Made in Abyss: Retsujitsu no Ougonkyou* names an arc rather than a season,
+    so there is no marker to strip and the "base" is the whole title. The two
+    slots would buy nothing — and the acceptance route still applies if such a
+    release turns up under one of the forms that are asked.
+    """
+    built = queries(MADE_IN_ABYSS_S2, 7, offset=13)
+
+    assert not any(form.endswith(" - 20") or form.endswith(" 20") for form in built)
+    assert built == queries(MADE_IN_ABYSS_S2, 7)
+    assert (
+        acceptable(
+            one("[SubsPlease] Made in Abyss - 20 (1080p) [A1B2C3D4].mkv"),
+            titles=MADE_IN_ABYSS_TITLES,
+            number=7,
+            season=None,
+            offset=13,
+        )
+        is not None
+    )
+
+
+def test_the_absolute_number_is_padded_against_the_combined_length() -> None:
+    """A franchise that passes 100 episodes is written the way a long show is."""
+    long_run = Anime(
+        anilist_id=1,
+        title_romaji="A Long Show 2nd Season",
+        format="TV",
+        episodes=24,
+        relations=[relation("PREQUEL", anilist_id=2)],
+    )
+
+    built = queries(long_run, 3, offset=90)
+
+    assert "A Long Show - 093" in built
+    assert "A Long Show 093" in built
+
+
+def test_the_absolute_forms_fit_inside_the_budget() -> None:
+    """A marked, subtitled sequel with an offset: the english tail is what goes.
+
+    Fourteen forms for ten slots. The absolute pair is ahead of every english
+    form on purpose — a group that numbers absolutely writes the romaji
+    franchise name — and the cap is what states that preference.
+    """
+    kimetsu = Anime(
+        anilist_id=145139,
+        title_romaji="Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season",
+        title_english="Demon Slayer: Kimetsu no Yaiba Swordsmith Village Arc",
+        format="TV",
+        episodes=11,
+        relations=[relation("PREQUEL", anilist_id=142329)],
+    )
+
+    built = queries(kimetsu, 1, offset=55)
+
+    assert len(built) == nyaa_module.MAX_QUERIES
+    assert "Kimetsu no Yaiba: Katanakaji no Sato-hen - 56" in built
+    assert "Kimetsu no Yaiba: Katanakaji no Sato-hen 56" in built
+
+
+def test_the_subsplease_release_is_accepted_as_the_episode_it_is() -> None:
+    """``- 25`` is episode 1 of season two, and the candidate says how it knows."""
+    candidate = acceptable(one(JJK_ABSOLUTE), titles=JJK_TITLES, number=1, season=2, offset=24)
+
+    assert candidate is not None
+    assert candidate.absolute is True
+    assert candidate.offset == 24
+    assert candidate.parsed.episode == 25
+
+
+def test_season_ones_own_first_episode_is_still_rejected() -> None:
+    """The whole hazard: ``- 01`` under an offset is the *prequel's* episode 1."""
+    assert (
+        acceptable(one(JJK_SEASON_ONE_FIRST), titles=JJK_TITLES, number=1, season=2, offset=24)
+        is None
+    )
+
+
+def test_the_episode_below_the_offset_is_rejected() -> None:
+    """``- 24`` is season one's last, not season two's first."""
+    assert (
+        acceptable(one(JJK_SEASON_ONE_LAST), titles=JJK_TITLES, number=1, season=2, offset=24)
+        is None
+    )
+
+
+def test_the_marked_release_is_still_accepted_under_an_offset() -> None:
+    """Nothing about the ordinary per-season rule changes."""
+    candidate = acceptable(one(JJK_MARKED), titles=JJK_TITLES, number=1, season=2, offset=24)
+
+    assert candidate is not None
+    assert candidate.absolute is False
+    assert candidate.parsed.episode == 1
+
+
+def test_an_absolute_release_is_not_that_number_of_the_entrys_own_episodes() -> None:
+    """``- 25`` asked for as *episode 25* is season one's, and the entry has 23.
+
+    The season check is what says so, and it still runs: the absolute reading
+    only ever applies to ``number + offset``, which for episode 25 would be 49.
+    """
+    assert acceptable(one(JJK_ABSOLUTE), titles=JJK_TITLES, number=25, season=2, offset=24) is None
+
+
+def test_a_release_that_names_a_season_is_never_read_absolutely() -> None:
+    """A group that wrote ``S2`` has said which season it uploaded."""
+    marked_absolute = "[SubsPlease] Jujutsu Kaisen S2 - 25 (1080p) [D4E5F6A7].mkv"
+
+    assert (
+        acceptable(one(marked_absolute), titles=JJK_TITLES, number=1, season=2, offset=24) is None
+    )
+
+
+def test_an_absolute_release_of_another_show_is_still_the_wrong_show() -> None:
+    """The 0.90 title rule is unchanged, and runs on the absolute path too."""
+    other = "[SubsPlease] Bleach - 25 (1080p) [E5F6A7B8].mkv"
+
+    assert acceptable(one(other), titles=JJK_TITLES, number=1, season=2, offset=24) is None
+
+
+def test_the_season_marked_release_wins_when_both_come_back() -> None:
+    """Explicit beats inferred, and the inferred one does not reach the ranker."""
+    feed = [
+        NyaaItem(title=JJK_ABSOLUTE, link="", info_hash="a" * 40, seeders=900),
+        NyaaItem(title=JJK_MARKED, link="", info_hash="b" * 40, seeders=3),
+    ]
+
+    kept = filter_items(feed, titles=JJK_TITLES, number=1, season=2, offset=24)
+
+    assert [candidate.item.title for candidate in kept] == [JJK_MARKED]
+
+
+def test_the_absolute_release_survives_when_nothing_names_a_season() -> None:
+    """The control: without an explicit rival it is the answer, not a runner-up."""
+    feed = [NyaaItem(title=JJK_ABSOLUTE, link="", info_hash="a" * 40, seeders=900)]
+
+    kept = filter_items(feed, titles=JJK_TITLES, number=1, season=2, offset=24)
+
+    assert [candidate.item.title for candidate in kept] == [JJK_ABSOLUTE]
+    assert kept[0].absolute is True
+
+
+def test_a_chosen_absolute_release_says_so_in_its_reasons() -> None:
+    """FR-A3: a release numbered 25 landing in episode row 1 has to be explained."""
+    kept = filter_items(
+        [NyaaItem(title=JJK_ABSOLUTE, link="", info_hash="a" * 40, seeders=900)],
+        titles=JJK_TITLES,
+        number=1,
+        season=2,
+        offset=24,
+    )
+
+    top = rank(kept, Rules())[0]
+
+    assert "absolute numbering: release 25 = episode 1" in top.reasons
+
+
+def test_an_ordinary_pick_says_nothing_about_absolute_numbering() -> None:
+    """The reason appears only where the arithmetic actually happened."""
+    kept = filter_items([one(JJK_MARKED)], titles=JJK_TITLES, number=1, season=2, offset=24)
+
+    top = rank(kept, Rules())[0]
+
+    assert not any("absolute numbering" in reason for reason in top.reasons)
+
+
+async def test_the_search_asks_the_absolute_form_and_keeps_what_it_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through :func:`search_for_episode`, offset and all."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    feed = read_fixture("search_empty.xml")
+    stub = NyaaStub({"Jujutsu Kaisen - 25": feed})
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, JJK_S2, 1, Rules(), offset=24)
+
+    assert "Jujutsu Kaisen - 25" in stub.queries
+    assert found.forms == len(queries(JJK_S2, 1, offset=24))
 
 
 # --- One-Room TA: the Western naming, end to end -----------------------------

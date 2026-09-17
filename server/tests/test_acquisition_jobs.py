@@ -16,7 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, Job, JobStatus, MediaFile, Torrent, Want
+from arc.models import Anime, Episode, EpisodeState, Job, JobStatus, MediaFile, Torrent, Want
 from arc.services.acquisition import jobs as acquisition_jobs
 from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition import qbit as qbit_module
@@ -398,6 +398,178 @@ async def test_every_release_taken_is_the_same_as_no_release(
     assert episode.state is EpisodeState.SEARCHING
     assert await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id)) is None
     assert len(await queued(db_session, SEARCH_RELEASE)) == 1, "the retry schedule, as with no hit"
+
+
+# --- Absolute numbering on sequels (FR-A4, 2026-09-17) ----------------------
+
+
+def _feed(title: str, *, info_hash: str, seeders: int = 120) -> str:
+    """One Nyaa RSS item, enough for the filter and the ranker."""
+    return (
+        '<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0"><channel><item>'
+        f"<title>{title}</title>"
+        "<link>https://nyaa.test/download/1.torrent</link>"
+        f"<nyaa:infoHash>{info_hash}</nyaa:infoHash>"
+        f"<nyaa:seeders>{seeders}</nyaa:seeders>"
+        "<nyaa:leechers>1</nyaa:leechers><nyaa:downloads>9</nyaa:downloads>"
+        "<nyaa:size>1.3 GiB</nyaa:size><nyaa:trusted>Yes</nyaa:trusted>"
+        "<nyaa:remake>No</nyaa:remake><nyaa:categoryId>1_2</nyaa:categoryId>"
+        "</item></channel></rss>"
+    )
+
+
+async def _as_sequel(session: AsyncSession, episode: Episode, *, prequel_episodes: int) -> Anime:
+    """Turn this episode's show into a second season with a cached prequel."""
+    anime = await session.get(Anime, episode.anime_id)
+    assert anime is not None
+    prequel = Anime(
+        anilist_id=(anime.anilist_id or 0) + 500_000,
+        title_romaji="Sousou no Frieren",
+        format="TV",
+        status="FINISHED",
+        episodes=prequel_episodes,
+    )
+    session.add(prequel)
+    await session.flush()
+    anime.title_romaji = "Sousou no Frieren 2nd Season"
+    anime.title_english = None
+    anime.format = "TV"
+    anime.episodes = 12
+    anime.relations = [
+        {
+            "anilist_id": prequel.anilist_id,
+            "mal_id": None,
+            "relation_type": "PREQUEL",
+            "format": "TV",
+        }
+    ]
+    await session.flush()
+    return anime
+
+
+async def test_the_offset_is_read_off_the_cached_prequel_row(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relation blob carries ids and a title; the count is on the other row."""
+    _wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962060, email="offset@arc.test", feed=None
+    )
+    anime = await _as_sequel(db_session, episode, prequel_episodes=28)
+
+    assert await acquisition_jobs._prequel_offset(db_session, anime) == 28
+
+
+async def test_a_prequel_arc_has_not_cached_declines_the_offset(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The rule declines rather than guessing at a length it cannot read."""
+    _wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962061, email="nooffset@arc.test", feed=None
+    )
+    anime = await _as_sequel(db_session, episode, prequel_episodes=28)
+    anime.relations = [
+        {"anilist_id": 7_654_321, "mal_id": None, "relation_type": "PREQUEL", "format": "TV"}
+    ]
+    await db_session.flush()
+
+    assert await acquisition_jobs._prequel_offset(db_session, anime) is None
+
+
+async def test_a_prequel_still_airing_declines_the_offset(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An announced episode count is the number likeliest to be wrong."""
+    _wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962064, email="airing@arc.test", feed=None
+    )
+    anime = await _as_sequel(db_session, episode, prequel_episodes=28)
+    prequel = await db_session.scalar(
+        select(Anime).where(Anime.anilist_id == (anime.anilist_id or 0) + 500_000)
+    )
+    assert prequel is not None
+    prequel.status = "RELEASING"
+    await db_session.flush()
+
+    assert await acquisition_jobs._prequel_offset(db_session, anime) is None
+
+
+async def test_a_malformed_relation_blob_declines_rather_than_failing(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``relations`` is JSONB from somebody else: a bad id is not a failed search.
+
+    The whole search still runs, asks its ordinary forms and stamps the episode
+    — it simply asks no absolute form.
+    """
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962065, email="badblob@arc.test", feed=None
+    )
+    anime = await _as_sequel(db_session, episode, prequel_episodes=28)
+    anime.relations = [
+        {"anilist_id": "n/a", "mal_id": None, "relation_type": "PREQUEL", "format": "TV"},
+        "not even a blob",
+    ]
+    await db_session.flush()
+
+    assert await acquisition_jobs._prequel_offset(db_session, anime) is None
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries
+    assert not any("- 35" in query for query in wired.nyaa.queries)
+    assert episode.last_search_forms == len(wired.nyaa.queries)
+
+
+async def test_a_search_asks_for_the_absolute_number_and_takes_that_release(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point, end to end: `- 35` is episode 7 of a season that follows 28.
+
+    The only feed that answers is the absolute form's, so nothing but the new
+    rule can produce a download here — and the torrent row it writes belongs to
+    the episode numbered 7, not to one numbered 35.
+    """
+    absolute = "[SubsPlease] Sousou no Frieren - 35 (1080p) [AB12CD34].mkv"
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962062, email="absolute@arc.test", feed=None
+    )
+    await _as_sequel(db_session, episode, prequel_episodes=28)
+    wired.nyaa.answers = {"Sousou no Frieren - 35": _feed(absolute, info_hash="c" * 40)}
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert "Sousou no Frieren - 35" in wired.nyaa.queries
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert episode.number == 7
+    torrent = await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+    assert torrent is not None
+    assert torrent.title == absolute
+
+
+async def test_a_season_marked_release_is_preferred_over_the_absolute_one(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Explicit beats inferred even when the inferred one has the seeders."""
+    absolute = "[SubsPlease] Sousou no Frieren - 35 (1080p) [AB12CD34].mkv"
+    marked = "[Erai-raws] Sousou no Frieren S2 - 07 [1080p][Multiple Subtitle].mkv"
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962063, email="explicit@arc.test", feed=None
+    )
+    await _as_sequel(db_session, episode, prequel_episodes=28)
+    wired.nyaa.answers = {
+        "Sousou no Frieren - 35": _feed(absolute, info_hash="c" * 40, seeders=4000),
+        "Sousou no Frieren S2 - 07": _feed(marked, info_hash="d" * 40, seeders=3),
+    }
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    torrent = await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+    assert torrent is not None
+    assert torrent.title == marked
 
 
 # --- The search diagnostic on the episode row (FR-A7, 2026-09-14) -----------

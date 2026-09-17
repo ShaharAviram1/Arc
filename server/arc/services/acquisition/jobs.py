@@ -339,6 +339,60 @@ async def _pick(ctx: JobContext, episode: Episode, ranked: list[Ranked]) -> Rank
     return None
 
 
+async def _prequel_offset(session: AsyncSession, anime: Anime) -> int | None:
+    """How many episodes ran before this entry, from the cached rows (FR-A4).
+
+    The database half of :func:`~arc.services.acquisition.nyaa.absolute_offset`
+    and the only reason it needs one: a relation blob carries external ids and
+    a title, never an episode count, so the count has to be read off the
+    prequel's own ``anime`` row. A prequel Arc has not cached is what makes the
+    whole rule decline — the walk is written that way on purpose — so a miss
+    here is an ordinary answer rather than a failure.
+
+    AniList id first, MAL id second, and never both in one ``OR``: two ids that
+    disagree would fetch whichever row the planner reached first, which is
+    exactly the kind of "nearly right" answer an offset must not be built on.
+
+    **Nothing here may fail a search.** ``relations`` is JSONB written by
+    whichever source answered, and a blob carrying ``"anilist_id": "n/a"`` is a
+    malformed row rather than an emergency: an entry Arc cannot compute an
+    offset for is the ordinary, documented outcome, and letting a ``ValueError``
+    out of it would put the *episode* back on the retry schedule over a field
+    the search never needed. So an id that is not a number is skipped without a
+    query being issued, and anything else that goes wrong is caught once, logged
+    at ``WARNING`` with the entry on it, and answered ``None``.
+    """
+
+    def _id(value: object) -> int | None:
+        """One external id off a relation blob, or ``None`` if it is not one."""
+        if isinstance(value, bool) or not isinstance(value, int | str):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    async def resolve(anilist_id: int | None, mal_id: int | None) -> Anime | None:
+        row: Anime | None = None
+        anilist = _id(anilist_id)
+        if anilist is not None:
+            row = await session.scalar(select(Anime).where(Anime.anilist_id == anilist))
+        mal = _id(mal_id)
+        if row is None and mal is not None:
+            row = await session.scalar(select(Anime).where(Anime.mal_id == mal))
+        return row
+
+    try:
+        return await nyaa_module.absolute_offset(anime, resolve)
+    except Exception:  # noqa: BLE001 - a bad relation blob is not a failed search
+        log.warning(
+            "could not work out an absolute numbering offset",
+            extra={"anime_id": anime.id},
+            exc_info=True,
+        )
+        return None
+
+
 async def _record_torrent(session: AsyncSession, episode: Episode, chosen: Ranked) -> Torrent:
     """The ``torrents`` row for the chosen release, reused if it exists.
 
@@ -531,7 +585,24 @@ async def search_release(ctx: JobContext) -> None:
     # goes through the same instance. It is never closed here — it outlives
     # the job (:func:`arc.services.acquisition.nyaa.shared_client`).
     nyaa = nyaa_module.shared_client(ctx.settings.nyaa_url)
-    found = await search_for_episode(nyaa, anime, episode.number, rules)
+    # Absolute numbering (FR-A4, 2026-09-17), read off the catalogue before the
+    # first request: it changes both what is asked for and what is accepted,
+    # and ``None`` — an entry with no prequel chain Arc can add up — is the
+    # ordinary answer and the behaviour every search had before it existed.
+    offset = await _prequel_offset(ctx.session, anime)
+    # Said out loud on every search, because "why did it ask for `- 25`?" and
+    # "why did it *not*?" are the same question about this one number, and the
+    # rule's ordinary answer is to decline (FR-A4).
+    ctx.log.info(
+        "absolute numbering applies" if offset else "absolute numbering does not apply",
+        extra={
+            "episode_id": episode.id,
+            "anime_id": anime.id,
+            "number": episode.number,
+            "offset": offset,
+        },
+    )
+    found = await search_for_episode(nyaa, anime, episode.number, rules, offset=offset)
     ranked = found.ranked
     # Every attempt, before anything is decided about it: the pair of numbers
     # is the diagnostic for a row that says ``Searching`` and nothing else

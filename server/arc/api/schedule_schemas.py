@@ -85,9 +85,29 @@ class ScheduleEntry(BaseModel):
     #: the wrong question on a row the catalogue has no season for. Always false
     #: on a prev/next season view, which takes no such rows.
     carried_over: bool = False
+    #: Whether the caller has watched **the episode this slot names**, or null
+    #: (owner, 2026-09-17). FR-W5's definition, applied to ``next_episode`` and
+    #: to nothing else.
+    #:
+    #: Null is the ordinary answer, and it means "there is nothing to say":
+    #: either the slot names no episode (FR-C6's MAL-synthesised time), or the
+    #: episode it names has **not aired yet** — and nobody has watched an
+    #: episode that has not been broadcast. That is the bug this field exists
+    #: to end: Watch Now drew "Episode 23 ✓ Watched" beside Friday's Slime
+    #: broadcast because it read the tick off the show's *latest aired* row
+    #: rather than off the episode on the card. The flag now belongs to the
+    #: named episode or to no one.
+    watched: bool | None = None
 
     @classmethod
-    def from_placed(cls, entry: PlacedEntry) -> ScheduleEntry:
+    def from_placed(cls, entry: PlacedEntry, *, watched: bool | None = None) -> ScheduleEntry:
+        """``watched`` is the caller's FR-W5 answer for ``entry.next_episode``.
+
+        Passed in rather than derived, and only ever for an episode that has
+        already aired: the router is what holds the caller's list progress and
+        completions, and the rule that an upcoming slot carries no tick is
+        enforced by simply not asking about one (:mod:`arc.api.schedule`).
+        """
         return cls(
             anime=AnimeSummary.from_anime(entry.anime, entry.list_status),
             air_time_local=_hhmm(entry.air_time_local),
@@ -97,6 +117,7 @@ class ScheduleEntry(BaseModel):
             following=entry.following,
             list_status=entry.list_status,
             carried_over=entry.carried_over,
+            watched=watched,
         )
 
 
@@ -143,7 +164,12 @@ class SchedulePage(BaseModel):
         # the length of the method.
         upcoming: tuple[int, str],
         timezone: str,
+        # ``anime_id → watched``, and present only for the entries whose named
+        # episode has aired. One entry per show in a week, so the show's id
+        # identifies the slot; see :attr:`ScheduleEntry.watched`.
+        watched: dict[int, bool] | None = None,
     ) -> SchedulePage:
+        marks = watched or {}
         return cls(
             year=year,
             season=season,
@@ -153,11 +179,17 @@ class SchedulePage(BaseModel):
             days=[
                 ScheduleDay(
                     weekday=weekday,
-                    entries=[ScheduleEntry.from_placed(entry) for entry in entries],
+                    entries=[
+                        ScheduleEntry.from_placed(entry, watched=marks.get(entry.anime.id))
+                        for entry in entries
+                    ],
                 )
                 for weekday, entries in enumerate(placement.days)
             ],
-            unscheduled=[ScheduleEntry.from_placed(entry) for entry in placement.unscheduled],
+            unscheduled=[
+                ScheduleEntry.from_placed(entry, watched=marks.get(entry.anime.id))
+                for entry in placement.unscheduled
+            ],
         )
 
 
@@ -189,7 +221,12 @@ class BehindEntry(BaseModel):
 
 
 class NewEpisodeEntry(BaseModel):
-    """An episode of a followed show that aired in the last seven days.
+    """One episode of a followed show, as an episode shelf renders it.
+
+    Both 16:9 shelves take this shape — ``new_this_week`` and, since
+    2026-09-17, ``ready_to_watch`` — because it is the same row: a show and one
+    of its episodes. One model rather than two identical ones, for the reason
+    :class:`~arc.services.catalog.progress.NewEpisodeRow` is one dataclass.
 
     The episode is the *same* :class:`~arc.api.anime_schemas.EpisodeOut` the
     show page renders, filled in the same way, which is the point of taking
@@ -291,11 +328,18 @@ class ContinueWatchingEntry(BaseModel):
 
 
 class HomePage(BaseModel):
-    """``GET /api/home`` — the three rows of the home page (FR-W1)."""
+    """``GET /api/home`` — the shelves of the home page (FR-W1)."""
 
     #: Started and unfinished, most recently watched first, at most
     #: :data:`~arc.services.playback.progress.CONTINUE_LIMIT`.
     continue_watching: list[ContinueWatchingEntry] = Field(default_factory=list)
+    #: Ready, unstarted and unwatched, whenever the episode aired; the file's
+    #: ``ready_at`` newest first, at most
+    #: :data:`arc.services.catalog.progress.READY_LIMIT` (owner, 2026-09-17).
+    #: A shelf of its own rather than a slice of ``new_this_week``, which is
+    #: the fix: the client used to filter the week's episodes for the ready
+    #: ones, so a ready episode of an older show was never on the page.
+    ready_to_watch: list[NewEpisodeEntry] = Field(default_factory=list)
     #: Newest aired episode first.
     behind: list[BehindEntry] = Field(default_factory=list)
     #: Newest first, at most :data:`arc.services.catalog.progress.NEW_LIMIT`.

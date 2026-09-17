@@ -11,11 +11,13 @@ import {
   FOCUS_RING,
   HeroFrame,
   PlayGlyph,
+  PosterWash,
   Shelf,
   Skeleton,
 } from '@/components/ui'
 import {
   anilistUrl,
+  backdropArt,
   catalogErrorMessage,
   episodeProgressPercent,
   episodeProblem,
@@ -40,7 +42,6 @@ import {
   type ListEntry,
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
-import { useHealth } from '@/lib/health'
 import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
 
@@ -84,18 +85,6 @@ const FALLBACK_NOTICES: Partial<Record<CatalogSource, string>> = {
 const UNLINKED_RELATION_HINT = 'Not in the catalogue yet'
 
 const NO_EPISODES = 'No episodes known yet. Arc fills them in as the catalogue answers.'
-
-/**
- * Why every row shows the stripe (§5.8, owner 2026-09-13).
- *
- * Episode stills come from TMDB alone, reached by id through the offline
- * cross-id map — so a show the map cannot reach, or a deployment with no TMDB
- * key, has none and never will. Said once, above the list, rather than
- * fourteen times beside identical placeholders; and said *only* then, because
- * on a mapped show the pictures are on their way and a caption promising
- * otherwise would be wrong a second later.
- */
-const NO_STILLS = 'No episode pictures for this show'
 
 /** What the primary action says when there is nothing playable to offer. */
 const NOTHING_READY = 'Nothing ready yet'
@@ -152,18 +141,54 @@ function altTitles(anime: AnimeDetail): string {
   return [...new Set(alternatives)].join(' · ')
 }
 
+/** The row's 16:9 frame, whichever of the three pictures it ends up holding. */
+const ROW_ART = 'w-[152px] shrink-0'
+
 /**
- * An episode still, or nothing at all.
+ * The picture beside one episode row, in the order it is worth showing:
  *
- * Deliberately no fallback to the show's own art: the same banner cropped
- * fourteen times down a list of episodes reads as fourteen identical pictures
- * of nothing, where the stripe placeholder reads as "no still for this one"
- * and lets the row's words carry it. What the stripe cannot say is whether a
- * picture is coming; :data:`NO_STILLS` above the list says that once, and only
- * where the answer is no.
+ * 1. the episode's own still, which is what the row is for;
+ * 2. the show's TMDB backdrop, which is 16:9 and fills the frame as it is;
+ * 3. otherwise the key visual, letterboxed in the frame at its own 2:3.
+ *
+ * Until 2026-09-17 there was no step 2 or 3: a row with no still drew the
+ * stripe placeholder, and a line above the list ("No episode pictures for this
+ * show") explained the ones that would stay that way. The argument was that
+ * one banner cropped fourteen times reads as fourteen pictures of nothing —
+ * which is true of a *banner*, and is why one is not offered here. It is not
+ * true of a show's own artwork framed honestly, and the owner's case is what
+ * settled it: One-Room TA is not in the TMDB id map at all, so no still can
+ * ever come, and a fourteen-row column of stripes under a caption is a worse
+ * page than the same column carrying the show it is about.
+ *
+ * `PosterWash` with `ground={null}` is the letterbox: the same component the
+ * Home tiles use, minus the blurred wash they draw behind the poster. The wash
+ * is what a shelf of eight tiles can afford and a list cannot — a long-runner's
+ * page is fifty rows, and fifty 40 px blurs is a great deal of compositing for
+ * a ground nobody looks at.
  */
-function stillArt(episode: EpisodeOut): string | null {
-  return episode.still_url ?? null
+function EpisodeArt({ anime, episode }: { anime: AnimeDetail; episode: EpisodeOut }) {
+  const still = episode.still_url ?? null
+  if (still !== null) {
+    return <Artwork url={still} shape="still" radius="still" className={ROW_ART} />
+  }
+
+  const backdrop = backdropArt(anime)
+  if (backdrop !== null) {
+    return <Artwork url={backdrop} shape="still" radius="still" className={ROW_ART} />
+  }
+
+  return (
+    <PosterWash
+      poster={keyVisual(anime)}
+      ground={null}
+      shape="still"
+      radius="still"
+      padding="p-1.5"
+      align="center"
+      className={ROW_ART}
+    />
+  )
 }
 
 function watchedCount(episodes: EpisodeOut[]): number {
@@ -886,12 +911,7 @@ function EpisodeRow({
         playable ? 'hover:bg-[var(--arc-surface-hover)]' : '',
       )}
     >
-      <Artwork
-        url={stillArt(episode)}
-        shape="still"
-        radius="still"
-        className="w-[152px] shrink-0"
-      />
+      <EpisodeArt anime={anime} episode={episode} />
 
       <div className="min-w-0 flex-1">
         <p className="text-[16px] font-medium text-[var(--arc-text)]">
@@ -960,21 +980,15 @@ function Episodes({
   isAdmin: boolean
   timezone?: string
 }) {
-  const { data: health } = useHealth()
-  // Two ways for the stripes to be permanent: TMDB cannot be reached for this
-  // show, or this deployment has no key at all and reaches TMDB for nothing.
-  // Either is worth one line; a `true` and an unanswered health check are not,
-  // because then the pictures are simply not here yet.
-  const noStills = anime.tmdb_mapped === false || health?.tmdb_enabled === false
-
+  // No "no episode pictures" caption any more (owner, 2026-09-17): a row with
+  // no still now falls back to the show's backdrop or its poster, so there is
+  // nothing left for the line to explain. `tmdb_mapped` still decides whether
+  // the page polls for stills that are on their way (`awaitingStills`).
   return (
     <section className="mt-14">
       <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
         Episodes
       </h2>
-      {noStills ? (
-        <p className="mt-1.5 text-[13px] text-[var(--arc-text-muted)]">{NO_STILLS}</p>
-      ) : null}
       {anime.episodes.length === 0 ? (
         <EmptyState className="mt-5" message={NO_EPISODES} />
       ) : (

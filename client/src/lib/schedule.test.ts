@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useRemoveListEntry, useSetListEntry, type ListStatus } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
 import {
+  currentSeason,
   homeQueryKey,
+  isCurrentSeason,
   isFollowing,
   parseSeason,
   parseYear,
@@ -13,6 +15,7 @@ import {
   seasonLabel,
   useHome,
   useSchedule,
+  weekDates,
   weekdayInTimezone,
   WEEKDAY_LABELS,
   type HomePage,
@@ -87,6 +90,102 @@ describe('weekdayInTimezone', () => {
     vi.stubGlobal('Intl', { DateTimeFormat: UnknownWeekday })
 
     expect(weekdayInTimezone('UTC', new Date('2026-09-09T12:00:00Z'))).toBe(-1)
+  })
+})
+
+describe('weekDates', () => {
+  it('names every day of the Monday–Sunday week the viewer is in', () => {
+    // A Tuesday: the week around it runs Mon 7 Sep to Sun 13 Sep.
+    expect(weekDates('Europe/Berlin', new Date('2026-09-08T10:00:00Z'))).toEqual([
+      '7 Sep',
+      '8 Sep',
+      '9 Sep',
+      '10 Sep',
+      '11 Sep',
+      '12 Sep',
+      '13 Sep',
+    ])
+  })
+
+  it('reads the week in the schedule’s zone, not the browser’s', () => {
+    // 23:00 UTC on Sunday is already Monday in Tokyo — the next week.
+    const at = new Date('2026-09-13T23:00:00Z')
+    expect(weekDates('UTC', at)[0]).toBe('7 Sep')
+    expect(weekDates('Asia/Tokyo', at)[0]).toBe('14 Sep')
+  })
+
+  it('crosses a month and a year without arithmetic of its own', () => {
+    expect(weekDates('UTC', new Date('2026-12-31T12:00:00Z'))).toEqual([
+      '28 Dec',
+      '29 Dec',
+      '30 Dec',
+      '31 Dec',
+      '1 Jan',
+      '2 Jan',
+      '3 Jan',
+    ])
+  })
+
+  it('survives the night a zone puts its clocks back', () => {
+    // Europe/Berlin leaves summer time on Sunday 25 October 2026.
+    expect(weekDates('Europe/Berlin', new Date('2026-10-25T12:00:00Z'))).toEqual([
+      '19 Oct',
+      '20 Oct',
+      '21 Oct',
+      '22 Oct',
+      '23 Oct',
+      '24 Oct',
+      '25 Oct',
+    ])
+  })
+
+  it('gives no dates at all when Intl cannot say what day it is', () => {
+    class UnknownWeekday {
+      format(): string {
+        return 'Sept'
+      }
+      formatToParts(): { type: string; value: string }[] {
+        return []
+      }
+    }
+    vi.stubGlobal('Intl', { DateTimeFormat: UnknownWeekday })
+
+    expect(weekDates('UTC', new Date('2026-09-09T12:00:00Z'))).toEqual([])
+  })
+})
+
+describe('currentSeason / isCurrentSeason', () => {
+  it('cuts the year into quarters the way the server does', () => {
+    expect(currentSeason(new Date('2026-01-01T00:00:00Z'))).toEqual({
+      year: 2026,
+      season: 'WINTER',
+    })
+    expect(currentSeason(new Date('2026-03-31T23:59:00Z'))).toEqual({
+      year: 2026,
+      season: 'WINTER',
+    })
+    expect(currentSeason(new Date('2026-04-01T00:00:00Z'))).toEqual({
+      year: 2026,
+      season: 'SPRING',
+    })
+    expect(currentSeason(new Date('2026-09-30T00:00:00Z'))).toEqual({
+      year: 2026,
+      season: 'SUMMER',
+    })
+    expect(currentSeason(new Date('2026-12-31T23:00:00Z'))).toEqual({ year: 2026, season: 'FALL' })
+  })
+
+  it('measures in UTC, because the server does', () => {
+    // 23:00 UTC on 31 March is already 1 April in Tokyo, and the server would
+    // still call this WINTER: both ends have to agree which grid is live.
+    expect(currentSeason(new Date('2026-03-31T23:00:00Z')).season).toBe('WINTER')
+  })
+
+  it('tells the live week from a browse', () => {
+    const at = new Date('2026-10-06T10:00:00Z')
+    expect(isCurrentSeason({ year: 2026, season: 'FALL' }, at)).toBe(true)
+    expect(isCurrentSeason({ year: 2026, season: 'SUMMER' }, at)).toBe(false)
+    expect(isCurrentSeason({ year: 2025, season: 'FALL' }, at)).toBe(false)
   })
 })
 

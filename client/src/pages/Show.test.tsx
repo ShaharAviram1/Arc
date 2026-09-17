@@ -18,11 +18,13 @@ import {
   FRIEREN_DETAIL_UNMAPPED,
   FRIEREN_DETAIL_VIA_MAL,
   FRIEREN_DETAIL_VIA_OFFLINE,
+  FRIEREN_DETAIL_WITH_STILLS,
   FRIEREN_SAMPLE,
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
   MAL_WRITE_ERROR,
+  STILL_URL,
   UNAVAILABLE_REASON,
   UNLINKED_RELATION,
 } from '@/test/animeFixtures'
@@ -45,7 +47,7 @@ const TRANSCODE_PATH = '/api/episodes/9007/transcode'
 const WATCHED_PATH = '/api/episodes/9001/watched'
 const UNWATCHED_PATH = '/api/episodes/9002/watched'
 const PROGRESS_RESULT = { completed: true, newly_completed: true, list_progress: 2 }
-/** The one line the episode list adds when there will never be stills (§5.8). */
+/** The line the episode list used to add when no still could ever come. */
 const NO_STILLS = 'No episode pictures for this show'
 
 /** The tooltip on a pill with no undo (FR-W5). */
@@ -807,12 +809,56 @@ describe('Show', () => {
     expect(screen.queryAllByText('est.')).toHaveLength(0)
   })
 
-  describe('episode pictures (§5.8)', () => {
+  describe('episode pictures (§5.8, owner 2026-09-17)', () => {
     const HEALTH_PATH = 'GET /api/health'
     const WITH_KEY = { body: { status: 'ok', version: '0.1.0', env: 'dev', tmdb_enabled: true } }
     const NO_KEY = { body: { status: 'ok', version: '0.1.0', env: 'dev', tmdb_enabled: false } }
+    const BACKDROP = 'https://image.tmdb.example/backdrop.jpg'
 
-    it('says so once when TMDB cannot be reached for this show', async () => {
+    /** The frame beside the first episode row, whatever it ended up holding. */
+    function firstRowArt(): HTMLElement {
+      const list = (
+        screen
+          .getByRole('heading', { level: 2, name: 'Episodes' })
+          .closest('section') as HTMLElement
+      ).querySelector('.flex.flex-col.gap-0\\.5') as HTMLElement
+      return list.firstElementChild?.firstElementChild as HTMLElement
+    }
+
+    it('draws the episode’s own still when it has one', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [HEALTH_PATH]: WITH_KEY,
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL_WITH_STILLS },
+      })
+
+      renderShow()
+      await screen.findByRole('heading', { level: 2, name: 'Episodes' })
+
+      const art = firstRowArt()
+      expect(art.querySelector('img')).toHaveAttribute('src', STILL_URL)
+      // A still wins outright: no wash, no poster plate.
+      expect(art.querySelector('[data-hero-poster]')).toBeNull()
+    })
+
+    it('falls back to the show’s backdrop when the episode has no still', async () => {
+      mockApi({
+        'GET /api/auth/me': ME,
+        [HEALTH_PATH]: WITH_KEY,
+        [DETAIL_PATH]: { body: { ...FRIEREN_DETAIL_UNMAPPED, backdrop_url: BACKDROP } },
+      })
+
+      renderShow()
+      await screen.findByRole('heading', { level: 2, name: 'Episodes' })
+
+      const art = firstRowArt()
+      expect(art.querySelector('img')).toHaveAttribute('src', BACKDROP)
+      expect(art.querySelector('[data-hero-poster]')).toBeNull()
+    })
+
+    it('falls back to the poster, letterboxed, when there is no backdrop', async () => {
+      // One-Room TA's case: the id map cannot reach the show, so no still and
+      // no backdrop will ever come. The show's own key visual carries the row.
       mockApi({
         'GET /api/auth/me': ME,
         [HEALTH_PATH]: WITH_KEY,
@@ -820,13 +866,20 @@ describe('Show', () => {
       })
 
       renderShow()
+      await screen.findByRole('heading', { level: 2, name: 'Episodes' })
 
-      // One line above the list, not a caption on fourteen identical stripes.
-      expect(await screen.findByText(NO_STILLS)).toBeInTheDocument()
-      expect(screen.getAllByText(NO_STILLS)).toHaveLength(1)
+      const art = firstRowArt()
+      const plate = art.querySelector('[data-hero-poster] img')
+      expect(plate).toHaveAttribute('src', FRIEREN.cover_large_url)
+      // Letterboxed, not washed: a list is fifty rows deep and the blurred
+      // ground the Home tiles draw is not worth fifty compositings.
+      expect(art.querySelector('[data-hero-backdrop]')).toBeNull()
     })
 
-    it('says nothing while the pictures are still on their way', async () => {
+    it('frames a mapped show’s rows too, while its stills are on their way', async () => {
+      // The fallback is not gated on `tmdb_mapped`: a row with no still is a
+      // row with no still, whether or not one is coming. What `tmdb_mapped`
+      // still decides is the poll (`awaitingStills`), and nothing else.
       mockApi({
         'GET /api/auth/me': ME,
         [HEALTH_PATH]: WITH_KEY,
@@ -834,23 +887,26 @@ describe('Show', () => {
       })
 
       renderShow()
-      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+      await screen.findByRole('heading', { level: 2, name: 'Episodes' })
 
-      // Opening the page queued the enrichment; a caption saying there are no
-      // pictures would be wrong a few seconds later.
-      expect(screen.queryByText(NO_STILLS)).not.toBeInTheDocument()
+      expect(firstRowArt().querySelector('[data-hero-poster] img')).toHaveAttribute(
+        'src',
+        FRIEREN.cover_large_url,
+      )
     })
 
-    it('says so on a deployment with no TMDB key, mapped or not', async () => {
+    it('no longer captions the list with "no episode pictures"', async () => {
+      // The fallback says it instead, on every row, in the show's own artwork.
       mockApi({
         'GET /api/auth/me': ME,
         [HEALTH_PATH]: NO_KEY,
-        [DETAIL_PATH]: { body: FRIEREN_DETAIL_AWAITING_STILLS },
+        [DETAIL_PATH]: { body: FRIEREN_DETAIL_UNMAPPED },
       })
 
       renderShow()
+      await screen.findByRole('heading', { level: 2, name: 'Episodes' })
 
-      expect(await screen.findByText(NO_STILLS)).toBeInTheDocument()
+      expect(screen.queryByText(NO_STILLS)).not.toBeInTheDocument()
     })
   })
 

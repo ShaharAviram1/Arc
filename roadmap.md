@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-14 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-17 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -698,10 +698,16 @@ the finish work (bugs found that way are fixed inside M16).
         titles split only on real filesystem paths via an explicit flag);
         parser corpus 259/259, query corpus 17 cases; 828 matching tests,
         full client 644 and lint green; migration `4f2ab7c91d68` on dev
-  - [ ] Absolute episode numbering on sequels (SubsPlease `Jujutsu Kaisen -
+  - [x] Absolute episode numbering on sequels (SubsPlease `Jujutsu Kaisen -
         25` for S2 E1): offset from prequel episode counts via relations,
         accepted only when season agreement and the offset both hold — own
         item with a Reviewer, after this batch
+       . Verified 2026-09-17 (orchestrator): Reviewer found no blocker; its
+        should-fixes landed (only FINISHED prequels count, bare-base
+        sequels spend no slots, a malformed relation never fails a search);
+        562 matching/corpus/acquisition tests green, query corpus 18 cases,
+        parser corpus 259/259, ruff/format/mypy clean
+
   - [x] Deployed 2026-09-14 as "M16 batch 2" (commit `621dd27`): migration
         `4f2ab7c91d68` ran on the host, `WORKER_DRAIN_TIMEOUT` set to 10 in
         the host env to match the 15 s stop grace, health 200 with 0
@@ -710,6 +716,112 @@ the finish work (bugs found that way are fixed inside M16).
         owner's stuck One-Room TA episodes 1–2 were re-searched right after
         the deploy — 6 forms, ToonsHub `S01E01`/`S01E02` found and chosen,
         both downloading
+  - **Batch 3 (owner, 2026-09-17, after the batch-2 deploy):**
+  - [x] Player end-of-episode flow: at the 90 % completion mark show a small
+        toast "Marked as watched" instead of the next-episode overlay; with
+        1:30 or less remaining show the overlay offering "Next episode",
+        "Keep watching" and "Back to the show" (owner's wording). Built
+        client-only (spec FR-S5 rewritten, architecture §5.4a): the toast is
+        raised by the server's `newly_completed` so a rewatch is silent, the
+        card is derived from `ended || remaining <= 90 s` with "Keep watching"
+        and Escape holding for the rest of the playback, "Next episode" is
+        drawn only when the next one is ready, and both render inside the
+        fullscreen element. The ⟲10 / ⟳10 glyphs were redrawn in the same
+        pass (owner: the arc was on the wrong side) — one rewind, mirrored.
+        61 Player tests green. Verified 2026-09-17 (orchestrator) in Chrome on dev: seeking to
+        60 s before the end brought up the card ("Episode 2 isn't ready
+        yet", Keep watching, Back to the show) with the video still
+        playing; 61 Player tests
+  - [x] Player: the ±10 s seek controls draw their semicircle on the wrong
+        side; the glyphs should read as rewind (arc opening left) and
+        forward (mirror) — owner, 2026-09-17.
+        Verified 2026-09-17 (orchestrator): the redrawn glyphs read as
+        ⟲10 and ⟳10 with the arc opening on the correct side; a test pins
+        the forward glyph as the mirror of the back one.
+
+  - [x] Shows the TMDB id map cannot reach (One-Room TA: AniList 205068 has
+        no TMDB entry) get no stills or backdrop; their episode rows and
+        cards should fall back to the show's poster (or backdrop when there
+        is one) instead of the striped placeholder, and the "No episode
+        pictures" line goes.
+        Built 2026-09-17, client-only: `EpisodeArt` in `pages/Show.tsx` takes
+        still → `backdrop_url` → key visual letterboxed in the 16:9 slot
+        (`PosterWash` with `ground={null}`, the wash dropped because a show
+        page is fifty rows where a shelf is eight); `backdropArt` added to
+        `lib/anime.ts`; Home's tiles already had the chain and keep their
+        wash; the `NO_STILLS` caption is gone and `tmdb_mapped` stays on the
+        API for `awaitingStills`' polling rule. Verified 2026-09-17 (orchestrator) on dev: the unmapped
+        Fate/stay night Heaven's Feel III row shows its poster letterboxed
+        in the 16:9 slot instead of the stripes; the "no pictures" line is
+        gone
+  - [x] "Ready to watch" is derived from the New-this-week rows (aired in
+        the last 7 days), so a ready episode of an older show (One-Room TA,
+        aired 2026-08-27) never appears. Fix: a server-side "ready and not
+        started by the viewer" query for the shelf, any air date, newest
+        ready first.
+        Built 2026-09-17: `progress.ready_to_watch` (ready state, list in
+        watching/planned/on_hold, no `watch_progress` past 10 s, no
+        completion, number above the list's progress; `renditions.ready_at`
+        desc nulls last, cap 20) behind a new `ready_to_watch` array on
+        `GET /api/home`; the client renders it and `readyToWatch`'s filter
+        over `new_this_week` is gone. Verified 2026-09-17 (orchestrator): server-side `ready_to_watch`
+        shelf with 13 new API tests (old ready episode listed, started or
+        watched-by-progress or dropped ones not); live proof waits for the
+        deploy (One-Room TA on production)
+  - [x] The This-week panel shows "✓ Watched" on upcoming appointments
+        (Slime episode 23, Mushoku episode 13): the flag is derived from the
+        show's latest aired row and drawn beside the next episode's number.
+        A future episode never carries a tick; the tick applies only to the
+        aired episode the tile actually names.
+        Built 2026-09-17: `ScheduleEntry.watched` (`bool | null`) on
+        `GET /api/schedule`, answered by `api/schedule.watched_marks` — FR-W5
+        for `next_episode`, and only where `next_at` is already past, so an
+        upcoming slot sends null and two queries run only when a slot has
+        aired; Home's `appointments()` reads it and `watchedThisWeek`'s
+        lookup by show is gone. Verified 2026-09-17 (orchestrator) on dev: the eight upcoming
+        appointments carry no tick; the API sends `watched` only for an
+        aired named episode; 290 home/schedule/catalogue/playback tests
+  - [ ] Absolute episode numbering on sequels — approved by the owner; the
+        item above moves into this batch with its own Reviewer.
+        Built 2026-09-17 (spec FR-A4, architecture §5.1a/§6/§10):
+        `nyaa.absolute_offset` sums the `PREQUEL` chain's episode counts
+        through cached `anime` rows and **declines** the entry entirely on an
+        uncached prequel, a null count, a prequel that has not finished airing
+        (an announced total is the number likeliest to be wrong), two countable
+        prequels at one hop, a loop, >10 hops or a format it cannot classify;
+        films/OVAs in the chain are skipped (so *Jujutsu Kaisen 0* costs season
+        two nothing). `queries()` then asks `Jujutsu Kaisen - 25` and `Jujutsu
+        Kaisen 25` behind the romaji short forms — and only where the season
+        marker left a shorter base behind, so an unmarked sequel spends no
+        slots on a form nobody writes — `acceptable()` takes `N + offset` only
+        from a release naming no season, and `filter_items()` drops every
+        absolute candidate when a season-marked one for the same episode came
+        back too. `jobs._prequel_offset` is the DB half and can never fail a
+        search (a malformed relation blob declines and logs at WARNING);
+        `search_release` logs at INFO which offset it used; `rank` explains the
+        pick with "absolute numbering: release 25 = episode 1". Reviewer's
+        three should-fixes and two nits applied the same day. 177 nyaa tests,
+        query corpus 18 cases, 121 acquisition-job tests, ruff/mypy clean —
+        awaiting orchestrator validation
+  - [x] Schedule redesign (owner, 2026-09-17, replacing the dimming idea):
+        show three days at a time instead of seven, starting with today;
+        arrows on the day-and-date bar move through the week (the season's
+        prev/next stays for browsing other seasons); rows are roomier with
+        full show names and legible air times; today is marked; shows the
+        viewer follows carry a small highlight. Long-runners and carried-in
+        shows stay as they are — the room is what fixes the clutter.
+        Built 2026-09-17, client-only (`pages/Schedule.tsx`, `weekDates` in
+        `lib/schedule.ts`): today plus the next two days, a day-and-date bar
+        ("Wed 17 Sep") with `GLASS_CIRCLE` chevrons and arrow-key support that
+        stop at the week's ends, an accent underline and a "Today" chip on
+        today, un-clamped titles with 15px times and 56px thumbs, and an ember
+        left rule plus sr-only "On your list" on a followed row. A browsed
+        prev/next season shows weekday names alone — no dates, no today, and
+        the window opens on Monday — because only the live season's grid is a
+        real week. Verified 2026-09-17 (orchestrator) on dev: three days from today,
+        "Today" chip and ember rule, arrows at both ends, full titles and
+        15 px times, five followed shows highlighted with sr-only "On your
+        list"; a browsed season shows weekday names only; 61 Schedule tests
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed

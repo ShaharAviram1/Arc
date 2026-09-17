@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-14. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-09-17. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -110,7 +110,11 @@ any time, and the owner uses it daily.
   credits when AniList has not, and never overwrites AniList-provided values;
   opening a show's page asks for its missing pictures (they appear without a
   reload), and where the id map cannot reach the show — or the deployment has
-  no TMDB key — the episode list says so once instead of waiting.
+  no TMDB key — an episode row or card with no still of its own falls back to
+  the show's backdrop and then to its key visual, framed in the 16:9 slot
+  rather than left as a placeholder (owner, 2026-09-17; the caption that used
+  to explain the empty box is gone, since the artwork is a better answer than a
+  sentence about the absence of it).
   A record no live source has answered for carries a quiet "via offline
   catalogue" caveat wherever it is shown — the counterpart of "via MAL" — and
   that caveat disappears on its own once AniList or MAL fills the record,
@@ -161,7 +165,25 @@ any time, and the owner uses it daily.
   whatever form found it, and where a release cannot be told from a series pack
   by anything in its name Arc leaves the episode unfetched and says so — a
   missing file is visible and fixable, the wrong film plays as though it were
-  right.
+  right. **Some groups never restart the count on a sequel** (owner,
+  2026-09-17): where the catalogue's own `PREQUEL` chain adds up to a number
+  Arc can be sure of — every prequel cached, **every one of them finished
+  airing** (an airing season's episode count is an announcement, and one short
+  puts the absolute number inside that season's own run), every episode count
+  published, films and OVAs skipped because groups do not count them — a later
+  season is also asked for by its **absolute** number (`Jujutsu Kaisen - 25`
+  for episode 1 of a second season that follows 24), and a release carrying
+  that number is accepted as that episode. Only ever above the prequel's own total, only from
+  a release that names no season at all, and never while an explicitly
+  season-marked release for the same episode came back in the same search: a
+  group that wrote `S2` has already answered the question the arithmetic is
+  asking. An entry whose chain Arc cannot add up keeps exactly the behaviour it
+  had before, because an offset that is inferred rather than read is the wrong
+  file rather than a missing one. The absolute *query* is only asked where the
+  show has a short name to ask it under — a sequel whose title names an arc
+  rather than a season has none, and nine words followed by a running number is
+  a form nobody writes — though a release like that is still accepted if one of
+  the other forms finds it.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -275,7 +297,23 @@ any time, and the owner uses it daily.
   that the user never said. The status is never rolled back: a show FR-W5
   completed stays completed, because "completed" is the user's word (FR-W2).
   Un-marking never creates a list entry.
-- FR-S5 Next-episode: at the end of an episode, offer the next one if ready.
+- FR-S5 **The end of an episode is two moments** (owner, 2026-09-17, replacing
+  the single overlay at the completion mark).
+  1. *Crossing the completion mark* (FR-S4's 90 %, unchanged) is bookkeeping,
+     and gets a receipt: a small, quiet "Marked as watched" toast over the
+     picture for about four seconds, dismissable by a click, carrying no
+     action. Nothing is offered and no overlay appears — the decision about
+     what to watch next is ten minutes away. A rewatch crosses the same mark
+     and says nothing, because the completion is not new.
+  2. *The end itself* — with 1:30 or less remaining, and again when the media
+     ends — gets the overlay: **Next episode** (offered only when there is a
+     next episode and it is ready; when it exists but is not prepared, or the
+     episode was the last, the overlay says so instead of drawing a dead
+     button), **Keep watching** (puts the overlay away for the rest of that
+     playback; Escape does the same) and **Back to the show**. The episode
+     keeps playing underneath, the overlay takes no keyboard focus so the
+     shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
+     toast and the overlay render inside the fullscreen element.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
 
 ### 4.6 Watch tracking and list states
@@ -285,10 +323,18 @@ any time, and the owner uses it daily.
   and resumes where it stopped; owner, 2026-09-11), **Behind on** (followed airing shows with unwatched
   aired episodes), and **New this week** (episodes that aired in the last 7
   days for followed shows). As shelved since M15
-  those are Continue watching, Catch up, and This week plus Ready to watch —
-  the latter being the ready, unstarted half of New this week. The This-week
+  those are Continue watching, Catch up, and This week plus **Ready to watch**:
+  every episode Arc holds a playable file for, on a show the viewer is
+  watching, has planned or has on hold, that they have neither started nor
+  watched (FR-W5) — **whatever it aired, and whether it aired at all**, newest
+  file first (owner, 2026-09-17). It was the ready, unstarted half of New this
+  week until then, which silently made it a shelf about the last seven days of
+  broadcasting rather than about the files Arc is holding. The This-week
   shelf carries **no acquisition state** (owner, 2026-09-13): the episode, its
-  air day, and a watched tick when the viewer has watched it (FR-W5). What Arc
+  air day, and a watched tick when the viewer has watched it (FR-W5). The tick
+  belongs to **the episode the tile names** and to no other: a slot whose
+  broadcast has not happened never carries one, whatever the viewer has watched
+  of the show (owner, 2026-09-17). What Arc
   is doing about the file belongs to the show page, where FR-A7's per-episode
   state lives in full. The page also
   opens with a hero of season recommendations, which is presentation over the
@@ -429,10 +475,10 @@ any time, and the owner uses it daily.
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you |
-| Schedule | 1 | Weekday grid for the season; prev/next season; add-to-list actions |
+| Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons |
-| Player | 1 | HLS player, resume, next episode, progress reporting |
+| Player | 1 | HLS player, resume, progress reporting; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -845,3 +891,97 @@ is and the grace period decides.
   not part of this** and remains its own item: a release numbered 40 of a
   two-season franchise needs the relation graph, and guessing at it means a
   wrong file rather than a missing one.
+- 2026-09-17 — **The end of an episode is two moments** (FR-S5, owner, M16
+  batch 3: "the overlay of the next episode at the completion pct mark isn't
+  really good"). The overlay used to arrive with the completion at 90 %, which
+  put a decision about the next episode on screen while two and a half minutes
+  of this one were still running — and did it over a blacked-out picture. The
+  two things are now separated by what they are for. The completion mark is
+  Arc's bookkeeping and the viewer only needs a receipt, so it gets a quiet
+  "Marked as watched" toast for four seconds with nothing to press and nothing
+  to decide; a rewatch, whose completion is not new, gets silence. The *end* is
+  the decision, and arrives with 1:30 left — a card offering the next episode
+  when one is ready, "Keep watching" for the viewer who is not finished with
+  this one (Escape says the same, and it holds for the rest of that playback),
+  and the way back to the show. The video keeps playing underneath, nothing
+  takes focus away from the playback shortcuts, and nothing auto-advances: the
+  next episode is still a thing the viewer asks for. FR-S4's rule, the server's
+  once-only completion and every MAL write behind it are untouched — this is
+  what the client says about them, not when they happen.
+- 2026-09-17 — **The schedule shows three days, not seven** (FR-C3, owner,
+  M16 batch 3). Once the current week's grid started carrying every airing
+  show — long-runners and two-cour carry-ins included (2026-09-13) — seven
+  columns of the 1180px measure were 158px each, and a 158px column is a list
+  of abbreviations rather than a schedule. The page now shows **today,
+  tomorrow and the day after**, named with their dates ("Wed 17 Sep"), with
+  chevron arrows at the ends of the day-and-date bar that walk the window
+  through the same Monday–Sunday week the API already returns, one day at a
+  time, stopping at its ends; left/right arrow keys do the same. Season
+  prev/next is untouched — it is a different axis, and browsing Spring 2026 is
+  not the same gesture as looking at Thursday. The room bought by three
+  columns goes into the rows: the **whole** title, never clamped, the air time
+  at 15px, a 56px key visual, the "Since Spring 2026" caveat where the server
+  sends one. Today carries an accent underline and a "Today" chip; a show the
+  viewer follows carries a quiet accent left rule and "On your list" for a
+  screen reader — "a little highlight", not a badge. **Dates and today belong
+  to the live season only**: a prev/next view is a catalogue browse, its grid
+  is the shows of that season by weekday rather than a week, and printing this
+  week's dates over Spring 2026's shows would be a claim about when they air.
+  There the bar carries weekday names alone, nothing is marked today, and the
+  window opens on Monday. Nothing about *which* shows are in the week changed.
+- 2026-09-17 — **Ready to watch is about the file, and the week's tick is
+  about the episode** (FR-W1, FR-W5, owner, M16 batch 3; both diagnosed on
+  production). Two shelves on Watch Now were deriving an answer from a
+  neighbour's data, and both were wrong in the same way — the neighbour's
+  question had a clause theirs did not.
+  (1) **Ready to watch** was the client filtering New this week for its ready,
+  unstarted rows, so the shelf inherited "and it aired in the last seven days".
+  One-Room TA finished airing on 2026-08-27 with two episodes ready, and Watch
+  Now offered neither. The shelf is now its own server-side answer: ready file,
+  show watching / planned / on hold, not started and not watched, any air date,
+  newest file first. On hold is included here where New this week excludes it —
+  a paused show is exactly the one "the file is here" might restart, and it
+  costs one tile rather than a week of broadcasts.
+  (2) **The This-week tick** was looked up by *show* in the same New this week
+  list, which answers about that show's newest aired episode — so Friday's
+  Slime slot, which names episode 23, drew "✓ Watched" from episode 22. The
+  tick now belongs to the episode the tile names, and an appointment whose
+  broadcast has not happened never carries one: the server answers FR-W5 for
+  that episode only where it has already aired, and sends nothing at all
+  otherwise.
+  Also in the same pass: an episode row or card with **no still** falls back to
+  the show's backdrop, then to its key visual framed in the 16:9 slot, instead
+  of the striped placeholder — and the "No episode pictures for this show"
+  caption is gone, because the fallback is a better answer than a sentence
+  explaining an empty box. Stills come from TMDB alone, reached through the
+  offline id map, so a show the map cannot reach (One-Room TA, AniList 205068)
+  would have kept fourteen stripes for ever.
+- 2026-09-17 — **Absolute episode numbering on sequels** (FR-A4, owner, M16
+  batch 3, and the item deliberately held back from the 2026-09-14 matching
+  pass). Some groups never restart the count: SubsPlease released *Jujutsu
+  Kaisen* season two as `- 25` through `- 47` while AniList numbers that entry
+  1–23, so `Jujutsu Kaisen S2 - 01` matched nothing and `Jujutsu Kaisen - 01`
+  was season *one's* first episode. Both endings are bad and the second is the
+  one the non-negotiables forbid, which is why this waited for its own item:
+  "a release numbered 40 of a two-season franchise needs the relation graph,
+  and guessing at it means a wrong file rather than a missing one."
+  So it is not guessed. The offset is the **sum of the episode counts of the
+  entry's `PREQUEL` chain**, walked through rows Arc has already cached, and
+  the whole rule **declines** — leaving the entry exactly as it was before —
+  the moment any part of that sum is unknown: a prequel that is not cached, one
+  with no published episode count, one **still airing** (its total is a promise
+  and an off-by-one lands inside its own band, where the season check is blind),
+  two countable prequels at one hop (which of them the group was counting is the
+  very thing that must not be inferred), a chain that loops or runs past ten. Films, OVAs and specials in the chain are
+  skipped rather than counted, because no group counts *Jujutsu Kaisen 0* — an
+  assumption, and written down as one.
+  With an offset, two more query forms are asked (`Jujutsu Kaisen - 25` and the
+  dashless `Jujutsu Kaisen 25`, behind the romaji short forms, because that is
+  the shape the group that numbers this way writes), and a release carrying
+  that number is accepted as the episode the catalogue numbers 1 — but only
+  from a release that **names no season**, and never while a season-marked
+  release for the same episode is in the same pool. An explicit answer beats an
+  inferred one; `- 24`, season one's last, is still season one's last; and the
+  chosen release's log line says `absolute numbering: release 25 = episode 1`,
+  because a file named 25 landing in an episode row numbered 1 is the one pick
+  nobody would otherwise be able to explain.

@@ -456,6 +456,9 @@ export function scheduleEntry(
     following: false,
     list_status: anime.list_status,
     carried_over: false,
+    // Null, not false: "nothing to say about a tick", which is what an
+    // upcoming slot and a slot naming no episode both send (FR-W5).
+    watched: null,
     ...overrides,
   }
 }
@@ -547,6 +550,7 @@ export const BEHIND_FRIEREN: BehindEntry = {
 
 export const HOME_PAGE: HomePage = {
   continue_watching: [],
+  ready_to_watch: [],
   behind: [BEHIND_FRIEREN],
   new_this_week: [
     { anime: FRIEREN, episode: airedEpisode() },
@@ -614,7 +618,12 @@ export const HOME_PAGE_CONTINUE_NO_DURATION: HomePage = {
   continue_watching: [CONTINUE_NO_DURATION],
 }
 
-export const EMPTY_HOME: HomePage = { continue_watching: [], behind: [], new_this_week: [] }
+export const EMPTY_HOME: HomePage = {
+  continue_watching: [],
+  ready_to_watch: [],
+  behind: [],
+  new_this_week: [],
+}
 
 /* --- Playback (roadmap M8) -------------------------------------------- */
 

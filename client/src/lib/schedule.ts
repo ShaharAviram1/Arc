@@ -46,8 +46,12 @@ export const WEEKDAY_LABELS: readonly string[] = [
   'Sunday',
 ]
 
-/** `Intl`'s short weekday names in the same Monday-first order. */
-const WEEKDAY_CODES: readonly string[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+/**
+ * `Intl`'s short weekday names in the same Monday-first order. Exported
+ * because the three-day window's bar names each day short ("Wed 17 Sep"): the
+ * full name is the column's accessible name, the code is what is drawn.
+ */
+export const WEEKDAY_CODES: readonly string[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 /**
  * The statuses the server counts as *following* a show: the ones a person
@@ -92,6 +96,15 @@ export interface ScheduleEntry {
    * `anime.season`/`anime.season_year`.
    */
   carried_over: boolean
+  /**
+   * Whether the viewer has watched the episode *this slot names* (FR-W5), or
+   * null when there is nothing to say: the slot names no episode, or the
+   * episode it names has not aired yet. An appointment in the future never
+   * carries a tick — Watch Now used to draw one beside Friday's broadcast,
+   * having read it off the show's latest aired episode rather than the one on
+   * the card (owner, 2026-09-17).
+   */
+  watched: boolean | null
 }
 
 export interface ScheduleDay {
@@ -126,7 +139,11 @@ export interface BehindEntry {
   latest_aired_at: string | null
 }
 
-/** An episode that aired in the last seven days for a followed show. */
+/**
+ * One episode of a followed show, as an episode shelf draws it. Both 16:9
+ * shelves the server decides — `new_this_week` and `ready_to_watch` — are
+ * lists of these.
+ */
 export interface NewEpisodeEntry {
   anime: AnimeSummary
   episode: EpisodeOut
@@ -149,10 +166,18 @@ export interface ContinueWatchingEntry {
   duration_s: number | null
 }
 
-/** `GET /api/home` — the three FR-W1 sections. */
+/** `GET /api/home` — the FR-W1 shelves. */
 export interface HomePage {
   /** Most recent first; the server caps the list, the client caps it again. */
   continue_watching: ContinueWatchingEntry[]
+  /**
+   * Ready, unstarted and unwatched, newest file first — whenever the episode
+   * aired (owner, 2026-09-17). The server decides the whole shelf: the client
+   * used to filter `new_this_week` for it, which silently required the episode
+   * to have been broadcast in the last seven days and so hid every ready
+   * episode of an older show.
+   */
+  ready_to_watch: NewEpisodeEntry[]
   behind: BehindEntry[]
   new_this_week: NewEpisodeEntry[]
 }
@@ -188,6 +213,32 @@ export function parseYear(value: string | null): number | undefined {
 }
 
 /**
+ * The season Arc is in, by the same arithmetic the server uses
+ * (`services/catalog/seasons.py`): three calendar months each, Jan–Mar
+ * `WINTER` … Oct–Dec `FALL`, measured in **UTC** rather than the viewer's zone
+ * so that both ends agree about which grid is the live one.
+ *
+ * The response does not say whether the season on screen is the current one —
+ * it says which season it *is* — and the page has to know, because only the
+ * current grid is a real week: it is the one the server fills with every show
+ * on air, and the only one whose columns have dates and a today (owner,
+ * 2026-09-17). A prev/next view is a catalogue browse, and printing this
+ * week's dates over Spring 2026's shows would be a claim about when they air.
+ */
+export function currentSeason(at: Date = new Date()): SeasonRef {
+  return {
+    year: at.getUTCFullYear(),
+    season: SEASONS[Math.floor(at.getUTCMonth() / 3)] ?? 'WINTER',
+  }
+}
+
+/** Whether the grid on screen is the live week rather than a browse. */
+export function isCurrentSeason(page: SeasonRef, at: Date = new Date()): boolean {
+  const now = currentSeason(at)
+  return page.year === now.year && page.season === now.season
+}
+
+/**
  * Which column is today, as a `ScheduleDay.weekday` (0 = Monday).
  *
  * The grid is in the viewer's timezone, so "today" has to be read in that same
@@ -210,6 +261,79 @@ function shortWeekday(timezone: string | undefined, at: Date): string {
   } catch {
     return new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(at)
   }
+}
+
+const DAY_MS = 86_400_000
+
+/**
+ * The month of "17 Sep" — day and month, never the year, because the grid is
+ * one week long. Composed rather than formatted whole: a locale decides both
+ * the order ("Sep 17") and the abbreviation, and `en-GB` spells this month
+ * "Sept", which is a character wider than every other month in a heading that
+ * has to line up three times across.
+ */
+const MONTH_SHORT = new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' })
+
+/**
+ * The dates of the Monday–Sunday week that `at` falls in, as "17 Sep" labels
+ * indexed the way `ScheduleDay.weekday` is (0 = Monday).
+ *
+ * The three-day window (owner, 2026-09-17) names its columns "Wed 17 Sep", and
+ * a weekday alone cannot say which Wednesday. The server groups the week in
+ * the viewer's timezone, so the dates have to be read in that zone too — at
+ * 23:00 UTC on a Sunday the Tokyo viewer is already in the *next* week, and
+ * his Monday column is tomorrow rather than six days ago.
+ *
+ * Arithmetic happens at noon UTC: adding 24h to a local midnight lands on the
+ * same day again in a zone that put its clocks back that night, and no zone
+ * shifts a noon across a date boundary.
+ *
+ * Returns an empty array when the zone cannot be read at all — the bar then
+ * shows weekday names alone, which is what it showed before there were dates.
+ */
+export function weekDates(timezone: string, at: Date = new Date()): string[] {
+  const weekday = weekdayInTimezone(timezone, at)
+  const today = dateInTimezone(timezone === '' ? undefined : timezone, at)
+  if (weekday < 0 || today === null) return []
+
+  const monday = Date.UTC(today.year, today.month - 1, today.day - weekday, 12)
+  return WEEKDAY_CODES.map((_, index) => {
+    const day = new Date(monday + index * DAY_MS)
+    return `${String(day.getUTCDate())} ${MONTH_SHORT.format(day)}`
+  })
+}
+
+interface CalendarDate {
+  year: number
+  month: number
+  day: number
+}
+
+/** The civil date `at` falls on in `timezone`, read off `Intl`'s own parts. */
+function dateInTimezone(timezone: string | undefined, at: Date): CalendarDate | null {
+  const parts = dateParts(timezone, at)
+  const year = Number(parts.year)
+  const month = Number(parts.month)
+  const day = Number(parts.day)
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null
+  return { year, month, day }
+}
+
+function dateParts(timezone: string | undefined, at: Date): Record<string, string> {
+  const options: Intl.DateTimeFormatOptions = {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }
+  let formatted: Intl.DateTimeFormatPart[]
+  try {
+    formatted = new Intl.DateTimeFormat('en-US', { ...options, timeZone: timezone }).formatToParts(
+      at,
+    )
+  } catch {
+    formatted = new Intl.DateTimeFormat('en-US', options).formatToParts(at)
+  }
+  return Object.fromEntries(formatted.map((part) => [part.type, part.value]))
 }
 
 /**

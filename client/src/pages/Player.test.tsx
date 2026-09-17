@@ -23,6 +23,7 @@ const PLAY_PATH = `GET /api/episodes/${String(EPISODE_ID)}/play`
 const PROGRESS_PATH = 'POST /api/progress'
 const PROGRESS_RESULT = { completed: false, newly_completed: false, list_progress: null }
 const PROGRESS_UNSAVED = 'Progress isn’t being saved — check your connection.'
+const MARKED_WATCHED = 'Marked as watched'
 
 function renderPlayer(routes: MockRoutes = { [PLAY_PATH]: { body: PLAY_INFO } }) {
   const fetchMock = mockApi({
@@ -108,6 +109,27 @@ async function readyVideo(equip = true): Promise<HTMLVideoElement> {
   if (video === null) throw new Error('no video element rendered')
   if (equip) equipVideo(video)
   return video
+}
+
+/** Moves the playhead and lets the page see it, as a tick of playback would. */
+function seekTo(video: HTMLVideoElement, position: number): void {
+  video.currentTime = position
+  fireEvent.timeUpdate(video)
+}
+
+/**
+ * One forced progress write at `position`. `pause` bypasses the reporter's
+ * minimum gap, so this is exactly one report — the one the server can answer
+ * with `newly_completed`.
+ */
+function completeAt(video: HTMLVideoElement, position: number): void {
+  seekTo(video, position)
+  fireEvent.pause(video)
+}
+
+/** Every number in an SVG path, in the order it is written. */
+function numbersIn(path: string): number[] {
+  return (path.match(/-?\d*\.?\d+/g) ?? []).map(Number)
 }
 
 /**
@@ -384,9 +406,17 @@ describe('Player', () => {
     fireEvent.ended(video)
 
     expect(await screen.findByText('Next: Episode 2')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Play' })).toHaveAttribute('href', '/watch/9002')
-    // The header's back link and the overlay's own both point at the show.
-    expect(screen.getAllByRole('link', { name: 'Back to show' })).toHaveLength(2)
+    expect(screen.getByRole('link', { name: 'Next episode' })).toHaveAttribute(
+      'href',
+      '/watch/9002',
+    )
+    // The header keeps its own way back; the card carries a second one.
+    expect(screen.getByRole('link', { name: 'Back to show' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to the show' })).toHaveAttribute(
+      'href',
+      `/anime/${String(FRIEREN.id)}`,
+    )
+    expect(screen.getByRole('button', { name: 'Keep watching' })).toBeInTheDocument()
   })
 
   it('names the next episode without offering it when it is not ready', async () => {
@@ -395,8 +425,15 @@ describe('Player', () => {
     const video = await readyVideo()
     fireEvent.ended(video)
 
+    // The line says why there is nothing to press; no dead button is drawn
+    // under a sentence that has already explained itself.
     expect(await screen.findByText('Episode 2 isn’t ready yet')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Play' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Next episode' })).not.toBeInTheDocument()
+    expect(
+      within(screen.getByRole('group', { name: 'End of episode' })).queryByRole('button', {
+        name: 'Next episode',
+      }),
+    ).not.toBeInTheDocument()
   })
 
   it('says so when there is no next episode', async () => {
@@ -406,9 +443,16 @@ describe('Player', () => {
     fireEvent.ended(video)
 
     expect(await screen.findByText('This was the last episode')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Next episode' })).not.toBeInTheDocument()
   })
 
-  it('shows the overlay as soon as the server calls the episode complete (FR-S4)', async () => {
+  /**
+   * The two moments, as the owner drew them on 2026-09-17. Crossing the
+   * completion mark is bookkeeping and gets a receipt; the *end* of the
+   * episode is the decision and gets the card. They used to be one moment, and
+   * the card arrived ten minutes early.
+   */
+  it('shows a toast, and no card, when the server calls the episode complete (FR-S4)', async () => {
     renderPlayer({
       [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
       'POST /api/progress': {
@@ -418,11 +462,203 @@ describe('Player', () => {
 
     const video = await readyVideo()
     fireEvent.loadedMetadata(video)
-    video.currentTime = 1350
-    fireEvent.timeUpdate(video)
-    fireEvent.pause(video)
+    // Past 90 % of 1436.8 s (1293.1) and still 2:16 short of the end, so this
+    // is the completion mark and nothing else.
+    completeAt(video, 1300)
 
-    expect(await screen.findByText('Next: Episode 2')).toBeInTheDocument()
+    expect(await screen.findByText(MARKED_WATCHED)).toBeInTheDocument()
+    expect(screen.queryByText('Next: Episode 2')).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+  })
+
+  it('raises the completion toast once, and takes it away after four seconds', async () => {
+    renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
+      'POST /api/progress': {
+        body: { completed: true, newly_completed: true, list_progress: 1 },
+      },
+    })
+
+    const video = await readyVideo()
+
+    // The clock has to be fake before the report lands, or the four seconds
+    // are armed against the real one and cannot be wound on.
+    vi.useFakeTimers()
+    try {
+      completeAt(video, 1300)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50)
+      })
+      // Once, not once per tick: the server calls a completion new exactly
+      // once per (user, episode).
+      expect(screen.getAllByText(MARKED_WATCHED)).toHaveLength(1)
+      seekTo(video, 1305)
+      expect(screen.getAllByText(MARKED_WATCHED)).toHaveLength(1)
+
+      // Still up just short of the four seconds: a receipt, not a blink.
+      act(() => {
+        vi.advanceTimersByTime(3500)
+      })
+      expect(screen.getByText(MARKED_WATCHED)).toBeInTheDocument()
+
+      act(() => {
+        vi.advanceTimersByTime(600)
+      })
+      expect(screen.queryByText(MARKED_WATCHED)).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * A rewatch crosses the same mark and must say nothing: `newly_completed` is
+   * the server's once-per-(user, episode) answer (architecture §5.4a), so the
+   * second time through it is false and there is nothing to announce.
+   */
+  it('says nothing when a rewatch crosses the mark again (FR-S4)', async () => {
+    const rewatch: PlayInfo = {
+      ...PLAY_INFO_NEXT_READY,
+      episode: { ...PLAY_INFO_NEXT_READY.episode, watched: true, watched_source: 'arc' },
+    }
+    const { fetchMock } = renderPlayer({
+      [PLAY_PATH]: { body: rewatch },
+      'POST /api/progress': {
+        body: { completed: true, newly_completed: false, list_progress: null },
+      },
+    })
+
+    const video = await readyVideo()
+    completeAt(video, 1300)
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(PROGRESS_PATH)
+    })
+
+    expect(screen.queryByText(MARKED_WATCHED)).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+  })
+
+  it('brings the card up with a minute and a half left, not at the mark', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+
+    // 2:16 left: past the completion mark, and still the middle of the episode.
+    seekTo(video, 1300)
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+
+    // 1:29 left.
+    seekTo(video, 1348)
+    expect(await screen.findByRole('group', { name: 'End of episode' })).toBeInTheDocument()
+    expect(screen.getByText('Next: Episode 2')).toBeInTheDocument()
+  })
+
+  it('puts the card away on Keep watching and does not bring it back', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    seekTo(video, 1350)
+    await screen.findByRole('group', { name: 'End of episode' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Keep watching' }))
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+
+    // The next tick is deeper into the window, and the media then ends: the
+    // viewer has said no once and is not asked again this playback.
+    seekTo(video, 1400)
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+    fireEvent.ended(video)
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+  })
+
+  it('reads Escape as Keep watching', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    seekTo(video, 1350)
+    await screen.findByRole('group', { name: 'End of episode' })
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => {
+      expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+    })
+
+    seekTo(video, 1400)
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+  })
+
+  /** The card is a card, not a modal: the window shortcuts still answer. */
+  it('leaves the playback shortcuts working while the card is up (FR-S6)', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    seekTo(video, 1350)
+    await screen.findByRole('group', { name: 'End of episode' })
+
+    // Nothing inside the card took focus away from the page.
+    expect(document.activeElement).toBe(document.body)
+
+    fireEvent.keyDown(window, { key: ' ' })
+    expect(video.paused).toBe(false)
+  })
+
+  it('leaves for the show page from the card', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY } })
+
+    const video = await readyVideo()
+    fireEvent.ended(video)
+    await screen.findByRole('group', { name: 'End of episode' })
+
+    await userEvent.click(screen.getByRole('link', { name: 'Back to the show' }))
+    expect(await screen.findByText('show page')).toBeInTheDocument()
+  })
+
+  it('goes to the next episode from the card', async () => {
+    const { fetchMock } = renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
+      'GET /api/episodes/9002/play': { body: PLAY_INFO_EPISODE_2 },
+    })
+
+    const video = await readyVideo()
+    fireEvent.ended(video)
+    await screen.findByRole('group', { name: 'End of episode' })
+
+    await userEvent.click(screen.getByRole('link', { name: 'Next episode' }))
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('GET /api/episodes/9002/play')
+    })
+    // A fresh page for the new episode: no card carried over from the old one.
+    expect(await screen.findByText('Episode 2')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'End of episode' })).not.toBeInTheDocument()
+  })
+
+  /**
+   * Both the receipt and the card live inside the element the page asks the
+   * browser to make fullscreen; anywhere else they would be invisible for the
+   * one mode in which an episode is most likely to be watched to the end.
+   */
+  it('renders the toast and the card inside the fullscreen element', async () => {
+    const { request } = stubFullscreen()
+    renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
+      'POST /api/progress': {
+        body: { completed: true, newly_completed: true, list_progress: 1 },
+      },
+    })
+
+    const video = await readyVideo()
+    await userEvent.click(screen.getByRole('button', { name: 'Fullscreen' }))
+    const root = request.mock.instances[0] as HTMLElement | undefined
+    if (root === undefined) throw new Error('nothing was asked to go fullscreen')
+
+    completeAt(video, 1300)
+    expect(root.contains(await screen.findByText(MARKED_WATCHED))).toBe(true)
+
+    fireEvent.ended(video)
+    expect(root.contains(await screen.findByRole('group', { name: 'End of episode' }))).toBe(true)
   })
 
   it('surfaces a fatal hls error with a way to try again', async () => {
@@ -911,6 +1147,58 @@ describe('Player controls', () => {
     expect(requestsMade(fetchMock)).not.toContain('DELETE /api/episodes/9001/watched')
     // The glyph stays filled: the viewer has watched it either way.
     expect(pill.querySelector('circle')).toHaveClass('fill-current')
+  })
+
+  /**
+   * The ⟲10 / ⟳10 pair had its arc on the wrong side (owner, 2026-09-17): the
+   * back control has to read as a rewind — the ring open on the left, the head
+   * turning counter-clockwise into that opening — and the forward one as the
+   * same drawing mirrored, rather than as a second path that can drift.
+   */
+  it('draws the back skip as a rewind and the forward one as its mirror', async () => {
+    renderPlayer()
+
+    await readyVideo(false)
+    const back = screen.getByRole('button', { name: 'Back 10 seconds' })
+    const forward = screen.getByRole('button', { name: 'Forward 10 seconds' })
+
+    const paths = (button: HTMLElement): string[] =>
+      Array.from(button.querySelectorAll('svg g path')).map((path) => path.getAttribute('d') ?? '')
+
+    // One drawing: the forward glyph is the rewind flipped about the vertical.
+    expect(paths(back)).toEqual(paths(forward))
+    expect(back.querySelector('svg g')?.getAttribute('transform')).toBeNull()
+    expect(forward.querySelector('svg g')?.getAttribute('transform')).toBe(
+      'translate(24 0) scale(-1 1)',
+    )
+
+    // `M<x> <y> A<rx> <ry> 0 1 1 <x2> <y2>`: both ends of the ring are left of
+    // centre, so the quarter it is missing — the opening — is on the left.
+    const ring = numbersIn(paths(back)[0] ?? '')
+    const [ringX, ringY] = [ring[0] ?? NaN, ring[1] ?? NaN]
+    expect(ringX).toBeLessThan(12)
+    expect(ring[7]).toBeLessThan(12)
+
+    // `M<x> <y> H<x2> V<y2>`: the head's corner is the ring's upper end, its
+    // arms trailing right and up — an arrow pointing down into the opening,
+    // which is anticlockwise, which is backwards.
+    const head = numbersIn(paths(back)[1] ?? '')
+    const [armX, armY, cornerX, topY] = [
+      head[0] ?? NaN,
+      head[1] ?? NaN,
+      head[2] ?? NaN,
+      head[3] ?? NaN,
+    ]
+    expect(cornerX).toBe(ringX)
+    expect(armY).toBe(ringY)
+    expect(armX).toBeGreaterThan(cornerX)
+    expect(topY).toBeLessThan(armY)
+
+    // The number reads through the middle of both, upright: it sits outside
+    // the mirrored group, so "10" never comes out backwards.
+    expect(back.querySelector('svg text')?.textContent).toBe('10')
+    expect(forward.querySelector('svg text')?.textContent).toBe('10')
+    expect(forward.querySelector('svg text')?.closest('g')).toBeNull()
   })
 
   /**

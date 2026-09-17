@@ -6,7 +6,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
 import type { AnimeSummary, EpisodeOut, MyListItem } from '@/lib/anime'
 import type { RecsPage } from '@/lib/recs'
-import { weekdayInTimezone, WEEKDAY_LABELS, type SchedulePage } from '@/lib/schedule'
+import {
+  weekdayInTimezone,
+  WEEKDAY_LABELS,
+  type HomePage,
+  type ScheduleEntry,
+  type SchedulePage,
+} from '@/lib/schedule'
 import { Home } from '@/pages/Home'
 import {
   APOTHECARY,
@@ -77,8 +83,14 @@ function progressWidth(tile: HTMLElement): string | undefined {
 /** Which column is "today" for the test user, so a fixture can land on it. */
 const TODAY = weekdayInTimezone(TEST_USER.timezone)
 
-/** One followed show airing tonight, one airing on another day. */
-function weekSchedule(): SchedulePage {
+/**
+ * One followed show airing tonight, one airing on another day.
+ *
+ * Tonight's slot is an *upcoming* broadcast by default (`next_at` in 2099), so
+ * the server would send `watched: null` for it — which is what `tonight` lets a
+ * test override when it wants the aired-and-watched case instead.
+ */
+function weekSchedule(tonight: Partial<ScheduleEntry> = {}): SchedulePage {
   const other = (TODAY + 2) % 7
   return {
     ...EMPTY_SCHEDULE,
@@ -93,6 +105,7 @@ function weekSchedule(): SchedulePage {
               next_at: '2099-01-01T19:00:00Z',
               following: true,
               list_status: 'watching',
+              ...tonight,
             }),
           ],
         }
@@ -143,10 +156,17 @@ function readyEpisode(overrides: Partial<EpisodeOut> = {}): EpisodeOut {
   }
 }
 
-const READY_ONLY = {
+/**
+ * One ready, unstarted episode, on the shelf the server decides (owner,
+ * 2026-09-17). It is deliberately *not* also in `new_this_week`: the client
+ * used to derive this shelf from that one, and nothing should make it work
+ * again by accident.
+ */
+const READY_ONLY: HomePage = {
   continue_watching: [],
+  ready_to_watch: [{ anime: FRIEREN, episode: readyEpisode() }],
   behind: [],
-  new_this_week: [{ anime: FRIEREN, episode: readyEpisode() }],
+  new_this_week: [],
 }
 
 /* --- The season the hero is built from -------------------------------- */
@@ -949,17 +969,13 @@ describe('Watch Now shelves', () => {
     expect(progressWidth(tile)).toBeUndefined()
   })
 
-  it('keeps started episodes out of "Ready to watch"', async () => {
+  it('renders the "Ready to watch" shelf the server decides', async () => {
     renderHome({
       'GET /api/home': {
         body: {
           ...EMPTY_HOME,
           continue_watching: [CONTINUE_FRIEREN],
-          new_this_week: [
-            // The same episode the viewer is part way through.
-            { anime: FRIEREN, episode: readyEpisode({ id: 9201, number: 5 }) },
-            { anime: APOTHECARY, episode: readyEpisode({ id: 9302, number: 2 }) },
-          ],
+          ready_to_watch: [{ anime: APOTHECARY, episode: readyEpisode({ id: 9302, number: 2 }) }],
         },
       },
     })
@@ -980,6 +996,58 @@ describe('Watch Now shelves', () => {
 
     // And the started one is on the shelf above, once.
     expect(within(shelf('Continue watching')).getAllByRole('link')).toHaveLength(1)
+  })
+
+  it('no longer builds "Ready to watch" out of this week’s episodes', async () => {
+    // The bug (owner, 2026-09-17): the shelf was `new_this_week` filtered for
+    // the ready, unstarted rows, so it silently required the episode to have
+    // aired in the last seven days — and a ready episode of an older show
+    // could not reach the page at all. The server sends the shelf now; a ready
+    // episode that is only in the week's list is the week's, not this shelf's.
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          new_this_week: [{ anime: FRIEREN, episode: readyEpisode({ id: 9401, number: 8 }) }],
+        },
+      },
+    })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(screen.queryByRole('heading', { name: 'Ready to watch' })).not.toBeInTheDocument()
+  })
+
+  it('offers a ready episode of a show that stopped airing weeks ago', async () => {
+    // The owner's case: One-Room TA aired 2026-08-27, two episodes ready, and
+    // nothing on Watch Now mentioned either of them.
+    renderHome({ 'GET /api/home': { body: READY_ONLY } })
+
+    await screen.findByRole('heading', { level: 2, name: 'Ready to watch' })
+    const ready = within(shelf('Ready to watch')).getAllByRole('link')
+
+    expect(ready).toHaveLength(1)
+    expect(ready[0]).toHaveAccessibleName(`Play ${FRIEREN.title.preferred} episode 7`)
+  })
+
+  it('frames a still-less tile in the show’s own artwork', async () => {
+    // The same fallback the show page's rows take: no still, no backdrop, so
+    // the key visual carries the tile (this one washed, as a shelf can afford).
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          ready_to_watch: [{ anime: FRIEREN, episode: readyEpisode({ still_url: null }) }],
+        },
+      },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'Ready to watch' })
+    const tile = within(shelf('Ready to watch')).getAllByRole('link')[0] as HTMLElement
+
+    expect(tile.querySelector('[data-hero-poster] img')).toHaveAttribute(
+      'src',
+      FRIEREN.cover_large_url,
+    )
   })
 
   it('shows no "Continue watching" shelf when nothing was started', async () => {
@@ -1031,7 +1099,7 @@ describe('Watch Now shelves', () => {
     // outside the Show page needs. A broadcast time and the episode is the
     // whole card now.
     renderHome({
-      'GET /api/home': { body: { ...READY_ONLY, continue_watching: [] } },
+      'GET /api/home': { body: READY_ONLY },
       'GET /api/schedule': { body: weekSchedule() },
     })
 
@@ -1048,17 +1116,21 @@ describe('Watch Now shelves', () => {
     expect(week.getByText('Episode 12')).toBeInTheDocument()
   })
 
-  it('ticks a week’s episode the viewer has watched (FR-W5)', async () => {
-    // Watched through the list's progress alone, which on the owner's own
-    // imported list is how most of this shelf is watched.
+  it('never ticks an appointment that has not happened yet (owner, 2026-09-17)', async () => {
+    // The bug: the tick was looked up by *show* in the week's episodes, so
+    // Friday's slot read "Episode 23 ✓ Watched" off last week's episode 22.
+    // The server now answers about the episode the card names, and sends null
+    // for one that has not aired — whatever the viewer has watched of the show.
     renderHome({
       'GET /api/home': {
         body: {
-          ...READY_ONLY,
+          ...EMPTY_HOME,
           new_this_week: [
+            // Episode 11 of the same show, watched: the row the page used to
+            // read the tick off.
             {
               anime: FRIEREN,
-              episode: readyEpisode({ watched: true, watched_source: 'progress' }),
+              episode: readyEpisode({ id: 9501, number: 11, watched: true }),
             },
           ],
         },
@@ -1067,7 +1139,25 @@ describe('Watch Now shelves', () => {
     })
 
     await screen.findByRole('heading', { level: 2, name: 'This week' })
-    expect(within(shelf('This week')).getByText('Watched')).toBeInTheDocument()
+    const week = within(shelf('This week'))
+
+    expect(week.getByText('Episode 12')).toBeInTheDocument()
+    expect(week.queryByText('Watched')).not.toBeInTheDocument()
+  })
+
+  it('ticks an appointment whose own episode the viewer has watched (FR-W5)', async () => {
+    // Tonight's broadcast, already aired and already seen: the server says so
+    // on the slot itself, and the card is the only thing that has to render it.
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: weekSchedule({ watched: true }) },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'This week' })
+    const week = within(shelf('This week'))
+
+    expect(week.getByText('Watched')).toBeInTheDocument()
+    expect(week.getAllByText('Watched')).toHaveLength(1)
   })
 
   it('counts what has piled up in prose, with no badge on the artwork', async () => {

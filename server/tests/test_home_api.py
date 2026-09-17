@@ -36,7 +36,7 @@ from arc.models import (
     User,
     WatchProgress,
 )
-from arc.services.catalog.progress import NEW_LIMIT
+from arc.services.catalog.progress import NEW_LIMIT, READY_LIMIT
 from arc.services.media.names import TRANSCODE
 from arc.services.playback.progress import CONTINUE_LIMIT
 from tests.conftest import add_user, api_transport, login
@@ -855,6 +855,257 @@ async def test_an_episode_above_the_list_progress_is_not_marked(
 
     assert cards[0]["episode"]["watched"] is False
     assert cards[0]["episode"]["watched_source"] is None
+
+
+# --- Ready to watch (owner, 2026-09-17) ---------------------------------------
+#
+# The shelf used to be the client's filter over "new this week", which meant a
+# ready episode had to have been broadcast in the last seven days to be
+# offered. It is now its own query, and these tests are the four rules it has:
+# ready, on a followed list, unstarted, unwatched — with the air date playing no
+# part at all.
+
+
+async def make_ready(
+    factory: SessionFactory,
+    episode: Episode,
+    *,
+    ready_at: datetime | None = NOW,
+) -> None:
+    """Give an episode a playable file, as the transcode would."""
+    async with factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None
+        row.state = EpisodeState.READY
+        session.add(
+            Rendition(
+                episode_id=episode.id,
+                dir=f"/data/renditions/{episode.id}",
+                playlist_path=f"/data/renditions/{episode.id}/index.m3u8",
+                duration=1420.0,
+                ready_at=ready_at,
+            )
+        )
+        await session.commit()
+
+
+def ready_numbers(body: dict[str, list[dict[str, object]]]) -> list[int]:
+    return [row["episode"]["number"] for row in body["ready_to_watch"]]
+
+
+async def old_show(factory: SessionFactory, *, title: str, anilist_id: int) -> int:
+    """A finished show whose last episode aired three weeks ago.
+
+    The owner's case: One-Room TA aired 2026-08-27 and had two ready episodes
+    that Watch Now could not show, because every one of them is outside the
+    seven-day window "new this week" is made of.
+    """
+    anime_id = await add_anime(
+        factory, title=title, anilist_id=anilist_id, status="FINISHED", episodes=4
+    )
+    await add_episodes(factory, anime_id, count=4, first_at=NOW - timedelta(weeks=6))
+    return anime_id
+
+
+async def test_a_ready_episode_of_an_older_show_is_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The bug, in one test: no broadcast this week, and still on the shelf."""
+    anime_id = await old_show(api_factory, title="One-Room TA", anilist_id=910060)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 2))
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [2, 1]
+    assert body["ready_to_watch"][0]["anime"]["title"]["preferred"] == "One-Room TA"
+    assert body["ready_to_watch"][0]["episode"]["state"] == "ready"
+    assert body["ready_to_watch"][0]["episode"]["watched"] is False
+    # And nothing here aired this week, which is what used to hide it.
+    assert body["new_this_week"] == []
+
+
+async def test_an_episode_with_no_file_is_not_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """``ready`` is the state and nothing looser: preparing is not playable."""
+    anime_id = await old_show(api_factory, title="Preparing", anilist_id=910061)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    episode = await episode_number(api_factory, anime_id, 1)
+    async with api_factory() as session:
+        row = await session.get(Episode, episode.id)
+        assert row is not None
+        row.state = EpisodeState.PREPARING
+        await session.commit()
+
+    assert (await home(client))["ready_to_watch"] == []
+
+
+async def test_a_started_episode_is_not_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """It is on Continue watching instead; one episode, one shelf."""
+    anime_id = await old_show(api_factory, title="Half Way", anilist_id=910062)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 2))
+    await start_watching(api_factory, user, first, ready=False)
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [2]
+    assert [row["episode"]["number"] for row in body["continue_watching"]] == [1]
+
+
+async def test_an_episode_barely_opened_is_still_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Five seconds in is not "started" — it is the same floor resume uses."""
+    anime_id = await old_show(api_factory, title="Peeked", anilist_id=910063)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await start_watching(api_factory, user, first, position_s=5.0, ready=False)
+
+    assert ready_numbers(await home(client)) == [1]
+
+
+async def test_an_episode_the_list_progress_covers_is_not_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-W5 read backwards: at or below the progress is watched."""
+    anime_id = await old_show(api_factory, title="Imported", anilist_id=910064)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=2)
+    for number in (1, 2, 3):
+        await make_ready(api_factory, await episode_number(api_factory, anime_id, number))
+
+    assert ready_numbers(await home(client)) == [3]
+
+
+async def test_a_completed_episode_is_not_ready_to_watch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-W5's other half: a completion row, with the list still at zero.
+
+    Written the way FR-W3's manual mark writes it — ``0``/``0`` — so this is
+    also the case a "started" test could never cover: no position at all.
+    """
+    anime_id = await old_show(api_factory, title="Marked", anilist_id=910065)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 2))
+    await start_watching(
+        api_factory, user, first, position_s=0.0, duration_s=0.0, completed=True, ready=False
+    )
+
+    assert ready_numbers(await home(client)) == [2]
+
+
+@pytest.mark.parametrize("status", [ListStatus.DROPPED, ListStatus.COMPLETED])
+async def test_a_dropped_or_completed_shows_ready_episode_is_not_offered(
+    client: AsyncClient, user: User, api_factory: SessionFactory, status: ListStatus
+) -> None:
+    """FR-W4's set: those shows generate no wants, so they make no offers."""
+    anime_id = await old_show(api_factory, title="Abandoned", anilist_id=910066)
+    await follow(api_factory, user, anime_id, status)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
+
+    assert (await home(client))["ready_to_watch"] == []
+
+
+async def test_an_on_hold_shows_ready_episode_is_offered(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Unlike "new this week", which is a week of broadcasts and would be noise.
+
+    A paused show is exactly the one a "the file is here" tile might restart.
+    """
+    anime_id = await old_show(api_factory, title="Paused", anilist_id=910067)
+    await follow(api_factory, user, anime_id, ListStatus.ON_HOLD)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
+
+    assert ready_numbers(await home(client)) == [1]
+
+
+async def test_a_ready_episode_of_a_show_not_on_the_list_is_not_offered(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await old_show(api_factory, title="Stranger", anilist_id=910068)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
+
+    assert (await home(client))["ready_to_watch"] == []
+
+
+async def test_ready_to_watch_is_newest_file_first(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The *file's* clock, not the broadcast's: the shelf is about the file.
+
+    Episode 1 was transcoded last, so it leads — which is also the case the
+    air-date order would get wrong.
+    """
+    anime_id = await old_show(api_factory, title="Out of order", anilist_id=910069)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    for number, hours in ((1, 1), (2, 9), (3, 5)):
+        await make_ready(
+            api_factory,
+            await episode_number(api_factory, anime_id, number),
+            ready_at=NOW - timedelta(hours=hours),
+        )
+
+    assert ready_numbers(await home(client)) == [1, 3, 2]
+
+
+async def test_a_file_with_no_ready_at_sorts_last(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A rendition written before the column was filled is not "just now"."""
+    anime_id = await old_show(api_factory, title="Undated", anilist_id=910070)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1), ready_at=None)
+    await make_ready(
+        api_factory,
+        await episode_number(api_factory, anime_id, 2),
+        ready_at=NOW - timedelta(days=30),
+    )
+
+    assert ready_numbers(await home(client)) == [2, 1]
+
+
+async def test_ready_to_watch_is_capped(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A binge-drop of a whole season is not a shelf."""
+    anime_id = await add_anime(
+        api_factory, title="Whole season", anilist_id=910071, status="FINISHED", episodes=26
+    )
+    await add_episodes(api_factory, anime_id, count=26, first_at=NOW - timedelta(weeks=30))
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    for number in range(1, 27):
+        await make_ready(
+            api_factory,
+            await episode_number(api_factory, anime_id, number),
+            ready_at=NOW - timedelta(hours=number),
+        )
+
+    rows = (await home(client))["ready_to_watch"]
+
+    assert len(rows) == READY_LIMIT
+    assert [row["episode"]["number"] for row in rows] == list(range(1, READY_LIMIT + 1))
+
+
+async def test_another_users_ready_episode_is_not_on_this_shelf(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    other = await add_user(api_factory, "ready.other@arc.test", "other-password")
+    anime_id = await old_show(api_factory, title="Theirs", anilist_id=910072)
+    await follow(api_factory, other, anime_id, ListStatus.WATCHING, progress=0)
+    await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
+
+    assert (await home(client))["ready_to_watch"] == []
 
 
 # --- What a card carries about the show (M15) ---------------------------------
