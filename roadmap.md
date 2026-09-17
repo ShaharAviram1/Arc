@@ -822,6 +822,13 @@ the finish work (bugs found that way are fixed inside M16).
         "Today" chip and ember rule, arrows at both ends, full titles and
         15 px times, five followed shows highlighted with sr-only "On your
         list"; a browsed season shows weekday names only; 61 Schedule tests
+  - [x] Deployed 2026-09-17 as "M16 batch 3" (commit `8cd03e4`): no
+        migration; health 200 with 0 warnings; the worker restarted cleanly
+        and its first transcode is its own claim (no orphan). Live proof on
+        production: "Ready to watch" now lists One-Room TA episodes 3 and 4
+        (aired 2026-08-27, impossible under the old 7-day rule) beside the
+        current-season episodes, and the This-week panel shows no tick on
+        any upcoming appointment
 - [ ] Per-show overrides UI for group/resolution
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
