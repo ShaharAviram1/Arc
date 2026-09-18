@@ -1064,6 +1064,11 @@ the finish work (bugs found that way are fixed inside M16).
         ([transcode p10, transcode p20, compute_wants p120] at concurrency 2,
         one encoder) and fails without the gate; deployed to the same host the
         incident happened on
+  - Group narrowing + worker cap gate deployed 2026-09-18 as 93b88cb (no
+    migration). Post-deploy: `/api/health` ok, the queue fully drained
+    within seconds of the worker start (the previous deploy left 39 jobs
+    behind a parked encode); Demon Slayer 2019 episode 10 re-searches on
+    its FR-A6 retry at 04:47 UTC, episode 11 on its daily retry.
 - [x] Per-show overrides UI for group/resolution
       Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
       §4 `settings`, §5b). The `override:anime:<id>` row the ranker has
