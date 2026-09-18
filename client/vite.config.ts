@@ -34,5 +34,16 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     css: false,
+    // Reported only when asked for (`vitest run --coverage`, which is what CI
+    // runs); a plain `pnpm test` is unaffected. `include` is what decides the
+    // denominator — a source file no test ever imports is still counted, at
+    // 0 %, rather than silently flattering the total.
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/main.tsx', 'src/test/**', 'src/**/*.test.{ts,tsx}', 'src/**/*.d.ts'],
+    },
   },
 })

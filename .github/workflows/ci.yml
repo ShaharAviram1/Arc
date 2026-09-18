@@ -1,0 +1,241 @@
+# Arc — continuous integration.
+#
+# Three jobs, deliberately independent so a red one names its own half of the
+# repo: `server` (pytest against a real Postgres), `client` (vitest), `lint`
+# (exactly what `make lint` runs, one command per step so the failing step is
+# the failing tool). Nothing here needs a secret: every external service the
+# suite touches — AniList, MAL, TMDB, Nyaa, qBittorrent, the recommendation
+# provider — is behind a mock transport or a fake, and the tests that call a
+# real one are marked (`slow` for ffmpeg, `live` for the LLM) and deselected.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per ref: a push that lands while an older run of the same branch is
+# still going cancels it rather than queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with server/.python-version and client/package.json's
+  # toolchain. pnpm is pinned because there is no `packageManager` field for
+  # pnpm/action-setup to read.
+  PYTHON_VERSION: '3.14'
+  PNPM_VERSION: '10.33.2'
+  NODE_VERSION: '24'
+
+jobs:
+  server:
+    name: server (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      # `make dev-db` in one service container. The suite creates its own
+      # database when TEST_DATABASE_URL names one that is missing, but the
+      # image seeds `arc` anyway, so nothing has to wait for that.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: arc
+          POSTGRES_PASSWORD: arc
+          POSTGRES_DB: arc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U arc -d arc"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://arc:arc@localhost:5432/arc
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # No ffmpeg on the runner on purpose: every non-`slow` test that touches
+      # ffmpeg or ffprobe writes a fake shell script onto PATH
+      # (tests/media_helpers.py, tests/test_probe.py), and the one file that
+      # wants the real binary — tests/test_transcode_slow.py — is marked
+      # `slow` and deselected below.
+      - name: Install dependencies
+        working-directory: server
+        run: uv sync --all-groups
+
+      # `-m` on the command line replaces pyproject's `addopts` marker
+      # expression, so `not live` has to be repeated here: without it the
+      # money-spending eval would be selected (it would skip for want of a
+      # key, but the guard should not depend on that).
+      - name: Run tests
+        working-directory: server
+        run: >-
+          uv run pytest -q -m "not slow and not live"
+          --cov=arc --cov-report=xml --cov-report=term-missing:skip-covered
+
+      - name: Coverage summary
+        if: always()
+        working-directory: server
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import pathlib, xml.etree.ElementTree as ET
+
+          report = pathlib.Path("coverage.xml")
+          print("## Server coverage\n")
+          if not report.is_file():
+              print("No `coverage.xml` was produced — the suite did not finish.")
+              raise SystemExit(0)
+          root = ET.parse(report).getroot()
+          lines = float(root.get("line-rate", 0)) * 100
+          branches = float(root.get("branch-rate", 0)) * 100
+          covered = int(root.get("lines-covered", 0))
+          valid = int(root.get("lines-valid", 0))
+          print("| Metric | Coverage |")
+          print("| --- | --- |")
+          print(f"| Lines | **{lines:.2f}%** ({covered}/{valid}) |")
+          print(f"| Branches | {branches:.2f}% |")
+          PY
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: server/coverage.xml
+          if-no-files-found: warn
+
+  client:
+    name: client (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        working-directory: client
+        run: pnpm exec vitest run --coverage
+
+      - name: Coverage summary
+        if: always()
+        working-directory: client
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import pathlib
+
+          report = pathlib.Path("coverage/lcov.info")
+          print("## Client coverage\n")
+          if not report.is_file():
+              print("No `lcov.info` was produced — the suite did not finish.")
+              raise SystemExit(0)
+          found = hit = 0
+          for line in report.read_text().splitlines():
+              if line.startswith("LF:"):
+                  found += int(line[3:])
+              elif line.startswith("LH:"):
+                  hit += int(line[3:])
+          pct = (hit / found * 100) if found else 0.0
+          print("| Metric | Coverage |")
+          print("| --- | --- |")
+          print(f"| Lines | **{pct:.2f}%** ({hit}/{found}) |")
+          PY
+
+      - name: Upload lcov.info
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-coverage
+          path: client/coverage/lcov.info
+          if-no-files-found: warn
+
+  lint:
+    name: lint (ruff, mypy, eslint, tsc, prettier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install server dependencies
+        working-directory: server
+        run: uv sync --all-groups
+
+      - name: Install client dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      # One step per tool, in the order `make lint` runs them: a red X names
+      # the tool without anybody opening the log. `../scripts` and the explicit
+      # `--config` are the Makefile's, and for the reason given there.
+      - name: ruff check
+        working-directory: server
+        run: uv run ruff check --config pyproject.toml . ../scripts
+
+      - name: ruff format --check
+        working-directory: server
+        run: uv run ruff format --check --config pyproject.toml . ../scripts
+
+      - name: mypy
+        working-directory: server
+        run: uv run mypy arc
+
+      - name: eslint
+        working-directory: client
+        run: pnpm lint
+
+      - name: tsc
+        working-directory: client
+        run: pnpm exec tsc -b --noEmit
+
+      - name: prettier --check
+        working-directory: client
+        run: pnpm format:check

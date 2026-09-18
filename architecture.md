@@ -2693,6 +2693,42 @@ two together.
   download behind an `httpx.MockTransport`; nothing in the suite fetches
   either dataset.
 
+### Continuous integration (M16)
+
+`.github/workflows/ci.yml` runs on pushes to `main` and on every pull request,
+as three jobs in parallel, each with its own dependency cache:
+
+| Job | What it runs |
+|---|---|
+| `server` | `postgres:18` as a service container (the CI equivalent of `make dev-db`), uv with Python 3.14, `uv sync --all-groups`, then `uv run pytest -q -m "not slow and not live" --cov=arc --cov-report=xml --cov-report=term-missing:skip-covered` against `TEST_DATABASE_URL=postgresql+asyncpg://arc:arc@localhost:5432/arc`. |
+| `client` | pnpm (pinned in the workflow's `env`, since `client/package.json` carries no `packageManager` field) + Node 24, `pnpm install --frozen-lockfile`, `pnpm exec vitest run --coverage`. |
+| `lint` | The six commands of `make lint`, one step per tool so a failure names the tool without opening the log. |
+
+Three things about it are load-bearing rather than incidental:
+
+- **No secrets, and no network to a real service.** AniList, MAL, TMDB, Nyaa,
+  qBittorrent and the recommendation providers are all behind mock transports
+  or fakes in the suite; the only tests that reach a real dependency are
+  marked, and both marks are deselected. `slow` is deselected so the runner
+  needs no ffmpeg — every other test that touches ffmpeg or ffprobe writes a
+  fake executable onto `PATH` (`tests/media_helpers.py`, `tests/test_probe.py`)
+  — and `live` because it spends provider quota. This is the one place CI and
+  `make test` differ: locally, where ffmpeg is installed, `make test` runs the
+  `slow` file too.
+- **`not live` is repeated on the command line.** A `-m` argument *replaces*
+  the expression in `addopts`, so `-m "not slow"` alone would quietly re-select
+  the live eval that `addopts` exists to exclude.
+- **The coverage summary is ten lines of `python3`.** Each suite job parses its
+  own report — Cobertura's `line-rate` from `coverage.xml`, the `LF:`/`LH:`
+  totals from `lcov.info` — and appends a small table to
+  `$GITHUB_STEP_SUMMARY`. No third-party action, and therefore no token and no
+  upload of the code's shape to a third party. The reports themselves are
+  uploaded as build artifacts (`server-coverage`, `client-coverage`).
+
+Coverage is opt-in on both sides: `[tool.coverage]` in `server/pyproject.toml`
+and `test.coverage` in `client/vite.config.ts` only say what to measure *when
+asked*, so `make test` is exactly as fast as it was.
+
 ## 11. Decision log
 
 - 2026-09-05 — Chose Python/FastAPI over Node/Go for parsing and media
@@ -4316,3 +4352,14 @@ two together.
   adjustment — it has always meant the selected files — which is the last of
   FR-A11's "the size Arc reserves or reports for a batch is the sum of its
   wanted files" falling out of the design rather than being enforced.
+- 2026-09-18 — **CI on GitHub Actions** (`.github/workflows/ci.yml`, §10):
+  three parallel jobs — server (pytest on a `postgres:18` service container),
+  client (Vitest), lint (`make lint`'s six commands, one step each) — on push
+  to `main` and on every pull request. No secrets and no ffmpeg on the runner:
+  the `slow` and `live` marks are both deselected, and everything else is
+  mocked. Coverage is reported by the tools already in the toolchain
+  (`pytest-cov`, `@vitest/coverage-v8`, both dev-only), summarised into the
+  run summary by a few lines of `python3` rather than a third-party action,
+  and uploaded as artifacts. Chosen over a single job so a red run says which
+  half of the repo broke, and over adding ffmpeg to the runner because the one
+  test that needs it is the one test the `slow` mark was created for.

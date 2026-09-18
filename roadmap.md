@@ -1485,7 +1485,26 @@ the finish work (bugs found that way are fixed inside M16).
 - [x] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
       of 2026-09-05; see architecture.md decision log) — **not doing in M16** (owner, 2026-09-18: TS 7 is not ready; revisit when typescript-eslint supports it)
 - [x] Responsive/accessibility items not already closed by M15 — **not doing** (owner, 2026-09-18: dropped from M16)
-- [ ] Full test suite green in CI; coverage report
+- [ ] Full test suite green in CI; coverage report — built 2026-09-18:
+      `.github/workflows/ci.yml`, on push to `main` and on every pull request,
+      three parallel jobs with per-toolchain caches. **server**: a `postgres:18`
+      service container, uv + Python 3.14, `uv sync --all-groups`, then
+      `pytest -q -m "not slow and not live" --cov=arc` (Cobertura + terminal);
+      no ffmpeg is installed because every non-`slow` test fakes the binary on
+      PATH. **client**: pnpm 10.33.2 + Node 24, `pnpm install
+      --frozen-lockfile`, `vitest run --coverage` (`@vitest/coverage-v8`, V8
+      provider, text + lcov). **lint**: the six `make lint` commands, one step
+      each. Both suite jobs write their line coverage into the run summary
+      (`$GITHUB_STEP_SUMMARY`, parsed in-line with python3 — no third-party
+      action, no token) and upload `coverage.xml` / `lcov.info` as artifacts.
+      `concurrency` cancels superseded runs per ref, `permissions: contents:
+      read`, timeouts 25/15/15 min, no secrets anywhere. Coverage as measured
+      locally on the same commands: server 96.45 % of lines (13956/14469,
+      89.67 % of branches; 3718 passed, 2 deselected, 10 m 32 s), client
+      95.78 % (2863/2989).
+      README gained a status badge and a "Continuous integration" section;
+      architecture.md §10 and its decision log record the shape.
+      — awaiting orchestrator validation
 - [ ] Final docs sweep: spec, architecture, roadmap, README all current
 - **DoD:** "finished product" — every FR in spec.md is implemented or
   explicitly marked out of scope; owner has used it daily for two weeks

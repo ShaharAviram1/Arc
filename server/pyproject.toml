@@ -25,6 +25,7 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
     "ruff>=0.8",
     "mypy>=1.13",
     "aiosqlite>=0.20",
@@ -61,6 +62,26 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["apscheduler.*", "anitopy.*", "asyncpg.*"]
 ignore_missing_imports = true
+
+# Coverage is opt-in: nothing here turns it on, so `make test` stays as fast as
+# it was. CI asks for it explicitly (`--cov=arc`); this block only says what
+# "arc" means when it does.
+[tool.coverage.run]
+# `source` is the whole of the filter: `alembic/` (hand-reviewed generated
+# migrations, imported only by `alembic upgrade`) and `tests/` both sit
+# outside the `arc` package, so neither is measured and neither needs an
+# `omit` line.
+source = ["arc"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

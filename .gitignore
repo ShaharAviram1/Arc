@@ -23,6 +23,7 @@ dist/
 .vite/
 *.tsbuildinfo
 .eslintcache
+coverage/
 
 # --- Runtime data ----------------------------------------------------------
 data/

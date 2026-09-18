@@ -1,5 +1,7 @@
 # Arc
 
+[![CI](https://github.com/ShaharAviram1/Arc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShaharAviram1/Arc/actions/workflows/ci.yml?query=branch%3Amain)
+
 Arc is a multi-user, self-hosted anime server with a browser client: it keeps
 track of what you and the people you invite are watching, acquires the next
 unwatched episodes on its own, transcodes them to browser-playable HLS with
@@ -105,6 +107,18 @@ The server tests marked `pg` run against a throwaway `arc_test` database
 use. They fail loudly if Postgres is not running — start it with `make
 dev-db`, or set `ARC_SKIP_PG_TESTS=1` to skip them on a machine without
 Docker.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request, as three parallel jobs: **server** (pytest against a `postgres:18`
+service container, with coverage), **client** (Vitest with V8 coverage), and
+**lint** (the six commands `make lint` runs, one step each, so a red X names
+the tool). No secrets are needed — every external service is mocked, and the
+two test groups that reach a real one are deselected: `slow` (real ffmpeg) and
+`live` (the recommendation provider). Each job prints its line coverage into
+the run summary and uploads its report as an artifact — `server-coverage`
+(`coverage.xml`, Cobertura) and `client-coverage` (`lcov.info`).
 
 ## Layout
 
