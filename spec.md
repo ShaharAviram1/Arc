@@ -191,7 +191,25 @@ any time, and the owner uses it daily.
   show has a short name to ask it under — a sequel whose title names an arc
   rather than a season has none, and nine words followed by a running number is
   a form nobody writes — though a release like that is still accepted if one of
-  the other forms finds it.
+  the other forms finds it. **A finished show whose forms find too little is
+  asked again by release group** (owner, 2026-09-18). The feed answers the
+  newest 75 matches of a query and **cannot be paged** — `p=`, `s=` and `o=`
+  are ignored by the RSS endpoint, verified against the live feed — so for an
+  old show whose franchise kept going those 75 results *are* the franchise:
+  *Kimetsu no Yaiba* episode 10 returned 91 results across seven forms with not
+  one season-one single among them. Since Nyaa matches whole words, the way to
+  reach what is behind them is a **narrower** query: `Kimetsu no Yaiba - 10
+  HorribleSubs` returns the 2019 uploads. So where the ordinary forms have left
+  fewer than **three** acceptable candidates, a finished show's top three forms
+  — the romaji `- NN`, the english `- NN` and the romaji `SxxEyy` — are asked
+  again with a group's name appended, the admin's preferred groups first and
+  then a short built-in list of the groups that have covered nearly every
+  simulcast. It stops as soon as there are three to compare, which is what
+  FR-A3's rules need, and a per-episode ceiling of twenty requests bounds the
+  worst case. A show that is still airing asks none of them — its newest
+  episode is inside the newest 75 — and none of this changes which releases are
+  acceptable: a narrowed form's results are merged, filtered and ranked by
+  exactly the same rules.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -1165,3 +1183,36 @@ is and the grace period decides.
   global rules while following them exactly. And **nothing is re-ranked**: like
   every other rule change, it applies to the next search and leaves anything
   already downloading alone.
+- 2026-09-18 — **Nyaa is searched by group for a finished show** (FR-A4, owner,
+  M16): *"the helper will compare sources to find the most optimal."* Arc used
+  to see only the newest 75 matches of each query form, and for a show that
+  finished years ago whose franchise kept going those 75 are the franchise:
+  *Kimetsu no Yaiba* (2019) episode 10 was searched on production under seven
+  forms, returned 91 merged results, and **none** of them was a season-one
+  single — every item was season 4 or 5, an Infinity Castle rip, a remake or a
+  batch, and all of them were correctly rejected. Episode 11 found exactly one
+  acceptable release, a two-seeder unknown-group encode, and it died in the
+  client. Nothing was wrong with the filter or the ranker; the pool was too
+  shallow to hold the answer. The first attempt at this asked the feed for
+  pages 2 and 3 — **the RSS endpoint ignores `p=` entirely** (pages 1, 2 and 3
+  of a query are byte-identical; only the HTML listing paginates), so that was
+  seventeen requests for the same 91 results. What does surface the old uploads
+  is a narrower question, because Nyaa ANDs every word of a query: `Kimetsu no
+  Yaiba - 10 HorribleSubs` returns 30 items, one of which is the episode at
+  5–8 seeders. So a **`FINISHED`** entry whose ordinary forms left fewer than
+  three acceptable candidates asks its top three forms again per group — the
+  admin's `preferred_groups` first (per-show override included), then the three
+  groups that have subtitled nearly every simulcast since 2013 — stopping at
+  three candidates and under a twenty-request ceiling. An **airing** show is
+  untouched and deliberately so: its weekly release is inside the newest 75,
+  and six more requests would buy nothing. Depth was chosen over any change to
+  the filter because the filter's 91 rejections were all correct.
+- 2026-09-18 — **A transcode never occupies a worker slot it cannot encode in**
+  (FR-P1, FR-P3, M16). Production runs two worker slots and one encoder; two
+  queued transcodes took both slots, one encoded and the other waited 25
+  minutes for it, so every short job — the `compute_wants` for the episode the
+  owner had just finished, and the `mal_push` for it — waited too. The worker
+  now refuses to *claim* a transcode while it already runs as many as the host
+  allows, which leaves the free slot to the highest-priority other job.
+  FR-P3's rule is unchanged: transcode priority is still how soon a user will
+  reach the episode, and the queued encode keeps its place.

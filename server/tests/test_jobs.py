@@ -10,7 +10,8 @@ the test database, and :func:`jobs_factory` empties the table afterwards.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from arc.services.acquisition import names as acquisition_names
 from arc.services.catalog import names as catalog_names
 from arc.services.jobs import (
     JobContext,
+    JobHandler,
     backoff,
     claim_one,
     claim_statement,
@@ -36,6 +38,8 @@ from arc.services.jobs import (
     run_job,
     run_worker_loop,
 )
+from arc.services.jobs import registry as job_registry
+from arc.services.jobs.loop import process_caps
 from arc.services.jobs.runner import MAX_BACKOFF
 from arc.services.library import names as library_names
 from arc.services.mal import names as mal_names
@@ -121,6 +125,22 @@ async def no_rollback_marker(pg_engine: AsyncEngine) -> AsyncIterator[None]:
             )
 
 
+@pytest.fixture
+def stub_handler(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, JobHandler], None]:
+    """Stand in for a real handler for the length of one test.
+
+    The per-process cap tests need a ``transcode`` job that takes a length of
+    time they control and no ffmpeg at all. ``register`` refuses to shadow a
+    live type on purpose (two handlers for one type is a production-only bug),
+    so the registry's own dictionary is swapped and put back by ``monkeypatch``.
+    """
+
+    def swap(job_type: str, handler: JobHandler) -> None:
+        monkeypatch.setitem(job_registry._HANDLERS, job_type, handler)
+
+    return swap
+
+
 async def _reload(factory: SessionFactory, job_id: int) -> Job:
     async with factory() as session:
         job = await session.get(Job, job_id)
@@ -141,6 +161,17 @@ async def _wait_for_status(
         await asyncio.sleep(0.02)
         job = await _reload(factory, job_id)
     raise AssertionError(f"job {job_id} never became {wanted}; it is {job.status}")
+
+
+async def _wait_until(condition: Callable[[], bool], what: str, timeout: float = 3.0) -> None:
+    """Poll until ``condition`` holds, rather than sleeping a guess."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
 
 
 def _worker(factory: SessionFactory, settings: Settings, stop: asyncio.Event) -> asyncio.Task[None]:
@@ -760,6 +791,189 @@ async def test_nothing_new_is_claimed_once_the_stop_signal_has_arrived(
         stored = await _reload(jobs_factory, job.id)
         assert stored.status is JobStatus.PENDING, "a stopped loop must claim nothing"
         assert stored.attempts == 0
+
+
+# --- Per-process caps -------------------------------------------------------
+#
+# ``MAX_TRANSCODES`` is smaller than ``WORKER_CONCURRENCY`` on the production
+# host (1 against 2), and a transcode claimed into a slot the encoder cannot
+# serve parks on the media semaphore holding that slot for the length of the
+# encode ahead of it. Two transcodes at the front of the queue therefore took
+# both of production's slots for 25 minutes on 2026-09-18 and starved
+# ``compute_wants``, ``mal_push``, ``poll_qbit`` and ``search_release``. The
+# loop now declines to claim a capped type while its cap is full.
+
+#: A transcode priority: the number ``media/names.transcode_priority`` gives an
+#: episode the next user is one away from, and two away from.
+NEXT_EPISODE = media_names.PRIORITY_PER_EPISODE
+EPISODE_AFTER = 2 * media_names.PRIORITY_PER_EPISODE
+
+
+async def _does_nothing(ctx: JobContext) -> None:
+    """Stands in for the short job's real handler: what it *does* is not the point."""
+    return None
+
+
+def test_the_only_capped_type_is_the_transcode(settings: Settings) -> None:
+    """The mapping is built from settings, so a cap cannot drift from its knob."""
+    assert process_caps(settings) == {media_names.TRANSCODE: settings.max_transcodes}
+    lowered = settings.model_copy(update={"max_transcodes": 1})
+    assert process_caps(lowered) == {media_names.TRANSCODE: 1}
+
+
+def test_the_claim_statement_is_unchanged_when_nothing_is_excluded() -> None:
+    """The gate costs the ordinary claim nothing — not even a clause."""
+    plain = str(claim_statement())
+    assert "NOT IN" not in plain.upper()
+    assert str(claim_statement(())) == plain, "an empty exclusion is the statement as it was"
+    assert "NOT IN" in str(claim_statement([media_names.TRANSCODE])).upper()
+
+
+async def test_a_claim_can_be_told_to_skip_a_job_type(jobs_factory: SessionFactory) -> None:
+    """The clause narrows the candidates and leaves the ordering alone."""
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    transcode = await _enqueued(
+        jobs_factory,
+        media_names.TRANSCODE,
+        {"episode_id": 1},
+        priority=NEXT_EPISODE,
+        run_after=due,
+    )
+    wants = await _enqueued(
+        jobs_factory,
+        acquisition_names.COMPUTE_WANTS,
+        priority=acquisition_names.COMPUTE_WANTS_PRIORITY,
+        run_after=due,
+    )
+
+    async with jobs_factory() as session:
+        skipped = await claim_one(session, WORKER, exclude_types={media_names.TRANSCODE})
+    assert skipped is not None
+    assert skipped.id == wants.id, "the excluded type must not be claimed, however it sorts"
+
+    async with jobs_factory() as session:
+        plain = await claim_one(session, WORKER)
+    assert plain is not None
+    assert plain.id == transcode.id, "and it is still there, in its own place, afterwards"
+
+
+async def _two_transcodes_and_a_short_job(
+    factory: SessionFactory,
+) -> tuple[Job, Job, Job]:
+    """The 2026-09-18 queue: two encodes in front of work somebody is waiting for."""
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    first = await _enqueued(
+        factory, media_names.TRANSCODE, {"episode_id": 1}, priority=NEXT_EPISODE, run_after=due
+    )
+    second = await _enqueued(
+        factory, media_names.TRANSCODE, {"episode_id": 2}, priority=EPISODE_AFTER, run_after=due
+    )
+    wants = await _enqueued(
+        factory,
+        acquisition_names.COMPUTE_WANTS,
+        priority=acquisition_names.COMPUTE_WANTS_PRIORITY,
+        run_after=due,
+    )
+    return first, second, wants
+
+
+async def test_a_second_transcode_does_not_take_the_slot_the_short_jobs_need(
+    jobs_factory: SessionFactory,
+    settings: Settings,
+    stub_handler: Callable[[str, JobHandler], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The regression, end to end: two slots, one encoder, three jobs.
+
+    The first transcode encodes. The second slot goes to ``compute_wants``
+    rather than to the second transcode — which stays *pending*, where it costs
+    nothing — and is claimed, in its own priority order, once the encode ends.
+
+    The two log lines are asserted here as well, counts included: the gate can
+    hold for twenty minutes of polling and must say so once, not once a poll.
+    """
+    caplog.set_level(logging.INFO, logger="arc.worker")
+    encoding = asyncio.Event()
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def fake_transcode(ctx: JobContext) -> None:
+        started.append(ctx.job.id)
+        encoding.set()
+        await release.wait()
+
+    stub_handler(media_names.TRANSCODE, fake_transcode)
+    stub_handler(acquisition_names.COMPUTE_WANTS, _does_nothing)
+    first, second, wants = await _two_transcodes_and_a_short_job(jobs_factory)
+    one_encoder = settings.model_copy(update={"max_transcodes": 1})
+
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        run_worker_loop(
+            jobs_factory, one_encoder, stop, worker_id=WORKER, concurrency=2, poll_interval=0.05
+        )
+    )
+    try:
+        await asyncio.wait_for(encoding.wait(), timeout=5)
+        await _wait_for_status(jobs_factory, wants.id, JobStatus.DONE)
+        # Several polls with a free slot and a pending transcode in front of
+        # nothing else: long enough for the old loop to have claimed it.
+        await asyncio.sleep(0.25)
+        parked = await _reload(jobs_factory, second.id)
+        assert parked.status is JobStatus.PENDING, "an encode must not hold the second slot"
+        assert parked.attempts == 0, "a job that was never claimed has spent no attempt"
+        assert started == [first.id], "only one encoder was allowed to start"
+
+        release.set()
+        await _wait_for_status(jobs_factory, first.id, JobStatus.DONE)
+        await _wait_for_status(jobs_factory, second.id, JobStatus.DONE)
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(worker, timeout=5)
+
+    assert started == [first.id, second.id], "the transcodes still ran in priority order"
+
+    gate = [record.message for record in caplog.records if "per-process cap" in record.message]
+    shut = ["closed" if "claiming other work" in line else "open" for line in gate]
+    assert shut[:2] == ["closed", "open"], gate
+    assert all(before != after for before, after in zip(shut, shut[1:], strict=False)), gate
+    # Four transitions at the very most — closed, open, closed, open — over
+    # however many polls the encode took. One a poll is the failure mode.
+    assert len(shut) <= 4, gate
+
+
+async def test_two_encoders_claim_two_transcodes(
+    jobs_factory: SessionFactory,
+    settings: Settings,
+    stub_handler: Callable[[str, JobHandler], None],
+) -> None:
+    """The gate is the cap, not a ban: raise ``MAX_TRANSCODES`` and both run."""
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def fake_transcode(ctx: JobContext) -> None:
+        started.append(ctx.job.id)
+        await release.wait()
+
+    stub_handler(media_names.TRANSCODE, fake_transcode)
+    stub_handler(acquisition_names.COMPUTE_WANTS, _does_nothing)
+    first, second, _ = await _two_transcodes_and_a_short_job(jobs_factory)
+    two_encoders = settings.model_copy(update={"max_transcodes": 2})
+
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        run_worker_loop(
+            jobs_factory, two_encoders, stop, worker_id=WORKER, concurrency=2, poll_interval=0.05
+        )
+    )
+    try:
+        await _wait_until(lambda: len(started) == 2, "both transcodes to start")
+        assert started == [first.id, second.id]
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(worker, timeout=5)
 
 
 # --- API --------------------------------------------------------------------

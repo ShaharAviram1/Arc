@@ -50,6 +50,23 @@ as ``- 01``, and accepted as episode 1 — but only from a release that names no
 season at all, and never while an explicitly season-marked release for the same
 episode is in the same pool.
 
+**A finished show that finds nothing is asked again by group**
+(:func:`group_queries`, 2026-09-18). The feed answers the newest 75 matches of
+a query and **cannot be paged at all** — ``&p=2`` and ``&p=3`` return byte for
+byte what ``&p=1`` returns, verified against the live feed, and only the HTML
+listing paginates. For an old show whose franchise kept going those 75 are the
+franchise: episode 10 of *Kimetsu no Yaiba* (2019) came back under seven forms
+as 91 merged results with not one season-one single among them — season 4,
+season 5, an Infinity Castle rip, remakes and batches, every one correctly
+rejected. The filter was right; the pool was three years too young. Since Nyaa
+ANDs the words of a query, the way to reach what is behind those 75 is to ask
+something **narrower**: ``Kimetsu no Yaiba - 10 HorribleSubs`` returns the 2019
+singles. So a ``FINISHED`` entry whose ordinary forms left the pool under
+:data:`ENOUGH_CANDIDATES` asks its top forms again with a group's name on the
+end — the admin's :attr:`~arc.services.acquisition.rules.Rules.preferred_groups`
+first, then :data:`DEEP_SEARCH_GROUPS` — stopping the moment there is enough to
+rank and never spending more than :data:`MAX_REQUESTS` requests on one episode.
+
 **Ranking is FR-A3's four rules in order**: preferred group, then resolution,
 then seeders, then Nyaa's trusted flag — behind one rule that comes first, an
 **English dub ranks below every subbed candidate** and is only ever chosen for
@@ -148,6 +165,46 @@ TITLE_THRESHOLD: Final[float] = 0.90
 #: would otherwise push a marked entry's english short forms off the end. The
 #: dedupe keeps a typical show at three or four regardless.
 MAX_QUERIES: Final[int] = 10
+
+#: How many acceptable releases in the merged pool are enough to stop looking.
+#: Three: the ranker's job is to compare sources, and three of them give it
+#: something to compare — a fourth costs two seconds of a volunteer-run site's
+#: patience and changes the answer rarely. Counted with the real
+#: :func:`filter_items`, so "acceptable" here means exactly what it means to
+#: the pick.
+ENOUGH_CANDIDATES: Final[int] = 3
+
+#: Most requests one episode's search may make, title forms and narrowed forms
+#: together. Ten title forms plus three forms × up to six groups is 28, which
+#: is nearly a minute of pacing for one episode; 20 is 38 seconds of it, and
+#: the narrowing is ordered so that the requests most likely to answer are the
+#: ones inside the ceiling. It is only reached by a show where nothing has been
+#: found yet — :data:`ENOUGH_CANDIDATES` stops the narrowing long before it on
+#: anything that is working.
+MAX_REQUESTS: Final[int] = 20
+
+#: The airing status that earns the narrowed forms (:func:`deep_search`). Every
+#: source normalises into AniList's vocabulary on the way in, so there is one
+#: spelling to check. A null status reads as "not known to be finished" and
+#: gets the ordinary forms only: that is the airing show's behaviour, and the
+#: airing show's behaviour is the one that must not change.
+DEEP_SEARCH_STATUS: Final[str] = "FINISHED"
+
+#: The groups a **finished** show is asked for by name when its ordinary forms
+#: find nothing (:func:`group_queries`, 2026-09-18). Between them these three
+#: have subtitled nearly every simulcast since 2013 — HorribleSubs until 2020,
+#: SubsPlease after it, Erai-raws throughout — so for an old show whose own
+#: uploads are buried they are the names likeliest to be attached to the
+#: episode that does exist: ``Kimetsu no Yaiba - 10 HorribleSubs`` returns the
+#: 2019 singles that ``Kimetsu no Yaiba - 10`` cannot reach.
+#:
+#: A **constant and not a setting**, and it is the one call here worth
+#: reviewing: three names hard-coded into the search are three claims about who
+#: uploads anime, and they will age. They sit *behind* the admin's own
+#: ``preferred_groups`` (which is where a fourth name belongs) and they are
+#: de-duplicated against it, so an admin who prefers Judas asks Judas first and
+#: never asks it twice.
+DEEP_SEARCH_GROUPS: Final[tuple[str, ...]] = ("HorribleSubs", "SubsPlease", "Erai-raws")
 
 #: Punctuation a release group drops and a catalogue keeps. Every one of these
 #: either glues two words into one token (``Yarichin☆Bitch-bu``) or hangs off
@@ -442,7 +499,14 @@ class NyaaClient:
         await self._client.aclose()
 
     def url_for(self, query: str) -> str:
-        """The RSS URL for ``query`` (architecture.md §6)."""
+        """The RSS URL for ``query`` (architecture.md §6).
+
+        One URL per query and no ``p``: **the RSS feed does not paginate**
+        (verified 2026-09-18). ``&p=2`` and ``&p=3`` answer byte for byte what
+        ``&p=1`` answers, and so do ``s=``/``o=`` — only the HTML listing pages
+        and sorts. What gets past the first 75 results is therefore a *narrower
+        query* (:func:`group_queries`), never a deeper one.
+        """
         params = urlencode({"page": "rss", "q": query, "c": CATEGORY, "f": FILTER})
         return f"{self._base_url}/?{params}"
 
@@ -1546,25 +1610,118 @@ def rank(candidates: Iterable[Candidate], rules: Rules) -> list[Ranked]:
     return ranked
 
 
+def deep_search(anime: Anime) -> bool:
+    """Whether this entry may be asked the narrowed forms (:func:`group_queries`).
+
+    A show the catalogue calls :data:`DEEP_SEARCH_STATUS`, and nothing else —
+    the asymmetry is the whole decision (owner, 2026-09-18). The newest 75
+    matches of a *finished* show's query are its franchise's later seasons,
+    because the episode being looked for was uploaded years ago and everything
+    since sits in front of it. The newest 75 of an *airing* show's query
+    contain this week's release, which is the thing being looked for: there is
+    nothing behind them worth six more requests, and Nyaa's patience is the
+    budget.
+
+    Null status reads as not-finished. It is the airing show's answer, and the
+    airing show's behaviour is the one that must not change.
+    """
+    return str(anime.status or "").strip().upper() == DEEP_SEARCH_STATUS
+
+
+def group_queries(anime: Anime, number: int, rules: Rules) -> list[str]:
+    """``"<form> <group>"`` for the top forms × the groups worth naming.
+
+    The fix of 2026-09-18, and the shape of it follows from what Nyaa does
+    with a query: it ANDs the words, so adding a group's name to a form does
+    not *sort* the 75 newest matches, it asks a different and much smaller
+    question — one whose whole answer fits. ``Kimetsu no Yaiba - 10`` is 75
+    results of a franchise that ran five more seasons; ``Kimetsu no Yaiba - 10
+    HorribleSubs`` is 30 results, one of which is the episode.
+
+    Only the **top three ordinary forms** earn a narrowed version: the romaji
+    ``- NN``, the english ``- NN``, and the romaji ``SxxEyy``. Those are the
+    three shapes a group's own upload actually has, and every further form
+    multiplied by every group is a request spent on a spelling nobody wrote.
+    The order is **form-major** — all the groups of the romaji form, then all
+    the groups of the english one — because the form is the stronger signal:
+    romaji is what groups write, and a wrong-language form narrowed by the
+    right group still finds nothing.
+
+    Groups come from the rules first (``preferred_groups``, per-show override
+    already merged by
+    :func:`~arc.services.acquisition.rules.load_rules`) and then from
+    :data:`DEEP_SEARCH_GROUPS`, de-duplicated case-insensitively so an admin
+    who already prefers SubsPlease does not ask for it twice. Preferring a
+    group is a statement about who to ask, and the admin's statement outranks
+    the module's.
+
+    Pure, like :func:`queries`, so the list is a claim that can be read and
+    argued with rather than a behaviour that has to be watched.
+    """
+    padded = pad(number, total_episodes=anime.episodes)
+    season = anime_season(anime)
+    romaji = anime.title_romaji
+    english = anime.title_english
+
+    forms: list[str] = []
+    if romaji:
+        forms.append(f"{romaji} - {padded}")
+    if english and english != romaji:
+        forms.append(f"{english} - {padded}")
+    if romaji:
+        forms.append(_sxxexx_form(romaji, season or 1, number))
+
+    groups: list[str] = []
+    seen_groups: set[str] = set()
+    for group in (*rules.preferred_groups, *DEEP_SEARCH_GROUPS):
+        folded = group.strip().casefold()
+        if not folded or folded in seen_groups:
+            continue
+        seen_groups.add(folded)
+        groups.append(group.strip())
+
+    built: dict[str, None] = {}
+    for form in forms:
+        normalised = " ".join(form.split())
+        if not normalised:
+            continue
+        for group in groups:
+            built.setdefault(f"{normalised} {group}", None)
+    return list(built)
+
+
 @dataclass(frozen=True, slots=True)
 class Search:
     """What one episode's search asked, saw and kept (FR-A7).
 
-    ``ranked`` is the answer; ``forms`` and ``results`` are the *diagnostic*,
-    and they are here because they are the two numbers that tell an owner
-    looking at a stuck row which half is broken. "Six forms, zero results" is a
-    query problem — Nyaa has never heard of any name Arc asked by, which is
-    what every case in ``tests/fixtures/query_corpus.txt`` was before it was
-    fixed. "Two forms, forty results, nothing kept" is a filter problem, and
-    the rejection log names the sentence behind each one. Without the pair, a
-    row that says ``Searching`` for six hours says nothing at all.
+    ``ranked`` is the answer; the other three are the *diagnostic*, and they
+    are here because ``forms`` and ``results`` are the two numbers that tell an
+    owner looking at a stuck row which half is broken. "Six forms, zero
+    results" is a query problem — Nyaa has never heard of any name Arc asked
+    by, which is what every case in ``tests/fixtures/query_corpus.txt`` was
+    before it was fixed. "Two forms, forty results, nothing kept" is a filter
+    problem, and the rejection log names the sentence behind each one. Without
+    the pair, a row that says ``Searching`` for six hours says nothing at all.
+    ``requests`` is the third and the newest (2026-09-18): above ``forms`` it
+    says the search fell back on the group-narrowed forms
+    (:func:`group_queries`), which is the sentence behind a search that took
+    forty seconds.
     """
 
     ranked: list[Ranked]
-    #: How many query forms ran (:func:`queries`, after the dedupe and the cap).
+    #: How many **title** query forms ran (:func:`queries`, after the dedupe
+    #: and the cap). Deliberately still only those: it is the number on the
+    #: episode row, and "7 forms" has meant "seven ways of writing the title"
+    #: since M6.
     forms: int
-    #: Distinct releases they returned between them, before the filter.
+    #: Distinct releases every form returned between them, before the filter.
     results: int
+    #: Requests made, title forms and narrowed forms together (some possibly
+    #: answered from the ten-minute cache). Equal to ``forms`` for an airing
+    #: show and for a finished one that found what it needed, so a larger
+    #: number is itself the statement that this search had to go narrower
+    #: (:func:`group_queries`).
+    requests: int
 
     @property
     def kept(self) -> int:
@@ -1603,18 +1760,61 @@ async def search_for_episode(
     and the same torrent comes back under several of them; the first feed to
     mention one wins, which keeps the best query's ordering at the front of the
     pool for anything the ranker leaves tied.
+
+    **A finished show that found too little is asked again by group**
+    (:func:`group_queries`, 2026-09-18), and the rule is exactly this:
+
+    * every title form runs first, exactly as before;
+    * then, **only for a** :func:`deep_search` **entry** and **only while the
+      merged pool holds fewer than** :data:`ENOUGH_CANDIDATES` **acceptable
+      releases**, the narrowed forms run in order, each one an ordinary paced
+      and cached request;
+    * the narrowing stops the moment there are three to compare, because that
+      is what the ranker was short of;
+    * and :data:`MAX_REQUESTS` is the ceiling on the lot — title forms
+      included — so one episode's search cannot cost more than 20 requests
+      however the forms and groups multiply out.
+
+    The narrowed forms are **not** counted against :data:`MAX_QUERIES`: that
+    cap is the budget for ways of writing the *title*, and these are not that.
+    They are counted in ``requests`` and not in ``forms``, for the same reason.
+
+    Nothing about *which* releases are acceptable changes: a narrowed form's
+    results merge by info hash like everything else and go through the same
+    filter into the same ranking, so a group that was asked for by name still
+    wins or loses on preferred group, resolution, seeders and trusted. The pool
+    was the bug.
     """
     titles = anime_titles(anime)
     season = anime_season(anime)
+    single = is_single(anime)
 
     merged: dict[str, NyaaItem] = {}
     counts: list[int] = []
-    for query in queries(anime, number, offset=offset):
+    requests = 0
+
+    def enough() -> bool:
+        """Whether the pool already holds enough to compare (FR-A3)."""
+        kept = filter_items(
+            merged.values(),
+            titles=titles,
+            number=number,
+            season=season,
+            threshold=threshold,
+            single=single,
+            year=anime.season_year,
+            offset=offset,
+        )
+        return len(kept) >= ENOUGH_CANDIDATES
+
+    async def ask(query: str) -> int:
+        """One form, merged into the pool; how many items it returned."""
+        nonlocal requests
         items = await client.search(query)
+        requests += 1
         before = len(merged)
         for item in items:
             merged.setdefault(item.info_hash, item)
-        counts.append(len(items))
         log.debug(
             "nyaa query",
             extra={
@@ -1625,6 +1825,35 @@ async def search_for_episode(
                 "new": len(merged) - before,
             },
         )
+        return len(items)
+
+    for query in queries(anime, number, offset=offset):
+        if requests >= MAX_REQUESTS:
+            log.warning(
+                "nyaa request ceiling reached, forms left unasked",
+                extra={"anime_id": anime.id, "number": number, "requests": requests},
+            )
+            break
+        counts.append(await ask(query))
+
+    if deep_search(anime):
+        # Narrowed by group, and only for what the title forms could not
+        # reach: the newest 75 matches of a finished show's query are its
+        # franchise's later seasons, and the feed cannot be paged past them.
+        for query in group_queries(anime, number, rules):
+            if requests >= MAX_REQUESTS:
+                log.warning(
+                    "nyaa request ceiling reached, narrowed forms left unasked",
+                    extra={"anime_id": anime.id, "number": number, "requests": requests},
+                )
+                break
+            if enough():
+                break
+            log.debug(
+                "nyaa narrowed query",
+                extra={"query": query, "anime_id": anime.id, "number": number},
+            )
+            await ask(query)
 
     candidates = filter_items(
         merged.values(),
@@ -1632,7 +1861,7 @@ async def search_for_episode(
         number=number,
         season=season,
         threshold=threshold,
-        single=is_single(anime),
+        single=single,
         year=anime.season_year,
         offset=offset,
     )
@@ -1645,13 +1874,15 @@ async def search_for_episode(
             "offset": offset,
             "queries": len(counts),
             "per_query": counts,
+            "requests": requests,
+            "narrowed": requests - len(counts),
             "merged": len(merged),
             "kept": len(candidates),
             "top": ranked[0].item.title if ranked else None,
             "reasons": list(ranked[0].reasons) if ranked else [],
         },
     )
-    return Search(ranked=ranked, forms=len(counts), results=len(merged))
+    return Search(ranked=ranked, forms=len(counts), results=len(merged), requests=requests)
 
 
 def as_dict(ranked: Ranked) -> dict[str, Any]:
@@ -1673,8 +1904,12 @@ __all__ = [
     "ABSOLUTE_SKIPPED_FORMATS",
     "CACHE_TTL",
     "CATEGORY",
+    "DEEP_SEARCH_GROUPS",
+    "DEEP_SEARCH_STATUS",
+    "ENOUGH_CANDIDATES",
     "MAX_PREQUEL_HOPS",
     "MAX_QUERIES",
+    "MAX_REQUESTS",
     "MAX_SYNONYM_QUERIES",
     "MIN_INTERVAL",
     "MIN_SEEDERS",
@@ -1701,7 +1936,9 @@ __all__ = [
     "anime_titles",
     "as_dict",
     "close_shared_client",
+    "deep_search",
     "filter_items",
+    "group_queries",
     "has_prequel",
     "head_of",
     "is_single",

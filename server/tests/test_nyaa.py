@@ -20,6 +20,7 @@ query that returned *something* was a correct ranking over the wrong pool.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any
 
 import httpx
@@ -41,7 +42,9 @@ from arc.services.acquisition.nyaa import (
     acceptable,
     anime_season,
     anime_titles,
+    deep_search,
     filter_items,
+    group_queries,
     has_prequel,
     head_of,
     is_single,
@@ -93,6 +96,18 @@ MUSHOKU_S3 = Anime(
     title_english="Mushoku Tensei: Jobless Reincarnation Season 3",
     title_native="無職転生 III ～異世界行ったら本気だす～",
     synonyms=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season"],
+    episodes=14,
+)
+#: The same entry with the catalogue's own ``FINISHED`` status on it, for the
+#: paging tests: ten query forms, which is what makes it the worst case the
+#: request ceiling is written against (2026-09-18).
+MUSHOKU_S3_FINISHED = Anime(
+    anilist_id=178789,
+    title_romaji="Mushoku Tensei III: Isekai Ittara Honki Dasu",
+    title_english="Mushoku Tensei: Jobless Reincarnation Season 3",
+    title_native="無職転生 III ～異世界行ったら本気だす～",
+    synonyms=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season"],
+    status="FINISHED",
     episodes=14,
 )
 #: Split at the colon the way the query builder splits it, because the heads
@@ -2389,6 +2404,336 @@ async def test_concurrent_searches_do_not_burst(monkeypatch: pytest.MonkeyPatch)
 
     assert len(stub.queries) == 3
     assert len(slept) == 2
+
+
+# --- Narrowing a finished show's search by group (2026-09-18) ---------------
+#
+# Nyaa answers the newest 75 matches of a query and **cannot be paged**: `&p=2`
+# and `&p=3` return byte for byte what `&p=1` returns, verified against the
+# live feed on 2026-09-18, and so do `s=`/`o=`. For a finished show whose
+# franchise kept going those 75 are the franchise: *Kimetsu no Yaiba* episode
+# 10 came back as seven forms, 91 merged results and not one season-one single
+# — season 4, season 5, an Infinity Castle rip, remakes and batches, every one
+# of them correctly rejected. Nothing here tests the filter, which was right
+# about all 91. What reaches the 2019 uploads is a *narrower* question: Nyaa
+# ANDs every word, so `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items and
+# one of them is the episode.
+
+
+def feed_of(*titles: str, seeders: int = 100) -> str:
+    """A Nyaa RSS document with one item per title, hashed by its own name.
+
+    Hashing the title rather than the position is what makes the merge behave
+    as it does against the real feed: the same release under two forms is one
+    row in the pool, and two different releases are two.
+    """
+    items = "".join(
+        "<item>"
+        f"<title>{title}</title>"
+        "<link>https://nyaa.test/download/x.torrent</link>"
+        f"<nyaa:infoHash>{hashlib.sha1(title.encode()).hexdigest()}</nyaa:infoHash>"
+        f"<nyaa:seeders>{seeders}</nyaa:seeders>"
+        "<nyaa:leechers>2</nyaa:leechers><nyaa:downloads>9</nyaa:downloads>"
+        "<nyaa:size>1.3 GiB</nyaa:size><nyaa:trusted>No</nyaa:trusted>"
+        "<nyaa:remake>No</nyaa:remake><nyaa:categoryId>1_2</nyaa:categoryId>"
+        "</item>"
+        for title in titles
+    )
+    return (
+        '<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0">'
+        f"<channel>{items}</channel></rss>"
+    )
+
+
+def franchise_junk(count: int, *, tag: str = "a") -> list[str]:
+    """``count`` releases of the *wrong* seasons, as the newest 75 really are.
+
+    Every one of them is rejected by the season check, which is the point: a
+    feed full of correctly rejected results is what an old show's query returns,
+    and it is indistinguishable from a feed full of candidates until the filter
+    has run.
+    """
+    return [
+        f"[SubsPlease] Kimetsu no Yaiba S{4 + index % 2} - "
+        f"{index % 12 + 1:02d} (1080p) [{tag}{index:04d}].mkv"
+        for index in range(count)
+    ]
+
+
+#: AniList 101922, and the case the narrowing exists for: 2019, ``FINISHED``, a
+#: franchise that ran four more seasons and three films after it. Seven title
+#: forms, none of which can tell Nyaa to skip the newer ones.
+KIMETSU_S1 = Anime(
+    anilist_id=101922,
+    title_romaji="Kimetsu no Yaiba",
+    title_english="Demon Slayer: Kimetsu no Yaiba",
+    status="FINISHED",
+    format="TV",
+    episodes=26,
+    season_year=2019,
+    relations=[relation("SEQUEL", anilist_id=142329)],
+)
+#: The same entry as the catalogue holds it *while it is airing*, which is the
+#: behaviour that must not change: its weekly release is inside the newest 75,
+#: so there is nothing behind them worth nine more requests.
+KIMETSU_AIRING = Anime(
+    anilist_id=101922,
+    title_romaji="Kimetsu no Yaiba",
+    title_english="Demon Slayer: Kimetsu no Yaiba",
+    status="RELEASING",
+    format="TV",
+    episodes=26,
+    season_year=2019,
+)
+KIMETSU_QUERIES = [
+    "Kimetsu no Yaiba - 10",
+    "Demon Slayer: Kimetsu no Yaiba - 10",
+    "Kimetsu no Yaiba S01E10",
+    "Demon Slayer - 10",
+    "Kimetsu no Yaiba 10",
+    "Demon Slayer: Kimetsu no Yaiba S01E10",
+    "Demon Slayer Kimetsu no Yaiba - 10",
+]
+KIMETSU_FIRST_QUERY = KIMETSU_QUERIES[0]
+#: The nine narrowed forms, in the order they must be asked: **form-major**,
+#: the three groups of the romaji dash form first. Only the top three title
+#: forms earn one — the head form, the bare form and the variants do not.
+KIMETSU_NARROWED = [
+    "Kimetsu no Yaiba - 10 HorribleSubs",
+    "Kimetsu no Yaiba - 10 SubsPlease",
+    "Kimetsu no Yaiba - 10 Erai-raws",
+    "Demon Slayer: Kimetsu no Yaiba - 10 HorribleSubs",
+    "Demon Slayer: Kimetsu no Yaiba - 10 SubsPlease",
+    "Demon Slayer: Kimetsu no Yaiba - 10 Erai-raws",
+    "Kimetsu no Yaiba S01E10 HorribleSubs",
+    "Kimetsu no Yaiba S01E10 SubsPlease",
+    "Kimetsu no Yaiba S01E10 Erai-raws",
+]
+#: What ``Kimetsu no Yaiba - 10 HorribleSubs`` actually answers: the 2019
+#: single and its two lower-resolution siblings, five to eight seeders each.
+HORRIBLESUBS_1080P = "[HorribleSubs] Kimetsu no Yaiba - 10 [1080p].mkv"
+HORRIBLESUBS_SIBLINGS = [
+    "[HorribleSubs] Kimetsu no Yaiba - 10 [720p].mkv",
+    "[HorribleSubs] Kimetsu no Yaiba - 10 [480p].mkv",
+]
+#: And what the ordinary forms answer: the franchise, plus a batch of the
+#: season actually being searched for — which is still never picked (FR-A4).
+KIMETSU_FRANCHISE = feed_of(
+    *franchise_junk(20),
+    "[Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [1080p][Multiple Subtitle]",
+)
+
+
+def test_only_a_finished_show_earns_the_narrowed_forms() -> None:
+    assert deep_search(KIMETSU_S1)
+    assert not deep_search(KIMETSU_AIRING)
+    assert not deep_search(FRIEREN_S1), "a row with no status is not known to be finished"
+
+
+def test_a_lower_case_status_is_still_finished() -> None:
+    """``anime.status`` is somebody else's string; it is read, not trusted."""
+    assert deep_search(Anime(anilist_id=1, title_romaji="x", status=" finished "))
+
+
+def test_the_narrowed_forms_are_the_top_three_titles_times_the_groups() -> None:
+    assert group_queries(KIMETSU_S1, 10, Rules()) == KIMETSU_NARROWED
+
+
+def test_the_speculative_title_forms_earn_no_narrowed_version() -> None:
+    """Three forms × three groups, and the other four forms are not among them.
+
+    A head form or a symbol-stripped variant narrowed by a group is a guess
+    about a guess, and each one costs a real request.
+    """
+    narrowed = group_queries(KIMETSU_S1, 10, Rules())
+
+    assert len(narrowed) == 9
+    for form in ("Demon Slayer - 10", "Kimetsu no Yaiba 10", "Demon Slayer Kimetsu no Yaiba - 10"):
+        assert not any(query.startswith(f"{form} ") for query in narrowed)
+
+
+def test_the_admins_own_groups_come_first_and_are_not_asked_twice() -> None:
+    """``preferred_groups`` outranks the built-in three, case-insensitively.
+
+    An admin who prefers a group has said who to ask; ``subsplease`` and
+    ``SubsPlease`` are one group, which is exactly how the ranker reads them.
+    """
+    rules = Rules(preferred_groups=("subsplease", "Judas"))
+
+    narrowed = group_queries(KIMETSU_S1, 10, rules)
+
+    assert narrowed[:4] == [
+        "Kimetsu no Yaiba - 10 subsplease",
+        "Kimetsu no Yaiba - 10 Judas",
+        "Kimetsu no Yaiba - 10 HorribleSubs",
+        "Kimetsu no Yaiba - 10 Erai-raws",
+    ]
+    assert len(narrowed) == 12, "four groups, not five: SubsPlease was already asked"
+
+
+def test_a_show_with_one_title_narrows_that_one() -> None:
+    """No english title is two forms fewer, not an empty list."""
+    narrowed = group_queries(ONE_ROOM, 7, Rules(preferred_groups=("ToonsHub",)))
+
+    assert narrowed[0] == "Wollum Jogyonim - 07 ToonsHub"
+    assert "One-Room TA - 07 ToonsHub" in narrowed
+
+
+async def test_a_finished_show_that_found_nothing_asks_by_group_and_finds_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production case, end to end: 21 correctly rejected results, then this.
+
+    The narrowed form answers the 2019 single and its two siblings, which is
+    three acceptable releases — so the search stops there, having asked one
+    narrowed form of the nine, and the ranker picks across them on resolution
+    exactly as it would have on any other pool.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {
+            **{query: KIMETSU_FRANCHISE for query in KIMETSU_QUERIES},
+            KIMETSU_NARROWED[0]: feed_of(HORRIBLESUBS_1080P, *HORRIBLESUBS_SIBLINGS, seeders=6),
+        }
+    )
+    rules = Rules(preferred_resolution="1080p", fallback_resolution="720p")
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, rules)
+
+    assert stub.queries == [*KIMETSU_QUERIES, KIMETSU_NARROWED[0]]
+    assert found.ranked[0].item.title == HORRIBLESUBS_1080P
+    assert len(found.ranked) == 3
+    assert (found.forms, found.requests) == (len(KIMETSU_QUERIES), len(KIMETSU_QUERIES) + 1)
+
+
+async def test_the_narrowed_forms_are_asked_in_order_until_they_run_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing anywhere: all nine are asked, form-major, and the search gives up."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(default=KIMETSU_FRANCHISE)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
+
+    assert stub.queries == [*KIMETSU_QUERIES, *KIMETSU_NARROWED]
+    assert found.ranked == []
+    assert (found.forms, found.requests) == (7, 16)
+
+
+async def test_the_narrowed_forms_are_not_asked_when_the_title_forms_sufficed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three acceptable releases is what the ranker was short of (FR-A3)."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {
+            KIMETSU_FIRST_QUERY: feed_of(
+                HORRIBLESUBS_1080P,
+                *HORRIBLESUBS_SIBLINGS,
+                *franchise_junk(10),
+            )
+        }
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
+
+    assert stub.queries == KIMETSU_QUERIES, "not one narrowed form"
+    assert len(found.ranked) == nyaa_module.ENOUGH_CANDIDATES == 3
+    assert found.requests == found.forms == len(KIMETSU_QUERIES)
+
+
+async def test_two_candidates_are_not_enough_to_call_off_the_narrowing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the threshold, so the constant is the rule."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {
+            KIMETSU_FIRST_QUERY: feed_of(HORRIBLESUBS_1080P, HORRIBLESUBS_SIBLINGS[0]),
+            KIMETSU_NARROWED[0]: feed_of(HORRIBLESUBS_SIBLINGS[1]),
+        }
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
+
+    assert KIMETSU_NARROWED[0] in stub.queries
+    assert len(found.ranked) == 3
+    assert found.requests == found.forms + 1
+
+
+async def test_an_airing_show_never_asks_a_narrowed_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The behaviour that must not change: this week's release is in the 75."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub({KIMETSU_NARROWED[0]: feed_of(HORRIBLESUBS_1080P)}, default=KIMETSU_FRANCHISE)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_AIRING, 10, Rules())
+
+    assert stub.queries == KIMETSU_QUERIES
+    assert found.requests == found.forms, "one request per title form, exactly as before"
+    assert found.ranked == [], "the single is behind a narrowed form an airing show does not ask"
+
+
+async def test_the_request_ceiling_covers_both_kinds_of_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten title forms and eighteen narrowed ones is 28; the ceiling is 20.
+
+    Three preferred groups on top of the built-in three, and nothing anywhere
+    acceptable — the worst case the ceiling exists for. The forms it does not
+    reach are the last narrowed ones, which is the right end to lose: the
+    groups an admin named and the romaji form are asked first.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(default=KIMETSU_FRANCHISE)
+    rules = Rules(preferred_groups=("Judas", "Anime Time", "Yameii"))
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, MUSHOKU_S3_FINISHED, 11, rules)
+
+    assert len(queries(MUSHOKU_S3_FINISHED, 11)) == nyaa_module.MAX_QUERIES == 10
+    assert len(group_queries(MUSHOKU_S3_FINISHED, 11, rules)) == 18
+    assert found.requests == len(stub.queries) == nyaa_module.MAX_REQUESTS == 20
+    assert found.forms == 10, "every title form ran; the ceiling only cut the narrowing"
+
+
+async def test_every_narrowed_form_is_spaced_by_the_polite_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A narrowed form is an ordinary request and waits its two seconds."""
+    slept: list[float] = []
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
+    stub = NyaaStub(default=KIMETSU_FRANCHISE)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
+
+    assert found.requests == 16
+    assert len(slept) == 15, "the first request waits for nothing"
+    assert all(0 < pause <= MIN_INTERVAL for pause in slept)
+
+
+async def test_the_rss_url_carries_no_page_parameter_at_all() -> None:
+    """Nyaa's RSS ignores ``p``, ``s`` and ``o`` (verified 2026-09-18).
+
+    Pages 1, 2 and 3 of the same query answer byte for byte the same document,
+    so a URL with ``p`` on it is a request spent to read what Arc already has.
+    The one URL Arc asks is the one it has always asked.
+    """
+    stub = NyaaStub()
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        assert client.url_for("Sousou no Frieren - 07") == (
+            "https://nyaa.test/?page=rss&q=Sousou+no+Frieren+-+07&c=1_2&f=0"
+        )
+        await client.search("Kimetsu no Yaiba - 10 HorribleSubs")
+
+    assert "&p=" not in client.url_for("q")
 
 
 # --- The shared client ------------------------------------------------------

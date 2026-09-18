@@ -185,7 +185,13 @@ def acquisition_settings(tmp_path: Path, **overrides: Any) -> Settings:
 
 
 class NyaaStub:
-    """An ``httpx.MockTransport`` that answers Nyaa RSS from fixtures."""
+    """An ``httpx.MockTransport`` that answers Nyaa RSS from fixtures.
+
+    ``answers`` is keyed by the **whole** query string, which is all a narrowed
+    form is: ``"Kimetsu no Yaiba - 10"`` and ``"Kimetsu no Yaiba - 10
+    HorribleSubs"`` are two keys and two different feeds, exactly as they are
+    two different questions to Nyaa (2026-09-18).
+    """
 
     def __init__(self, answers: dict[str, str] | None = None, *, default: str | None = None):
         #: query string → XML body. Matched on the ``q`` parameter.

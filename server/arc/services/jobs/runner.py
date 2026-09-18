@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import logging
 import traceback
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -62,15 +63,29 @@ MAX_ERROR_CHARS = 2000
 WORKER_ID_MAX = 64
 
 
-def claim_statement() -> Select[tuple[Job]]:
+def claim_statement(exclude_types: Collection[str] = ()) -> Select[tuple[Job]]:
     """The claim SELECT, exactly as run by :func:`claim_one`.
 
     Exposed so that tests can prove the ``SKIP LOCKED`` behaviour on raw
     connections against the same statement the worker uses.
+
+    ``exclude_types`` leaves out job types the calling process cannot run at
+    this moment — a type whose per-process cap is already full
+    (:func:`arc.services.jobs.loop.process_caps`). It adds one ``NOT IN`` and
+    nothing else: the ordering, the ``LIMIT 1`` and the ``SKIP LOCKED`` are
+    untouched, so an excluded type keeps its place in the queue and is claimed
+    in the usual order as soon as the cap frees up. Empty by default, and the
+    statement is then exactly the one it has always been.
     """
+    where: list[ColumnElement[bool]] = [
+        Job.status == JobStatus.PENDING,
+        Job.run_after <= func.now(),
+    ]
+    if exclude_types:
+        where.append(Job.type.not_in(tuple(exclude_types)))
     return (
         select(Job)
-        .where(Job.status == JobStatus.PENDING, Job.run_after <= func.now())
+        .where(*where)
         .order_by(Job.priority, Job.run_after, Job.id)
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -104,15 +119,21 @@ def format_error(exc: BaseException) -> str:
     return f"{head}\n{tail[-room:]}"
 
 
-async def claim_one(session: AsyncSession, worker_id: str) -> Job | None:
+async def claim_one(
+    session: AsyncSession, worker_id: str, *, exclude_types: Collection[str] = ()
+) -> Job | None:
     """Take the next due job, or return ``None`` if there is nothing to do.
 
     Commits before returning: the row lock is only held for the length of the
     claim, and the job is marked ``running`` so that no one else picks it up.
     ``attempts`` is incremented here rather than on failure, so a worker that
     dies mid-job still burns an attempt and a poison job cannot loop forever.
+
+    ``exclude_types`` is passed straight to :func:`claim_statement`: the caller
+    is saying which types it cannot serve right now, not which ones are
+    unimportant.
     """
-    job = await session.scalar(claim_statement())
+    job = await session.scalar(claim_statement(exclude_types))
     if job is None:
         # Release the (empty) read transaction rather than leaving it idle.
         await session.rollback()

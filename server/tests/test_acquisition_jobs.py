@@ -623,6 +623,76 @@ async def test_a_paused_search_stamps_nothing_because_it_asked_nothing(
     assert episode.last_search_results is None
 
 
+# --- Narrowing a finished show's search (FR-A4, 2026-09-18) -----------------
+
+
+#: The first of the nine group-narrowed forms this show earns: romaji dash
+#: form, first group. Written out rather than derived, because the *order* is
+#: the claim being made.
+NARROWED_FIRST = "Sousou no Frieren - 07 HorribleSubs"
+
+
+async def test_a_finished_shows_search_asks_by_group_and_takes_what_it_finds(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole fix, end to end: nothing under the titles, the episode under a group.
+
+    Every title form answers the empty feed — which is what *Kimetsu no Yaiba*
+    episode 10 amounted to after the filter had correctly rejected all 91
+    franchise results — and the narrowed form is the one that answers. The log
+    line carries both counts, since "7 forms, 16 requests" is the sentence that
+    says a search went narrower than it used to.
+    """
+    single = "[HorribleSubs] Sousou no Frieren - 07 [1080p].mkv"
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962070, email="narrow@arc.test", feed=None
+    )
+    anime = await db_session.get(Anime, episode.anime_id)
+    assert anime is not None
+    anime.status = "FINISHED"
+    await db_session.flush()
+    wired.nyaa.answers = {NARROWED_FIRST: _feed(single, info_hash="e" * 40, seeders=6)}
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert NARROWED_FIRST in wired.nyaa.queries
+    assert episode.state is EpisodeState.DOWNLOADING
+    torrent = await db_session.scalar(select(Torrent).where(Torrent.episode_id == episode.id))
+    assert torrent is not None
+    assert torrent.title == single
+    record = next(row for row in caplog.records if row.getMessage() == "nyaa search finished")
+    assert episode.last_search_forms is not None
+    assert record.__dict__["forms"] == episode.last_search_forms
+    assert record.__dict__["requests"] > record.__dict__["forms"]
+
+
+async def test_an_airing_shows_search_asks_its_title_forms_and_stops(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``RELEASING`` is ``make_anime``'s default status, and the one that narrows not.
+
+    The same release sitting behind the same narrowed form: an airing show does
+    not ask, because its own week's upload is inside the newest 75 results and
+    Nyaa's patience is the budget.
+    """
+    single = "[HorribleSubs] Sousou no Frieren - 07 [1080p].mkv"
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962071, email="noneed@arc.test", feed=None
+    )
+    wired.nyaa.answers = {NARROWED_FIRST: _feed(single, info_hash="e" * 40, seeders=6)}
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert NARROWED_FIRST not in wired.nyaa.queries
+    assert not any("HorribleSubs" in query for query in wired.nyaa.queries)
+    assert episode.state is EpisodeState.SEARCHING
+    assert episode.last_search_results == 0
+
+
 # --- No candidate: the retry schedule (FR-A6) -------------------------------
 
 

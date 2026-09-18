@@ -985,6 +985,85 @@ the finish work (bugs found that way are fixed inside M16).
     and the demo account's Watch Now showed its first real row within
     minutes — Demon Slayer episode 11, "no metadata after 60 minutes — Arc
     retries daily", linking to the show page.
+  - [x] Nyaa search narrows by release group for a **finished** show (FR-A4,
+        owner 2026-09-18): *"the helper will compare sources to find the most
+        optimal."* Arc only ever saw the newest 75 matches of each query form,
+        and for an old show whose franchise kept going those 75 *are* the
+        franchise. *Kimetsu no Yaiba* episode 10 came back on production as
+        seven forms, 91 results and **zero** season-one singles: season 4,
+        season 5, an Infinity Castle rip, remakes and batches, every one of
+        them correctly rejected. The filter was right; the pool was three years
+        too young. Paging was tried first and does not exist — **the RSS
+        endpoint ignores `p=`** (and `s=`/`o=`); pages 1–3 of a query are
+        byte-identical, so it cost 17 requests for the same 91 results.
+        Nyaa ANDs every word of a query, so the reachable fix is a *narrower*
+        question: `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items
+        including the 2019 single at 5–8 seeders. Built 2026-09-18:
+        `nyaa.group_queries` asks `<form> <group>` for the top three title
+        forms only (romaji `- NN`, english `- NN`, romaji `SxxEyy`) × the
+        groups — `rules.preferred_groups` first, per-show override included,
+        then `DEEP_SEARCH_GROUPS = ("HorribleSubs", "SubsPlease",
+        "Erai-raws")`, de-duplicated case-insensitively — form-major, run
+        **after** the ordinary forms, **only** for a `FINISHED` entry
+        (`deep_search`) and **only** while the merged pool holds fewer than
+        `ENOUGH_CANDIDATES` = 3 acceptable releases, under a `MAX_REQUESTS` =
+        20 ceiling counted across both kinds of form (≈38 s of 2 s pacing).
+        An airing show asks none of them — its own week's release is inside the
+        newest 75. Narrowed forms do not count against `MAX_QUERIES` (that cap
+        is about spellings of the title) and are reported in `Search.requests`
+        rather than `Search.forms`, so the episode row's "N forms" is unchanged
+        and `search_release` logs both (no new column, no migration). Nothing
+        changed about which releases are acceptable, the ranking, batch
+        rejection or the retry schedule: a narrowed form's results merge by
+        info hash and go through the same filter and ranker. **Small call for
+        review:** the three built-in group names are hard-coded — a claim about
+        who uploads anime, which will age — and sit behind whatever an admin
+        has preferred. 14 new nyaa tests and 2 new job tests (the production
+        case end to end, and the airing show that must not narrow); 171 nyaa,
+        144 acquisition-job/corpus cases green, `make lint` clean. Verified 2026-09-18 (orchestrator): 315 nyaa/acquisition/corpus tests and
+        make lint green; live against Nyaa, Kimetsu no Yaiba episode 10 went
+        from 0 acceptable candidates (91 results) to 3 with the HorribleSubs
+        1080p single ranked first in 8 requests, and episode 11 now prefers the
+        8-seeder HorribleSubs release over the 1-seeder one that died on
+        production; RSS paging was confirmed a no-op (identical pages), which is
+        why the first draft was redirected to narrowing
+  - [x] A transcode is not claimed into a worker slot the encoder cannot serve
+        (owner, 2026-09-18, production). `WORKER_CONCURRENCY=2` against an
+        effective `MAX_TRANSCODES=1`: after a deploy the two lowest priorities
+        in the queue were both transcodes, both were claimed, one encoded and
+        the other sat in the second slot for **25 minutes at 0 %**, parked on
+        `transcode_semaphore` and heartbeating exactly as the media docstring
+        promises it would. Both slots were then holding transcodes, so every
+        short job starved for the length of an encode — the `compute_wants` for
+        the episode the owner had just finished did not run for half an hour,
+        and neither did its `mal_push`. Nothing was misbehaving; the mistake was
+        claiming work the encoder could not start. Built 2026-09-18:
+        `jobs/loop.process_caps(settings)` is a `{job type: cap}` mapping —
+        `transcode` → `max_transcodes`, the type named from
+        `media/names.TRANSCODE`, and the only entry — and `run_worker_loop`
+        counts what it is running by type and passes the types at their cap to
+        the claim as `exclude_types`, which is one `Job.type NOT IN (…)` in
+        `claim_statement` / `claim_one` and changes nothing else about the
+        ordering, the `LIMIT 1` or the `SKIP LOCKED`. The free slot therefore
+        goes to the highest-priority *other* job and the queued transcode stays
+        `pending`, claimed in its usual order the moment an encode ends. One
+        INFO line when the gate closes ("at the per-process cap; claiming other
+        work until a slot frees") and one when it opens ("below the per-process
+        cap; every job type is claimable again"), not one per poll. The media
+        semaphore is untouched and deliberately so: it is still the guard for
+        the two cases the loop cannot see — a second worker process on one host,
+        and `MAX_TRANSCODES` lowered under a claim already made — and
+        `media/jobs.py`'s docstring now says which half does what. No schema
+        change, no new setting, no change to any job priority. Five new queue
+        tests (the production queue end to end, the raised cap, the `claim_one`
+        exclusion, the compiled statement with no `NOT IN` when nothing is
+        excluded, and the caps mapping); 43 queue cases and the 103
+        transcode/admin/worker cases around them green, then the whole server
+        suite (3503) and `make lint` clean. Verified 2026-09-18 (orchestrator): 245 job/transcode/nyaa tests and make
+        lint green; the new loop test reproduces the production queue
+        ([transcode p10, transcode p20, compute_wants p120] at concurrency 2,
+        one encoder) and fails without the gate; deployed to the same host the
+        incident happened on
 - [x] Per-show overrides UI for group/resolution
       Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
       §4 `settings`, §5b). The `override:anime:<id>` row the ranker has

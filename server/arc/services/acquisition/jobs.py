@@ -535,6 +535,20 @@ async def search_release(ctx: JobContext) -> None:
     on the episode — ``last_search_at``, ``last_search_forms``,
     ``last_search_results`` — which is what the show page's row reads (FR-A7).
     A paused or storage-held run stamps nothing, because it asked nothing.
+
+    **This handler is allowed to be slow** (2026-09-18). A finished show's
+    search asks its title forms and then, where those found too little, the
+    group-narrowed forms
+    (:func:`~arc.services.acquisition.nyaa.group_queries`), up to
+    :data:`~arc.services.acquisition.nyaa.MAX_REQUESTS` requests in total and
+    two seconds apart, so one attempt can take some forty seconds where it used
+    to take twenty. Nothing in the queue reads that as stuck:
+    ``WORKER_STALE_AFTER`` is two hours and bounds *silence* rather than work,
+    the runner puts no timeout on a handler at all, and the worker's heartbeat
+    is its scheduler's own thirty-second tick — which keeps ticking, because
+    every wait in here is an ``await`` on the same event loop. What it does
+    spend is one of ``WORKER_CONCURRENCY``'s two slots for that much longer,
+    which is why the paging stops at the first pool worth ranking.
     """
     episode_id = int(ctx.payload["episode_id"])
     now = datetime.now(UTC)
@@ -613,6 +627,24 @@ async def search_release(ctx: JobContext) -> None:
     episode.last_search_forms = found.forms
     episode.last_search_results = found.results
     await ctx.session.flush()
+    # ``requests`` is the third number and the only one that is not on the row
+    # (FR-A4, 2026-09-18): how many times Nyaa was actually asked, which is
+    # more than ``forms`` exactly when a finished show had to fall back on the
+    # group-narrowed forms. "7 forms, 13 requests" is the sentence that says
+    # this search went looking, and it is the number to read if a search ever
+    # feels slow, since every request is another two seconds of pacing.
+    ctx.log.info(
+        "nyaa search finished",
+        extra={
+            "episode_id": episode.id,
+            "anime_id": anime.id,
+            "number": episode.number,
+            "forms": found.forms,
+            "requests": found.requests,
+            "results": found.results,
+            "kept": found.kept,
+        },
+    )
 
     chosen = await _pick(ctx, episode, ranked) if ranked else None
     if chosen is None:

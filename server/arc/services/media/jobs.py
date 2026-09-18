@@ -61,6 +61,17 @@ database work happen outside it, so ``MAX_TRANSCODES`` counts encoders rather
 than jobs. A job waiting for a slot sits in ``running`` with its heartbeat
 going; it does not fail, and it does not give the slot up to a later, lower
 priority episode.
+
+**And it is the safety net, not the schedule.** Parking here is now the
+exceptional case rather than the ordinary one: since 2026-09-18
+:func:`arc.services.jobs.loop.process_caps` stops the claim loop taking a
+transcode at all while this process already runs ``MAX_TRANSCODES`` of them, so
+the second one stays ``pending`` — where it costs nothing and holds no
+concurrency slot — instead of occupying a worker slot for the length of the
+encode ahead of it and starving every short job behind it. What remains for the
+semaphore is what the loop-side gate cannot see: a second worker process on the
+same host, and ``MAX_TRANSCODES`` lowered under a claim already made. Both end
+up here, waiting, heartbeating, and eventually encoding in priority order.
 """
 
 from __future__ import annotations
