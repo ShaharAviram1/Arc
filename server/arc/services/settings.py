@@ -34,9 +34,16 @@ two field names the admin never sent.
 clearing it queues the recompute that acts on it — so the rules editor and the
 pause button do the same thing.
 
-**Per-show overrides are read-only here** (``override:anime:<id>``, written by
-hand or by M16's editor). They are listed so the admin can see that a show is
-not following the global rules, which is the question the rules page raises.
+**Per-show overrides are written through the same validators** (M16, owner
+2026-09-18). :func:`write_override` and :func:`delete_override` are the editor
+behind the show page's "Release rules for this show" and the Remove button in
+Admin → Rules; a row they write is exactly what the global keys would accept
+for the same two fields, because the ranker reads them with one set of rules
+(:func:`~arc.services.acquisition.rules.load_rules`) and a per-show list of
+thirty groups is no more a preference than a global one. An override that
+names *neither* field is a **deletion**, not a stored ``{}``: an empty row
+would show up in the admin table as a show that does not follow the global
+rules while following them exactly.
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ from arc.services.acquisition.rules import (
     MAX_SLOT_CAP,
     OVERRIDE_PREFIX,
     PAUSED_KEY,
+    override_key,
     set_paused,
 )
 from arc.services.catalog import preferred_title
@@ -105,6 +113,20 @@ class SettingsInvalid(ValueError):
     def __init__(self, errors: Mapping[str, str]) -> None:
         self.errors: dict[str, str] = dict(errors)
         super().__init__("; ".join(f"{key}: {message}" for key, message in self.errors.items()))
+
+
+class NoSuchAnime(LookupError):
+    """:func:`write_override` was given an id no ``anime`` row answers to.
+
+    A 404 rather than a 422: the body was fine, the show is not there. Only
+    the *write* asks — :func:`delete_override` deliberately does not, because
+    an override that outlived the show it names is precisely the row an admin
+    needs to be able to take away.
+    """
+
+    def __init__(self, anime_id: int) -> None:
+        self.anime_id = anime_id
+        super().__init__(f"no anime with id {anime_id}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +284,54 @@ def validate(patch: Mapping[str, Any], current: Mapping[str, Any] | None = None)
     return cleaned
 
 
+def validate_override(preferred_groups: Any = None, resolution: Any = None) -> dict[str, Any]:
+    """Normalise one per-show override, or raise :class:`SettingsInvalid`.
+
+    Pure, like :func:`validate`, and deliberately built out of the *same* two
+    validators the global keys use: FR-A3 allows a per-show override for group
+    and resolution and nothing else, so there is nothing here that a global
+    value would not have to satisfy.
+
+    Returns only the fields the caller actually named, in the shape the
+    ``override:anime:<id>`` row stores them (``preferred_groups``,
+    ``resolution``). **An empty answer means "no override"** — the caller
+    deletes the row rather than writing ``{}``. ``None`` is "not named", and so
+    is an empty list or a blank string: the show page's groups field is free
+    text and its resolution select has a "Use global" entry, which is how an
+    admin says "take this show back to the global rules" — the same thing as
+    having no override at all, and one fewer state for the ranker to read.
+    """
+    errors: dict[str, str] = {}
+    cleaned: dict[str, Any] = {}
+
+    if isinstance(preferred_groups, list) and not preferred_groups:
+        preferred_groups = None
+    if preferred_groups is not None:
+        try:
+            groups = _groups(preferred_groups)
+        except ValueError as exc:
+            errors["preferred_groups"] = str(exc)
+        else:
+            # ``_groups`` refuses a blank entry rather than dropping it, so
+            # this can only be empty for an empty list — caught above already,
+            # and again here so "an empty list is not a preference" is stated
+            # beside the field it is about rather than two lines away.
+            if groups:
+                cleaned["preferred_groups"] = groups
+
+    if isinstance(resolution, str) and not resolution.strip():
+        resolution = None
+    if resolution is not None:
+        try:
+            cleaned["resolution"] = _one_of(resolution, RESOLUTIONS)
+        except ValueError as exc:
+            errors["resolution"] = str(exc)
+
+    if errors:
+        raise SettingsInvalid(errors)
+    return cleaned
+
+
 # --- Reading and writing ----------------------------------------------------
 
 
@@ -283,6 +353,41 @@ async def read_values(session: AsyncSession) -> dict[str, Any]:
     )
     stored = {key: value for key, value in rows.all()}
     return {key: stored.get(key, default) for key, default in DEFAULT_SETTINGS.items()}
+
+
+def _override(anime_id: int, title: str, value: Mapping[str, Any]) -> Override:
+    """One stored row as the API renders it, lenient like the rule readers.
+
+    A field of the wrong JSON type reads as absent rather than raising: these
+    rows are hand-editable, and the admin table exists to *show* a bad one.
+    """
+    groups = value.get("preferred_groups")
+    resolution = value.get("resolution")
+    return Override(
+        anime_id=anime_id,
+        title=title,
+        preferred_groups=([str(item) for item in groups] if isinstance(groups, list) else None),
+        resolution=resolution if isinstance(resolution, str) else None,
+    )
+
+
+async def read_override(session: AsyncSession, anime_id: int) -> Override | None:
+    """One show's override, or ``None`` when it follows the global rules.
+
+    One query. The title costs no second one on the show page, which is the
+    caller that matters: ``GET /api/anime/{id}`` has already loaded that
+    ``Anime`` into this session, and sessions are made with
+    ``expire_on_commit=False``, so :meth:`~sqlalchemy.orm.Session.get` answers
+    from the identity map.
+    """
+    value = await session.scalar(select(Setting.value).where(Setting.key == override_key(anime_id)))
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        log.warning("ignoring a malformed per-show override", extra={"anime_id": anime_id})
+        return None
+    anime = await session.get(Anime, anime_id)
+    return _override(anime_id, preferred_title(anime) if anime is not None else "", value)
 
 
 async def read_overrides(session: AsyncSession) -> list[Override]:
@@ -312,21 +417,10 @@ async def read_overrides(session: AsyncSession) -> list[Override]:
     for anime in anime_rows.all():
         titles[anime.id] = preferred_title(anime)
 
-    overrides: list[Override] = []
-    for anime_id, value in sorted(parsed, key=lambda pair: pair[0]):
-        groups = value.get("preferred_groups")
-        resolution = value.get("resolution")
-        overrides.append(
-            Override(
-                anime_id=anime_id,
-                title=titles.get(anime_id, ""),
-                preferred_groups=(
-                    [str(item) for item in groups] if isinstance(groups, list) else None
-                ),
-                resolution=resolution if isinstance(resolution, str) else None,
-            )
-        )
-    return overrides
+    return [
+        _override(anime_id, titles.get(anime_id, ""), value)
+        for anime_id, value in sorted(parsed, key=lambda pair: pair[0])
+    ]
 
 
 async def write_values(
@@ -387,6 +481,93 @@ async def write_values(
     return changed
 
 
+async def write_override(
+    session: AsyncSession,
+    *,
+    anime_id: int,
+    preferred_groups: Any = None,
+    resolution: Any = None,
+    admin_id: int | None = None,
+) -> Override | None:
+    """Write one show's ``override:anime:<id>`` row, or remove it.
+
+    Validated by :func:`validate_override` — the same two validators the global
+    keys use — so a refusal reaches the router as the one
+    :class:`SettingsInvalid` it turns into a 422. Raises :class:`NoSuchAnime`
+    when nothing answers to ``anime_id``: an override is a rule about a show,
+    and a rule about a show Arc has never heard of is a typed id, not a policy.
+
+    An override naming neither field is a **deletion** (see the module
+    docstring), and the answer is then ``None`` — the row the caller asked for
+    does not exist, which is the honest thing to say about it.
+
+    Flushed, not committed, and logged with the previous value like
+    :func:`write_values`, because this is the setting that answers "why did
+    this one show get 720p from a group nobody else uses?".
+
+    Nothing is enqueued. A rule change does not queue a recompute either (only
+    *clearing the pause* does, and for its own reason): the ranker reads these
+    rows when it searches, so the next search for this show already uses the
+    new rule, and nothing already downloading is disturbed — which is what the
+    rules editor tells the admin in so many words.
+    """
+    value = validate_override(preferred_groups, resolution)
+    anime = await session.get(Anime, anime_id)
+    if anime is None:
+        raise NoSuchAnime(anime_id)
+    if not value:
+        await delete_override(session, anime_id=anime_id, admin_id=admin_id)
+        return None
+
+    key = override_key(anime_id)
+    row = await session.scalar(select(Setting).where(Setting.key == key))
+    old = row.value if row is not None else None
+    if row is None:
+        session.add(Setting(key=key, value=value))
+    elif old == value:
+        # Nothing changed. No write, and no log line claiming one.
+        return _override(anime_id, preferred_title(anime), value)
+    else:
+        row.value = value
+    await session.flush()
+    log.info(
+        "per-show override changed",
+        extra={
+            "setting": key,
+            "anime_id": anime_id,
+            "old": old,
+            "new": value,
+            "admin_id": admin_id,
+        },
+    )
+    return _override(anime_id, preferred_title(anime), value)
+
+
+async def delete_override(
+    session: AsyncSession, *, anime_id: int, admin_id: int | None = None
+) -> bool:
+    """Remove one show's override row; True when there was one to remove.
+
+    Idempotent, and it does not ask whether the show exists. Both for the same
+    reason: the caller is a person pressing Remove on a row, and the two ways
+    that row can already be gone — somebody else removed it, the show itself
+    was deleted from under it — are not errors to report but the state they
+    wanted.
+    """
+    key = override_key(anime_id)
+    row = await session.scalar(select(Setting).where(Setting.key == key))
+    if row is None:
+        return False
+    old = row.value
+    await session.delete(row)
+    await session.flush()
+    log.info(
+        "per-show override removed",
+        extra={"setting": key, "anime_id": anime_id, "old": old, "admin_id": admin_id},
+    )
+    return True
+
+
 __all__ = [
     "EDITABLE_KEYS",
     "FALLBACK_EQUALS_PREFERRED",
@@ -399,11 +580,16 @@ __all__ = [
     "NOT_A_LIST",
     "RESOLUTIONS",
     "UNKNOWN_KEY",
+    "NoSuchAnime",
     "Override",
     "SettingsInvalid",
     "defaults",
+    "delete_override",
+    "read_override",
     "read_overrides",
     "read_values",
     "validate",
+    "validate_override",
+    "write_override",
     "write_values",
 ]

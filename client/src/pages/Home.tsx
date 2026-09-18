@@ -43,6 +43,7 @@ import {
   weekdayInTimezone,
   WEEKDAY_LABELS,
   type BehindEntry,
+  type FailureEntry,
   type HomePage,
   type Season,
   type SchedulePage,
@@ -1008,6 +1009,224 @@ function HowArcWorksHint({ userId }: { userId: number }) {
   )
 }
 
+/* --- The viewer's own failures ----------------------------------------- */
+
+/**
+ * The failure banner (spec FR-W6, M16, owner 2026-09-12: "a user's own failed
+ * downloads, transcodes and MAL writes").
+ *
+ * Above the hero, because a thing that is broken is the one piece of news on
+ * this page that does not wait for a scroll — and below the demo strip, which
+ * is about the whole site rather than about one episode. Quiet, though: one
+ * row per failure, no icon, no colour on the strip itself, the reason in the
+ * muted voice the rest of the page uses. Arc saying "this stopped" should read
+ * like Arc saying "this is ready", not like an alarm; an episode nobody can
+ * play is a fact, and shouting it does not fix it.
+ *
+ * Three rows and then a fold: the banner has to be dismissable one row at a
+ * time (a transcode an admin is already looking at is not news twice), and a
+ * list of eleven above the hero would be the page.
+ *
+ * Every row links to where the thing can be *done*: an episode's show page,
+ * where FR-A7's per-episode state and the admin retry live, and the sync log
+ * for a MyAnimeList write, where FR-M5's revert does. The banner itself offers
+ * no action beyond putting a row away.
+ */
+
+/** How many rows are shown before the "+N more" fold. */
+const FAILURES_SHOWN = 3
+
+const FAILURE_REGION = 'Problems on your shows'
+
+/**
+ * Dismissal is per failure, per account, in this browser — no round trip
+ * (small call, M16; the server is told nothing, because there is nothing for
+ * anybody else to know about one person putting one row away).
+ *
+ * One `localStorage` entry per dismissed failure, keyed by the viewer's id and
+ * the server's own failure key, which follows the demo strip's precedent
+ * (`arc:how-arc-works-dismissed:<user id>`). A key per row rather than a list
+ * under one key because the rows arrive and leave independently, and because
+ * it makes the pruning below a plain prefix scan.
+ *
+ * Nothing here trusts the store: every read and write is wrapped, since the
+ * accessor itself throws in a browser set to block site data, and a page that
+ * will not render because it could not remember a dismissal would be a poor
+ * trade.
+ */
+const FAILURE_KEY_PREFIX = 'arc:failure-dismissed:'
+
+function failureStoreKey(userId: number, key: string): string {
+  return `${FAILURE_KEY_PREFIX}${String(userId)}:${key}`
+}
+
+/**
+ * The keys this account has dismissed that the server still reports — and, on
+ * the way, the ones it no longer reports are deleted.
+ *
+ * The pruning is what keeps the store bounded: a failure key carries the
+ * moment the failure happened (FR-A6 retries daily, so a stubborn episode
+ * mints a new key a day), and without this every one of them would sit in the
+ * browser for ever. Called once per mount, which is often enough — the store
+ * only grows when the page is opened.
+ */
+function pruneDismissed(userId: number, live: readonly string[]): Set<string> {
+  const wanted = new Set(live.map((key) => failureStoreKey(userId, key)))
+  const kept = new Set<string>()
+  try {
+    const mine = `${FAILURE_KEY_PREFIX}${String(userId)}:`
+    const stored: string[] = []
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index)
+      if (key !== null && key.startsWith(mine)) stored.push(key)
+    }
+    for (const key of stored) {
+      if (wanted.has(key)) {
+        kept.add(key.slice(mine.length))
+      } else {
+        window.localStorage.removeItem(key)
+      }
+    }
+  } catch {
+    // Nothing remembered, so nothing is hidden: every failure is shown, which
+    // is the right way round for this feature to fail.
+    return new Set<string>()
+  }
+  return kept
+}
+
+function rememberDismissed(userId: number, key: string): void {
+  try {
+    window.localStorage.setItem(failureStoreKey(userId, key), '1')
+  } catch {
+    // The row still goes away for this visit; it comes back on the next one.
+  }
+}
+
+/** "Download failed" / "Preparing failed" / "MyAnimeList update failed". */
+function failureLabel(failure: FailureEntry): string {
+  if (failure.kind === 'mal') return 'MyAnimeList update failed'
+  // FR-P4's `failed` is a transcode that broke; FR-A6's `unavailable` is Arc
+  // not finding the file in the first place. Two different people fix them.
+  return failure.state === 'failed' ? 'Preparing failed' : 'Download failed'
+}
+
+/** A JSONB value from the write log, where it is a thing worth printing. */
+function valueText(value: unknown): string | null {
+  if (typeof value === 'string' && value !== '') return value
+  if (typeof value === 'number') return String(value)
+  return null
+}
+
+/**
+ * What the row names: the show, and then the episode or the field.
+ *
+ * "Frieren: Beyond Journey's End · Episode 14" for an episode;
+ * "Frieren: Beyond Journey's End · progress 12 → 13" for a write, because
+ * which field and which value is the whole content of a MyAnimeList failure.
+ */
+function failureSubject(failure: FailureEntry): string {
+  const title = failure.anime.title.preferred
+  if (failure.kind === 'mal') {
+    if (failure.field === null) return title
+    const from = valueText(failure.old_value)
+    const to = valueText(failure.new_value)
+    const change = to === null ? failure.field : `${failure.field} ${from ?? '—'} → ${to}`
+    return `${title} · ${change}`
+  }
+  if (failure.episode_number === null) return title
+  return `${title} · Episode ${String(failure.episode_number)}`
+}
+
+function FailureRow({ failure, onDismiss }: { failure: FailureEntry; onDismiss: () => void }) {
+  const subject = failureSubject(failure)
+  const label = failureLabel(failure)
+  const to = failure.kind === 'mal' ? '/mal' : `/anime/${String(failure.anime.id)}`
+  const linkText = failure.kind === 'mal' ? 'Sync log' : 'Show page'
+
+  return (
+    <li className="flex items-baseline gap-2.5 border-t-[0.5px] border-[var(--arc-border)] px-3.5 py-2.5 text-[14px] first:border-t-0">
+      <span className="shrink-0 font-semibold text-[var(--arc-text)]">{label}</span>
+      <span className="min-w-0 flex-1 text-[var(--arc-text-muted)]">
+        <span className="text-[var(--arc-text)]">{subject}</span>
+        {' — '}
+        {failure.reason}
+      </span>
+      <Link
+        to={to}
+        className={cx(
+          'shrink-0 rounded-nav text-[13px] font-semibold text-[var(--arc-text)] underline decoration-[var(--arc-border-strong)] decoration-1 underline-offset-4 hover:decoration-[var(--arc-text)]',
+          FOCUS_RING,
+        )}
+      >
+        {linkText}
+      </Link>
+      <button
+        type="button"
+        aria-label={`Dismiss ${label}: ${subject}`}
+        onClick={onDismiss}
+        className={cx(
+          'shrink-0 rounded-full px-2 py-1 text-[14px] leading-none text-[var(--arc-text-muted)] hover:text-[var(--arc-text)]',
+          FOCUS_RING,
+        )}
+      >
+        <span aria-hidden>✕</span>
+      </button>
+    </li>
+  )
+}
+
+function FailureBanner({ userId, failures }: { userId: number; failures: FailureEntry[] }) {
+  // Pruned once, at mount, against the list this render was given: a key the
+  // server has stopped reporting is a failure that is over, and remembering
+  // that somebody dismissed it is remembering nothing.
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() =>
+    pruneDismissed(
+      userId,
+      failures.map((failure) => failure.key),
+    ),
+  )
+  const [expanded, setExpanded] = useState(false)
+
+  const rows = failures.filter((failure) => !dismissed.has(failure.key))
+  if (rows.length === 0) return null
+
+  const shown = expanded ? rows : rows.slice(0, FAILURES_SHOWN)
+  const folded = rows.length - shown.length
+
+  return (
+    <section
+      aria-label={FAILURE_REGION}
+      className="mb-5 rounded-nav border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)]"
+    >
+      <ul>
+        {shown.map((failure) => (
+          <FailureRow
+            key={failure.key}
+            failure={failure}
+            onDismiss={() => {
+              rememberDismissed(userId, failure.key)
+              setDismissed((current) => new Set(current).add(failure.key))
+            }}
+          />
+        ))}
+      </ul>
+      {folded > 0 ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className={cx(
+            'w-full rounded-b-nav border-t-[0.5px] border-[var(--arc-border)] px-3.5 py-2 text-left text-[13px] text-[var(--arc-text-muted)] hover:text-[var(--arc-text)]',
+            FOCUS_RING,
+          )}
+        >
+          +{String(folded)} more
+        </button>
+      ) : null}
+    </section>
+  )
+}
+
 /* --- Page -------------------------------------------------------------- */
 
 export function Home() {
@@ -1150,9 +1369,22 @@ export function Home() {
   // blank space is not it: the sr-only title becomes the visible one.
   const hasHero = heroItems.length > 0
 
+  // The viewer's own failures (FR-W6). Keyed on the account so that signing in
+  // as somebody else starts from their own dismissals rather than inheriting a
+  // set built for the previous viewer.
+  const failures = data.failures ?? []
+
   return (
     <section>
       {me?.is_demo === true ? <HowArcWorksHint key={me.id} userId={me.id} /> : null}
+
+      {/*
+        Mounted even with nothing to show: the banner is what prunes the
+        dismissal store, and a store only pruned while something is broken
+        would keep every key from a good week for ever (orchestrator,
+        2026-09-18). It renders nothing itself when there are no rows.
+      */}
+      {me != null ? <FailureBanner key={me.id} userId={me.id} failures={failures} /> : null}
 
       {hasHero ? (
         <SeasonHero items={heroItems} />

@@ -386,10 +386,41 @@ works" framing move in from the demo checklist and show **only on the demo
 account**; the failure banner shows a user **their own** failures only; the
 owner uses the site daily for a few days first so the kinks surface before
 the finish work (bugs found that way are fixed inside M16).
-- [ ] Failure banner on Watch Now: a user's own failed downloads, transcodes
+- [x] Failure banner on Watch Now: a user's own failed downloads, transcodes
       and MAL writes, dismissable per failure, linking to the episode or job
       (admins see the same view of their own; the Admin jobs tab stays the
-      global view) — email/push remain out of scope
+      global view) — email/push remain out of scope.
+      Built 2026-09-18 (FR-W6, architecture §5.4b). The rule is one pure
+      query function, `arc/services/catalog/failures.py::failures_for_user`:
+      every episode the caller holds a **live** want on (samples included,
+      FR-T2-dropped wants excluded) whose state is `failed` — reason = the
+      tail of the latest transcode job's `error_tail`/`last_error`, trimmed
+      to 160 chars through `trim_middle` — or `unavailable` — reason = the
+      episode's own FR-A6 reason plus "Arc retries daily", or "no release
+      found; Arc retries daily" where it kept none — plus the caller's own
+      `mal_write_log` rows with status `failed` (newest 10, with the field and
+      the old → new value), sorted newest first across both kinds and capped
+      at 20. Two queries, and the transcode lookup only when something came
+      back `failed`, so the home page's "jobs is read twice" expectation still
+      holds. Served as `failures` on `GET /api/home` (no new endpoint, so
+      §5.9's SSE invalidation carries it) and **no schema change**. The client
+      is `FailureBanner` in `client/src/pages/Home.tsx`: a quiet strip above
+      the hero and below the demo strip, one row per failure (leading label ·
+      show and episode · reason · a link to the show page or the sync log ·
+      ✕), three rows and then "+N more". Small call, as agreed in the task:
+      dismissal is per failure and per account in `localStorage`
+      (`arc:failure-dismissed:<user id>:<failure key>`, every access wrapped),
+      never a server round trip; keys the server no longer reports are pruned
+      on mount, and a failure's key carries its state and `state_changed_at`
+      so FR-A6's daily retry reappears after yesterday's dismissal. An admin
+      sees only their own; nothing global, and the Admin jobs tab is untouched.
+      Tests: server 3440 (26 new in `tests/test_failures.py`), client 703 (7
+      new in `Home.test.tsx`); `make lint` clean. Verified 2026-09-18 (orchestrator): 98 failure/home API tests, 704
+      client tests, lint clean; on dev a seeded unavailable episode and a failed
+      MAL write rendered as two rows with the right links, one dismissal survived
+      a reload, and the dismissal key was pruned once the failure was gone — the
+      last after a one-line fix by the orchestrator (the banner now mounts even
+      with nothing to show, so pruning runs on a good day too; test added)
 - [x] Demo account seeded by `arc.cli demo-list` (plausible list, a few ready
       episodes, a recommendation run) so every page has content without a MAL
       link; a "How Arc works" page with the pipeline diagram and one sentence
@@ -949,7 +980,42 @@ the finish work (bugs found that way are fixed inside M16).
     within a minute, four downloading; zero MAL writes, no MAL link. One
     Piece needed its progress reseeded at 1176 because the cached episodes
     past 1178 are 2027 air dates.
-- [ ] Per-show overrides UI for group/resolution
+- [x] Per-show overrides UI for group/resolution
+      Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
+      §4 `settings`, §5b). The `override:anime:<id>` row the ranker has
+      honoured since M6 is now editable from the product. Server:
+      `settings.validate_override` (pure, the *same* two validators the global
+      keys use), `write_override` / `delete_override` (flushed, one INFO line
+      per change with the previous value, an override naming neither field is
+      a deletion rather than a stored `{}`, `NoSuchAnime` → 404) and
+      `read_override`; routes `PUT /api/settings/overrides/{anime_id}` (body
+      `{preferred_groups: string[] | null, resolution: string | null}`,
+      answering the `OverrideOut` written or `null` when it removed the row)
+      and `DELETE` the same path (204, idempotent, and it does not require the
+      show to exist). The show page reads its own override from an **admin-only
+      `override` field on `GET /api/anime/{id}`** rather than a third route, so
+      the page's query count is unchanged. No schema change, no migration, and
+      nothing enqueued — like every rule change it applies to the next search.
+      Client: a "Release rules" chip beside the Episodes heading on the show
+      page (admins only) with a one-line summary — "Overrides: SubsPlease ·
+      720p" — opening an inline form (comma-separated groups, a resolution
+      select with "Use global", Save, Clear, 422s shown under the field they
+      named); Edit and Remove per row in Admin → Rules, with the settings and
+      show queries invalidated so the table and the show page agree; hooks and
+      the shared `parseGroups`/`overrideSummary` helpers in `lib/admin.ts`.
+      Small calls: the groups field is comma-separated text on both screens
+      (an override is typically one group) and de-duplicated
+      case-insensitively on save, mirroring the server; an empty groups box
+      plus "Use global" is a removal; Remove asks first, through the admin
+      page's existing `ConfirmButton`. Tests: server 3482 (25 new in
+      `tests/test_settings_overrides.py` — service, routes and one that proves
+      `load_rules` reads what was written — and 17 more in
+      `tests/test_settings_rules.py` for the pure validator), client 716 (12
+      new across `Show.test.tsx` and `Admin.test.tsx`); `make lint` clean.. Verified 2026-09-18 (orchestrator): 278 settings/override/acquisition
+      tests, 716 client tests, lint clean; on dev the show-page control wrote
+      `override:anime:76` with de-duplicated groups, the Admin Rules row edit
+      added 720p, Remove asked first and deleted the row; the summary line and
+      the table agreed at every step
 - [ ] Accessibility pass (keyboard nav, contrast)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
 - [ ] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as

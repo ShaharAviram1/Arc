@@ -36,6 +36,18 @@ const USERS = 'GET /api/users'
 const INVITES_PATH = 'GET /api/invites'
 const SETTINGS_PATH = 'GET /api/settings'
 const SAVE_SETTINGS = 'PUT /api/settings'
+/** The one override in `SETTINGS`, and the two routes that edit it (M16). */
+const OVERRIDDEN_SHOW = 'Sousou no Frieren'
+const OVERRIDE_PATH = '/api/settings/overrides/700'
+const SAVE_OVERRIDE = `PUT ${OVERRIDE_PATH}`
+const REMOVE_OVERRIDE = `DELETE ${OVERRIDE_PATH}`
+const OVERRIDE_SAVED = {
+  anime_id: 700,
+  title: OVERRIDDEN_SHOW,
+  preferred_groups: ['SubsPlease', 'ASW'],
+  resolution: '720p',
+}
+const OVERRIDE_REFUSED = 'must be one of 2160p, 1080p, 720p, 480p'
 const JOBS_PATH = 'GET /api/jobs?limit=50&offset=0'
 const JOBS_SUMMARY_PATH = 'GET /api/jobs/summary'
 const DISK_PATH = 'GET /api/retention/disk'
@@ -591,6 +603,107 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     expect(await screen.findByText('Rules saved.')).toBeInTheDocument()
     expect(screen.getByLabelText('Look-ahead N')).toHaveValue(4)
     expect(screen.getByRole('button', { name: 'Save rules' })).toBeDisabled()
+  })
+
+  /* --- Per-show overrides (FR-A3, M16) --------------------------------- */
+
+  it('edits an override in its own row', async () => {
+    const { fetchMock } = await openRules({ [SAVE_OVERRIDE]: { body: OVERRIDE_SAVED } })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const groups = screen.getByLabelText(`Groups for ${OVERRIDDEN_SHOW}`)
+    expect(groups).toHaveValue('Tsundere-Raws')
+    await userEvent.clear(groups)
+    await userEvent.type(groups, 'SubsPlease, subsplease , ASW')
+    fireEvent.change(screen.getByLabelText(`Resolution for ${OVERRIDDEN_SHOW}`), {
+      target: { value: '720p' },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_OVERRIDE)
+    })
+    // De-duplicated case-insensitively on the way out, exactly as the show
+    // page does it and as the server would have done anyway.
+    expect(bodyOf(fetchMock, 'PUT', OVERRIDE_PATH)).toEqual({
+      preferred_groups: ['SubsPlease', 'ASW'],
+      resolution: '720p',
+    })
+    // The row goes back to reading, and the settings query is refetched.
+    expect(screen.queryByLabelText(`Groups for ${OVERRIDDEN_SHOW}`)).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        requestsMade(fetchMock).filter((call) => call === SETTINGS_PATH).length,
+      ).toBeGreaterThan(1)
+    })
+  })
+
+  it('clears both fields as a removal, since an empty override is none', async () => {
+    const { fetchMock } = await openRules({ [SAVE_OVERRIDE]: { body: null } })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText(`Groups for ${OVERRIDDEN_SHOW}`))
+    fireEvent.change(screen.getByLabelText(`Resolution for ${OVERRIDDEN_SHOW}`), {
+      target: { value: '' },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_OVERRIDE)
+    })
+    expect(bodyOf(fetchMock, 'PUT', OVERRIDE_PATH)).toEqual({
+      preferred_groups: null,
+      resolution: null,
+    })
+  })
+
+  it('puts an edited row back the way it was on Cancel', async () => {
+    const { fetchMock } = await openRules()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText(`Groups for ${OVERRIDDEN_SHOW}`))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    const table = screen.getByRole('table', { name: 'Per-show overrides' })
+    expect(within(table).getByText('Tsundere-Raws')).toBeInTheDocument()
+    expect(requestsMade(fetchMock)).not.toContain(SAVE_OVERRIDE)
+  })
+
+  it('asks before removing an override, then removes it', async () => {
+    const { fetchMock } = await openRules({ [REMOVE_OVERRIDE]: { status: 204 } })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    expect(screen.getByText(`Remove the override for ${OVERRIDDEN_SHOW}?`)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, remove' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(REMOVE_OVERRIDE)
+    })
+  })
+
+  it('renders a 422 from an override edit under the field it named', async () => {
+    await openRules({
+      [SAVE_OVERRIDE]: {
+        status: 422,
+        body: {
+          detail: [{ loc: ['body', 'resolution'], msg: OVERRIDE_REFUSED, type: 'value_error' }],
+        },
+      },
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(OVERRIDE_REFUSED)
+    // Still editing: a refused save must not throw away what was typed.
+    expect(screen.getByLabelText(`Groups for ${OVERRIDDEN_SHOW}`)).toBeInTheDocument()
+  })
+
+  it('says where an override comes from when there are none', async () => {
+    await openRules({ [SETTINGS_PATH]: { body: { ...SETTINGS, overrides: [] } } })
+
+    expect(screen.getByText('No per-show overrides. Add one from a show page.')).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'Per-show overrides' })).not.toBeInTheDocument()
   })
 })
 

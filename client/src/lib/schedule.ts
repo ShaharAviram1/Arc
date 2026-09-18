@@ -166,6 +166,40 @@ export interface ContinueWatchingEntry {
   duration_s: number | null
 }
 
+/** Which of the two questions produced a failure row (FR-W6). */
+export type FailureKind = 'episode' | 'mal'
+
+/**
+ * One of the viewer's **own** failures, as the banner above the hero draws it
+ * (FR-W6, M16). One flat shape for both kinds, because the banner is one strip
+ * in one order; `kind` says which half is filled.
+ *
+ * `key` is what a dismissal is remembered under, and the server guarantees the
+ * two properties that makes it usable for that: the same failure carries the
+ * same key on the next request, and a *new* failure on the same episode —
+ * FR-A6 retries daily — carries a different one, so putting one away today
+ * cannot hide tomorrow's.
+ */
+export interface FailureEntry {
+  key: string
+  kind: FailureKind
+  anime: AnimeSummary
+  /** One sentence, already trimmed server-side. Never a stderr wall. */
+  reason: string
+  /** When it happened, or null where nothing dated it. */
+  since: string | null
+  /** The episode that stopped (`kind: 'episode'`). */
+  episode_id: number | null
+  episode_number: number | null
+  /** `failed` — a transcode broke — or `unavailable` — no release found. */
+  state: string | null
+  /** The write that did not land (`kind: 'mal'`). */
+  log_id: number | null
+  field: string | null
+  old_value: unknown
+  new_value: unknown
+}
+
 /** `GET /api/home` — the FR-W1 shelves. */
 export interface HomePage {
   /** Most recent first; the server caps the list, the client caps it again. */
@@ -180,6 +214,14 @@ export interface HomePage {
   ready_to_watch: NewEpisodeEntry[]
   behind: BehindEntry[]
   new_this_week: NewEpisodeEntry[]
+  /**
+   * The viewer's own broken episodes and their own MyAnimeList writes that did
+   * not land (FR-W6, M16), newest first. On this payload rather than an
+   * endpoint of its own so the live-update invalidation of the home query
+   * carries it (architecture.md §5.9). Optional on the wire so a response
+   * cached before M16 still parses; empty is the ordinary answer.
+   */
+  failures?: FailureEntry[]
 }
 
 export const SCHEDULE_QUERY_KEY = 'schedule'

@@ -442,6 +442,26 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   list_entry: ListEntry | null
   /** The viewer's own sample want, or null — the ordinary case (FR-A8). */
   sample: Sample | null
+  /**
+   * This show's per-show release-rule override (FR-A3), **for an admin only**:
+   * null for everybody else and for a show that follows the global rules. It
+   * rides on the show payload rather than a route of its own so that the page
+   * that edits it (M16) makes no extra request. Optional on the wire, and an
+   * answer without it is an answer with no override.
+   */
+  override?: RuleOverride | null
+}
+
+/**
+ * One show's group/resolution override, as both payloads that carry it spell
+ * it: `GET /api/anime/{id}` above (admins only) and `GET /api/settings`'s
+ * `overrides` list. `title` is `""` for an override whose show is gone.
+ */
+export interface RuleOverride {
+  anime_id: number
+  title: string
+  preferred_groups: string[] | null
+  resolution: string | null
 }
 
 export interface SetListEntryInput {

@@ -140,7 +140,11 @@ any time, and the owner uses it daily.
   2. preferred resolution (default 1080p, fallback 720p),
   3. seeders (more is better),
   4. Nyaa "trusted" flag.
-  Per-show overrides for group and resolution are allowed. **An English dub
+  Per-show overrides for group and resolution are allowed; an admin edits them
+  **on the show page** ("Release rules for this show", a control only an admin
+  sees) and in **Admin → Rules**, where every existing override can be changed
+  or removed (M16, owner 2026-09-18). An override naming neither field is the
+  same thing as having none. **An English dub
   ranks below every subbed candidate** and is never chosen while one exists
   (owner, 2026-09-14): a dub is not a worse copy of the episode, it is the
   episode in the wrong language, so it outranks all four rules above — both of
@@ -410,6 +414,26 @@ any time, and the owner uses it daily.
   A show still airing, a show with an unknown episode count, and a rewatch of
   an already-completed show are never auto-completed.
 
+- FR-W6 **Own failures on Watch Now** (M16, owner 2026-09-12: "a user's own
+  failures only"). The home page carries, above the hero, a quiet banner of the
+  things that have stopped **for this viewer**: an episode they hold a live want
+  on — the window's (FR-A1) or a sample of their own (FR-A8) — whose state is
+  `failed` (a transcode broke, FR-P4) or `unavailable` (FR-A6 found no release
+  and retries daily), and their own MyAnimeList writes that did not land
+  (FR-M6). Each row says what stopped, which show and episode, one sentence of
+  why — the tail of the transcode's own complaint, or FR-A6's retry promise,
+  never a page of ffmpeg output — and links to where it can be acted on: the
+  show page for an episode, the sync log for a write. Nothing here is global: a
+  want is per user and the log is per user, so an **admin sees exactly their
+  own**, and the Admin jobs tab (FR-D3) remains the whole-queue view. Each row
+  is **dismissable on its own**, and the dismissal is remembered per account in
+  that browser rather than on the server — putting a row away is a statement
+  about one reader's attention, not about the failure, which is still there and
+  still on the show page. A failure that happens *again* comes back: the daily
+  retry of an `unavailable` episode is new news, and a dismissal covers the
+  failure it was pressed on and no other. A show with nothing wrong renders no
+  banner at all. Notifications (email/push) stay out of scope (§8).
+
 ### 4.7 MyAnimeList sync
 - FR-M1 Each user links their own MAL account via OAuth 2.0 (PKCE). Tokens
   are stored encrypted and refreshed automatically.
@@ -496,7 +520,9 @@ any time, and the owner uses it daily.
 ### 4.10 Admin (phase 2 UI; the underlying settings exist from phase 1 via config)
 - FR-D1 Users & invites; deactivate a user.
 - FR-D2 Acquisition rules (groups, resolution, N), retention (G, D), subtitle
-  and audio language preferences.
+  and audio language preferences. The per-show group/resolution overrides of
+  FR-A3 are listed here too, and editable: change or remove one from the rules
+  tab, add one from the show's own page (M16, owner 2026-09-18).
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
@@ -521,15 +547,15 @@ any time, and the owner uses it daily.
 | Page | Phase | Contents |
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
-| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you |
+| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
 | Player | 1 | HLS player, autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
-| Admin | 2 | Users/invites, rules, jobs, disk, review queue |
+| Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk, review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
 | How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
 
@@ -1099,3 +1125,43 @@ is and the grace period decides.
   English for the same reason. Subtitles are untouched (English text track,
   already correct), and so is acquisition, which has ranked English dubs below
   every subbed release since the FR-A3 amendment of 2026-09-14.
+- 2026-09-18 — **Own failures on Watch Now** (FR-W6, owner's M16 scope line of
+  2026-09-12, built today). Two kinds of failure reach the page a person
+  actually opens: an episode they are waiting for that has stopped — FR-P4's
+  broken transcode, FR-A6's "no release found" — and their own MyAnimeList
+  writes that did not land (FR-M6). Until now both were only discoverable by
+  going to look: the show page for the episode, the sync page for the write,
+  and the owner's own fortnight of use is what turned "it is in the UI
+  somewhere" into a requirement. Four decisions inside it. **A live want is the
+  definition of "mine"**, rather than the list: a dropped want (FR-T2) is
+  somebody who stopped waiting, and a broken episode nobody wants is an admin's
+  business and not a user's. **The banner is quiet** — no colour on the strip,
+  no icon, the reason in the muted voice — because an episode that cannot play
+  is a fact, and shouting it does not fix it. **Dismissal is per failure, per
+  account, in that browser**, with no server round trip and nothing written
+  anywhere else: one reader's attention is not a property of the failure, which
+  stays on the show page either way, and a "dismissed" column would have been a
+  second source of truth about something the episode row already knows.
+  **A failure that recurs comes back**: every row carries a key built from the
+  episode, its state and the moment it changed, so FR-A6's daily retry mints a
+  new row and yesterday's dismissal cannot hide today's news. Nothing global
+  and nothing new in the database: the admin jobs tab (FR-D3) is still the
+  whole-queue view, an admin gets the same page about their own shows as
+  everybody else, and notifications stay out of scope (§8).
+- 2026-09-18 — **Per-show override editor** (FR-A3, FR-D2, owner, M16). The
+  override the ranker has honoured since M6 became something the product can
+  write. It lives in two places for one reason: the question it answers ("why
+  does this show keep arriving from the wrong group?") is asked on the **show
+  page**, which is also the only screen that knows which show is meant — so
+  that is where an override is created, in a control no non-admin ever sees.
+  Admin → Rules keeps the list and gains the two things one does to a rule that
+  already exists, Edit and Remove; it deliberately has no "add", because adding
+  needs a show picker and there is already a search page. Three smaller calls.
+  **The groups field is comma-separated text** rather than the global list's
+  ordered pills: an override is typically one group, and a box you can paste
+  into beats three clicks for that. **An override that names neither field is a
+  deletion**, so "back to the global rules" is one state rather than two — an
+  empty stored row would appear in the admin table as a show not following the
+  global rules while following them exactly. And **nothing is re-ranked**: like
+  every other rule change, it applies to the next search and leaves anything
+  already downloading alone.

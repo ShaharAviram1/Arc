@@ -77,7 +77,8 @@ from arc.api.anime_schemas import (
 from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep, SettingsDep
 from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
-from arc.models import Anime, Job, ListEntry
+from arc.api.schemas import OverrideOut
+from arc.models import Anime, Job, ListEntry, UserRole
 from arc.services.acquisition.samples import (
     SampleError,
     cancel_sample,
@@ -104,6 +105,7 @@ from arc.services.jobs import enqueue
 from arc.services.mal.names import is_linked
 from arc.services.mal.writelog import SyncState, sync_state
 from arc.services.playback.progress import completed_episode_ids
+from arc.services.settings import read_override
 from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
 
 log = logging.getLogger(__name__)
@@ -349,6 +351,11 @@ async def detail(
         if entry is not None and entry.status in WANTING_STATUSES
         else None
     )
+    # This show's rule override, for an admin (FR-A3, M16). One more
+    # ``settings`` lookup, and only for the reader who can act on it: the
+    # editor is on this page, and giving it a route of its own would have been
+    # a second round trip for every show page an admin opens.
+    override = await read_override(session, anime.id) if user.role is UserRole.ADMIN else None
     by_id = {episode.id: episode for episode in episodes}
     return AnimeDetail.build(
         anime,
@@ -386,6 +393,7 @@ async def detail(
         ),
         slots=slots,
         tmdb_mapped=tmdb_mapped,
+        override=None if override is None else OverrideOut.build(override),
     )
 
 

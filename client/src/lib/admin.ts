@@ -19,6 +19,12 @@
  * the flag as it now stands: the button is a toggle, and the sidebar's
  * "Acquisition paused" note has to agree with it, so both share
  * `acquisitionStatusQueryKey`.
+ *
+ * One thing here is *not* only for the admin page. The per-show override editor
+ * (M16) is on the show page as well as in Admin → Rules, because the question
+ * "why is this show downloading 720p?" is asked on both — so `useSaveOverride`,
+ * `useRemoveOverride` and the two helpers beside them live with the rest of the
+ * `settings` wire rather than being written twice.
  */
 
 import {
@@ -31,7 +37,7 @@ import {
 } from '@tanstack/react-query'
 import { ApiError, apiFetch } from '@/lib/api'
 import { acquisitionStatusQueryKey, type AcquisitionStatus } from '@/lib/acquisition'
-import { ANIME_QUERY_KEY } from '@/lib/anime'
+import { ANIME_QUERY_KEY, animeQueryKey, type RuleOverride } from '@/lib/anime'
 import { errorDetail, type Role } from '@/lib/auth'
 
 /**
@@ -125,20 +131,17 @@ export interface SettingsValues {
 
 export type SettingsKey = keyof SettingsValues
 
-/** One show's rule override (`GET /api/settings`). Editing arrives in M16. */
-export interface SettingsOverride {
-  anime_id: number
-  title: string
-  preferred_groups: string[] | null
-  resolution: string | null
-}
-
 /** `GET /api/settings` and the answer to `PUT /api/settings`. */
 export interface SettingsPayload {
   values: SettingsValues
   /** First-boot values, shown as hints and restored by "reset to default". */
   defaults: SettingsValues
-  overrides: SettingsOverride[]
+  /**
+   * The shows with a rule of their own (FR-A3). Typed from `lib/anime` rather
+   * than declared again here: the show page carries the same shape for one
+   * show, and the editor below writes for both.
+   */
+  overrides: RuleOverride[]
 }
 
 /**
@@ -525,6 +528,60 @@ export function defaultLabel(value: SettingsValues[SettingsKey]): string {
   return String(value)
 }
 
+/* --- Per-show overrides (FR-A3, M16) ---------------------------------- */
+
+/**
+ * The groups field is one comma-separated text box, on both screens.
+ *
+ * The admin page's *global* list is built pill by pill, because its order is
+ * the ranking and moving an entry matters. An override is typically one group
+ * — "this show, from ASW" — and a box you can type into and paste into beats
+ * three clicks for that. Parsed the way the server validates it: trimmed,
+ * blanks dropped, de-duplicated case-insensitively with the first spelling
+ * kept, because `group_rank` compares that way and a second spelling would be
+ * an unreachable entry in a ranked list.
+ */
+export function parseGroups(text: string): string[] {
+  const groups: string[] = []
+  const seen = new Set<string>()
+  for (const part of text.split(',')) {
+    const group = part.trim()
+    if (group === '') continue
+    const folded = group.toLocaleLowerCase()
+    if (seen.has(folded)) continue
+    seen.add(folded)
+    groups.push(group)
+  }
+  return groups
+}
+
+/** The stored list back in the box: what was saved, as it was saved. */
+export function formatGroups(groups: string[] | null): string {
+  return groups === null ? '' : groups.join(', ')
+}
+
+/**
+ * The one-line summary beside the show page's control — "SubsPlease · 720p".
+ *
+ * Null when there is nothing to say, which includes a row that names neither
+ * field: such a row can only be hand-written, and the honest summary of it is
+ * silence plus the Clear button that takes it away.
+ */
+export function overrideSummary(override: RuleOverride | null | undefined): string | null {
+  if (override === null || override === undefined) return null
+  const parts: string[] = []
+  if (override.preferred_groups !== null && override.preferred_groups.length > 0) {
+    parts.push(override.preferred_groups.join(', '))
+  }
+  if (override.resolution !== null) parts.push(override.resolution)
+  return parts.length === 0 ? null : parts.join(' · ')
+}
+
+/** The route both screens write to (`arc/api/settings.py`). */
+export function overridePath(animeId: number): string {
+  return `/api/settings/overrides/${String(animeId)}`
+}
+
 /* --- Formatting ------------------------------------------------------- */
 
 /**
@@ -766,6 +823,50 @@ export function useSaveSettings(): UseMutationResult<
     onSuccess: (payload) => {
       client.setQueryData(adminSettingsQueryKey, payload)
       void client.invalidateQueries({ queryKey: acquisitionStatusQueryKey })
+    },
+  })
+}
+
+export interface OverrideInput {
+  animeId: number
+  /** Null is "use the global list", not "no groups at all". */
+  preferred_groups: string[] | null
+  resolution: string | null
+}
+
+/**
+ * Write one show's override (FR-A3), or remove it by naming neither field.
+ *
+ * Both caches that can show it are invalidated: the rules table lists every
+ * override, and the show page carries its own on the detail payload, so a save
+ * from either screen has to reach the other — the whole point of there being
+ * one row behind both. The answer is `null` when the write removed the row.
+ */
+export function useSaveOverride(): UseMutationResult<RuleOverride | null, Error, OverrideInput> {
+  const client = useQueryClient()
+
+  return useMutation<RuleOverride | null, Error, OverrideInput>({
+    mutationFn: ({ animeId, preferred_groups, resolution }) =>
+      apiFetch<RuleOverride | null>(overridePath(animeId), {
+        method: 'PUT',
+        body: JSON.stringify({ preferred_groups, resolution }),
+      }),
+    onSuccess: (_override, { animeId }) => {
+      void client.invalidateQueries({ queryKey: adminSettingsQueryKey })
+      void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
+    },
+  })
+}
+
+/** Put one show back on the global rules. 204, and 204 again. */
+export function useRemoveOverride(): UseMutationResult<null, Error, number> {
+  const client = useQueryClient()
+
+  return useMutation<null, Error, number>({
+    mutationFn: (animeId) => apiFetch<null>(overridePath(animeId), { method: 'DELETE' }),
+    onSuccess: (_result, animeId) => {
+      void client.invalidateQueries({ queryKey: adminSettingsQueryKey })
+      void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
     },
   })
 }

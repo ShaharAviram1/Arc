@@ -27,6 +27,7 @@
 import { useState, type ReactNode } from 'react'
 import { ErrorState } from '@/components/ErrorState'
 import {
+  ConfirmButton,
   InlineError,
   Notice,
   panelClass,
@@ -44,14 +45,19 @@ import {
   adminErrorMessage,
   changedSettings,
   defaultLabel,
+  formatGroups,
+  parseGroups,
   rangeLabel,
   settingsFieldErrors,
+  useRemoveOverride,
+  useSaveOverride,
   useSaveSettings,
   useSettings,
   type SettingsKey,
   type SettingsPayload,
   type SettingsValues,
 } from '@/lib/admin'
+import type { RuleOverride } from '@/lib/anime'
 
 const EXPLANATION =
   'These are the rules the whole server runs on: what acquisition looks for, how far ahead it ' +
@@ -239,26 +245,37 @@ function GroupsField({
   )
 }
 
-/** A resolution choice; "no preference" is a real answer, hence the blank. */
+/**
+ * A resolution choice; "no preference" is a real answer, hence the blank.
+ *
+ * `label` is for the override rows, whose fields sit in table cells with no
+ * `<label>` of their own — the column heading names the column, not the row,
+ * and "Resolution for Frieren" is what a screen reader needs to hear.
+ */
 function ResolutionSelect({
   id,
   value,
   onChange,
+  label,
+  blankLabel = 'No preference',
 }: {
   id: string
   value: string | null
   onChange: (value: string | null) => void
+  label?: string
+  blankLabel?: string
 }) {
   return (
     <select
       id={id}
+      aria-label={label}
       value={value ?? ''}
       className={`w-40 ${inputClass}`}
       onChange={(event) => {
         onChange(event.target.value === '' ? null : event.target.value)
       }}
     >
-      <option value="">No preference</option>
+      <option value="">{blankLabel}</option>
       {RESOLUTIONS.map((resolution) => (
         <option key={resolution} value={resolution}>
           {resolution}
@@ -268,17 +285,165 @@ function ResolutionSelect({
   )
 }
 
-/** Per-show rule overrides. Read-only until M16 gives them an editor. */
+/**
+ * One override, edited in its own row.
+ *
+ * In place rather than in a dialog, for the reason `ConfirmButton` gives: the
+ * row is the context. Two fields, so the editing row is the reading row with
+ * its two cells swapped for inputs — nothing moves, and Cancel puts it back.
+ * The groups box is comma-separated here as it is on the show page, and the
+ * parsing is the same function, so the two screens cannot disagree about what
+ * "ASW, asw" means.
+ */
+function OverrideRow({ override }: { override: RuleOverride }) {
+  const [editing, setEditing] = useState(false)
+  const [groups, setGroups] = useState('')
+  const [resolution, setResolution] = useState('')
+  const save = useSaveOverride()
+  const remove = useRemoveOverride()
+
+  const fieldErrors = settingsFieldErrors(save.error)
+  const generalError =
+    save.isError && Object.keys(fieldErrors).length === 0 ? adminErrorMessage(save.error) : null
+  const name = override.title === '' ? `#${String(override.anime_id)}` : override.title
+
+  function edit() {
+    setGroups(formatGroups(override.preferred_groups))
+    setResolution(override.resolution ?? '')
+    // A refusal from the last attempt is not about what is in the boxes now.
+    save.reset()
+    setEditing(true)
+  }
+
+  function submit() {
+    const parsed = parseGroups(groups)
+    save.mutate(
+      {
+        animeId: override.anime_id,
+        preferred_groups: parsed.length === 0 ? null : parsed,
+        resolution: resolution === '' ? null : resolution,
+      },
+      {
+        onSuccess: () => {
+          setEditing(false)
+        },
+      },
+    )
+  }
+
+  if (!editing) {
+    return (
+      <tr className="border-t border-[var(--arc-border)]">
+        <td className={tdClass}>{name}</td>
+        <td className={tdClass}>
+          {override.preferred_groups === null || override.preferred_groups.length === 0
+            ? '—'
+            : override.preferred_groups.join(', ')}
+        </td>
+        <td className={tdClass}>{override.resolution ?? '—'}</td>
+        <td className={tdClass}>
+          <span className="inline-flex flex-wrap items-center gap-2">
+            <button type="button" className={subtleButtonClass} onClick={edit}>
+              Edit
+            </button>
+            <ConfirmButton
+              label="Remove"
+              question={`Remove the override for ${name}?`}
+              confirmLabel="Yes, remove"
+              pending={remove.isPending}
+              onConfirm={() => {
+                remove.mutate(override.anime_id)
+              }}
+            />
+            {remove.isError ? <InlineError message={adminErrorMessage(remove.error)} /> : null}
+          </span>
+        </td>
+      </tr>
+    )
+  }
+
+  return (
+    <tr className="border-t border-[var(--arc-border)]">
+      <td className={tdClass}>{name}</td>
+      <td className={tdClass}>
+        <input
+          type="text"
+          aria-label={`Groups for ${name}`}
+          value={groups}
+          placeholder="SubsPlease, Erai-raws"
+          className={`w-56 ${inputClass}`}
+          onChange={(event) => {
+            setGroups(event.target.value)
+          }}
+        />
+        {fieldErrors.preferred_groups === undefined ? null : (
+          <InlineError className="mt-1" message={fieldErrors.preferred_groups} />
+        )}
+      </td>
+      <td className={tdClass}>
+        <ResolutionSelect
+          id={`override-resolution-${String(override.anime_id)}`}
+          label={`Resolution for ${name}`}
+          // "No preference" is the right word for the global field and the
+          // wrong one here: an override with no resolution follows the global
+          // rule rather than having no rule, which is what the show page's
+          // own form says too.
+          blankLabel="Use global"
+          value={resolution === '' ? null : resolution}
+          onChange={(value) => {
+            setResolution(value ?? '')
+          }}
+        />
+        {fieldErrors.resolution === undefined ? null : (
+          <InlineError className="mt-1" message={fieldErrors.resolution} />
+        )}
+      </td>
+      <td className={tdClass}>
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className={primaryButtonClass}
+            disabled={save.isPending}
+            onClick={submit}
+          >
+            {save.isPending ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            type="button"
+            className={subtleButtonClass}
+            onClick={() => {
+              setEditing(false)
+            }}
+          >
+            Cancel
+          </button>
+          {generalError === null ? null : <InlineError message={generalError} />}
+        </span>
+      </td>
+    </tr>
+  )
+}
+
+/**
+ * Per-show rule overrides, editable since M16 (owner 2026-09-18).
+ *
+ * Editable but not *creatable* here: adding one needs a show, and the place
+ * that has one is the show page — which is also where the question ("why is
+ * this show downloading 720p?") gets asked. This table is the list of the
+ * answers, and the two things one can do to a rule that already exists.
+ */
 function OverridesPanel({ payload }: { payload: SettingsPayload }) {
   return (
     <section className="mt-10">
       <SectionHeading>Per-show overrides</SectionHeading>
       <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
-        Shows with their own group or resolution rule, which win over the values above. Editing them
-        from here arrives with M16; until then they are set on the show itself.
+        Shows with their own group or resolution rule, which win over the values above. Edit or
+        remove one here; a new one is added from the show’s own page.
       </p>
       {payload.overrides.length === 0 ? (
-        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">No per-show overrides.</p>
+        <p className="mt-4 text-[14px] text-[var(--arc-text-muted)]">
+          No per-show overrides. Add one from a show page.
+        </p>
       ) : (
         <div className="mt-4">
           <TableScroll>
@@ -289,19 +454,12 @@ function OverridesPanel({ payload }: { payload: SettingsPayload }) {
                   <th className={thClass}>Show</th>
                   <th className={thClass}>Groups</th>
                   <th className={thClass}>Resolution</th>
+                  <th className={thClass}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {payload.overrides.map((override) => (
-                  <tr key={override.anime_id} className="border-t border-[var(--arc-border)]">
-                    <td className={tdClass}>{override.title}</td>
-                    <td className={tdClass}>
-                      {override.preferred_groups === null || override.preferred_groups.length === 0
-                        ? '—'
-                        : override.preferred_groups.join(', ')}
-                    </td>
-                    <td className={tdClass}>{override.resolution ?? '—'}</td>
-                  </tr>
+                  <OverrideRow key={override.anime_id} override={override} />
                 ))}
               </tbody>
             </table>

@@ -50,10 +50,12 @@ from arc.api.episode_extras import episode_extras
 from arc.api.schedule_schemas import (
     BehindEntry,
     ContinueWatchingEntry,
+    FailureEntry,
     HomePage,
     NewEpisodeEntry,
 )
 from arc.services.catalog import list_progress_for, list_status_for
+from arc.services.catalog.failures import failures_for_user
 from arc.services.catalog.progress import behind_for_user, new_this_week, ready_to_watch
 from arc.services.playback.progress import completed_episode_ids, continue_watching
 from arc.services.tmdb.jobs import enqueue_episode_stills, enqueue_hero_art
@@ -81,9 +83,17 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     fresh = await new_this_week(session, user, now=at)
     started = await continue_watching(session, user_id=user.id)
     ready = await ready_to_watch(session, user)
+    # The banner above the hero (FR-W6, M16): the caller's own broken episodes
+    # and their own MyAnimeList writes that did not land. Nothing global — an
+    # admin sees their own wants here and the whole queue in the admin panel.
+    failures = await failures_for_user(session, user)
 
     shelves = (fresh, started, ready)
+    # The failure rows' shows join the badge lookup below, and only that one:
+    # a failure row carries a number and a state, not an ``EpisodeOut``, so it
+    # asks nothing of ``episode_extras``' four lookups.
     anime_ids = [row.anime.id for shelf in shelves for row in shelf]
+    anime_ids += [row.anime.id for row in failures]
     episode_ids = [row.episode.id for shelf in shelves for row in shelf]
     # One lookup for the list badges on the cards: those rows are all on the
     # caller's list by construction, but which state they are in is what the
@@ -166,6 +176,12 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
             for row in ready
         ],
         behind=[BehindEntry.from_row(row) for row in behind],
+        failures=[
+            # A sample (FR-A8) has no list entry at all, so this is often
+            # ``None`` here where it never is on a shelf row.
+            FailureEntry.from_row(row, list_status=statuses.get(row.anime.id))
+            for row in failures
+        ],
         new_this_week=[
             NewEpisodeEntry.from_row(
                 row,

@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from arc.api.schemas import OverrideOut
 from arc.core.text import trim_middle
 from arc.models import (
     Anime,
@@ -892,6 +893,12 @@ class AnimeDetail(AnimeCore):
     #: The caller's live sample want, or null (FR-A8). Null is the ordinary
     #: case: a sample is something a user asked for on this one show.
     sample: SampleOut | None = None
+    #: This show's per-show rule override (FR-A3), **for an admin only** — null
+    #: for everybody else and for a show that follows the global rules (M16,
+    #: owner 2026-09-18). It is on the show payload rather than behind a route
+    #: of its own so that the page that edits it makes no extra request: the
+    #: cost is one ``settings`` lookup on a request an admin was making anyway.
+    override: OverrideOut | None = None
 
     @classmethod
     def build(
@@ -911,6 +918,7 @@ class AnimeDetail(AnimeCore):
         sample: SampleOut | None = None,
         slots: SlotView | None = None,
         tmdb_mapped: bool = False,
+        override: OverrideOut | None = None,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -957,6 +965,7 @@ class AnimeDetail(AnimeCore):
             relations=relations,
             list_entry=_entry_out(list_entry, mal_sync, anime_status=anime.status, slots=slots),
             sample=sample,
+            override=override,
             episodes=[
                 EpisodeOut.from_episode(
                     episode,

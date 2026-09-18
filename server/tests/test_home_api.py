@@ -553,6 +553,11 @@ async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
     # ``search_release`` rows that give each searching episode its next try.
     # Both are one statement for the whole page, which is what this test is
     # guarding; thirty episodes must not turn into thirty reads.
+    #
+    # The failure banner (FR-W6, M16) adds a *third* read, and only on a page
+    # that has a ``failed`` episode on it to explain — nothing here is wanted,
+    # let alone broken, so it does not run. Its own counting is in
+    # ``tests/test_failures.py``, where the claim is one query per kind.
     for table, times in (("torrents", 1), ("renditions", 1), ("jobs", 2)):
         matched = [statement for statement in extras if f" {table}" in statement.lower()]
         assert len(matched) == times, f"{table} was queried {len(matched)} times"

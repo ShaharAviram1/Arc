@@ -22,11 +22,13 @@ from __future__ import annotations
 
 from datetime import datetime, time
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut, ListEntryOut
-from arc.models import Job, ListStatus, Rendition, Torrent
+from arc.models import EpisodeState, Job, ListStatus, Rendition, Torrent
+from arc.services.catalog.failures import FailureKind, FailureRow
 from arc.services.catalog.progress import BehindRow, NewEpisodeRow
 from arc.services.catalog.schedule import DAYS_IN_WEEK, PlacedEntry, WeekPlacement
 from arc.services.playback.progress import ContinueRow
@@ -329,6 +331,63 @@ class ContinueWatchingEntry(BaseModel):
         )
 
 
+class FailureEntry(BaseModel):
+    """One of the viewer's **own** failures, as the banner draws it (FR-W6).
+
+    Flat, and one shape for both kinds: the banner is a single strip in a
+    single order, so the client renders rows rather than branching into two
+    sections. ``kind`` says which half of the model is filled —
+    ``episode``/``state``/``episode_number`` for an episode that has stopped,
+    ``field``/``old_value``/``new_value``/``log_id`` for a MyAnimeList write
+    that did not land.
+
+    Deliberately **not** an :class:`~arc.api.anime_schemas.EpisodeOut`: a
+    failure row names an episode, it does not render one, and filling in an
+    ``EpisodeOut`` would put this list into
+    :mod:`arc.api.episode_extras`' four lookups for a number and a state the
+    row already has.
+    """
+
+    #: Stable per failure, and different once the failure is a new one: what
+    #: the client's per-account dismissal is remembered under
+    #: (:mod:`arc.services.catalog.failures` explains the shape).
+    key: str
+    kind: FailureKind
+    anime: AnimeSummary
+    #: One sentence, already trimmed server-side — never a stderr wall.
+    reason: str
+    #: When it happened, or null where nothing dated it.
+    since: datetime | None = None
+    #: The episode that stopped (``kind = episode``): ``failed`` — a transcode
+    #: broke, FR-P4 — or ``unavailable`` — FR-A6 gave up and retries daily.
+    episode_id: int | None = None
+    episode_number: int | None = None
+    state: EpisodeState | None = None
+    #: The write that did not land (``kind = mal``): the log row's own id, so
+    #: the sync page can be opened knowing which row this was.
+    log_id: int | None = None
+    field: str | None = None
+    old_value: Any = None
+    new_value: Any = None
+
+    @classmethod
+    def from_row(cls, row: FailureRow, *, list_status: ListStatus | None = None) -> FailureEntry:
+        return cls(
+            key=row.key,
+            kind=row.kind,
+            anime=AnimeSummary.from_anime(row.anime, list_status),
+            reason=row.reason,
+            since=row.since,
+            episode_id=None if row.episode is None else row.episode.id,
+            episode_number=None if row.episode is None else row.episode.number,
+            state=row.state,
+            log_id=row.log_id,
+            field=row.field,
+            old_value=row.old_value,
+            new_value=row.new_value,
+        )
+
+
 class HomePage(BaseModel):
     """``GET /api/home`` — the shelves of the home page (FR-W1)."""
 
@@ -346,11 +405,19 @@ class HomePage(BaseModel):
     behind: list[BehindEntry] = Field(default_factory=list)
     #: Newest first, at most :data:`arc.services.catalog.progress.NEW_LIMIT`.
     new_this_week: list[NewEpisodeEntry] = Field(default_factory=list)
+    #: The viewer's **own** failures, newest first, at most
+    #: :data:`arc.services.catalog.failures.MAX_FAILURES` (FR-W6, M16). Here
+    #: rather than on an endpoint of its own so that §5.9's live updates carry
+    #: it: an episode going ``failed`` already invalidates this query, and a
+    #: second route would have needed its own invalidation to say the same
+    #: thing. Empty is the ordinary answer and the client draws nothing for it.
+    failures: list[FailureEntry] = Field(default_factory=list)
 
 
 __all__ = [
     "BehindEntry",
     "ContinueWatchingEntry",
+    "FailureEntry",
     "HomePage",
     "NewEpisodeEntry",
     "ScheduleDay",

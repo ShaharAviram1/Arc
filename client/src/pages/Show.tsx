@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
@@ -8,13 +8,26 @@ import {
   buttonClass,
   cx,
   EmptyState,
+  FIELD_ERROR_CLASS,
   FOCUS_RING,
   HeroFrame,
+  inputClass,
+  LABEL_CLASS,
   PlayGlyph,
   PosterWash,
   Shelf,
   Skeleton,
 } from '@/components/ui'
+import {
+  adminErrorMessage,
+  formatGroups,
+  overrideSummary,
+  parseGroups,
+  RESOLUTIONS,
+  settingsFieldErrors,
+  useRemoveOverride,
+  useSaveOverride,
+} from '@/lib/admin'
 import {
   anilistUrl,
   backdropArt,
@@ -971,6 +984,195 @@ function EpisodeRow({
   )
 }
 
+/** The words on the per-show rule control (FR-A3, M16). */
+const OVERRIDE_LABEL = 'Release rules'
+const OVERRIDE_HEADING = 'Release rules for this show'
+const OVERRIDE_HINT =
+  'Ranking rules for this show alone. Anything left empty follows the global rules; ' +
+  'they apply to the next search, not to anything already downloading.'
+const OVERRIDE_USE_GLOBAL = 'Use global'
+const OVERRIDE_REMOVE_FAILED = 'Could not clear that.'
+
+/**
+ * The show's own group/resolution override (FR-A3), editable by an admin (M16).
+ *
+ * Here rather than only in Admin → Rules because this is where the question is
+ * asked: an admin looking at a show whose releases keep coming from the wrong
+ * group is on this page, and the rules tab has no way to *add* an override —
+ * it has no show picker, and would need one that duplicated search.
+ *
+ * Closed, it is one chip and a quiet summary, because on all but a handful of
+ * shows there is nothing to say. The draft is seeded when the form is opened,
+ * not on every render, so a background refetch cannot eat half-typed edits;
+ * reopening therefore always shows what the server holds.
+ */
+function OverrideControl({ anime }: { anime: AnimeDetail }) {
+  const override = anime.override ?? null
+  const [open, setOpen] = useState(false)
+  const [groups, setGroups] = useState('')
+  const [resolution, setResolution] = useState('')
+  const save = useSaveOverride()
+  const remove = useRemoveOverride()
+
+  const summary = overrideSummary(override)
+  const fieldErrors = settingsFieldErrors(save.error)
+  // A 422 that named no field, or anything that is not a 422 at all, still has
+  // to say something.
+  const generalError =
+    save.isError && Object.keys(fieldErrors).length === 0 ? adminErrorMessage(save.error) : null
+
+  function toggle() {
+    if (!open) {
+      setGroups(formatGroups(override?.preferred_groups ?? null))
+      setResolution(override?.resolution ?? '')
+      // Yesterday's refusal is not about what is in the boxes now.
+      save.reset()
+      remove.reset()
+    }
+    setOpen(!open)
+  }
+
+  function submit() {
+    const parsed = parseGroups(groups)
+    save.mutate(
+      {
+        animeId: anime.id,
+        // Empty means "follow the global rule", which is what null says on the
+        // wire — and saying it about both fields removes the override.
+        preferred_groups: parsed.length === 0 ? null : parsed,
+        resolution: resolution === '' ? null : resolution,
+      },
+      {
+        onSuccess: () => {
+          setOpen(false)
+        },
+      },
+    )
+  }
+
+  return (
+    <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:items-end">
+      <div className="flex flex-wrap items-center gap-2.5">
+        {open || summary === null ? null : (
+          <span className="text-[13px] text-[var(--arc-text-muted)]">Overrides: {summary}</span>
+        )}
+        <button
+          type="button"
+          aria-expanded={open}
+          className={buttonClass('chip', 'px-4 text-[13px]')}
+          onClick={toggle}
+        >
+          {OVERRIDE_LABEL}
+        </button>
+      </div>
+
+      {open ? (
+        <form
+          className="rounded-card flex w-full flex-col gap-3 border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-4 sm:w-[420px]"
+          onSubmit={(event) => {
+            event.preventDefault()
+            submit()
+          }}
+        >
+          <div>
+            <h3 className="text-[15px] font-semibold text-[var(--arc-text)]">{OVERRIDE_HEADING}</h3>
+            <p className="mt-1 text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">
+              {OVERRIDE_HINT}
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="override-groups" className={LABEL_CLASS}>
+              Preferred release groups
+            </label>
+            <input
+              id="override-groups"
+              type="text"
+              value={groups}
+              placeholder="SubsPlease, Erai-raws"
+              className={inputClass('w-full')}
+              onChange={(event) => {
+                setGroups(event.target.value)
+              }}
+            />
+            <p className="text-[13px] text-[var(--arc-text-muted)]">
+              In order of preference, separated by commas.
+            </p>
+            {fieldErrors.preferred_groups === undefined ? null : (
+              <p role="alert" className={FIELD_ERROR_CLASS}>
+                {fieldErrors.preferred_groups}
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="override-resolution" className={LABEL_CLASS}>
+              Resolution
+            </label>
+            <select
+              id="override-resolution"
+              value={resolution}
+              className={inputClass('w-40')}
+              onChange={(event) => {
+                setResolution(event.target.value)
+              }}
+            >
+              <option value="">{OVERRIDE_USE_GLOBAL}</option>
+              {RESOLUTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+            {fieldErrors.resolution === undefined ? null : (
+              <p role="alert" className={FIELD_ERROR_CLASS}>
+                {fieldErrors.resolution}
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="submit"
+              disabled={save.isPending}
+              className={buttonClass('primary', 'px-5 text-[14px]')}
+            >
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+            {override === null ? null : (
+              <button
+                type="button"
+                disabled={remove.isPending}
+                className={buttonClass('chip', 'px-4 text-[13px]')}
+                onClick={() => {
+                  remove.mutate(anime.id, {
+                    onSuccess: () => {
+                      setOpen(false)
+                    },
+                  })
+                }}
+              >
+                {remove.isPending ? 'Clearing…' : 'Clear'}
+              </button>
+            )}
+          </div>
+
+          {generalError === null ? null : (
+            <p role="alert" className={FIELD_ERROR_CLASS}>
+              {generalError}
+            </p>
+          )}
+          {remove.isError ? (
+            <p role="alert" className={FIELD_ERROR_CLASS}>
+              {OVERRIDE_REMOVE_FAILED}
+            </p>
+          ) : null}
+        </form>
+      ) : null}
+    </div>
+  )
+}
+
 function Episodes({
   anime,
   isAdmin,
@@ -986,9 +1188,13 @@ function Episodes({
   // the page polls for stills that are on their way (`awaitingStills`).
   return (
     <section className="mt-14">
-      <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
-        Episodes
-      </h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-[24px] leading-tight font-semibold tracking-[-0.02em] text-[var(--arc-text)]">
+          Episodes
+        </h2>
+        {/* The one control on this page a viewer never sees (FR-A3, M16). */}
+        {isAdmin ? <OverrideControl anime={anime} /> : null}
+      </div>
       {anime.episodes.length === 0 ? (
         <EmptyState className="mt-5" message={NO_EPISODES} />
       ) : (

@@ -9,6 +9,7 @@ import type { RecsPage } from '@/lib/recs'
 import {
   weekdayInTimezone,
   WEEKDAY_LABELS,
+  type FailureEntry,
   type HomePage,
   type ScheduleEntry,
   type SchedulePage,
@@ -1325,5 +1326,198 @@ describe('Watch Now — the demo account’s How Arc works strip', () => {
     })
 
     expect(await screen.findByText('New here?')).toBeInTheDocument()
+  })
+})
+
+/**
+ * The failure banner (spec FR-W6, M16, owner 2026-09-12). Three things are
+ * worth pinning: that a row says what it is and links to where it can be
+ * fixed, that a dismissal is per failure and survives a reload, and that a
+ * *new* failure on the same episode comes back — which is the one property the
+ * whole `key` scheme exists for, since FR-A6 retries daily.
+ */
+describe('Watch Now — my own failures', () => {
+  const KEY_PREFIX = `arc:failure-dismissed:${String(TEST_USER.id)}:`
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    window.localStorage.clear()
+  })
+
+  /** One `failures` row, as `/api/home` sends it. */
+  function failure(overrides: Partial<FailureEntry> = {}): FailureEntry {
+    return {
+      key: 'episode:9301:unavailable:2026-09-14T09:00:00+00:00',
+      kind: 'episode',
+      anime: FRIEREN,
+      reason: 'no release found; Arc retries daily',
+      since: '2026-09-14T09:00:00Z',
+      episode_id: 9301,
+      episode_number: 14,
+      state: 'unavailable',
+      log_id: null,
+      field: null,
+      old_value: null,
+      new_value: null,
+      ...overrides,
+    }
+  }
+
+  const MAL_FAILURE: FailureEntry = failure({
+    key: 'mal:88',
+    kind: 'mal',
+    anime: APOTHECARY,
+    reason: 'MAL said 500',
+    since: '2026-09-14T10:00:00Z',
+    episode_id: null,
+    episode_number: null,
+    state: null,
+    log_id: 88,
+    field: 'progress',
+    old_value: 12,
+    new_value: 13,
+  })
+
+  function withFailures(failures: FailureEntry[]): HomePage {
+    return { ...EMPTY_HOME, failures }
+  }
+
+  function banner(): HTMLElement {
+    return screen.getByRole('region', { name: 'Problems on your shows' })
+  }
+
+  it('says what stopped, and where it can be fixed', async () => {
+    renderHome({
+      'GET /api/home': {
+        body: withFailures([
+          failure(),
+          failure({
+            key: 'episode:9302:failed:2026-09-14T08:00:00+00:00',
+            episode_id: 9302,
+            episode_number: 15,
+            state: 'failed',
+            reason: 'ffmpeg exited 1',
+            since: '2026-09-14T08:00:00Z',
+          }),
+          MAL_FAILURE,
+        ]),
+      },
+    })
+
+    const rows = within(
+      await screen.findByRole('region', { name: 'Problems on your shows' }),
+    ).getAllByRole('listitem')
+    expect(rows).toHaveLength(3)
+
+    // FR-A6's give-up and FR-P4's broken transcode are different failures with
+    // different fixes, so they are different words.
+    expect(within(rows[0] as HTMLElement).getByText('Download failed')).toBeInTheDocument()
+    expect(rows[0]).toHaveTextContent('Frieren: Beyond Journey’s End · Episode 14')
+    expect(rows[0]).toHaveTextContent('no release found; Arc retries daily')
+    expect(within(rows[0] as HTMLElement).getByRole('link', { name: 'Show page' })).toHaveAttribute(
+      'href',
+      `/anime/${String(FRIEREN.id)}`,
+    )
+
+    expect(within(rows[1] as HTMLElement).getByText('Preparing failed')).toBeInTheDocument()
+    expect(rows[1]).toHaveTextContent('Episode 15')
+
+    // A MyAnimeList row names the field and the value, and points at the log
+    // where FR-M5's revert lives.
+    expect(
+      within(rows[2] as HTMLElement).getByText('MyAnimeList update failed'),
+    ).toBeInTheDocument()
+    expect(rows[2]).toHaveTextContent('The Apothecary Diaries · progress 12 → 13')
+    expect(within(rows[2] as HTMLElement).getByRole('link', { name: 'Sync log' })).toHaveAttribute(
+      'href',
+      '/mal',
+    )
+  })
+
+  it('draws nothing at all when nothing is broken', async () => {
+    renderHome({ 'GET /api/home': { body: EMPTY_HOME } })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(screen.queryByRole('region', { name: 'Problems on your shows' })).not.toBeInTheDocument()
+  })
+
+  it('still prunes the store when nothing is broken any more', async () => {
+    // The week after: every failure is over, so the server reports none. The
+    // keys put away while they were live must go with them, or a good week
+    // is exactly when the store stops being pruned (orchestrator, 2026-09-18).
+    window.localStorage.setItem(`${KEY_PREFIX}${failure().key}`, '1')
+    window.localStorage.setItem(`${KEY_PREFIX}${MAL_FAILURE.key}`, '1')
+    renderHome({ 'GET /api/home': { body: EMPTY_HOME } })
+
+    await screen.findByText(/Add a show from Browse/)
+    expect(screen.queryByRole('region', { name: 'Problems on your shows' })).not.toBeInTheDocument()
+    expect(Object.keys(window.localStorage).filter((key) => key.startsWith(KEY_PREFIX))).toEqual([])
+  })
+
+  it('dismisses one row and leaves the others, per account and per browser', async () => {
+    renderHome({ 'GET /api/home': { body: withFailures([failure(), MAL_FAILURE]) } })
+
+    await screen.findByText('Download failed')
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Dismiss Download failed: Frieren: Beyond Journey’s End · Episode 14',
+      }),
+    )
+
+    expect(screen.queryByText('Download failed')).not.toBeInTheDocument()
+    expect(screen.getByText('MyAnimeList update failed')).toBeInTheDocument()
+    expect(window.localStorage.getItem(`${KEY_PREFIX}${failure().key}`)).toBe('1')
+  })
+
+  it('remembers the dismissal across a reload', async () => {
+    window.localStorage.setItem(`${KEY_PREFIX}${failure().key}`, '1')
+    renderHome({ 'GET /api/home': { body: withFailures([failure(), MAL_FAILURE]) } })
+
+    await screen.findByText('MyAnimeList update failed')
+    expect(screen.queryByText('Download failed')).not.toBeInTheDocument()
+  })
+
+  it('shows the episode again once it has failed again', async () => {
+    // Yesterday's dismissal, and today's retry: FR-A6 looked again, failed
+    // again, and the row carries a new `since` — so a new key, so a new row.
+    window.localStorage.setItem(`${KEY_PREFIX}${failure().key}`, '1')
+    const today = failure({
+      key: 'episode:9301:unavailable:2026-09-15T09:00:00+00:00',
+      since: '2026-09-15T09:00:00Z',
+    })
+    renderHome({ 'GET /api/home': { body: withFailures([today]) } })
+
+    expect(await screen.findByText('Download failed')).toBeInTheDocument()
+    // And yesterday's key is gone from the store: the list is pruned to what
+    // the server still reports, so it cannot grow a key a day for ever.
+    expect(window.localStorage.getItem(`${KEY_PREFIX}${failure().key}`)).toBeNull()
+  })
+
+  it('folds everything past the third row behind a count', async () => {
+    const many = [1, 2, 3, 4, 5].map((number) =>
+      failure({
+        key: `episode:930${String(number)}:unavailable:2026-09-14T09:00:00+00:00`,
+        episode_id: 9300 + number,
+        episode_number: number,
+      }),
+    )
+    renderHome({ 'GET /api/home': { body: withFailures(many) } })
+
+    await screen.findAllByText('Download failed')
+    expect(within(banner()).getAllByRole('listitem')).toHaveLength(3)
+
+    await userEvent.click(screen.getByRole('button', { name: '+2 more' }))
+
+    expect(within(banner()).getAllByRole('listitem')).toHaveLength(5)
+    expect(screen.queryByRole('button', { name: '+2 more' })).not.toBeInTheDocument()
+  })
+
+  it('renders even where the browser refuses to say what it remembers', async () => {
+    vi.spyOn(window.localStorage, 'key').mockImplementation(() => {
+      throw new Error('access denied')
+    })
+    renderHome({ 'GET /api/home': { body: withFailures([failure()]) } })
+
+    expect(await screen.findByText('Download failed')).toBeInTheDocument()
   })
 })

@@ -56,6 +56,20 @@ const PROGRESS_HINT = 'Unwatch from the latest watched episode down'
 /** The design's meta line: studio, when it aired, how much of it there is. */
 const META_LINE = 'Madhouse · Fall 2023 · 28 episodes · 1 watched'
 
+/** The admin-only per-show rule control (FR-A3, M16) and its two routes. */
+const OVERRIDE_PATH = `/api/settings/overrides/${String(FRIEREN.id)}`
+const SAVE_OVERRIDE = `PUT ${OVERRIDE_PATH}`
+const REMOVE_OVERRIDE = `DELETE ${OVERRIDE_PATH}`
+const OVERRIDE = {
+  anime_id: FRIEREN.id,
+  title: FRIEREN.title.preferred,
+  preferred_groups: ['Tsundere-Raws'],
+  resolution: '2160p',
+}
+const OVERRIDE_REFUSED = 'must be one of 2160p, 1080p, 720p, 480p'
+/** The fixture as an admin sees it with a rule of its own. */
+const DETAIL_WITH_OVERRIDE: AnimeDetail = { ...FRIEREN_DETAIL, override: OVERRIDE }
+
 function renderShow(id: number | string = FRIEREN.id) {
   const router = createMemoryRouter(
     [
@@ -642,6 +656,127 @@ describe('Show', () => {
     })
     // One button, on the one failed episode.
     expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(1)
+  })
+
+  /* --- Per-show release rules (FR-A3, M16) ----------------------------- */
+
+  it('offers no per-show release rules to a non-admin', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: DETAIL_WITH_OVERRIDE } })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    expect(screen.queryByRole('button', { name: 'Release rules' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Overrides:/)).not.toBeInTheDocument()
+  })
+
+  it("summarises an admin's override in one line, and opens the form", async () => {
+    mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: DETAIL_WITH_OVERRIDE },
+    })
+
+    renderShow()
+    const control = await screen.findByRole('button', { name: 'Release rules' })
+
+    expect(screen.getByText('Overrides: Tsundere-Raws · 2160p')).toBeInTheDocument()
+    expect(control).toHaveAttribute('aria-expanded', 'false')
+
+    await userEvent.setup().click(control)
+
+    expect(control).toHaveAttribute('aria-expanded', 'true')
+    // Seeded from what the server holds, not from the last thing typed.
+    expect(screen.getByLabelText('Preferred release groups')).toHaveValue('Tsundere-Raws')
+    expect(screen.getByLabelText('Resolution')).toHaveValue('2160p')
+  })
+
+  it('saves the rule an admin typed, de-duplicated', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: DETAIL_WITH_OVERRIDE },
+      [SAVE_OVERRIDE]: { body: { ...OVERRIDE, preferred_groups: ['ASW'], resolution: '720p' } },
+    })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Release rules' }))
+    const groups = screen.getByLabelText('Preferred release groups')
+    await user.clear(groups)
+    await user.type(groups, 'ASW, asw , SubsPlease')
+    fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: '720p' } })
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_OVERRIDE)
+    })
+    expect(jsonBodyOf(callTo(fetchMock, OVERRIDE_PATH))).toEqual({
+      preferred_groups: ['ASW', 'SubsPlease'],
+      resolution: '720p',
+    })
+    // The form closes on a save, and the page refetches the show it changed.
+    expect(screen.getByRole('button', { name: 'Release rules' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    await waitFor(() => {
+      expect(requestsMade(fetchMock).filter((call) => call === DETAIL_PATH).length).toBeGreaterThan(
+        1,
+      )
+    })
+  })
+
+  it('clears a rule with the one route that removes it', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: DETAIL_WITH_OVERRIDE },
+      [REMOVE_OVERRIDE]: { status: 204 },
+    })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Release rules' }))
+    await user.click(screen.getByRole('button', { name: 'Clear' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(REMOVE_OVERRIDE)
+    })
+  })
+
+  it('offers no Clear on a show that has no rule of its own', async () => {
+    mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+    })
+
+    renderShow()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Release rules' }))
+
+    expect(screen.queryByText(/^Overrides:/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Preferred release groups')).toHaveValue('')
+    expect(screen.getByLabelText('Resolution')).toHaveValue('')
+  })
+
+  it('says why the server refused a rule, under the field it named', async () => {
+    mockApi({
+      'GET /api/auth/me': { body: TEST_ADMIN },
+      [DETAIL_PATH]: { body: DETAIL_WITH_OVERRIDE },
+      [SAVE_OVERRIDE]: {
+        status: 422,
+        body: {
+          detail: [{ loc: ['body', 'resolution'], msg: OVERRIDE_REFUSED, type: 'value_error' }],
+        },
+      },
+    })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Release rules' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(OVERRIDE_REFUSED)
+    // The form stays open: a refused save must not throw away the edit.
+    expect(screen.getByLabelText('Preferred release groups')).toBeInTheDocument()
   })
 
   it('reads downloaded and matching as complete', async () => {

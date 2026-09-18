@@ -9,6 +9,12 @@ readers accept a bad row and fall back with a warning, because they must never
 stop acquisition or turn a grace period into zero. The *write* path is the one
 place a mistake can still be reported to the person making it.
 
+The per-show override validator (:func:`~arc.services.settings.validate_override`,
+M16) is here for the same reason and held to the same bar: it is the same two
+validators the global keys use, so the file that pins the global matrix is the
+file that pins the difference — which is only ever *what counts as naming a
+field*.
+
 :func:`arc.services.acquisition.rules.storage_hold` is here for the same
 reason — it is the other pure function over these values (FR-T6), so its whole
 matrix is a table rather than a filesystem.
@@ -38,6 +44,7 @@ from arc.services.settings import (
     UNKNOWN_KEY,
     SettingsInvalid,
     validate,
+    validate_override,
 )
 
 
@@ -291,3 +298,66 @@ def test_a_bad_slot_cap_is_refused(value: Any) -> None:
 def test_the_storage_hold_rule(free: int, floor: int, held: bool) -> None:
     """FR-T6's whole arithmetic, as a table."""
     assert storage_hold(free, floor) is held
+
+
+# --- Per-show overrides, pure (FR-A3, M16) ----------------------------------
+
+
+def refused_override(preferred_groups: Any = None, resolution: Any = None) -> dict[str, str]:
+    """``validate_override`` must have refused; returns the field errors."""
+    with pytest.raises(SettingsInvalid) as caught:
+        validate_override(preferred_groups, resolution)
+    return caught.value.errors
+
+
+def test_an_override_may_name_either_field_or_both() -> None:
+    assert validate_override(["SubsPlease"], None) == {"preferred_groups": ["SubsPlease"]}
+    assert validate_override(None, "720p") == {"resolution": "720p"}
+    assert validate_override(["ASW"], "480p") == {
+        "preferred_groups": ["ASW"],
+        "resolution": "480p",
+    }
+
+
+def test_an_override_is_held_to_the_same_group_rules_as_the_global_list() -> None:
+    """Same validator, so the ranker reads one kind of list (FR-A3)."""
+    assert validate_override(["  SubsPlease ", "subsplease", "ASW"]) == {
+        "preferred_groups": ["SubsPlease", "ASW"]
+    }
+    assert "preferred_groups" in refused_override(["x" * (MAX_GROUP_LENGTH + 1)])
+    assert "preferred_groups" in refused_override([f"g{n}" for n in range(MAX_GROUPS + 1)])
+    assert "empty" in refused_override(["SubsPlease", "  "])["preferred_groups"]
+
+
+@pytest.mark.parametrize("value", ["SubsPlease", 7, [1], {"a": "b"}])
+def test_override_groups_must_be_a_list_of_strings(value: Any) -> None:
+    assert "preferred_groups" in refused_override(value)
+
+
+@pytest.mark.parametrize("value", ["1080", "FHD", "720P", 1080, True, []])
+def test_an_override_resolution_outside_the_closed_set_is_refused(value: Any) -> None:
+    assert "resolution" in refused_override(None, value)
+
+
+@pytest.mark.parametrize(
+    ("groups", "resolution"),
+    [
+        (None, None),
+        ([], None),
+        (None, ""),
+        ([], "   "),
+    ],
+)
+def test_an_override_that_names_nothing_is_no_override(groups: Any, resolution: Any) -> None:
+    """The caller deletes the row rather than storing ``{}`` (M16).
+
+    An empty groups field and a resolution of "Use global" are how the show
+    page says "back to the global rules", and that is the same state as never
+    having had an override — one fewer thing for the ranker to read.
+    """
+    assert validate_override(groups, resolution) == {}
+
+
+def test_both_fields_are_blamed_at_once() -> None:
+    """One 422 naming both, so the form marks both rather than one at a time."""
+    assert sorted(refused_override(["x" * 999], "4K")) == ["preferred_groups", "resolution"]
