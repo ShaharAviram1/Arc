@@ -42,6 +42,8 @@ from arc.services.acquisition.nyaa import (
     acceptable,
     anime_season,
     anime_titles,
+    batch_queries,
+    covered_wanted,
     deep_search,
     filter_items,
     group_queries,
@@ -2420,8 +2422,8 @@ async def test_concurrent_searches_do_not_burst(monkeypatch: pytest.MonkeyPatch)
 # one of them is the episode.
 
 
-def feed_of(*titles: str, seeders: int = 100) -> str:
-    """A Nyaa RSS document with one item per title, hashed by its own name.
+def feed_of_seeded(*releases: tuple[str, int]) -> str:
+    """A Nyaa RSS document, each item with its own seeder count.
 
     Hashing the title rather than the position is what makes the merge behave
     as it does against the real feed: the same release under two forms is one
@@ -2430,19 +2432,25 @@ def feed_of(*titles: str, seeders: int = 100) -> str:
     items = "".join(
         "<item>"
         f"<title>{title}</title>"
-        "<link>https://nyaa.test/download/x.torrent</link>"
+        f"<link>https://nyaa.test/download/{hashlib.sha1(title.encode()).hexdigest()[:7]}"
+        ".torrent</link>"
         f"<nyaa:infoHash>{hashlib.sha1(title.encode()).hexdigest()}</nyaa:infoHash>"
         f"<nyaa:seeders>{seeders}</nyaa:seeders>"
         "<nyaa:leechers>2</nyaa:leechers><nyaa:downloads>9</nyaa:downloads>"
         "<nyaa:size>1.3 GiB</nyaa:size><nyaa:trusted>No</nyaa:trusted>"
         "<nyaa:remake>No</nyaa:remake><nyaa:categoryId>1_2</nyaa:categoryId>"
         "</item>"
-        for title in titles
+        for title, seeders in releases
     )
     return (
         '<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0">'
         f"<channel>{items}</channel></rss>"
     )
+
+
+def feed_of(*titles: str, seeders: int = 100) -> str:
+    """The same document where every item is as well seeded as the next."""
+    return feed_of_seeded(*((title, seeders) for title in titles))
 
 
 def franchise_junk(count: int, *, tag: str = "a") -> list[str]:
@@ -2508,6 +2516,14 @@ KIMETSU_NARROWED = [
     "Kimetsu no Yaiba S01E10 HorribleSubs",
     "Kimetsu no Yaiba S01E10 SubsPlease",
     "Kimetsu no Yaiba S01E10 Erai-raws",
+]
+#: And the three forms that go looking for a **pack** once everything above
+#: has failed (:func:`batch_queries`, 2026-09-18). No episode number on any of
+#: them, because no batch release name carries one.
+KIMETSU_BATCH_FORMS = [
+    "Kimetsu no Yaiba",
+    "Kimetsu no Yaiba BATCH",
+    "Demon Slayer: Kimetsu no Yaiba BATCH",
 ]
 #: What ``Kimetsu no Yaiba - 10 HorribleSubs`` actually answers: the 2019
 #: single and its two lower-resolution siblings, five to eight seeders each.
@@ -2610,16 +2626,22 @@ async def test_a_finished_show_that_found_nothing_asks_by_group_and_finds_it(
 async def test_the_narrowed_forms_are_asked_in_order_until_they_run_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nothing anywhere: all nine are asked, form-major, and the search gives up."""
+    """Nothing anywhere: all nine are asked, form-major, and the search gives up.
+
+    And then the three batch forms, because a finished show that found no
+    single at all goes looking for a pack (2026-09-18) — they are the last
+    three requests of the search and they are counted in ``requests``, never
+    in ``forms``.
+    """
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub(default=KIMETSU_FRANCHISE)
 
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
 
-    assert stub.queries == [*KIMETSU_QUERIES, *KIMETSU_NARROWED]
+    assert stub.queries == [*KIMETSU_QUERIES, *KIMETSU_NARROWED, *KIMETSU_BATCH_FORMS]
     assert found.ranked == []
-    assert (found.forms, found.requests) == (7, 16)
+    assert (found.forms, found.requests) == (7, 19)
 
 
 async def test_the_narrowed_forms_are_not_asked_when_the_title_forms_sufficed(
@@ -2688,7 +2710,10 @@ async def test_the_request_ceiling_covers_both_kinds_of_form(
     Three preferred groups on top of the built-in three, and nothing anywhere
     acceptable — the worst case the ceiling exists for. The forms it does not
     reach are the last narrowed ones, which is the right end to lose: the
-    groups an admin named and the romaji form are asked first.
+    groups an admin named and the romaji form are asked first. Since
+    2026-09-18 the last three of the twenty are the batch forms rather than
+    narrowed ones (:func:`test_the_narrowing_leaves_three_requests_for_the_pack`);
+    the total and the "every title form ran" half are what this pins.
     """
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
     stub = NyaaStub(default=KIMETSU_FRANCHISE)
@@ -2706,7 +2731,10 @@ async def test_the_request_ceiling_covers_both_kinds_of_form(
 async def test_every_narrowed_form_is_spaced_by_the_polite_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A narrowed form is an ordinary request and waits its two seconds."""
+    """A narrowed form is an ordinary request and waits its two seconds.
+
+    So is a batch form; the pacing is the contract and nothing is exempt.
+    """
     slept: list[float] = []
     monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
     stub = NyaaStub(default=KIMETSU_FRANCHISE)
@@ -2714,8 +2742,8 @@ async def test_every_narrowed_form_is_spaced_by_the_polite_interval(
     async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
         found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
 
-    assert found.requests == 16
-    assert len(slept) == 15, "the first request waits for nothing"
+    assert found.requests == 19
+    assert len(slept) == 18, "the first request waits for nothing"
     assert all(0 < pause <= MIN_INTERVAL for pause in slept)
 
 
@@ -2734,6 +2762,788 @@ async def test_the_rss_url_carries_no_page_parameter_at_all() -> None:
         await client.search("Kimetsu no Yaiba - 10 HorribleSubs")
 
     assert "&p=" not in client.url_for("q")
+
+
+# --- Batches as candidates for a finished show (FR-A11, 2026-09-18) ---------
+#
+# The other half of the *Kimetsu no Yaiba* case above. Group narrowing reaches
+# the 2019 singles for many old shows; for some there are none, and what the
+# 91 results did hold was complete-season packs — thrown away by the filter
+# before the episode number was compared, because FR-A4's "never fetch whole
+# seasons" is a non-negotiable. It is a statement about **bytes**, so a pack
+# whose contents are read before anything is fetched may be a candidate: only
+# for a `deep_search` entry, only when `ranked` is empty, and never by default.
+#
+# Nothing here downloads a file or decides that a batch will be taken. These
+# tests pin the classification, the one new term in the sort key, the gate, and
+# that the whole pass costs **zero** extra requests.
+
+#: The season-one pack the ordinary forms already returned, its dubbed sibling,
+#: a pack of the wrong season, and the unnamed one whose coverage only its file
+#: list can settle.
+KIMETSU_BATCH = "[Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [BATCH]"
+KIMETSU_BATCH_DUB = "[Yameii] Kimetsu no Yaiba - 01 ~ 26 [English Dub] [BATCH]"
+KIMETSU_BATCH_HALF = "[Erai-raws] Kimetsu no Yaiba - 01 ~ 12 [BATCH]"
+KIMETSU_BATCH_S2 = "[Erai-raws] Kimetsu no Yaiba S2 - 01 ~ 11 [BATCH]"
+KIMETSU_PACK_UNNAMED = "[Judas] Kimetsu no Yaiba [BD 1080p][HEVC x265 10bit][BATCH]"
+KIMETSU_TITLES = ("Kimetsu no Yaiba", "Demon Slayer: Kimetsu no Yaiba")
+#: The 2019 single with nobody holding it, which is what makes the fallback
+#: fire: ``MIN_SEEDERS`` rejects it, so ``Search.ranked`` is empty.
+HORRIBLESUBS_DEAD = "[HorribleSubs] Kimetsu no Yaiba - 10 [1080p] [dead].mkv"
+
+
+def batch_candidate(title: str, *, seeders: int = 20, number: int = 10) -> Candidate:
+    """One batch through the real filter, so nothing here invents a candidate."""
+    candidate = acceptable(
+        seeded(title, seeders),
+        titles=KIMETSU_TITLES,
+        number=number,
+        season=None,
+        batches=True,
+    )
+    assert candidate is not None, title
+    return candidate
+
+
+def test_a_batch_is_a_candidate_only_when_it_is_asked_for() -> None:
+    """The default is the whole guarantee: one argument, two answers."""
+    item = seeded(KIMETSU_BATCH, 20)
+
+    assert acceptable(item, titles=KIMETSU_TITLES, number=10, season=None) is None
+    assert acceptable(item, titles=KIMETSU_TITLES, number=10, season=None, batches=True)
+
+
+def test_a_batch_candidate_carries_the_episodes_its_name_claims() -> None:
+    candidate = batch_candidate(KIMETSU_BATCH)
+
+    assert candidate.is_batch
+    assert candidate.covers == tuple(range(1, 27))
+    assert candidate.torrent_url == ""  # ``seeded`` builds no link; the feed does
+
+
+def test_a_pack_that_names_no_range_covers_nothing_it_can_be_held_to() -> None:
+    """The case FR-A4 could not accept before, and the reason it can now.
+
+    ``[Judas] Kimetsu no Yaiba [BD …][BATCH]`` says it is a batch and names no
+    episode, so its coverage is unknowable from its name — and knowable from
+    its file list, which Arc reads before it fetches anything.
+    """
+    candidate = batch_candidate(KIMETSU_PACK_UNNAMED)
+
+    assert candidate.is_batch
+    assert candidate.covers == ()
+
+
+def test_a_bare_blu_ray_rip_is_still_not_a_batch_candidate() -> None:
+    """It claims nothing at all — no episode, no range, no marker.
+
+    The parser reads it as ``unknown``, which is neither an episode nor a
+    batch, so it is refused under both readings. That is FR-A4's stated cost
+    kept rather than quietly spent: nothing in the name distinguishes it from
+    a franchise pack.
+    """
+    item = seeded("[Judas] Kimetsu no Yaiba [BD 1080p]", 20)
+
+    assert acceptable(item, titles=KIMETSU_TITLES, number=10, season=None) is None
+    assert acceptable(item, titles=KIMETSU_TITLES, number=10, season=None, batches=True) is None
+
+
+def test_a_range_that_does_not_reach_the_episode_is_rejected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A batch's low end *is* the number Arc asked for often enough to matter."""
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(
+            seeded(KIMETSU_BATCH_HALF, 20),
+            titles=KIMETSU_TITLES,
+            number=20,
+            season=None,
+            batches=True,
+        )
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert "batch release covering episodes 1-12, and this is episode 20" in reasons, reasons
+
+
+def test_a_batch_of_the_wrong_season_is_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    """The one mistake that is worse than a missing file."""
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(
+            seeded(KIMETSU_BATCH_S2, 20),
+            titles=KIMETSU_TITLES,
+            number=10,
+            season=None,
+            batches=True,
+        )
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert "batch release of season 2, not 1" in reasons, reasons
+
+
+def test_a_dead_batch_and_a_remake_are_refused_before_anything_else() -> None:
+    """The two checks in front of the classification have not moved."""
+    dead = seeded(KIMETSU_BATCH, 0)
+    remake = NyaaItem(title=KIMETSU_BATCH, link="", info_hash="0" * 40, seeders=99, remake=True)
+
+    assert acceptable(dead, titles=KIMETSU_TITLES, number=10, season=None, batches=True) is None
+    assert acceptable(remake, titles=KIMETSU_TITLES, number=10, season=None, batches=True) is None
+
+
+def test_a_film_never_gets_a_batch(caplog: pytest.LogCaptureFixture) -> None:
+    """One file, no episode for a file plan to identify (FR-A4's own words)."""
+    pack = seeded("[Judas] Servamp Movie - Alice in the Garden [BD 1080p][BATCH]", 30)
+    with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+        rejected = acceptable(
+            pack,
+            titles=anime_titles(SERVAMP_MOVIE),
+            number=1,
+            season=None,
+            single=True,
+            year=2018,
+            batches=True,
+        )
+
+    assert rejected is None
+    reasons = [getattr(record, "reason", "") for record in caplog.records]
+    assert any("this entry is one release" in reason for reason in reasons), reasons
+
+
+def test_an_absolute_batch_is_read_the_way_an_absolute_single_is() -> None:
+    """``25 ~ 47`` is season two's 1–23 when the catalogue's chain says 24.
+
+    The same four conditions a single needs: an offset read off the catalogue,
+    a release that names **no** season, the number inside the range, and the
+    title still reaching the threshold.
+    """
+    candidate = acceptable(
+        seeded("[Erai-raws] Jujutsu Kaisen - 25 ~ 47 [BATCH]", 30),
+        titles=JJK_TITLES,
+        number=1,
+        season=2,
+        offset=24,
+        batches=True,
+    )
+
+    assert candidate is not None
+    assert candidate.absolute and candidate.offset == 24
+    assert candidate.covers[0] == 25
+
+    marked = acceptable(
+        seeded("[Erai-raws] Jujutsu Kaisen 2nd Season - 25 ~ 47 [BATCH]", 30),
+        titles=JJK_TITLES,
+        number=1,
+        season=2,
+        offset=24,
+        batches=True,
+    )
+    assert marked is None, "a release that names its season is judged per season"
+
+
+def test_only_batches_keeps_the_two_lists_apart() -> None:
+    """A single always wins, so there is nothing for a mixed ranking to decide."""
+    feed = [seeded(HORRIBLESUBS_1080P, 6), seeded(KIMETSU_BATCH, 40)]
+
+    both = filter_items(feed, titles=KIMETSU_TITLES, number=10, season=None, batches=True)
+    only = filter_items(
+        feed,
+        titles=KIMETSU_TITLES,
+        number=10,
+        season=None,
+        batches=True,
+        only_batches=True,
+    )
+
+    assert [candidate.item.title for candidate in both] == [HORRIBLESUBS_1080P, KIMETSU_BATCH]
+    assert [candidate.item.title for candidate in only] == [KIMETSU_BATCH]
+
+
+# --- The one new term in the sort key ---------------------------------------
+
+
+def test_a_single_keeps_the_sort_key_it_has_always_had() -> None:
+    """Five terms, in FR-A3's order behind the dub. Asserted, not assumed."""
+    rules = Rules(preferred_groups=("SubsPlease",), preferred_resolution="1080p")
+    (entry,) = rank(
+        filter_items([seeded(GOOD, 12)], titles=GOOD_TITLES, number=7, season=None), rules
+    )
+
+    assert not entry.is_batch
+    assert entry.covered_wanted == 0
+    assert entry.sort_key == (0, 0, 0, -12, 1)
+    assert len(entry.sort_key) == 5
+
+
+def test_a_batch_gains_exactly_one_term_and_it_sits_behind_the_dub() -> None:
+    """``-covered_wanted`` second, so the dub still outranks everything."""
+    rules = Rules(preferred_groups=("Erai-raws",), preferred_resolution="1080p")
+    (entry,) = rank([batch_candidate(KIMETSU_BATCH, seeders=20)], rules, wanted_numbers=(10, 11))
+
+    assert entry.is_batch
+    assert entry.covered_wanted == 2
+    assert entry.sort_key == (0, -2, 0, 2, -20, 1)
+    assert entry.sort_key[1:] == (-2, *(0, 2, -20, 1))
+
+
+def test_an_unnamed_pack_scores_one_and_so_does_a_pack_nobody_asked_about() -> None:
+    """The floor, and why it is a floor rather than a zero.
+
+    A batch is only a candidate at all if it may hold the episode being
+    searched for, so one is the least any of them covers. That is what makes
+    an empty ``wanted_numbers`` — the default — neutral: every batch scores
+    alike, the term drops out of the key, and FR-A3's four rules decide,
+    instead of the packs with no coverage claim being quietly promoted.
+    """
+    named = batch_candidate(KIMETSU_BATCH)
+    unnamed = batch_candidate(KIMETSU_PACK_UNNAMED)
+
+    assert covered_wanted(unnamed, (10, 11, 12)) == 1
+    assert covered_wanted(named, ()) == 1
+    assert covered_wanted(named, (10, 11, 12)) == 3
+    assert covered_wanted(named, (30, 40)) == 1, "the floor, not the count"
+
+
+def test_an_absolute_packs_coverage_is_counted_in_the_entrys_own_numbers() -> None:
+    """The offset applies here too, or the count would be of the wrong episodes."""
+    candidate = acceptable(
+        seeded("[Erai-raws] Jujutsu Kaisen - 25 ~ 47 [BATCH]", 30),
+        titles=JJK_TITLES,
+        number=1,
+        season=2,
+        offset=24,
+        batches=True,
+    )
+    assert candidate is not None
+
+    assert covered_wanted(candidate, (1, 2, 3)) == 3
+    assert covered_wanted(candidate, (1, 2, 3, 99)) == 3
+
+
+def test_a_pack_covering_more_wanted_episodes_beats_a_better_seeded_one() -> None:
+    """One torrent instead of two, and the seeder rule loses to it by design."""
+    wide = batch_candidate(KIMETSU_BATCH, seeders=5)
+    narrow = batch_candidate(KIMETSU_BATCH_HALF, seeders=500)
+
+    ranked = rank([narrow, wide], Rules(), wanted_numbers=(10, 20, 21))
+
+    assert [entry.item.title for entry in ranked] == [KIMETSU_BATCH, KIMETSU_BATCH_HALF]
+    assert [entry.covered_wanted for entry in ranked] == [3, 1]
+
+
+def test_with_nothing_wanted_but_the_episode_seeders_decide_again() -> None:
+    """The other side of it: both cover one, so the term cancels out."""
+    wide = batch_candidate(KIMETSU_BATCH, seeders=5)
+    narrow = batch_candidate(KIMETSU_BATCH_HALF, seeders=500)
+
+    ranked = rank([wide, narrow], Rules(), wanted_numbers=(10,))
+
+    assert [entry.item.title for entry in ranked] == [KIMETSU_BATCH_HALF, KIMETSU_BATCH]
+
+
+def test_a_dubbed_batch_ranks_below_every_subbed_one() -> None:
+    """FR-A3's dub rule is in front of the coverage term, deliberately.
+
+    A dubbed pack of the whole series is still the episode in the wrong
+    language, and covering twenty-six of them does not change that.
+    """
+    dub = batch_candidate(KIMETSU_BATCH_DUB, seeders=4000)
+    sub = batch_candidate(KIMETSU_BATCH_HALF, seeders=6)
+
+    ranked = rank([dub, sub], Rules(), wanted_numbers=(10, 11, 12))
+
+    assert [entry.item.title for entry in ranked] == [KIMETSU_BATCH_HALF, KIMETSU_BATCH_DUB]
+    assert ranked[0].covered_wanted == 3 and ranked[1].covered_wanted == 3
+
+
+def test_a_chosen_batch_says_what_it_holds_in_its_reasons() -> None:
+    """FR-A7: the sentence a pick is judged by names both numbers."""
+    (entry,) = rank([batch_candidate(KIMETSU_BATCH)], Rules(), wanted_numbers=(10, 11))
+
+    assert "batch covering episodes 1-26, 2 of them wanted" in entry.reasons
+
+
+def test_an_ordinary_single_says_nothing_about_batches() -> None:
+    (entry,) = rank(
+        filter_items([seeded(GOOD, 12)], titles=GOOD_TITLES, number=7, season=None), Rules()
+    )
+
+    assert not any("batch" in reason for reason in entry.reasons)
+
+
+# --- When the search offers them --------------------------------------------
+
+
+async def test_a_finished_show_with_no_single_at_all_is_offered_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production shape: the only 2019 upload has nobody holding it.
+
+    ``MIN_SEEDERS`` rejects it — a torrent nobody seeds is not a worse
+    candidate but no candidate — so ``ranked`` is empty and the pool's packs
+    are offered instead, out of the same 21 results the forms already merged.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    pool = feed_of_seeded(
+        (HORRIBLESUBS_DEAD, 0),
+        (KIMETSU_BATCH, 30),
+        (KIMETSU_BATCH_S2, 90),
+        *((title, 50) for title in franchise_junk(18)),
+    )
+    stub = NyaaStub(default=pool)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules(), wanted_numbers=(10, 11))
+
+    assert found.ranked == [] and found.kept == 0
+    assert [entry.item.title for entry in found.batches] == [KIMETSU_BATCH]
+    assert found.batches[0].covered_wanted == 2
+    assert found.batches[0].torrent_url.startswith("https://nyaa.test/download/")
+
+
+async def test_one_live_seeder_is_enough_to_keep_the_batch_out_of_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``not ranked`` and not "fewer than three": a single always wins.
+
+    One seeder, no group anybody prefers, the wrong resolution — it is still
+    the episode, and a pack of twenty-six is still twenty-five files nobody
+    asked for. This is the stricter half of the gate and the reason a batch
+    cannot creep in behind a thin pool.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    pool = feed_of_seeded(
+        (HORRIBLESUBS_SIBLINGS[1], 1),
+        (KIMETSU_BATCH, 300),
+        *((title, 50) for title in franchise_junk(18)),
+    )
+    stub = NyaaStub(default=pool)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules(), wanted_numbers=(10, 11))
+
+    assert [entry.item.title for entry in found.ranked] == [HORRIBLESUBS_SIBLINGS[1]]
+    assert found.batches == [], "a single, however thin, is the answer"
+
+
+async def test_an_airing_show_is_never_offered_a_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The behaviour that must not change, on the batch side as on the query side."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    pool = feed_of_seeded((KIMETSU_BATCH, 300), *((title, 50) for title in franchise_junk(18)))
+    stub = NyaaStub(default=pool)
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_AIRING, 10, Rules())
+
+    assert stub.queries == KIMETSU_QUERIES, "no narrowed form either"
+    assert found.ranked == []
+    assert found.batches == [], "a null or RELEASING status reads as not finished"
+
+
+async def test_a_films_search_is_offered_no_batch_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``is_single`` gates the whole pass, as the film branch of the filter does."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    finished_film = Anime(
+        anilist_id=99999,
+        title_romaji="Servamp Movie: Alice in the Garden",
+        title_english="Servamp Movie: Alice in the Garden",
+        format="MOVIE",
+        status="FINISHED",
+        episodes=1,
+        season_year=2018,
+    )
+    stub = NyaaStub(
+        default=feed_of_seeded(
+            ("[Judas] Servamp Movie - Alice in the Garden [BD 1080p][BATCH]", 300)
+        )
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, finished_film, 1, Rules())
+
+    assert found.ranked == []
+    assert found.batches == []
+
+
+# --- Asking for the pack (2026-09-18) ---------------------------------------
+#
+# The correction. The first version of this fallback re-read the merged pool
+# and claimed it cost no request, which was true of *Kimetsu no Yaiba* episode
+# 10 by accident — `10` is a token of `1080p`, so the packs matched a numbered
+# query — and wrong of every other show. Against the live feed on 2026-09-18:
+# *One Week Friends* episode 3, 16 results, **0 batches**; *Chivalry of a
+# Failed Knight*, 13 and 0; *Dagashi Kashi 2*, 10 and 0. Every form the query
+# builder makes carries the episode number, no batch release name carries one,
+# and Nyaa ANDs the words of a query — so a pack has to be asked for by name.
+
+#: The show the gap was found on: finished, and its packs are named without a
+#: number like every other pack.
+ISSHUUKAN = Anime(
+    anilist_id=20589,
+    title_romaji="Isshuukan Friends.",
+    title_english="One Week Friends",
+    status="FINISHED",
+    format="TV",
+    episodes=12,
+    season_year=2014,
+)
+ISSHUUKAN_BATCH = "[Erai-raws] Isshuukan Friends - 01 ~ 12 [1080p][Multiple Subtitle][BATCH]"
+ISSHUUKAN_DEAD = "[HorribleSubs] Isshuukan Friends - 03 [1080p].mkv"
+
+
+def test_the_batch_forms_carry_no_episode_number_at_all() -> None:
+    """Which is the whole point of them, and why the numbered forms cannot do it."""
+    forms = batch_queries(KIMETSU_S1)
+
+    assert forms == KIMETSU_BATCH_FORMS
+    assert not any(character.isdigit() for form in forms for character in form)
+
+
+def test_the_batch_forms_are_built_off_the_season_stripped_base() -> None:
+    """The same base the short forms use: a pack writes ``S2``, not ``2nd Season``."""
+    assert batch_queries(FRIEREN_S2)[:2] == [
+        "Sousou no Frieren",
+        "Sousou no Frieren BATCH",
+    ]
+
+
+def test_a_show_with_one_title_asks_two_batch_forms_not_three() -> None:
+    """No english title is one form fewer, not a duplicate of the romaji one."""
+    assert batch_queries(
+        Anime(anilist_id=1, title_romaji="Dagashi Kashi 2", title_english="Dagashi Kashi 2")
+    ) == ["Dagashi Kashi 2", "Dagashi Kashi 2 BATCH"]
+    assert batch_queries(Anime(anilist_id=1)) == []
+
+
+async def test_a_pool_with_no_batch_in_it_is_what_the_numbered_forms_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gap itself, stated as a test: 16 results, 0 batches, and then the ask.
+
+    The numbered forms answer nothing but seederless singles — no pack matches
+    a query with ``03`` in it — so the merged pool holds no batch at all and
+    re-reading it would find nothing. The bare title form is what answers the
+    pack.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {form: feed_of_seeded((ISSHUUKAN_BATCH, 40)) for form in batch_queries(ISSHUUKAN)},
+        default=feed_of_seeded((ISSHUUKAN_DEAD, 0)),
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, ISSHUUKAN, 3, Rules(), wanted_numbers=(3, 4))
+
+    title_forms = queries(ISSHUUKAN, 3)
+    narrowed = group_queries(ISSHUUKAN, 3, Rules())
+    assert found.ranked == [], "the only single has nobody holding it"
+    assert [entry.item.title for entry in found.batches] == [ISSHUUKAN_BATCH]
+    assert found.batches[0].covered_wanted == 2
+    assert all("03" in query for query in (*title_forms, *narrowed)), "every form is numbered"
+    assert stub.queries == [*title_forms, *narrowed, *batch_queries(ISSHUUKAN)]
+    assert found.forms == len(title_forms), "the batch forms are not title forms"
+    assert found.requests == len(title_forms) + len(narrowed) + 3
+
+
+async def test_the_batch_forms_are_not_asked_when_a_single_was_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``not ranked`` gates the requests as well as the classification.
+
+    One live seeder is a single, a single is the episode, and the three
+    requests are not spent.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {KIMETSU_FIRST_QUERY: feed_of(HORRIBLESUBS_1080P, *HORRIBLESUBS_SIBLINGS, seeders=6)},
+        default=KIMETSU_FRANCHISE,
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules())
+
+    assert stub.queries == KIMETSU_QUERIES
+    assert not any(form in stub.queries for form in KIMETSU_BATCH_FORMS)
+    assert found.requests == found.forms == len(KIMETSU_QUERIES)
+    assert found.batches == []
+
+
+async def test_an_airing_show_asks_no_batch_form_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The airing show's behaviour is the one that must not change."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {form: feed_of_seeded((KIMETSU_BATCH, 300)) for form in KIMETSU_BATCH_FORMS},
+        default=KIMETSU_FRANCHISE,
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_AIRING, 10, Rules())
+
+    assert stub.queries == KIMETSU_QUERIES, "not one narrowed form and not one batch form"
+    assert found.requests == found.forms == len(KIMETSU_QUERIES)
+    assert found.batches == []
+
+
+async def test_the_narrowing_leaves_three_requests_for_the_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten title forms and eighteen narrowed ones, and the pack is still asked for.
+
+    The reservation (owner, 2026-09-18). Without it the narrowing spends the
+    whole twenty looking for a single and the batch forms are never reached —
+    on exactly the show likeliest to have nothing but packs. So for an entry
+    that could still ask for one, the narrowing stops at
+    ``MAX_REQUESTS - MAX_BATCH_QUERIES`` and the three forms follow it. The
+    total is unchanged: ten titles, seven narrowed, three packs, twenty.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(default=KIMETSU_FRANCHISE)
+    rules = Rules(preferred_groups=("Judas", "Anime Time", "Yameii"))
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, MUSHOKU_S3_FINISHED, 11, rules)
+
+    packs = batch_queries(MUSHOKU_S3_FINISHED)
+    assert len(queries(MUSHOKU_S3_FINISHED, 11)) == nyaa_module.MAX_QUERIES == 10
+    assert len(group_queries(MUSHOKU_S3_FINISHED, 11, rules)) == 18
+    assert found.requests == len(stub.queries) == nyaa_module.MAX_REQUESTS == 20
+    assert stub.queries[-3:] == packs, "the reserved slots went to the packs"
+    assert len(packs) == nyaa_module.MAX_BATCH_QUERIES == 3
+    assert found.forms == 10, "every title form ran; the reservation cut the narrowing"
+    assert len(stub.queries) - found.forms - len(packs) == 7, "seven narrowed forms, not ten"
+
+
+async def test_a_film_keeps_the_plain_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing is reserved for an entry that will never ask for a pack."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    finished_film = Anime(
+        anilist_id=88888,
+        title_romaji="Servamp Movie: Alice in the Garden",
+        title_english="Servamp Movie: Alice in the Garden",
+        format="MOVIE",
+        status="FINISHED",
+        episodes=1,
+        season_year=2018,
+    )
+    stub = NyaaStub(default=feed_of_seeded(("[Nobody] Something Else [1080p]", 9)))
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, finished_film, 1, Rules())
+
+    assert found.batches == []
+    assert found.requests < nyaa_module.MAX_REQUESTS, "a film has few forms to begin with"
+    assert not any(query.endswith(nyaa_module.BATCH_WORD) for query in stub.queries)
+
+
+async def test_a_batch_form_already_asked_is_not_asked_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A film's own forms are bare titles, and a numbered show's are not.
+
+    The dedupe is cheap insurance rather than a live case: it is the same rule
+    the query builder applies to its own forms, and a repeated question to
+    Nyaa is the one thing the pacing exists to prevent.
+    """
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    bare_title_show = Anime(
+        anilist_id=4242,
+        title_romaji="Kimetsu no Yaiba",
+        title_english="Kimetsu no Yaiba",
+        status="FINISHED",
+        format="TV",
+        episodes=26,
+    )
+    stub = NyaaStub(default=feed_of_seeded((KIMETSU_BATCH, 30)))
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, bare_title_show, 10, Rules())
+
+    assert len(stub.queries) == len(set(stub.queries)), "not one query twice"
+    assert len(found.batches) == 1
+
+
+# --- Fetching the .torrent (FR-A11, plan §4) --------------------------------
+#
+# The one request in the module that is not a search, and the reason the batch
+# path can promise what it promises: qBittorrent refuses `torrents/filePrio`
+# while it has no metadata, so a magnet has a window in which unwanted files
+# arrive and a `.torrent` added as a file has none.
+
+#: A bencoded dictionary, near enough: what matters is the leading `d`.
+TORRENT_BLOB = b"d8:announce20:http://nyaa.tracker.wf4:infod6:lengthi42eee"
+
+
+def torrent_transport(blob: bytes, *, status: int = 200) -> tuple[httpx.MockTransport, list[str]]:
+    """A transport that answers every GET with ``blob``, recording the URLs."""
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        return httpx.Response(status, content=blob)
+
+    return httpx.MockTransport(handler), asked
+
+
+async def test_the_torrent_file_is_returned_as_bytes() -> None:
+    transport, asked = torrent_transport(TORRENT_BLOB)
+
+    async with NyaaClient("https://nyaa.test", transport=transport) as client:
+        blob = await client.torrent_file("https://nyaa.test/download/2088261.torrent")
+
+    assert blob == TORRENT_BLOB
+    assert asked == ["https://nyaa.test/download/2088261.torrent"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.test/download/1.torrent",
+        "https://nyaa.test.evil/download/1.torrent",
+        "http://nyaa.test/download/1.torrent",
+        "/download/1.torrent",
+    ],
+)
+async def test_a_torrent_url_off_nyaas_own_host_is_refused(url: str) -> None:
+    """``link`` is a string out of somebody else's XML.
+
+    A request Arc makes because a feed told it to is a request to an arbitrary
+    address unless this holds, and the trailing slash is part of the check so
+    that ``nyaa.test.evil`` does not pass for ``nyaa.test``. Not one byte is
+    asked for: the URL is refused before the transport is reached.
+    """
+    transport, asked = torrent_transport(TORRENT_BLOB)
+
+    async with NyaaClient("https://nyaa.test", transport=transport) as client:
+        with pytest.raises(NyaaUnavailable, match="off nyaa's own host"):
+            await client.torrent_file(url)
+
+    assert asked == []
+
+
+async def test_an_html_body_is_not_a_torrent() -> None:
+    """What a Cloudflare interstitial looks like, and it is not bencoded."""
+    transport, _asked = torrent_transport(b"<!doctype html><title>Just a moment</title>")
+
+    async with NyaaClient("https://nyaa.test", transport=transport) as client:
+        with pytest.raises(NyaaUnavailable, match="bencoded"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+
+async def test_an_oversize_body_is_refused() -> None:
+    """A ``.torrent`` is kilobytes; a megabyte of one is something else."""
+    transport, _asked = torrent_transport(b"d" + b"x" * nyaa_module.MAX_TORRENT_BYTES)
+
+    async with NyaaClient("https://nyaa.test", transport=transport) as client:
+        with pytest.raises(NyaaUnavailable, match="over 1048576"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+
+async def test_a_redirect_off_nyaas_own_host_is_refused() -> None:
+    """The client follows redirects, so where Arc *asked* is not the whole story.
+
+    ``link`` is a string out of somebody else's XML. The first check says Arc
+    asked nyaa; this one says nyaa answered — a 302 to anywhere is otherwise
+    the same arbitrary request with an extra hop, and the blob it returns is
+    about to be handed to qBittorrent.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "nyaa.test":
+            return httpx.Response(302, headers={"location": "https://evil.test/1.torrent"})
+        return httpx.Response(200, content=TORRENT_BLOB)
+
+    async with NyaaClient("https://nyaa.test", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(NyaaUnavailable, match="redirected off nyaa's own host"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+
+async def test_a_redirect_that_stays_on_nyaa_is_followed() -> None:
+    """``/download`` has moved about before; the guard is about the *host*."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/download/1.torrent":
+            return httpx.Response(302, headers={"location": "https://nyaa.test/view/1.torrent"})
+        return httpx.Response(200, content=TORRENT_BLOB)
+
+    async with NyaaClient("https://nyaa.test", transport=httpx.MockTransport(handler)) as client:
+        assert await client.torrent_file("https://nyaa.test/download/1.torrent") == TORRENT_BLOB
+
+    assert seen == ["/download/1.torrent", "/view/1.torrent"]
+
+
+async def test_an_oversize_content_length_is_refused_on_its_header() -> None:
+    """A body Arc will refuse anyway is refused before it is worth holding."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=TORRENT_BLOB,
+            headers={"content-length": str(nyaa_module.MAX_TORRENT_BYTES + 1)},
+        )
+
+    async with NyaaClient("https://nyaa.test", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(NyaaUnavailable, match="claims 1048577 bytes"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+
+async def test_a_nonsense_content_length_is_not_taken_as_a_refusal() -> None:
+    """The header is a claim, and a claim Arc cannot read is not a reason."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=TORRENT_BLOB, headers={"content-length": "lots"})
+
+    async with NyaaClient("https://nyaa.test", transport=httpx.MockTransport(handler)) as client:
+        assert await client.torrent_file("https://nyaa.test/download/1.torrent") == TORRENT_BLOB
+
+
+async def test_a_4xx_on_the_torrent_is_final_and_a_5xx_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It goes through ``_fetch``, so it inherits the retry rule unchanged."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    gone, asked_gone = torrent_transport(b"", status=404)
+    broken, asked_broken = torrent_transport(b"", status=503)
+
+    async with NyaaClient("https://nyaa.test", transport=gone) as client:
+        with pytest.raises(NyaaUnavailable, match="404"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+    async with NyaaClient("https://nyaa.test", transport=broken) as client:
+        with pytest.raises(NyaaUnavailable, match="503"):
+            await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+    assert len(asked_gone) == 1, "a 4xx is final"
+    assert len(asked_broken) == 2, "a 5xx is retried once"
+
+
+async def test_the_torrent_fetch_is_paced_and_never_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paced like a search, and asked again every time it is asked for.
+
+    The cache exists to spare Nyaa a *repeated question*; a blob is fetched
+    once, immediately before it is added, and holding megabytes of payload for
+    ten minutes would be a cache of the wrong thing.
+    """
+    slept: list[float] = []
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep(slept))
+    transport, asked = torrent_transport(TORRENT_BLOB)
+
+    async with NyaaClient("https://nyaa.test", transport=transport) as client:
+        await client.torrent_file("https://nyaa.test/download/1.torrent")
+        await client.torrent_file("https://nyaa.test/download/1.torrent")
+
+    assert len(asked) == 2, "never cached"
+    assert len(slept) == 1 and 0 < slept[0] <= MIN_INTERVAL
 
 
 # --- The shared client ------------------------------------------------------

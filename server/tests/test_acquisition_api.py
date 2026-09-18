@@ -17,7 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from arc.api import acquisition as acquisition_api
 from arc.db import SessionFactory
-from arc.models import EpisodeState, Job, ListEntry, ListStatus, Torrent, User, UserRole, Want
+from arc.models import (
+    EpisodeState,
+    Job,
+    ListEntry,
+    ListStatus,
+    Torrent,
+    TorrentFile,
+    TorrentKind,
+    User,
+    UserRole,
+    Want,
+)
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     COMPUTE_WANTS_PRIORITY,
@@ -162,8 +173,91 @@ async def test_a_downloading_episode_reports_its_progress_and_release(
         "resolution": "1080p",
         "title": "[SubsPlease] Sousou no Frieren - 07 (1080p) [24356E19].mkv",
         "seeders": 155,
+        "batch": False,
     }
     assert episode["unavailable_reason"] is None
+
+
+async def batch_backed_show(factory: SessionFactory) -> tuple[int, int]:
+    """A show whose episode 7 is one file of a pack, 30 % in. Returns ids."""
+    async with factory() as session:
+        anime = await make_anime(session, anilist_id=963002)
+        episodes = await make_episodes(session, anime, 26, aired_through=26)
+        episode = episodes[6]
+        episode.state = EpisodeState.DOWNLOADING
+        torrent = Torrent(
+            info_hash="c" * 40,
+            kind=TorrentKind.BATCH,
+            title="[Judas] Kimetsu no Yaiba [BD 1080p]",
+            group="Judas",
+            resolution="1080p",
+            seeders=41,
+            save_path="/data/downloads/batch/" + "c" * 40,
+            # The pack is nearly done and this episode's file has barely
+            # started: the two numbers exist to be told apart.
+            progress=0.93,
+            qbit_state="downloading",
+            total_size=14_800_000_000,
+            wanted_bytes=1_100_000_000,
+        )
+        session.add(torrent)
+        await session.flush()
+        session.add(
+            TorrentFile(
+                torrent_id=torrent.id,
+                file_index=6,
+                path="[Judas] Kimetsu no Yaiba - 07.mkv",
+                size=1_100_000_000,
+                episode_id=episode.id,
+                wanted=True,
+                progress=0.3,
+            )
+        )
+        await session.commit()
+        return anime.id, episode.id
+
+
+async def test_a_batch_backed_episode_reports_its_own_file_and_says_it_is_a_pack(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """The percentage is the file's, the release is the pack's (FR-A7, FR-A11)."""
+    anime_id, episode_id = await batch_backed_show(api_factory)
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    episode = next(row for row in body["episodes"] if row["id"] == episode_id)
+    assert episode["download_progress"] == pytest.approx(0.3), "not the pack's 93 %"
+    assert episode["release"] == {
+        "group": "Judas",
+        "resolution": "1080p",
+        "title": "[Judas] Kimetsu no Yaiba [BD 1080p]",
+        "seeders": 41,
+        "batch": True,
+    }
+
+
+async def test_a_claim_given_back_is_no_longer_the_episode_s_release(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """Cancelled, rejected or swept: the pack stops answering for the episode."""
+    anime_id, episode_id = await batch_backed_show(api_factory)
+    async with api_factory() as session:
+        row = await session.scalar(select(TorrentFile).where(TorrentFile.episode_id == episode_id))
+        assert row is not None
+        row.wanted = False
+        await session.commit()
+    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+
+    async with api_transport(api_app) as client:
+        await login(client, USER_EMAIL, USER_PASSWORD)
+        body = (await client.get(f"/api/anime/{anime_id}")).json()
+
+    episode = next(row for row in body["episodes"] if row["id"] == episode_id)
+    assert episode["release"] is None
+    assert episode["download_progress"] is None
 
 
 async def test_an_episode_with_no_torrent_carries_nulls(

@@ -276,6 +276,18 @@ curl -X POST https://arc.example.com/api/acquisition/resume -b cookies -H 'Origi
 
 `python -m arc.cli status` prints whether it is paused, among everything else.
 
+A second, narrower switch lives beside it: **`batch_fallback`** (admin rules
+tab, default on). A finished show whose search finds no acceptable single may
+take a season pack and download only the wanted episode's file from it (FR-A4,
+FR-A11); turning it off stops that — no new pack is taken, and no further file
+is enabled in one Arc already holds — and such an episode waits for a single
+instead. A pack already downloading finishes the episodes it was taken for.
+Those packs land in **`downloads/batch/<info hash>/`** rather than
+`downloads/<episode id>/`: one directory per torrent, holding the one or two
+files Arc selected, with every other file in the pack left at priority 0 and
+never fetched. Nothing else reads that directory by name, and retention deletes
+a batch-backed episode's own file while leaving the torrent in the client.
+
 ### The status summary
 
 ```bash

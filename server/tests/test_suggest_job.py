@@ -32,7 +32,11 @@ from arc.models import (
     JobStatus,
     MediaFile,
     ReviewState,
+    Torrent,
+    TorrentFile,
+    TorrentKind,
 )
+from arc.services.acquisition.qbit import BATCH_DIR
 from arc.services.jobs.registry import JobContext
 from arc.services.library import jobs as library_jobs
 from arc.services.library.names import (
@@ -404,6 +408,58 @@ class TestHappyPath:
             db_session,
             tmp_path,
             directory=f"downloads/{episode.id}",
+            candidates=candidates(11),
+        )
+        chain = use(monkeypatch, FakeChain(ANSWER))
+        assert chain is not None
+
+        await run_suggest(db_session, suggest_settings, media_file.id)
+
+        assert "Arc downloaded this file itself" in chain.user
+        assert "episode 3" in chain.user
+
+    async def test_a_file_out_of_a_pack_carries_the_prior_too(
+        self,
+        db_session: AsyncSession,
+        suggest_settings: Settings,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Read from the ``torrent_files`` row: a pack's path names no episode.
+
+        ``downloads/batch/<info hash>/`` is deliberately unreadable as an id
+        (FR-A11), so the claim the filename parser wrote at pick time is the
+        only record of what Arc believed it was fetching — and it is worth
+        exactly as much here as a save path is: a prior, offered to the model,
+        never a link.
+        """
+        await add_anime(db_session, 11, "Sousou no Frieren")
+        episode = Episode(anime_id=11, number=3, state=EpisodeState.MATCHING)
+        db_session.add(episode)
+        await db_session.flush()
+        info_hash = "b" * 40
+        torrent = Torrent(
+            info_hash=info_hash,
+            kind=TorrentKind.BATCH,
+            title="[Judas] Sousou no Frieren [BD 1080p]",
+            save_path=f"/data/downloads/{BATCH_DIR}/{info_hash}",
+        )
+        db_session.add(torrent)
+        await db_session.flush()
+        db_session.add(
+            TorrentFile(
+                torrent_id=torrent.id,
+                file_index=4,
+                path=FRIEREN_FILE,
+                size=1,
+                episode_id=episode.id,
+                wanted=True,
+            )
+        )
+        media_file = await add_file(
+            db_session,
+            tmp_path,
+            directory=f"downloads/{BATCH_DIR}/{info_hash}",
             candidates=candidates(11),
         )
         chain = use(monkeypatch, FakeChain(ANSWER))

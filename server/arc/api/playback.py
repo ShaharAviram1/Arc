@@ -152,7 +152,7 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
             out_of_order=episode.number in out_of_order(siblings),
             completed=progress is not None and progress.completed,
             list_progress=entry.progress if entry is not None else 0,
-            torrent=extras.torrents.get(episode.id),
+            release=extras.torrents.get(episode.id),
             rendition=rendition,
             transcode_job=extras.transcode_jobs.get(episode.id),
         ),

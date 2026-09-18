@@ -210,6 +210,54 @@ any time, and the owner uses it daily.
   episode is inside the newest 75 — and none of this changes which releases are
   acceptable: a narrowed form's results are merged, filtered and ranked by
   exactly the same rules.
+  **A finished show with nothing but batches is fetched from one, file by
+  file** (owner, 2026-09-18). "Never fetch whole seasons" is a statement about
+  *bytes*, not about torrents, and for a show that finished airing years ago
+  the only seeded releases are often batches: *Kimetsu no Yaiba* episode 10
+  came back under seven title forms and six group-narrowed ones with no
+  season-one single among them and several complete-season packs. So where a
+  **finished** show's search ends with **no acceptable single at all**, Arc may
+  take a batch that covers the wanted episode — and it downloads **only that
+  episode's file**. The pack has to be **asked for by name**: every query form
+  above carries the episode number and no batch release name carries one, so a
+  numbered search never returns a pack at all (16 results and none for *One
+  Week Friends* episode 3, 13 and none for *Chivalry of a Failed Knight*, 10
+  and none for *Dagashi Kashi 2*). Up to three more queries are made, with no
+  number on any of them — the title bare, and the title with the word batch in
+  the two languages — and they are the last requests the search makes, inside
+  the same per-episode ceiling as every other form, with those last three
+  **reserved**: the search by release group stops three short of the ceiling
+  so that a show with many ways of writing its title still gets to ask for a
+  pack, which is the show likeliest to have nothing else. The release's `.torrent` is fetched from Nyaa first, so the
+  client is handed a torrent whose contents are already known; it is added
+  **stopped**, every file is set to priority 0, the identified wanted files are
+  set to priority 1, the selection is read back and verified, and only then is
+  the torrent started. **No unwanted file is downloaded** — pieces straddling a
+  file boundary are the only overlap, and they are never written as a file —
+  and there is no window in which more could be, which is why the file is added
+  rather than the magnet. A batch's file is identified by the same filename
+  parser the library uses, with the release name carrying the show's identity
+  and the file's own name only having to carry a number; creditless openings,
+  extras and samples map to nothing and stay at priority 0. **Where the wanted
+  episode's file cannot be identified — no file claims it, or two do — the
+  batch is not added at all**: it is removed from the client before it has
+  fetched anything, Arc *remembers* that it could not be read so the same pack
+  is not fetched and read again every six hours, and the episode keeps FR-A6's
+  ordinary retry and ends "unavailable · only batch releases, and their files
+  could not be identified" — because a missing file is visible and fixable and
+  the wrong episode plays as though it were right. One batch serves several
+  wants: the other episodes somebody is waiting for that the release's own name
+  says it holds are selected in the same breath, a later episode of the same
+  show enables another file in the *same* torrent with no new search, and a
+  want withdrawn sets its file back to priority 0. An episode that was only
+  riding along and turns out not to be in the pack is left to its own search —
+  it is *the* wanted episode's file that has to be identifiable, not everyone
+  else's. An **airing** show takes none of this — its own week's release is
+  inside the newest 75 results — and a film or one-episode entry takes none of
+  it either. The whole exception is behind one admin switch, `batch_fallback`
+  (FR-D2, default on), which stops both halves: no new pack is taken and no
+  further file is enabled in one Arc already has, while a pack already
+  downloading finishes the episodes it was taken for.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -239,7 +287,11 @@ any time, and the owner uses it daily.
   forms, 0 results · next try 23:26", in the viewer's own timezone. A row that
   says only "searching" for six hours says nothing, and the pair of numbers is
   what separates a query that matches nothing from a filter that keeps nothing.
-  An unavailable row keeps its reason instead.
+  An unavailable row keeps its reason instead. An episode being served out of a
+  pack (FR-A11) shows **its own file's** percentage, never the pack's, and the
+  row says `from a batch` after the group and the resolution — which are the
+  pack's and are true of twenty-six episodes, so without the phrase they read
+  as a release of this one.
 - FR-A8 A user can ask for the first episode of any show as a sample from the
   show page, without changing their list or MAL. Only that one episode is
   fetched; it follows the same states, D-day drop (FR-T2) and retention
@@ -260,6 +312,20 @@ any time, and the owner uses it daily.
   have arrived, or once Arc has given up on finding them (FR-A6). A sample
   (FR-A8) never counts: it may add one episode beyond the cap, and is never
   refused by it.
+- FR-A11 A batch taken under FR-A4's exception is held as **one** torrent
+  record with no episode of its own and one file record per file, each carrying
+  the episode it holds, whether Arc asked for it, and its own progress. An
+  episode is complete when **its file** is; the torrent is complete when every
+  wanted file is, at which point it is **stopped and kept** so that a later
+  episode of the same show can be served from it, and **deleted with its
+  files** only when nothing it holds can be wanted again (every list entry for
+  the show completed, dropped or gone — an on-hold entry keeps the pack stopped)
+  or when retention has removed the last of them. A pack Arc gives up on while
+  it is holding a file the library already has is **stopped, not deleted**: that
+  file is an episode somebody may be watching, and those bytes are retention's
+  to remove per episode. Retention deletes a batch-backed episode's **file**, never the
+  torrent; the bytes an episode is charged with are its own file's, and the
+  size Arc reserves or reports for a batch is the sum of its **wanted** files.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -529,6 +595,17 @@ any time, and the owner uses it daily.
   grace anchor behind.
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired.
+- FR-T1/FR-T3 for a **batch-backed** episode (FR-A11): what is deleted is the
+  episode's **own file**, and the torrent is kept. The episode is charged the
+  bytes of that file and nothing else — never the pack's total, and never
+  another episode's file sitting in the same directory — so the rule above
+  decides one episode at a time exactly as it does for a single. Before the
+  file is removed Arc gives the claim back, so that the pack cannot fetch it
+  again for another episode's sake, and the pack itself is then kept, stopped,
+  or removed with its files by FR-A11's rule: retention of the last file of a
+  show nobody is following any more is what ends a pack's life. The record of
+  which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
+  no search at all — a later want is served from the same pack.
 - FR-T4 Admin can see disk usage and manually delete or re-fetch.
 - FR-T5 All of G, D, N are admin-configurable.
 - FR-T6 Acquisition holds itself while free space on the data volume is below
@@ -540,7 +617,13 @@ any time, and the owner uses it daily.
 - FR-D2 Acquisition rules (groups, resolution, N), retention (G, D), subtitle
   and audio language preferences. The per-show group/resolution overrides of
   FR-A3 are listed here too, and editable: change or remove one from the rules
-  tab, add one from the show's own page (M16, owner 2026-09-18).
+  tab, add one from the show's own page (M16, owner 2026-09-18). **Batch
+  fallback for finished shows** (`batch_fallback`, default on, M16, owner
+  2026-09-18) is edited here as well: it is the one switch that turns FR-A4's
+  batch exception (FR-A11) off, and with it off such an episode waits for a
+  single instead — no new pack is taken and no further file is enabled in one
+  Arc already has, while a pack already downloading finishes the episodes it
+  was taken for.
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
@@ -568,7 +651,7 @@ any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
 | Player | 1 | HLS player, autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
@@ -1216,3 +1299,173 @@ is and the grace period decides.
   allows, which leaves the free slot to the highest-priority other job.
   FR-P3's rule is unchanged: transcode priority is still how soon a user will
   reach the episode, and the queued encode keeps its place.
+- 2026-09-18 — **The batch schema landed ahead of its behaviour.**
+  `torrents.episode_id` is nullable with a `kind` column and a `CHECK` tying
+  them, plus `save_path`/`total_size`/`wanted_bytes` and a `torrent_files`
+  table, and the qBittorrent client gained the four calls a selective download
+  needs (`torrents/files`, `torrents/filePrio`, `torrents/start`, and a
+  multipart `torrents/add` that posts the `.torrent` itself, stopped). **No
+  requirement changed yet**: nothing writes a batch row, `acceptable()` still
+  rejects every batch by default, and singles take byte-identical paths. FR-A4's
+  amendment and FR-A11 are written when the behaviour that needs them is.
+- 2026-09-18 — **The batch search landed ahead of the batch download.**
+  `nyaa.acceptable` can classify a batch instead of rejecting it, but only when
+  asked (`batches=False` by default, so every existing caller, the whole query
+  corpus and every current rejection are unchanged), and `search_for_episode`
+  asks in exactly one place: a **`FINISHED`** entry, not a film, whose search
+  ended with **no acceptable single at all**. Those candidates go in
+  `Search.batches`, ordered by dub, then by how many of the show's wanted
+  episodes the release covers, then by FR-A3's four rules; the client gained
+  `torrent_file()` for the `.torrent` behind one of them. **No requirement
+  changed yet**: nothing fetches a batch, nothing writes a batch row, and a
+  candidate in a list is not a download. FR-A4's amendment and FR-A11 are
+  written with the task that makes them true.
+- 2026-09-18 — **A finished show with nothing but batches takes one, file by
+  file** (FR-A4 amendment + **FR-A11**, FR-D2, owner, M16). The requirements the
+  two entries above deferred are now written, because the behaviour that needs
+  them exists: where a `FINISHED` entry's search ends with **no acceptable
+  single at all**, `search_release` fetches the best covering pack's `.torrent`
+  from Nyaa, adds it as a **file** and **stopped**, sets every file to priority
+  0, sets the identified wanted files to 1, **reads the selection back and
+  verifies it**, and only then starts the torrent. There is no instant at which
+  an unwanted file is selected and the torrent is running, which is the whole of
+  the byte guarantee and the reason the file is added rather than the magnet
+  (`filePrio` is refused without metadata). A file is identified by the library
+  parser on its own basename: creditless openings, extras, samples, fonts and
+  `.nfo`s map to nothing, a file naming another show or another season is
+  dropped, and **exactly one** file for the searched episode is required — zero
+  or two and the pack is deleted from the client before it has fetched
+  anything, the next candidate is tried, and with none left the episode keeps
+  FR-A6's retry and ends "unavailable · only batch releases, and their files
+  could not be identified". One batch serves several wants: the other episodes of the show
+  somebody wants *and* the release's own name says it holds are selected in the
+  same request, and a later episode attaches to a pack Arc already has for
+  **zero** Nyaa requests; one that turns out not to be in the pack is left to
+  its own search. Airing shows, films and one-episode entries take none of it,
+  and `batch_fallback` (FR-D2, default on) turns the whole exception off — the
+  attach included.
+  The narrowing (2026-09-18) reaches the 2019 singles for many old shows; this
+  is for the ones where there are none.
+- 2026-09-18 — **The batch pick, after review** (FR-A4, FR-A11, FR-D2, M16).
+  Five corrections, and each of them is a thing that would have gone wrong on
+  production rather than a tidy-up. (1) The `torrents` row is now reserved
+  **before** any file priority is written, so that of two searches racing on one
+  pack the loser fails on its own insert instead of wiping the winner's
+  selection — with the old order it would have turned every file of a started
+  torrent back off and left an episode downloading nothing. (2) A file list the
+  client cannot describe in full is refused rather than silently shortened: a
+  dropped row was an index that never got turned off and never appeared in the
+  read-back, so it would have downloaded unseen. (3) The pack is **stopped
+  again** right after the add, because a client that already holds it — a crash
+  after the start, an operator's own add — reports success whatever state it is
+  running in. (4) The client has to confirm the **hash**, not just the success:
+  everything after the add is keyed on a string that came out of a feed. (5) An
+  episode that was only riding along and is not in the pack is dropped rather
+  than refusing the pack, which is what FR-A4's "where *the* wanted episode's
+  file cannot be identified" always said. Two things a user can see follow:
+  a pack Arc could not read is **remembered** (so the fortnight's retries stop
+  re-fetching it, and an episode that only ever *skipped* candidates keeps the
+  ordinary "no acceptable release found" reason rather than claiming Arc read
+  something), and `batch_fallback` now stops the **attach** as well as the pick
+  — an admin who turns it off means "fetch no more of this", and enabling
+  another file is fetching more, while a pack already downloading finishes the
+  episodes it was taken for.
+- 2026-09-18 — **A pack finishes one file at a time** (FR-A4, FR-A11, M16).
+  The second half of the batch exception, and it needed no new requirement: an
+  episode is complete when **its** file is, the pack is complete when every file
+  Arc asked for is, and it is then stopped and kept so the next episode of the
+  show is served from it for nothing — which is FR-A11 as written. What the
+  build settles is what the words meant in the three places they were quiet. A
+  pack that stalls or disappears gives up only the files that had **not**
+  arrived: the episode whose file is already in the library keeps it — and, on
+  the owner's call, so do the bytes. Giving up on a pack that has already handed
+  a file over **stops** it instead of deleting it with its files, because one of
+  its episodes can be playable while another's swarm dies, and deleting the lot
+  would leave a file record pointing at nothing; those bytes are retention's to
+  remove per episode. A pack is removed with its files when nothing it holds can
+  be wanted again — every list entry for every show in it completed, dropped or
+  gone, or nothing in it identifiable — and an **on-hold** entry is not that
+  (owner): it means "fetch no more of this", which is a different question, and
+  a paused viewer comes back to a stopped pack whose unwanted files are on
+  nobody's disk. And a file an admin turns off in qBittorrent's own Web UI is
+  left off, with a line in the log: Arc asking for those bytes again once a
+  minute would be overruling a person about their own disk.
+- 2026-09-18 — **Cancel, reject and retention on a shared pack** (FR-A4,
+  FR-A11, FR-T1, FR-T3, M16). The third and last quiet corner of the batch
+  exception, and every case in it has the same shape: the ending a single takes
+  would delete a torrent several episodes share, **with its files**. So a
+  batch-backed episode gives back its own file record and nothing else, and one
+  job writes the new selection and decides the pack's fate. A **cancelled**
+  want turns its file off and leaves the torrent exactly where it is — the pack
+  is never marked cancelled, because that mark is an instruction to delete with
+  files — and the file keeps the episode written on it, so changing your mind a
+  minute later is served from the same pack with no search. **Retention**
+  deletes the episode's own file and keeps the torrent, charges the episode its
+  own bytes, and gives the claim back *before* unlinking, so a pack started
+  again for another episode cannot re-fetch what was just removed; the pack is
+  then kept, stopped or deleted by FR-A11's one rule, which is how sweeping the
+  last file of a show nobody follows any more does end a pack's life. A file a
+  person **rejects** in review is the one case where the record is cleared as
+  well as turned off: the episode goes "unavailable · downloaded file was not
+  this episode" exactly as a single's would, and clearing the episode off that
+  file is the pack's version of what marking a single rejected does — the
+  fortnight of retries must not be handed the identical file back every day.
+- 2026-09-18 — **The poll reconciles a pack's selection, and two client states
+  are a failure** (FR-A4, FR-A11, FR-A6, M16; reviewer, confirmed by the
+  orchestrator). Two changes to what was written above, both of them because
+  the earlier rule was about the case that looks the same and is not. **A file
+  whose selection in the client disagrees with Arc's record — in either
+  direction — is now written again**, with the warning kept. This supersedes
+  "a file an admin turns off in the Web UI is left off": Arc cannot tell that
+  admin apart from its own dropped instruction, and the dropped instruction is
+  real — a re-selection queued while one is already running for the same pack is
+  deduplicated away, so a want withdrawn in that second is never carried out and
+  the running job writes the answer from before it. Left alone, the client and
+  Arc's record disagree for ever, which means bytes nobody asked for arriving or
+  an episode waiting on a file that will never be fetched. The poll settling it
+  once a minute is what makes that self-correcting, and an admin who wants a
+  file left alone has Arc's own controls for it. And **a download the torrent
+  client itself reports as errored or as having lost its files is treated as a
+  failed attempt**, immediately rather than after a waiting period: it takes
+  FR-A6's ordinary retry and says so on the show page (FR-A7), because a
+  different release may work where that one did not. This was always the right
+  reading and is now reachable in an ordinary way — retention deleting one
+  episode's file out of a pack that is still downloading others is exactly how a
+  client ends up reporting missing files.
+- 2026-09-18 — **A pack says so on the show page, and its percentage is its
+  own file's** (FR-A7, FR-A11, FR-D3, M16). The last piece of the batch
+  exception, and the only one a viewer meets. An episode being served out of a
+  pack shows **its own file's** percentage: the pack can be 93 % done while this
+  episode's file has barely started, and a bar reading the torrent's number
+  would be measuring somebody else's episode. The release beside it is the
+  *pack's* — its group, its title, its resolution, all true of twenty-six
+  episodes — so the row adds `from a batch`, without which "[Judas] · 1080p" on
+  episode 7 reads as a release of episode 7 and a bar that moves in a different
+  direction from the torrent's reads as broken. A claim given back (cancelled,
+  rejected, swept) stops answering for the episode at once. For an admin the
+  same rule in the other direction: the qBittorrent panel says which rows are
+  packs, reads a pack's null episode as "several" rather than "not linked", and
+  reports the bytes Arc **asked for** — the payload figure is on no API at all,
+  because it is not a number any rule, log or reservation in Arc may read
+  (FR-A11), and a panel that showed 14.8 GB beside a 1.1 GB download would be
+  the one place it leaked back in. The retention preview names the claims it
+  would give back beside the bytes it would free, since "one file record
+  released" is the part of a batch-backed deletion that is not bytes and is
+  what stops the pack fetching the file again a minute later.
+- 2026-09-18 — **The batch fallback had to ask for the pack** (FR-A4's
+  amendment, M16; a correction of the same day, no requirement changed). The
+  first build of the exception re-read the pool the numbered forms had already
+  merged and claimed it cost no extra request. It cost none and found none:
+  every query form carries the episode number, no batch release name carries
+  one, and Nyaa matches whole words — so a numbered search's results hold no
+  packs at all. Checked against the live feed: *One Week Friends* episode 3,
+  16 results, **0** batches; *Chivalry of a Failed Knight*, 13 and 0; *Dagashi
+  Kashi 2*, 10 and 0. The one case that looked like it worked, *Kimetsu no
+  Yaiba* episode 10, matched only because `10` is a token of `1080p`. So a
+  finished show with no single now asks up to **three** more queries with no
+  number on them — the season-stripped title bare, that title with `BATCH`,
+  and the english title with `BATCH` — deduplicated against the forms already
+  asked, counted against the same twenty-request per-episode ceiling, and
+  asked **last**, after the group narrowing has had the budget, because the
+  narrowing is looking for a single and a single beats every pack. An airing
+  show, a film and a search that found a single ask none of them.

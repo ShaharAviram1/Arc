@@ -391,10 +391,11 @@ strip, so nothing on the page moves when they appear.
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
 | `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list) |
-| `torrents` | id, episode_id, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, added_at, completed_at |
+| `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, added_at, completed_at |
+| `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
-| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
+| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 | `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
 | `offline_ids` | id (surrogate PK), anidb_id, anilist_id (indexed), mal_id (indexed), kitsu_id, tmdb_tv_id, tmdb_movie_id, tmdb_season, tvdb_id, tvdb_season, imdb_id (the first when the entry carries several), type. Fribb's `anime-lists`, and the only route from an Arc show to a **TMDB** id — AniList publishes none. An entry with neither an AniList nor a MAL id is dropped on import: nothing could ever reach it |
 | `offline_imports` | source (PK: `manami` \| `fribb`), version (manami's release tag out of the header's `$schema`; Fribb's `ETag`/`Last-Modified`/download date), imported_at, rows, checksum (sha256 of the downloaded file — an unchanged file skips the parse and the replace entirely) |
@@ -557,7 +558,15 @@ stores — which rows a reader has dismissed — lives in that browser's
   on completion → `downloaded`, largest video file under the mapped host
   directory is ingested with `expected=[anime_id, number]` so the matcher's
   prior applies → `matching` → `matched` via `link()`. A torrent that
-  vanished from the client → `unavailable` "removed from client".
+  vanished from the client → `unavailable` "removed from client". A **second
+  loop** in the same handler does the same for a batch one file at a time, off
+  the same `torrents/info` answer (FR-A11, the batch bullet below).
+- `qbit_reselect` (per torrent, priority 60, FR-A11): the only writer of a
+  batch's file selection and run state after the pick — `torrents/files`,
+  `filePrio` 0 then 1 from the rows, then start / stop / delete-with-files per
+  `batch.disposition()`. Queued by `claim_existing`, the reconciler's cancel,
+  retention and a rejected member; a job for the two reasons `qbit_cancel` is
+  one (the batch bullet below).
 - **Stalls (FR-A6, 2026-09-13).** The same handler gives up on a torrent that
   is going nowhere, which before this it never did: `poll_qbit` reacted only to
   a torrent that had *vanished*, so a dead magnet held one of qBittorrent's
@@ -655,6 +664,243 @@ stores — which rows a reader has dismissed — lives in that browser's
   the episode takes the ordinary "no release yet" path and looks again
   tomorrow. Paired with the filter's new 0-seeder rejection (§6, Nyaa row):
   zero seeders is not a worse candidate, it is a file that cannot be fetched.
+- **Batch with selective download (FR-A4/FR-A11, owner 2026-09-18).** After the
+  title forms and the group-narrowed forms, **only for a `deep_search` entry**
+  and **only when `Search.ranked` is empty** — no acceptable single at all, a
+  stricter bar than the narrowing's "fewer than three" — **the pack is asked
+  for**: `nyaa.batch_queries` builds up to three more forms with **no episode
+  number on any of them** — `<romaji base>`, `<romaji base> BATCH` and
+  `<english base> BATCH` — de-duplicated against the forms already asked, each
+  an ordinary paced and cached request counted in `Search.requests` and never
+  in `Search.forms`, and all of them inside the same `MAX_REQUESTS` (20)
+  ceiling as everything else. This is a **correction of 2026-09-18**: the first
+  version re-read the merged pool and claimed it cost no request, which was
+  true of *Kimetsu no Yaiba* episode 10 by accident — `10` is a token of
+  `1080p`, so its packs matched a numbered query — and wrong of every other
+  show. Every form the query builder makes carries the episode number, no batch
+  release name carries one, and Nyaa ANDs the words of a query, so a numbered
+  search's pool holds **no batches at all**: verified against the live feed,
+  *One Week Friends* episode 3 returned 16 results and 0 batches, *Chivalry of
+  a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and 0. The extra forms come
+  **last**, after the narrowing has had the budget, which is the right way
+  round — the narrowing is looking for a single and a single beats every pack.
+  The three are **reserved**, though (owner, 2026-09-18): the narrowing stops
+  once `requests` reaches `MAX_REQUESTS - MAX_BATCH_QUERIES` (17), so a show
+  with ten title forms and eighteen narrowed ones asks seven of them and then
+  the three packs rather than spending the whole budget on a single that is
+  not there — which was exactly the show likeliest to have nothing but packs.
+  A film keeps the plain ceiling, since it never asks for a pack, and an
+  airing show never narrows at all. The worst case per episode is unchanged at
+  20 requests. `nyaa.filter_items(…, batches=True, only_batches=True)` then
+  reads the whole pool and `rank`
+  orders them by dub, then by how many of the show's **attachable** episodes
+  (the set defined below) the release's span covers, then by FR-A3's four
+  rules. A batch that
+  names no range at all is a candidate whose coverage is settled from its
+  contents rather than its name — the one thing FR-A4 could not do before.
+  `search_release` then, per candidate in rank order and skipping any hash that
+  already has a `torrents` row (`_pick`'s rule): fetches the `.torrent`
+  (`NyaaClient.torrent_file` — one paced request, the URL **and the URL the
+  answer came from** on nyaa's own host, `Content-Length` and body ≤1 MiB, must
+  begin `d`) → `torrents/add` **multipart with the file**, `stopped=true`,
+  savepath `downloads/batch/<hash>`, and the client must confirm the **hash**
+  (in 5.x's `added_torrent_ids`, or `has()`) rather than merely the success,
+  since everything after this is keyed on a string that came out of a feed →
+  **`batch.reserve_batch`: the `torrents` row, flushed, before one priority is
+  written** → `torrents/stop` (idempotent belt and braces: `add_file` reports
+  success for a torrent the client already holds *in any run state*) →
+  `torrents/files` → `batch.plan_files` maps each file to an episode with
+  `library/parser.parse` on the **basename** (the release name already carried
+  the show's identity, so a file only has to carry a number; directory
+  components are not evidence, and what saves a franchise pack's `Season 2/-
+  01.mkv` is the exactly-one-claim rule rather than its directory;
+  `nc`/`batch`/`movie`/`special`/`unknown` and non-video files map to nothing;
+  the absolute offset of §5.1a applies through `batch.plan_offset` — the
+  candidate's own offset for a pack that named a range, so a per-season pack is
+  read per-season, and the **entry's** offset for a pack that named none, which
+  is the shape a complete-series rip of an absolutely numbered sequel comes in;
+  **exactly one** file for *the* searched episode or the batch is refused, while
+  a free rider the pack does not hold is dropped with a log line) →
+  `filePrio priority=0` for **every** index, then `priority=1` for the wanted
+  ones → `torrents/files` **read back and verified**
+  (`batch.verify_selection`: nothing selected that was not asked for, nothing
+  asked for left off, and the names, sizes and count unchanged) →
+  `torrents/start`. Adding the file rather than the magnet is the whole of the
+  byte guarantee: `filePrio` is refused while the client has no metadata, so the
+  magnet route has a window and this one has none — **no unwanted file is
+  downloaded**, pieces straddling a file boundary being the only overlap and
+  never written as a file. **Reserving before selecting is what the race turns
+  on**: two searches for two episodes of one finished show both get past the
+  hash check (neither has committed), and with the old order the loser would
+  have run `filePrio 0` over every index of a torrent the winner had already
+  selected and started; now its insert raises `batch.BatchTaken` before it
+  touches the client's selection, the job retries and `claim_existing` attaches
+  it to the winner's pack. A refusal deletes the torrent, which has fetched
+  nothing, and **what it remembers depends on whether the answer could change**:
+  files that could not be identified, a listing the client could not describe in
+  full, more files than `MAX_TORRENT_FILES`, or a blob whose hash was not the
+  advertised one keep the row as a `qbit_state = 'unreadable'` tombstone
+  (`batch.mark_unreadable`, in `DECIDED_STATES`) so the same pack is not fetched
+  and read again every six hours for every episode of the show; a read-back the
+  client disagreed with, an empty listing and a `.torrent` Nyaa would not hand
+  over leave no row at all. An *exception* from the client propagates — the
+  runner retries, `add_file` is idempotent, and a stopped torrent with no
+  selection is holding nothing in the meantime. Which episodes a pack is taken
+  for is `batch.targets`: the one being searched for, plus every other episode
+  of the show that has a live want, is **`wanted`** (not `searching` — that one
+  has a `search_release` of its own on the other slot and could end up with a
+  single *and* a batch claim), holds no other live claim, **and** is inside the
+  span the release's own name claims — so a pack of 1–12 is never refused for
+  failing to hold episode 20, and the second want costs one more index in a
+  request Arc was making anyway. The same set is what `rank`'s `covered_wanted`
+  counts, so a pack is never preferred for covering an episode it will not be
+  asked to serve. `batch.claim_existing` is checked **before Nyaa is asked at
+  all**, so episode 11 attaches to episode 10's batch for zero requests: it
+  turns the `torrent_files` row on, **clears the row's `progress` and
+  `completed_at`** (what was known about the last copy of this file is not known
+  about the one being asked for now — kept, they would tell the job there is
+  nothing to fetch, tell the poll the pack is settled and tell the hand-off to
+  look for a file retention has deleted), takes `searching → downloading`
+  (through `searching` where the episode was only `wanted` — the state machine
+  grows no shortcut for this) and enqueues `qbit_reselect`; it will not attach
+  to a
+  torrent in `DECIDED_STATES` **or** `missing`, since neither is going to
+  complete another episode's file. `ux_torrent_files_one_wanted_per_episode`
+  resolves the other direction of the race. Every later change to a batch's
+  selection goes through the **`qbit_reselect` job** (priority 60, deduplicated
+  per torrent), for the same two reasons `qbit_cancel` is a job — the reconciler
+  and the sweep must not hold a transaction across an HTTP call, and an
+  unreachable client must not fail them. **The rows are its instruction and the
+  payload is only which torrent**, which is what makes it idempotent and its
+  per-torrent dedupe key right: two episodes of one pack changing in the same
+  moment is one selection to write. It writes nothing at all unless the client's
+  listing still matches the rows (`batch.listing_mismatch` — same count, same
+  name at each index; a disagreement is an `ERROR` and a no-op, because
+  `filePrio` takes an index and nothing else, so 1 written against a moved
+  listing fetches a file nobody asked for), then `priority=0` for the rows now
+  off **before** `priority=1` for the ones now on (fewer selected in between,
+  never more), then `batch.disposition()`: **KEEP** → `torrents/start`, or
+  `torrents/stop` where every wanted file is already in (there is nothing to
+  fetch and Arc does not seed); **STOP** — nothing wanted now, but a file maps
+  to an episode of a show somebody still has `watching`, `planned` **or
+  `on_hold`** (`batch.LIVE_STATUSES`, spelled out rather than imported since the
+  reconciler will import this module, and deliberately *wider* than
+  `wants.WANTING_STATUSES`: that set answers "fetch more of this?", to which an
+  on-hold show is no, and this one answers "could this ever be wanted again?",
+  to which a paused viewer is yes — owner, 2026-09-18) → `torrents/stop`
+  and the row is **kept**, so the next episode of that show attaches to it for
+  zero Nyaa requests; **DELETE** — every such entry completed, dropped or gone,
+  or no file maps to an episode at all (a pack the parser could make
+  nothing of, or whose episodes have left the catalogue) →
+  `torrents/delete(deleteFiles=true)` and the `torrents` row goes with
+  `torrent_files` cascading, deleted rather than kept as a tombstone because
+  there is nothing *wrong* with this pack and barring it from a future pick
+  would be `qbit_cancel`'s own mistake. `disposition` is one function because
+  four paths take a file away — a want withdrawn, a want attached, retention,
+  a rejected member — and each knows only why its own file went. **How those
+  paths take it away is `acquisition/claims.py`** (2026-09-18): three functions
+  — `live_claim`, `release_files`, `enqueue_reselect` — in a module that reaches
+  nothing but the models and the queue, because the reconciler, the review's
+  reject and the retention deleter all need them and all three are imported
+  from packages `batch` itself reaches through the parser and the ranker, so a
+  module-level import of `batch` from any of them closes a catalogue → library
+  → acquisition circle. `wants.cancel_if_unwanted` takes a **new branch before
+  its two writes**: an episode whose live claim is a `torrent_files` row
+  un-wants that row, takes the same `downloading → not_wanted` edge, enqueues
+  `qbit_reselect` and leaves `torrents.qbit_state` alone — a batch is never
+  marked `cancelled`, because that mark is `qbit_cancel`'s mandate and
+  `qbit_cancel` deletes with files. `qbit_cancel` itself is unchanged and cannot
+  reach a pack (it selects on `episode_id` *and* `cancelled`, and a batch row
+  matches neither), so the cancel job the reconciler queues alongside simply
+  finds nothing. The single path is byte for byte what it was, and
+  `release_if_unwanted` is untouched — it only acts on states with no bytes.
+  `samples.cancel_sample` inherits all of it through the same two helpers.
+  `reject.reject_download` gains the mirror branch: `episode_id_of` answers
+  `None` for `downloads/batch/<hash>/…` by design, so `batch_member_of` reads
+  the `(info hash, path inside the torrent)` pair out of the same layout and
+  finds the one `torrent_files` row it names; the episode goes `unavailable`
+  with `WRONG_FILE` exactly as today, the shared torrent is **never** marked
+  `rejected` (that would strand every other episode's file), and this is the one
+  caller that also **clears `episode_id`** on the row — the batch's equivalent
+  of what `rejected` does for a single, without which FR-A6's fortnight of
+  retries would be handed the identical file back by `claim_existing` every day.
+  Cancel and retention keep it, which is what makes changing your mind free.
+  Retention is §5.7. The stall rules
+  are **unchanged**: the
+  torrent is started only after its selection is written, so it never sits in
+  `metaDL` and `time_active` clocks it exactly as it clocks a single.
+  `settings.batch_fallback` (bool, default true, FR-D2) is the kill switch and
+  gates **both** the pick and the attach — enabling a file in a pack Arc already
+  holds is still fetching more — while a pack already downloading finishes the
+  episodes it holds claims for; off, every other path is byte-identical. The log
+  line `batch chosen` carries the files, the wanted count, the free riders the
+  pack did not hold and `wanted_bytes` beside `total_size` in human units ("28
+  files, 1 wanted, 0.4 GB of 10.9 GB"), which is the sentence that proves
+  FR-A4's spirit is intact; an episode whose candidates were all *skipped*
+  rather than read keeps FR-A6's ordinary reason rather than claiming Arc could
+  not identify anything. **The poll finishes a pack one file at a time.**
+  `poll_qbit` keeps its original query for singles — `WHERE episode_id IS NOT
+  NULL`, which the inner join already said, so that loop is byte for byte what
+  it was — and adds a **second loop** over the batch rows (`kind = 'batch'` and
+  no `qbit_state` Arc has decided about, `stalled` deliberately included so an
+  undelivered delete is retried as a single's is), both reading the same one
+  `torrents/info` answer. There an episode is complete when **its file** is:
+  one `torrents/files` per *in-flight* pack writes `torrent_files.progress` per
+  index (matched by `file_index`, the client's own numbering, never by
+  position), and a wanted file crossing `COMPLETE_PROGRESS` gets `completed_at`
+  and takes the **ordinary** hand-off for its own episode —
+  `host_path(torrents.save_path + '/' + torrent_files.path)` rather than
+  `largest_video`, which inside a pack is another episode — then `downloading →
+  downloaded → matching` and `expected = [anime_id, number]` exactly as a single
+  does, with no new state-machine edge anywhere. The hand-off is driven by the
+  **row** rather than by the listing, so a file that is complete but not yet
+  readable leaves its episode at `downloaded` and is retried on the next poll
+  with no further request. A **settled** pack — every wanted row complete and
+  the client reporting it stopped (`jobs.SETTLED_STATES`, 5.x's two names and
+  4.x's two) — makes **no** `torrents/files` call at all, so a shelf of finished
+  packs waiting to serve the next episode costs nothing per minute. A pack is
+  complete when every **wanted** file is: `torrents.completed_at` is set and it
+  is **stopped and kept**, whatever `QBIT_SEEDING` says (that switch is about
+  giving something back; this is a torrent with nothing left to fetch) and never
+  deleted here. The two failures are the single's, applied to the rows rather
+  than to one episode: `stall_reason` is unchanged and reads the pack's own
+  `torrents/info` row, and a pack that has vanished from the client is the same
+  statement one step on — either way it is the **wanted and not yet complete**
+  rows that are un-wanted and whose episodes go `unavailable` with the stall
+  sentence or "removed from the torrent client", while a file already handed off
+  is left exactly as it is (its episode is past `downloading`). The un-want is
+  not bookkeeping: `ux_torrent_files_one_wanted_per_episode` allows one live
+  claim per episode, so a row left wanted against a dead torrent would refuse
+  that episode its next pack. **A stall deletes with files only what the library
+  is not already using** (owner, 2026-09-18): for a single "the files go with
+  the torrent" is safe because the only file is the one that never arrived, but
+  one of a pack's episodes can be `ready` and playing while another's swarm
+  dies, and `deleteFiles=true` would take that file out from under the library
+  and leave a `media_files` row pointing at nothing. So a pack holding **any**
+  row with `completed_at` is *stopped* and kept with its `stalled` row — those
+  bytes are retention's per-episode decision (FR-T1) and `disposition`'s — and
+  only a pack that has handed nothing over goes through the same
+  `DELETE_ON_SIGHT` delete the singles use. The same is re-decided on every
+  later poll, since a `stalled` row stays in the query. And **the poll is the
+  reconciler for a pack's selection** (2026-09-18, superseding "a file switched
+  off in the Web UI is left off"): any file whose `wanted` disagrees with what
+  the client says is selected is logged at `WARNING` and the pack is queued for
+  `qbit_reselect`, whose instruction is the rows. The direction that forces it
+  is not the operator's but Arc's own — `enqueue` deduplicates against
+  **running** jobs as well as pending ones, so a want changing while a
+  re-selection is mid-flight is dropped and the running job writes the stale
+  answer with nothing left in the queue to correct it. One query a minute makes
+  that self-healing, and it costs a file an operator turned off by hand being
+  turned back on, with a line in the log saying so.
+- **Stalls, errors and missing files.** `stall_reason` also treats the client's
+  own `error` and `missingFiles` states as a stall (2026-09-18), with no
+  threshold — they say the client has stopped, not that it is making slow
+  progress — and with FR-A6's ordinary retry behind them, because a different
+  release may work where this one did not. A finished torrent is still never a
+  stall whatever state it is in. Reachable for a single all along and made
+  likely by packs: retention unlinking one episode's file out of a pack the
+  client is still running is exactly how a torrent reaches `missingFiles`, and
+  every other episode in it would otherwise wait in `downloading` for ever.
 - **Cancelling (2026-09-13).** The reconciler's release step has a second half.
   `wants.release_if_unwanted` returns a `wanted`/`searching`/`unavailable`
   episode to `not_wanted`; `wants.cancel_if_unwanted` does the same for a
@@ -791,11 +1037,23 @@ stores — which rows a reader has dismissed — lives in that browser's
   (`Mob Psycho 100 - 07`) out. The last two conditions apply to anitopy's own
   range answers as well, not only to the pattern. A run anitopy cannot read
   (`01〜12`) is also removed from the title, by a pattern built from the two
-  numbers the file was found to hold, so *86* and *07-Ghost* keep their names. A batch never reaches disk by acquisition (§6) and, when one arrives
-  through `manual/`, goes to review; the individual files *inside* a batch
-  directory are ordinary episode names and parse as episodes.
+  numbers the file was found to hold, so *86* and *07-Ghost* keep their names. A
+  file that is itself a multi-episode blob goes to review whether it arrived
+  through `manual/` or, since FR-A11, out of a pack Arc took deliberately; the
+  individual files *inside* a batch directory are ordinary episode names, parse
+  as episodes, and are matched by the ordinary rules.
 - Candidates: expected-episode prior (Arc-downloaded files; applied as a
-  bounded bonus so it can never beat a title that says otherwise), fuzzy
+  bounded bonus so it can never beat a title that says otherwise; **two
+  sources since FR-A11**, and the same weight for both — the hand-off passes
+  `expected` in the `match_file` payload, and `library/jobs._expected_episode`
+  re-derives it for a suggestion asked days later from the review page, where no
+  payload could carry it: a single's from its save path
+  (`downloads/<episode id>/`, `reject.episode_id_of`) and a pack member's from
+  the `torrent_files` row that names it (`reject.batch_file_of`), since
+  `downloads/batch/<info hash>/` is named for the torrent precisely so that no
+  id can be read out of it. A row's `episode_id` is the filename parser's
+  reading at pick time: a prior, never a link, so a member whose own name says
+  another show still goes to review), fuzzy
   search over the local cache, then (M15.5) the **offline catalogue** — up to
   `OFFLINE_HITS` = 12 hits, materialised as `anime` rows — and a live catalogue
   search (AniList → MAL) **only when the offline search returned nothing**.
@@ -1538,6 +1796,36 @@ outage skips that episode for this sweep only. Admin:
 `POST /api/episodes/{id}/delete-files`; `retained_bytes` on
 `GET /api/acquisition/status`.
 
+**A batch-backed episode (FR-A11, 2026-09-18) needs almost no code here, and
+that is the design rather than luck.** Its file lives in
+`downloads/batch/<hash>/`, so `downloads/<episode id>` does not exist and the
+file lands in `Targets.loose_files` — unlinked one file at a time and charged
+at its own `media_files.size`, which is per-episode accounting already correct.
+Its `torrents` row has a **null `episode_id`**, so `Targets.torrent_hashes` is
+empty and the delete-with-files above cannot reach the pack: *delete the file,
+keep the torrent* falls out of the data model. The two additions are
+`Targets.torrent_file_ids` — the claims, named by the preview and the dry run,
+loaded set-based in `_facts` like every other fact; the preview sends their
+count per row as `torrent_files` and the admin Storage tab adds them up into one
+line, "N batch file claims released", beside the bytes — and one step in
+`delete_episode_files`, **before anything is unlinked**: the rows are un-wanted
+(`claims.release_files`) and a `qbit_reselect` is queued per torrent, because a
+pack started again for another episode would otherwise re-fetch exactly what
+retention just removed. `episode_id` is **kept** on the row, so FR-T3's
+"re-acquired" is `batch.claim_existing` with no Nyaa request at all. What
+becomes of the pack is `batch.disposition` inside that job and nowhere else:
+KEEP while another episode still wants a file, STOP while some show it holds is
+watching/planned/on-hold, DELETE with its files otherwise — which is how
+sweeping the *last* file of a finished show removes a torrent that retention
+never names. `retained_usage` is unchanged: it sums `media_files.size` joined
+to the episode, which for a pack is the one file. **What retention cannot see
+is a cancelled member's partial bytes**: a want withdrawn mid-download leaves
+whatever had arrived inside `downloads/batch/<hash>/` with no `media_files` row
+naming it and no episode to charge it to, so it sits there until the pack itself
+reaches DELETE — which for a show somebody keeps on their list may be never (an
+M17 sweep of unclaimed files under `downloads/batch/` is the fix; the bytes are
+bounded by what one un-finished file had fetched).
+
 ### 5.0 Catalogue sources and fallback (M3b)
 - `CatalogSource` protocol: `search(q, page)`, `by_anilist_id(id)`,
   `by_mal_id(id)`, `season(year, season)`; implementations `AniListSource`
@@ -2065,7 +2353,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/catalogue/offline` | admin | offline-catalogue import status (M15.5, §5.0a): `{sources: [{source, version, imported_at, rows, checksum}] (newest first), stale, anime_rows, id_rows}`. `stale` is manami's alone — the id map without the titles is not a catalogue — and is true when it has never been imported or is older than `OFFLINE_CATALOGUE_STALE_DAYS`. Reads three counts and nothing else; the import itself is a job |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert. The revert writes `updated_by=arc`, `mal_dirty=true` and stamps `activated_at` if null (FR-A9: it is FR-M7's third user-originated event), on the entry it recreates as well as the one it edits |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column), and `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column). The episode's `release` carries `batch: true` when it is one selected file of a pack (FR-A11), and its `download_progress` is then **that file's** and not the pack's: the same `episode_extras` pass resolves a batch-backed episode through the `torrent_files` row that still claims it (one more query for the whole list, never one per episode), so the group and the title a row shows are the pack's — true of every episode in it — and the flag is what keeps the client from rendering them as a release of this one. A claim given back (cancelled, rejected, swept) stops answering for the episode at once, leaving its own `torrents` row, if it ever had one, to answer for it. And `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
@@ -2081,11 +2369,11 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
-| `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight) |
+| `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released" |
 | `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, total}, episodes_retained}` — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows `paused`, active wants, searching, downloading, `retained_bytes`, plus (2026-09-13) `storage_held`/`free_bytes`/`min_free_bytes` — FR-T6's guard, read from the same measurement and the same `storage_hold` rule the guard itself uses, with an unmeasurable path reading as zeros and *not* held — `dormant_entries`, the count of `watching`/`planned` entries with `activated_at IS NULL` whose show is not `RELEASING` (FR-A9), and `waiting_shows`/`slot_cap_k` — FR-A10's cap, the (user, show) pairs it is holding back right now and K itself, counted by the reconciler's own `wants.slot_totals(session)` (one pass over every list, K returned with the count) so the panel cannot disagree with the next tick. No upstream call |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
-| `GET /api/acquisition/qbit` | admin | `{reachable, version, error, torrents[{hash, name, state, progress, size, dlspeed, upspeed, episode_id}]}`. The only route that calls qBittorrent inside a request (`app/version` + `torrents/info?category=arc`, read-only, `asyncio.timeout` bounding the **whole probe** at 5 s — the client logs in and retries a 403 once, so a per-request budget would be six of them) and the only one that **never fails**: down, wrong password or unconfigured is `reachable: false` with the reason in `error`, because that is the answer the admin came for. `episode_id` comes from Arc's `torrents` rows, not from the client's tags |
+| `GET /api/acquisition/qbit` | admin | `{reachable, version, error, torrents[{hash, name, state, progress, size, dlspeed, upspeed, episode_id, kind, wanted_bytes}]}`. The only route that calls qBittorrent inside a request (`app/version` + `torrents/info?category=arc`, read-only, `asyncio.timeout` bounding the **whole probe** at 5 s — the client logs in and retries a 403 once, so a per-request budget would be six of them) and the only one that **never fails**: down, wrong password or unconfigured is `reachable: false` with the reason in `error`, because that is the answer the admin came for. `episode_id` comes from Arc's `torrents` rows, not from the client's tags — and so do `kind` (`single`/`batch`, null for a torrent Arc has no row for) and `wanted_bytes` (the files Arc asked for, recorded at pick time; null for a single, whose wanted bytes are its whole payload). A batch's `episode_id` is always null, which is why `kind` is worth sending: it is what tells an admin that a row belonging to no episode is a pack rather than somebody's own download. `size` needs no adjustment for one — `torrents/info`'s `size` is already the **selected** files' — and `total_size` is deliberately on no API at all, because a pack's payload is not a figure any rule, log or reservation may read (FR-A11) |
 
 ## 6. External integrations
 
@@ -2093,8 +2381,8 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|---|
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). **Interactive calls do not wait on 429**: the app's catalogue is built with `wait_on_rate_limit=False` (`create_catalog`), so a 429 on a search or a show page raises `SourceRateLimited` at once and falls straight through to MAL/offline instead of holding the request open — and, being a burst limit rather than an outage, it leaves the breaker closed, only noting a per-client "rate-limited until" so the next interactive call inside the window skips AniList without a request. The worker's `catalog_for()` keeps the wait. Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
-| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry, ≤20 requests per episode | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then — only where `absolute_offset` answered **and** the season marker left a shorter base behind — the **absolute pair** `<season-stripped base> - <N+offset>` and the dashless `<base> <N+offset>` (§5.1a: SubsPlease numbered *Jujutsu Kaisen* season two 25–47, and it writes the romaji franchise name, which is why the pair sits ahead of every english form; an unmarked sequel whose base *is* its whole title gets neither form, since nine words plus a running number is a query with no answer, and only a **finished** prequel chain produces an offset at all), then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. **A finished show that found too little is asked again by group** (2026-09-18). The RSS feed **cannot be paged**: `&p=2` and `&p=3` answer byte for byte what `&p=1` answers, and so do `s=`/`o=` — only the HTML listing paginates, verified against the live feed. So the 75 newest matches of a form are all a form can ever see, and for a finished show whose franchise kept going they *are* the franchise: *Kimetsu no Yaiba* (2019, FINISHED, sequels) episode 10 came back under seven forms as 91 merged results with **no season-one single among them** — season 4, season 5, an Infinity Castle rip, remakes and batches, all correctly rejected — because season one's uploads are from 2019 and everything the franchise has done since sits in front of them. Since Nyaa ANDs every word of a query, the fix is a narrower query rather than a deeper one: `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items including the 2019 single at 5–8 seeders. So **after** the title forms have run, **only for an entry the catalogue calls `FINISHED`** (`nyaa.deep_search`; a null status reads as not-finished) and **only while the merged pool holds fewer than `ENOUGH_CANDIDATES` (3) acceptable releases**, `nyaa.group_queries` asks `<form> <group>` for the **top three title forms only** — romaji `- NN`, english `- NN`, romaji `SxxEyy`, the three shapes a group's own upload has — times the groups: `rules.preferred_groups` first (per-show override already merged by `load_rules`), then `DEEP_SEARCH_GROUPS = ("HorribleSubs", "SubsPlease", "Erai-raws")`, de-duplicated case-insensitively so a preferred SubsPlease is not asked twice. The order is **form-major** (all groups of the romaji form, then the english one, then `SxxEyy`), because the form is the stronger signal. Each narrowed form is one ordinary paced and cached RSS request; the narrowing stops at three candidates, and `MAX_REQUESTS` (20) is the ceiling on title and narrowed forms **together** — ten titles plus three forms × six groups would be 28. Narrowed forms do **not** count against `MAX_QUERIES` (that cap is the budget for ways of writing the *title*) and are counted in `Search.requests` rather than `Search.forms`, so the episode row's "N forms" keeps meaning what it has meant since M6 while `search_release`'s log line carries both. An **airing** show asks no narrowed form at all: its weekly release is inside the newest 75. The three groups are a hard-coded claim about who uploads anime and are the part of this worth revisiting; an admin's own `preferred_groups` is where a fourth name belongs. Items parsed with the same filename parser; kept only when kind=episode, episode number equal — **or equal to `N + offset` on a release that names no season at all**, the absolute rule of §5.1a, which is then dropped outright if any season-marked candidate for the same episode also survived — title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked** (FR-A4): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected (§10). |
-| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
+| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry, ≤20 requests per episode | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then — only where `absolute_offset` answered **and** the season marker left a shorter base behind — the **absolute pair** `<season-stripped base> - <N+offset>` and the dashless `<base> <N+offset>` (§5.1a: SubsPlease numbered *Jujutsu Kaisen* season two 25–47, and it writes the romaji franchise name, which is why the pair sits ahead of every english form; an unmarked sequel whose base *is* its whole title gets neither form, since nine words plus a running number is a query with no answer, and only a **finished** prequel chain produces an offset at all), then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. **A finished show that found too little is asked again by group** (2026-09-18). The RSS feed **cannot be paged**: `&p=2` and `&p=3` answer byte for byte what `&p=1` answers, and so do `s=`/`o=` — only the HTML listing paginates, verified against the live feed. So the 75 newest matches of a form are all a form can ever see, and for a finished show whose franchise kept going they *are* the franchise: *Kimetsu no Yaiba* (2019, FINISHED, sequels) episode 10 came back under seven forms as 91 merged results with **no season-one single among them** — season 4, season 5, an Infinity Castle rip, remakes and batches, all correctly rejected — because season one's uploads are from 2019 and everything the franchise has done since sits in front of them. Since Nyaa ANDs every word of a query, the fix is a narrower query rather than a deeper one: `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items including the 2019 single at 5–8 seeders. So **after** the title forms have run, **only for an entry the catalogue calls `FINISHED`** (`nyaa.deep_search`; a null status reads as not-finished) and **only while the merged pool holds fewer than `ENOUGH_CANDIDATES` (3) acceptable releases**, `nyaa.group_queries` asks `<form> <group>` for the **top three title forms only** — romaji `- NN`, english `- NN`, romaji `SxxEyy`, the three shapes a group's own upload has — times the groups: `rules.preferred_groups` first (per-show override already merged by `load_rules`), then `DEEP_SEARCH_GROUPS = ("HorribleSubs", "SubsPlease", "Erai-raws")`, de-duplicated case-insensitively so a preferred SubsPlease is not asked twice. The order is **form-major** (all groups of the romaji form, then the english one, then `SxxEyy`), because the form is the stronger signal. Each narrowed form is one ordinary paced and cached RSS request; the narrowing stops at three candidates, and `MAX_REQUESTS` (20) is the ceiling on title and narrowed forms **together** — ten titles plus three forms × six groups would be 28. Narrowed forms do **not** count against `MAX_QUERIES` (that cap is the budget for ways of writing the *title*) and are counted in `Search.requests` rather than `Search.forms`, so the episode row's "N forms" keeps meaning what it has meant since M6 while `search_release`'s log line carries both. An **airing** show asks no narrowed form at all: its weekly release is inside the newest 75. The three groups are a hard-coded claim about who uploads anime and are the part of this worth revisiting; an admin's own `preferred_groups` is where a fourth name belongs. Items parsed with the same filename parser; kept only when kind=episode, episode number equal — **or equal to `N + offset` on a release that names no season at all**, the absolute rule of §5.1a, which is then dropped outright if any season-marked candidate for the same episode also survived — title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked by the ordinary path** (FR-A4; the one exception is asked for explicitly and is at the end of this cell): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. **A finished show with no acceptable single at all is offered batch candidates** (FR-A4 amendment + FR-A11, owner 2026-09-18). "Never fetch whole seasons" is a statement about *bytes*, not about torrents, and for a show that finished airing years ago the only seeded releases are often batches: *Kimetsu no Yaiba* episode 10 came back under seven title forms and six group-narrowed ones with no season-one single among them and several complete-season packs. So where a **finished** show's search ends with **no acceptable single at all**, the pack is **asked for**: `nyaa.batch_queries` adds up to three numberless forms — `<romaji base>`, `<romaji base> BATCH`, `<english base> BATCH` — deduplicated against what has already been asked, counted in `Search.requests` and never in `Search.forms`, inside the same 20-request ceiling and always **last**, after the narrowing has had the budget. (Corrected 2026-09-18: re-reading the merged pool found nothing, because every query form carries the episode number and no batch name does — *One Week Friends* episode 3 returned 16 results and 0 batches against the live feed, *Chivalry of a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and 0; *Kimetsu no Yaiba* episode 10 only appeared to work because `10` is a token of `1080p`.) Then `nyaa.filter_items(…, batches=True, only_batches=True)` reads the whole pool and `rank(…, wanted_numbers=…)` orders them by dub, then by how many of the show's currently wanted episodes the release's span covers, then by FR-A3's four rules; they land in `Search.batches`, which is a list of candidates and not a decision. `acceptable`'s `batches` argument defaults to **false**, so every path written before FR-A11 rejects every batch exactly as it did; with it on, a range must cover the episode (or `number + offset` under §5.1a's absolute rule, on the same four conditions a single needs), a pack naming **no** range at all is a candidate whose coverage its file list settles rather than its name, the season must agree, the title must reach the threshold, a dub is ranked rather than filtered, and a film or one-episode entry gets none of it. `NyaaClient.torrent_file(url)` fetches one `.torrent` — paced like a search, never cached, the URL **and the URL the answer came from** must be on nyaa's own host (redirects are followed, so where Arc asked is not the whole story), the `Content-Length` and the body ≤ `MAX_TORRENT_BYTES` (1 MiB) and bencoded (`d`), else `NyaaUnavailable`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected, as a single (`accept`/`reject`) and as a batch (`batch_accept`/`batch_reject`) (§10). |
+| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/files`, `torrents/filePrio`, `torrents/start`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. **A batch is added as the `.torrent` file itself, stopped** (FR-A4's exception, FR-A11, owner 2026-09-18): `torrents/filePrio` is refused while the client has no metadata, so the magnet route has a window in which unwanted bytes arrive and the file route has none — `torrents/add` is posted as `multipart/form-data` with `torrents=("release.torrent", blob, "application/x-bittorrent")`, `savepath` `<downloads>/batch/<info hash>`, `contentLayout=Original`, `autoTMM=false` and **both** `stopped=true` and `paused=true` (5.x reads the first, 4.x the second, each ignores the other), reusing the same `_added()` + `has()` confirmation that makes a duplicate magnet add idempotent, and additionally requiring the **hash itself** to come back (in 5.x's `added_torrent_ids`, or from `has()`) because everything after the add is keyed on a string that came out of a feed. A `torrents/stop` follows the add, idempotent and deliberate: a torrent the client already holds is reported as added whatever run state it is in. Four calls serve the selection: `torrents/files?hash=` (the client's own indices, names, sizes and per-file progress — authoritative, which is why the list is read back rather than bencoded out of the `.torrent`; a row it cannot parse **raises** rather than shortening the answer, since a dropped index is one that never gets turned off and never appears in the read-back), `torrents/filePrio` (`hash`, `id` = `|`-joined indices sorted and de-duplicated, `priority` 0 = off / 1 = normal — never 6 or 7, so a batch does not jump the client's own queue ahead of everybody's singles), and `torrents/start` (5.x's name; 404 falls back once to 4.x's `torrents/resume`, exactly as `torrents/stop` falls back to `torrents/pause`) as the **last** call, after the selection has been written and verified. `MAX_TORRENT_FILES` (500) is the ceiling on a pack Arc will read a selection out of. The same four calls serve a pack for the rest of its life: `poll_qbit` reads `torrents/files` **once per in-flight batch and not at all for a settled one** (every wanted file complete and the client reporting it stopped) for the per-file progress an episode's completion is read from, and `torrents/stop` for a pack whose every wanted file is in; and the `qbit_reselect` job (§5.1a) is the only other writer — `torrents/files`, `filePrio` 0 for the rows now off then 1 for the ones now on, then exactly one of `torrents/start`, `torrents/stop` or `torrents/delete(deleteFiles=true)` per `batch.disposition()`, and nothing at all if the listing no longer matches Arc's rows. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
@@ -2339,11 +2627,20 @@ two together.
   whether it has a prequel), the episode being searched for, the query forms
   `queries()` must build, the forms it must **not** build, real nyaa.si release
   names `acceptable()` must accept and reject, and which of the accepted ones
-  `rank()` must prefer. A block may also declare `prequel_episodes`, which the
+  `rank()` must prefer. A block may also carry `batch_accept` / `batch_reject`
+  (2026-09-18), the batch half of the same two fields: names that
+  `acceptable(…, batches=True)` must take as a candidate — each of them
+  asserted to be rejected by the *default* call as well, since `batches`
+  defaulting to false is the whole of FR-A4's guarantee — and names it must
+  refuse even then, the wrong season and a range that does not reach the
+  episode among them. A separate test walks every `reject` line in the file
+  that really is a batch and asserts it is still rejected, and rejected *as a
+  batch*, with the argument defaulted off. A block may also declare
+  `prequel_episodes`, which the
   reader feeds through the real `absolute_offset()` walk (2026-09-17) so the
   absolute forms and the absolute acceptance rule are asserted from the block's
   own counts rather than from a catalogue fact the file cannot show.
-  Eighteen cases, every one of them a show that sat in
+  Twenty cases, every one of them a show that sat in
   `searching` on production (or a film that quietly stood in for one): Rakudai
   (the head form), Mushoku Tensei S3 (the
   short forms), Frieren S1 and S2, One-Room TA (`SxxEyy` and its two batches),
@@ -2352,8 +2649,11 @@ two together.
   Superstar!! (symbols), Fate/Zero (the slash), two dub-versus-sub pairs, three
   films and the *Kizumonogatari* trilogy, whose three parts share one name and
   carry no episode number — the case the strict single title rule exists for —
-  and *Jujutsu Kaisen* season two, whose releases are numbered 25–47 where the
-  catalogue numbers them 1–23. The **group-narrowed forms** of 2026-09-18 (§6) are
+  *Jujutsu Kaisen* season two, whose releases are numbered 25–47 where the
+  catalogue numbers them 1–23, and two *Kimetsu no Yaiba* blocks for the batch
+  fallback — the pack that holds episode 10, the unnamed pack, the wrong
+  season's pack, and the 01–12 pack that is not episode 20's. The
+  **group-narrowed forms** of 2026-09-18 (§6) are
   pure in the same way and could join it, but what a block cannot express is
   *when* they are asked — that is a property of the search and the running
   pool, not of one entry — so `group_queries` and the narrowing are pinned by
@@ -3746,3 +4046,273 @@ two together.
   priority order. Scheduling is fixed in the loop and safety stays in the
   semaphore, deliberately: the semaphore is the only thing that can still see
   a second worker process on the host or a cap lowered mid-claim.
+- 2026-09-18 — **The batch data model and the qBittorrent calls it needs**
+  (§4, §6, FR-A4's amendment and FR-A11, owner 2026-09-18; the behaviour
+  follows in later tasks). `torrents.episode_id` is **nullable** and null
+  exactly when the new `kind` column says `batch`, tied together by
+  `ck_torrents_kind_episode`, with `save_path`, `total_size` and
+  `wanted_bytes` beside it and a new `torrent_files` table (index, path, size,
+  episode, wanted, priority, progress, completed_at) carrying the per-file
+  claims — `UNIQUE (torrent_id, file_index)`, a partial index on `episode_id`
+  where it is set and a partial **unique** index on `episode_id WHERE wanted`,
+  because "an episode has at most one live claim anywhere" is written by three
+  modules and the database is the only place all three can agree. The null is
+  the design rather than a convenience: every query keyed on `episode_id` —
+  the reconciler's cancel, `qbit_cancel`, `reject_download`, retention's
+  `torrent_hashes`, `poll_qbit`'s join — then skips a batch by default, and
+  each of them would otherwise delete a torrent several episodes share with
+  its files. No backfill: every existing row is a single, and "no
+  `torrent_files` rows" keeps meaning "the whole payload is one episode's". On
+  the client, a batch is added as **the `.torrent` file itself, stopped**
+  (`QbitClient.add_file`, multipart, both `stopped` and `paused` because 5.x
+  reads the first and 4.x the second) rather than as a magnet, because
+  `torrents/filePrio` is refused while the client has no metadata: the magnet
+  route has a window in which unwanted bytes arrive and the file route has
+  none, which is the whole of the byte guarantee. `files()`, `file_priority()`
+  and `start()` (404 → `torrents/resume`) are the rest of that sequence, and
+  `batch_save_path_for` files a batch under `downloads/batch/<hash>` precisely
+  so that every id-from-path inference fails closed for it.
+- 2026-09-18 — **Nyaa can offer a batch, and only where there is no single**
+  (§6 Nyaa row, §10, FR-A4's amendment and FR-A11; the add sequence follows in
+  a later task). `acceptable(…, batches=False)` — the default is the decision:
+  every caller, the whole query corpus and every current rejection are
+  byte-for-byte unchanged, and a batch becomes a candidate only where a caller
+  asks for one. `search_for_episode` asks in exactly one place, after the
+  title forms and the group-narrowed ones: `not ranked` (no acceptable single
+  at all, stricter than the narrowing's "fewer than three" — a single, however
+  poorly seeded, is the episode), `deep_search(anime)` (`FINISHED` only, so an
+  airing show and a null status are untouched) and not `is_single`. It costs
+  **up to three more requests** (`batch_queries`), and the first version of it
+  claiming otherwise is the correction of the same day: "the packs were in the
+  pool all along" held for *Kimetsu no Yaiba* episode 10 because `10` is a
+  token of `1080p`, and for nothing else — every query form carries the
+  episode number, no batch release name carries one, and Nyaa ANDs the words
+  of a query, so *One Week Friends* episode 3 returned 16 results and 0
+  batches, *Chivalry of a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and 0.
+  So the pack is asked for by the shape its name has: the season-stripped
+  title bare, that title with `BATCH`, and the english title with `BATCH` when
+  it says something new — deduplicated against the forms already asked,
+  counted in `requests` and never in `forms`, and inside `MAX_REQUESTS` like
+  everything else — with the last three of the twenty **reserved** for them,
+  the group narrowing stopping at `MAX_REQUESTS - MAX_BATCH_QUERIES` for any
+  entry that could still ask for a pack (a film keeps the plain ceiling, an
+  airing show never narrows). The narrowing still goes first, because it is
+  looking for a single and a single beats every pack; it just no longer eats
+  the whole budget on the shows that have none.
+  `Ranked.sort_key` gains one term and gains it for
+  batches only — `-covered_wanted`, directly behind the dub — so of two packs
+  holding the episode the one that also holds the others somebody is waiting
+  for wins, and a single's five-tuple is untouched (asserted, not assumed).
+  `covered_wanted` floors at one for every batch rather than counting from
+  zero, so an empty `wanted_numbers` is neutral instead of promoting the packs
+  whose coverage is unknown. And `NyaaClient._fetch` now returns the
+  `httpx.Response` so that `torrent_file()` can read `.content` where `search`
+  reads `.text`: one paced, never-cached request, refused unless the URL is on
+  nyaa's own host and the body is a bencoded dict under 1 MiB — a `<link>` is
+  a string out of somebody else's XML, and a request Arc makes because a feed
+  told it to is a request to an arbitrary address otherwise.
+- 2026-09-18 — **A batch is taken, and only its wanted files are fetched**
+  (§4 `settings`, §5.1a, FR-A4's amendment and FR-A11). The pieces the two
+  entries above landed are now wired into `search_release`, and the new module
+  is `arc/services/acquisition/batch.py`, kept together because three other
+  modules will read it: `plan_files` (pure: the file→episode map, the kind and
+  extension rules, the season agreement, the absolute offset, the title floor
+  for a file that names one, and **exactly one file for the searched episode or
+  the plan is refused**), `plan_offset` and `targets` (pure), `verify_selection`
+  (pure: the read-back gate), `claim_existing` (attach before Nyaa is asked),
+  `reserve_batch` / `record_files` (the `torrents` row, then the
+  `torrent_files` rows) and `mark_unreadable` (the tombstone). The call sequence
+  lives in `jobs._take_batch`, because the handler is what holds the client.
+  Four decisions worth the words.
+  **The offset passed to `plan_files` is the candidate's, not the entry's.** A
+  pack whose *name* said `25 ~ 47` is numbered absolutely and its files are read
+  that way; a pack accepted per-season is read per-season. The entry-wide offset
+  would read season two's own episode 25 as episode 1, which is the one mistake
+  this function must not make.
+  **Which episodes a pack is taken for is bounded by its own name**
+  (`batch.targets`). The searched episode always, plus the other live wants
+  inside the span the release claims — so a half-season pack is not refused for
+  failing to hold an episode it never claimed, while a pack that named no range
+  is asked for every want and refused if it cannot produce them (its coverage
+  was never claimed, so its file list is the only answer).
+  **A refusal deletes; an exception does not.** Too many files, a plan that
+  could not be read and a read-back that disagreed all delete the torrent —
+  still stopped, holding nothing — and try the next candidate. A qBittorrent
+  error is left to propagate: the runner retries the whole search, `add_file` is
+  idempotent for a torrent the client already holds, and a cleanup path that
+  needs the same unreachable client to work is worse than the stopped torrent it
+  would tidy.
+  **`wanted → downloading` stayed out of the state machine.** A batch is the
+  one place an episode that never went looking is about to have bytes arriving,
+  and `batch.start_downloading` takes the two existing edges in order rather
+  than adding a third that only this path would use.
+  `settings.batch_fallback` (bool, default true, FR-D2, seeded by
+  `d81f4b6ca3e7` the way the three booleans before it were) is the kill switch,
+  read in exactly one branch. `qbit_reselect` has its name, its priority (60,
+  beside `qbit_cancel`'s) and its per-torrent dedupe key; the handler, the
+  per-file completion in `poll_qbit` and the keep/stop/delete disposition were
+  the next task's and are the last entry below.
+- 2026-09-18 — **The batch pick, after review** (§5.1a, §6, FR-A4, FR-A11,
+  FR-D2). Nine corrections to the entry above, and the two structural ones are
+  worth the space.
+  **Reserve before selecting.** `batch.reserve_batch` inserts the `torrents`
+  row and flushes **between** the add and the first `filePrio`, and
+  `record_files` writes the sizes and the per-file rows after the start. Two
+  searches for two episodes of one finished show both get past "a hash with a
+  row was already tried", because neither has committed, and the window in
+  which the other commits is a paced Nyaa request wide; with the rows written
+  last, the loser ran `filePrio 0` over **every** index of a torrent the winner
+  had already selected files in and *started*, and only discovered it had lost
+  at the end. Now its insert raises `BatchTaken` before it has touched the
+  client's selection at all, the job retries, and `claim_existing` attaches it
+  to the winner's pack. It is also the single path's own order
+  (`jobs._record_torrent` inserts before it adds the magnet).
+  **A file list that cannot be fully parsed is an error.** `QbitClient.files`
+  used to drop a row with no usable name; that index would then never be named
+  in the `filePrio 0` that turns every file off — a freshly added torrent has
+  everything selected — and would be absent from both listings the read-back
+  compares, so it would download unseen and unrecorded. It now raises, and a
+  pack Arc cannot enumerate is never started.
+  Then: `torrents/stop` after the add, because `add_file` reports success for a
+  torrent the client already holds *in any run state*; the **hash** must be
+  confirmed and not just the success, since everything downstream is keyed on a
+  string from a feed; an empty listing is a refused candidate rather than a
+  raise; `torrent_file` re-checks the **answering** URL (redirects are followed)
+  and refuses an oversize `Content-Length` before the body; a free rider the
+  pack does not hold is **dropped** rather than refusing the pack, which is what
+  FR-A4's "where *the* wanted episode's file cannot be identified" always said;
+  `claim_existing` skips `missing` as well as `DECIDED_STATES`; only `wanted`
+  episodes ride along, because a `searching` one has its own job on the other
+  slot and could end up with a single *and* a batch claim; `covered_wanted` is
+  counted over that same attachable set rather than every live want; and a pack
+  that named **no** range is read with the *entry's* absolute offset (a
+  complete-series rip of an absolutely numbered sequel is exactly that shape)
+  while a pack that named one keeps the candidate's.
+  Two of these are visible to a user. A pack Arc could not read is **remembered**
+  as `qbit_state = 'unreadable'` with no `torrent_files` rows — the pick already
+  skips any hash with a row — so the fortnight's retries stop re-fetching it,
+  and an episode whose candidates were all merely *skipped* keeps FR-A6's
+  ordinary reason rather than claiming Arc read something. And `batch_fallback`
+  gates the **attach** as well as the pick: enabling another file in a pack Arc
+  already holds is still fetching more, which is what an admin turning it off
+  means; a pack already downloading finishes the episodes it holds claims for.
+- 2026-09-18 — **The batch poll, and `qbit_reselect`** (§5.1a, §6, FR-A4,
+  FR-A11, M16). The other half of the pack's life, and one idea decides all of
+  it: **an episode is complete when its own file is.** `poll_qbit` keeps its
+  original query for singles (`WHERE episode_id IS NOT NULL` — the inner join
+  already said it) and adds a second loop over the batch rows off the same one
+  `torrents/info` answer, where per-file progress comes from `torrents/files`
+  and each wanted file that crosses `COMPLETE_PROGRESS` takes the ordinary
+  hand-off for *its* episode. The path is the row's, never `largest_video`:
+  inside a season pack the biggest video file is another episode, and handing it
+  over with this episode's `expected` prior is the one mistake this loop had to
+  not make. Three things fall out of the same idea. A pack is complete when
+  every file **Arc asked for** is, at which point it is stopped (whatever
+  `QBIT_SEEDING` says — there is nothing left to fetch) and **kept**, because
+  the next episode of that show attaches to it for zero Nyaa requests; a
+  *settled* pack makes no `torrents/files` call at all, so a shelf of finished
+  packs costs nothing per minute; and the hand-off is retried off the row's
+  `completed_at` rather than the client's listing, so a file that lands a moment
+  after the torrent finishes is not stranded at `downloaded`.
+  The two failures are the single's, applied to the rows. A stall (`stall_reason`
+  **unchanged** — the pack was started only after its selection was written, so
+  it never sits in `metaDL`) and a pack gone from the client both un-want the
+  **wanted and not yet complete** rows and take their episodes to `unavailable`,
+  leaving a file already handed off alone. The un-want is load-bearing rather
+  than tidy: an episode may hold one live claim anywhere
+  (`ux_torrent_files_one_wanted_per_episode`), so a row left wanted against a
+  dead torrent would refuse that episode its next pack. **And the stall's delete
+  stops at what the library is using** (owner): a pack holding any row with
+  `completed_at` is *stopped* and kept rather than deleted with its files, since
+  one of its episodes can be `ready` and playing while another's swarm dies and
+  `deleteFiles=true` would leave a `media_files` row pointing at nothing —
+  retention owns those bytes per episode (FR-T1). Only a pack that has handed
+  nothing over is deleted, which is the ordinary case and the only one the
+  single path's argument ever covered. `stalled` batch rows stay in the poll's
+  query for the reason singles do — a request that did not land is retried, and
+  the retry re-decides stop-or-delete the same way — and a file whose selection
+  in the client disagrees with its row, **either way round**, is logged at
+  `WARNING` and the pack is handed back to `qbit_reselect`
+  (2026-09-18; this supersedes "a file switched off in the Web UI is left
+  off").
+  `qbit_reselect` is the only writer of a pack's selection after the pick, and
+  **its instruction is the rows** — the payload is a torrent id and nothing
+  else, which is what makes it idempotent and its per-torrent dedupe key right.
+  It refuses to write anything unless the client's listing still matches those
+  rows (`batch.listing_mismatch`: same count, same name at each index; a
+  disagreement is an `ERROR` and a no-op, since `filePrio` takes an index and a
+  1 written against a moved listing fetches a file nobody asked for), writes
+  0 before 1, and then applies one decision function so that four callers cannot
+  disagree: `batch.disposition()` is KEEP while anything is wanted, STOP when
+  nothing is but a file maps to an episode of a show somebody still has
+  `watching`, `planned` or `on_hold` — the case that makes a pack an asset — and
+  DELETE with files, row and all when every such entry is completed, dropped or
+  gone, or no file maps to an episode at all. Deleted rather than remembered:
+  there is nothing *wrong* with such a pack, so barring it from a future pick
+  would be `qbit_cancel`'s own mistake. `batch.LIVE_STATUSES` is spelled out
+  rather than imported from the reconciler, because the reconciler will import
+  `batch` (T6) and this is not a rule worth an import cycle — and it is
+  deliberately **wider** than `wants.WANTING_STATUSES` by one status (owner):
+  `on_hold` means "fetch no more of this", which is the reconciler's question,
+  and not "this can never be wanted again", which is this one's. A paused viewer
+  comes back, and a stopped pack at priority 0 is on the disk only as the files
+  it already fetched, which retention measures per episode.
+- 2026-09-18 — **Cancel, reject and retention for a batch-backed episode**
+  (§5.1a, §5.7, FR-A11, FR-T1, FR-T3, M16). Four callers, one sentence: none of
+  them may do what the single path does, because `qbit_cancel` and the retention
+  sweep both delete a hash **with its files** and a pack's files belong to
+  several episodes. So each of them gives back one `torrent_files` row and
+  queues `qbit_reselect`, which is where the pack's own fate is decided.
+  `wants.cancel_if_unwanted` takes a new branch **before** its existing two
+  writes and never marks a batch `cancelled`; `qbit_cancel` needed no change at
+  all (it selects on `episode_id` *and* `cancelled`, and a batch row matches
+  neither, so the job queued beside the cancel finds nothing and says so);
+  `samples.cancel_sample` inherited the whole of it through the two helpers it
+  already called. `reject.reject_download` resolves a pack member by the layout
+  that `episode_id_of` deliberately fails to read — `downloads/batch/<hash>/…`
+  — and is the **one** caller that clears `episode_id` on the row as well as
+  un-wanting it, because the alternative is FR-A6's fortnight of retries being
+  served the same wrong file every day; cancel and retention keep it, which is
+  what makes a want given back free to change your mind about. Retention needed
+  only `Targets.torrent_file_ids` and one step before unlinking: the file was
+  already a loose file charged at its own size, and the pack was already
+  unreachable by hash, both of them falling out of the nullable `episode_id`
+  rather than being coded for. **The helpers live in `acquisition/claims.py`,
+  not in `batch`** — the note above predicted the reconciler would import
+  `batch`, and it cannot: `batch` reaches `nyaa` and `library.parser`, and the
+  library package's `__init__` reaches the catalogue, so `wants` (which the
+  catalogue imports) closes a circle on the second module imported. Three
+  functions that touch only the models and the queue, shared by the reconciler,
+  the review's reject and the retention deleter, are the fix, and they are the
+  same shape as `acquisition/names.py` and for the same reason.
+- 2026-09-18 — **The batch prior, the episode row and the admin surface**
+  (§5.2a, §5b, §5.7, spec FR-A7, FR-A11, M16). The library and API half of the
+  batch exception, and both of them turned out to be one lookup each rather
+  than a mechanism. **The prior**: `library/jobs._expected_episode` is where a
+  *suggestion* asked from the review page days later gets "Arc downloaded this
+  believing it to be X" — no payload could carry it — and it derived that from
+  the save path. A pack's path deliberately yields nothing (`downloads/batch/
+  <info hash>/` is named for the torrent so that no id can be read out of it),
+  so the claim is read from the `torrent_files` row instead, through
+  `reject.batch_file_of` beside W5's `batch_member_of`: **one** implementation
+  of "which row is this file", shared by the reject path and this one, because
+  two would eventually disagree about a pack somebody moved. It is the
+  **existing** `expected` prior at its existing weight, `matcher.py` is not
+  touched, and a member whose own filename says another show still goes to
+  review — plan D4, and the test that fails the day somebody turns a row into a
+  link. **The episode row**: `episode_extras.torrents_for` now answers with an
+  `EpisodeRelease` (the `torrents` row, the progress, `batch`) rather than the
+  row alone, resolving a batch-backed episode through the `torrent_files` row
+  that is still `wanted` — one more query for the whole page, never one per
+  episode, and a claim given back stops answering at once, leaving the
+  episode's own `torrents` row, if it ever had one, to answer for it. Resolving
+  it *there*
+  rather than in the schema is what keeps the show page, the home shelves and
+  the player from having three answers to "how far has this episode got": the
+  same helper feeds all three, which is the reason `episode_extras` exists.
+  **The admin surface**: `kind` and `wanted_bytes` on the qBittorrent status,
+  and `total_size` on no API at all; `torrent_files` per retention-preview row
+  for the Storage tab's one added line. `torrents/info`'s `size` needed no
+  adjustment — it has always meant the selected files — which is the last of
+  FR-A11's "the size Arc reserves or reports for a batch is the sum of its
+  wanted files" falling out of the design rather than being enforced.

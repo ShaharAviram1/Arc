@@ -273,7 +273,15 @@ function WantsPanel() {
   )
 }
 
-/** Torrents as qBittorrent reports them, with Arc's episode attached. */
+/**
+ * Torrents as qBittorrent reports them, with Arc's episode attached.
+ *
+ * A batch says so and belongs to no single episode (FR-A11): its files are
+ * several episodes' and the rest of the pack sits at priority 0. The size
+ * column is the **selected** files either way — Arc's own `wanted_bytes` where
+ * it has it, the client's `size` (which already means the same thing) where it
+ * does not — because a pack's total is not a figure this panel may show.
+ */
 function TorrentsTable({ status }: { status: QbitStatus }) {
   if (status.torrents.length === 0) {
     return (
@@ -302,19 +310,30 @@ function TorrentsTable({ status }: { status: QbitStatus }) {
           <tbody>
             {status.torrents.map((torrent) => (
               <tr key={torrent.hash} className="border-t border-[var(--arc-border)]">
-                <td className={`${tdClass} max-w-md break-words`}>{torrent.name}</td>
+                <td className={`${tdClass} max-w-md break-words`}>
+                  {torrent.name}
+                  {torrent.kind === 'batch' ? (
+                    <span className="ml-2 text-[13px] text-[var(--arc-text-muted)]">
+                      batch · selected files only
+                    </span>
+                  ) : null}
+                </td>
                 <td className={tdClass}>
                   <Pill tone={torrent.progress >= 1 ? 'ok' : 'busy'}>{torrent.state}</Pill>
                 </td>
                 <td className={`${tdClass} whitespace-nowrap`}>
                   {formatPercent(torrent.progress)}
                 </td>
-                <td className={`${tdClass} whitespace-nowrap`}>{formatBytes(torrent.size)}</td>
+                <td className={`${tdClass} whitespace-nowrap`}>
+                  {formatBytes(torrent.wanted_bytes ?? torrent.size)}
+                </td>
                 <td className={`${tdClass} whitespace-nowrap`}>{formatBytes(torrent.dlspeed)}/s</td>
                 <td className={`${tdClass} whitespace-nowrap`}>{formatBytes(torrent.upspeed)}/s</td>
                 <td className={tdClass}>
                   {torrent.episode_id === null ? (
-                    <span className="text-[13px] text-[var(--arc-text-muted)]">not linked</span>
+                    <span className="text-[13px] text-[var(--arc-text-muted)]">
+                      {torrent.kind === 'batch' ? 'several' : 'not linked'}
+                    </span>
                   ) : (
                     <span className="whitespace-nowrap">#{torrent.episode_id}</span>
                   )}

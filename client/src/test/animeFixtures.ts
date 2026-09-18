@@ -142,6 +142,19 @@ export const CHOSEN_RELEASE: EpisodeRelease = {
   seeders: 123,
 }
 
+/**
+ * The same episode served out of a season pack instead (FR-A4, FR-A11): the
+ * group and the title are the *pack's*, and the percentage on the row is the
+ * one file's.
+ */
+export const BATCH_RELEASE: EpisodeRelease = {
+  group: 'Judas',
+  resolution: '1080p',
+  title: '[Judas] Sousou no Frieren [BD 1080p][HEVC x265 10bit]',
+  seeders: 41,
+  batch: true,
+}
+
 /** Why episode 5 gave up, after the FR-A6 retry window closed. */
 export const UNAVAILABLE_REASON = 'No acceptable release found after 14 days.'
 

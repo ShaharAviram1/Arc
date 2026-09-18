@@ -517,7 +517,7 @@ async def test_a_failed_episode_carries_its_reason_and_a_ready_one_its_rendition
 async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
-    """No N+1: three lookups for the page, however many episodes are on it."""
+    """No N+1: a fixed number of lookups, however many episodes are on it."""
     anime_id = await add_anime(
         api_factory, title="Daily", anilist_id=910023, status="RELEASING", episodes=30
     )
@@ -558,7 +558,12 @@ async def test_the_home_page_asks_for_the_extras_once_not_once_per_episode(
     # that has a ``failed`` episode on it to explain — nothing here is wanted,
     # let alone broken, so it does not run. Its own counting is in
     # ``tests/test_failures.py``, where the claim is one query per kind.
-    for table, times in (("torrents", 1), ("renditions", 1), ("jobs", 2)):
+    #
+    # ``torrents`` is read twice since FR-A11: once keyed on ``episode_id`` for
+    # the singles and once joined to ``torrent_files`` for the episodes a pack
+    # is holding. Two statements for the whole page, not one per episode, which
+    # is the property this test exists for.
+    for table, times in (("torrents", 2), ("renditions", 1), ("jobs", 2)):
         matched = [statement for statement in extras if f" {table}" in statement.lower()]
         assert len(matched) == times, f"{table} was queried {len(matched)} times"
 

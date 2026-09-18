@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from arc.models import Anime
+from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition.nyaa import (
     Candidate,
     NyaaItem,
@@ -43,12 +44,13 @@ from arc.services.acquisition.nyaa import (
     rank,
 )
 from arc.services.acquisition.rules import Rules
+from arc.services.library.parser import parse
 
 CORPUS = Path(__file__).parent / "fixtures" / "query_corpus.txt"
 
 #: Where the corpus stands. A floor, not a snapshot: new cases are welcome and
 #: the ones already here are the evidence behind a query form.
-MIN_CASES = 18
+MIN_CASES = 20
 
 #: Fields a block may carry once, and the ones it must.
 SINGLE_FIELDS = frozenset(
@@ -71,8 +73,16 @@ SINGLE_FIELDS = frozenset(
 PREQUEL_ID = 1
 REQUIRED_FIELDS = ("case", "romaji", "format", "number")
 
-#: And the ones it may repeat.
-LIST_FIELDS = frozenset({"synonym", "query", "absent", "accept", "reject"})
+#: And the ones it may repeat. ``batch_accept`` / ``batch_reject`` are the
+#: batch half of ``accept`` / ``reject`` (FR-A11, 2026-09-18): the same release
+#: names put through ``acceptable(..., batches=True)``, which is the only way
+#: past the batch rejection and is asked for by nothing but a finished show
+#: with no single at all. Two fields rather than a flag on the existing ones
+#: because a line's *default* reading has to stay the one every block written
+#: before today meant — ``reject`` means "never, whatever the caller asked".
+LIST_FIELDS = frozenset(
+    {"synonym", "query", "absent", "accept", "reject", "batch_accept", "batch_reject"}
+)
 
 #: Seeders an ``accept`` line gets when it does not say. Any constant will do:
 #: the ranking assertion is about the releases that *do* say.
@@ -118,6 +128,10 @@ class Case:
     absent_forms: tuple[str, ...] = ()
     accepted: tuple[Release, ...] = ()
     rejected: tuple[Release, ...] = ()
+    #: Batches ``acceptable(..., batches=True)`` must accept as a candidate,
+    #: and ones it must still refuse (FR-A11).
+    batch_accepted: tuple[Release, ...] = ()
+    batch_rejected: tuple[Release, ...] = ()
     prefer: str | None = None
     #: What :func:`absolute_offset` answered for this entry, computed from the
     #: block's own ``prequel_episodes`` through the real walk rather than
@@ -202,6 +216,8 @@ def _case(block: _Block) -> Case:
         absent_forms=tuple(block.lists["absent"]),
         accepted=tuple(Release.parse(line) for line in block.lists["accept"]),
         rejected=tuple(Release.parse(line) for line in block.lists["reject"]),
+        batch_accepted=tuple(Release.parse(line) for line in block.lists["batch_accept"]),
+        batch_rejected=tuple(Release.parse(line) for line in block.lists["batch_reject"]),
         prefer=single.get("prefer"),
     )
 
@@ -251,10 +267,17 @@ def test_every_case_has_a_unique_name() -> None:
 def test_every_case_asserts_something() -> None:
     """A block with no expectations would pass for ever and mean nothing."""
     for case in CASES:
-        assert case.query_forms or case.absent_forms or case.accepted or case.rejected, case.id
+        assert (
+            case.query_forms
+            or case.absent_forms
+            or case.accepted
+            or case.rejected
+            or case.batch_accepted
+            or case.batch_rejected
+        ), case.id
 
 
-def _accept(case: Case, release: Release) -> Candidate | None:
+def _accept(case: Case, release: Release, *, batches: bool = False) -> Candidate | None:
     return acceptable(
         release.item,
         titles=anime_titles(case.anime),
@@ -263,7 +286,43 @@ def _accept(case: Case, release: Release) -> Candidate | None:
         single=is_single(case.anime),
         year=case.anime.season_year,
         offset=case.offset,
+        batches=batches,
     )
+
+
+def test_every_batch_the_corpus_rejects_is_still_rejected_by_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard on the batch work of 2026-09-18 (FR-A11).
+
+    ``acceptable`` grew a ``batches`` argument, and the whole of its safety is
+    that it defaults to ``False``: no caller written before FR-A11 may start
+    seeing a batch. So every ``reject`` line in the file that really is a batch
+    — the *Dagashi Kashi* season pack, both *One-Room TA* packs, the two
+    *Frieren* ranges, the film batch, the absolute *Jujutsu Kaisen* pack — is
+    asserted here to be rejected by the default call, and to be rejected *as a
+    batch* rather than by some other rule that happens to catch it.
+
+    :func:`test_case` already re-asserts each of them per block. This says the
+    same thing in one place and about the *reason*, so that a change which
+    smuggled batches past the default would fail with the sentence naming it.
+    """
+    batch_rejections = [
+        (case, release)
+        for case in CASES
+        for release in case.rejected
+        if parse(release.title).is_batch
+    ]
+
+    assert len(batch_rejections) >= 8, "the corpus has lost its batch rejections"
+    for case, release in batch_rejections:
+        caplog.clear()
+        with caplog.at_level("DEBUG", logger=nyaa_module.__name__):
+            assert _accept(case, release) is None, f"{case.id}: {release.title!r} is a batch"
+        reasons = [getattr(record, "reason", "") for record in caplog.records]
+        assert any(reason.startswith("batch release") for reason in reasons), (
+            f"{case.id}: {release.title!r} was rejected by {reasons}, not as a batch"
+        )
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
@@ -284,6 +343,17 @@ def test_case(case: Case) -> None:
         assert _accept(case, release) is None, (
             f"{case.id}: {release.title!r} should have been rejected"
         )
+    for release in case.batch_accepted:
+        batch = _accept(case, release, batches=True)
+        assert batch is not None, f"{case.id}: {release.title!r} should be a batch candidate"
+        assert batch.is_batch, f"{case.id}: {release.title!r} is not a batch at all"
+        assert _accept(case, release) is None, (
+            f"{case.id}: {release.title!r} must still be rejected by the default"
+        )
+    for release in case.batch_rejected:
+        assert _accept(case, release, batches=True) is None, (
+            f"{case.id}: {release.title!r} should have been rejected even as a batch"
+        )
 
     if case.prefer is not None:
         ranked = rank(candidates, Rules())
@@ -296,11 +366,14 @@ def test_corpus_summary(capsys: pytest.CaptureFixture[str]) -> None:
     absent = sum(len(case.absent_forms) for case in CASES)
     accepted = sum(len(case.accepted) for case in CASES)
     rejected = sum(len(case.rejected) for case in CASES)
+    batch_accepted = sum(len(case.batch_accepted) for case in CASES)
+    batch_rejected = sum(len(case.batch_rejected) for case in CASES)
 
     with capsys.disabled():
         print(
             f"\nquery corpus: {len(CASES)} cases | {forms} forms required,"
             f" {absent} forbidden | {accepted} releases accepted, {rejected} rejected"
+            f" | batches: {batch_accepted} accepted, {batch_rejected} rejected"
         )
 
     assert forms >= len(CASES), "every case should require at least one query form"

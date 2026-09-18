@@ -177,6 +177,15 @@ export interface EpisodeRelease {
   resolution: string | null
   title: string
   seeders: number | null
+  /**
+   * Whether this episode is one selected file of a batch (FR-A4, FR-A11). The
+   * group, the title and the resolution are then the *pack's* — true of every
+   * file in it — and the percentage beside them is this episode's own file's,
+   * which is why the row says where it is coming from rather than showing a
+   * season pack's name as though it were a release of one episode. Optional on
+   * the wire so a cached payload from before batches still parses.
+   */
+  batch?: boolean
 }
 
 /**
@@ -813,9 +822,17 @@ export function episodeProblem(episode: EpisodeOut): EpisodeProblem | null {
 }
 
 /**
+ * What an episode served out of a season pack says in place of nothing
+ * (FR-A11). Deliberately a phrase and not a badge: it explains a group name
+ * that belongs to twenty-six episodes and a percentage that belongs to one.
+ */
+export const BATCH_HINT = 'from a batch'
+
+/**
  * `[SubsPlease] · 1080p · 123 seeders` — whichever of the three the server
- * knows, in that order. A release the parser got nothing out of falls back to
- * its raw name, which beats an empty line.
+ * knows, in that order, with `from a batch` after them for a pack's file. A
+ * release the parser got nothing out of falls back to its raw name, which
+ * beats an empty line.
  */
 export function releaseLine(release: EpisodeRelease): string {
   const parts: string[] = []
@@ -824,6 +841,9 @@ export function releaseLine(release: EpisodeRelease): string {
   if (release.seeders !== null) {
     parts.push(`${String(release.seeders)} seeder${release.seeders === 1 ? '' : 's'}`)
   }
+  // Last, and quietly: it is the least important thing about the release and
+  // the one a viewer needs to explain a percentage that is not the pack's.
+  if (release.batch === true) parts.push(BATCH_HINT)
   return parts.length === 0 ? release.title : parts.join(' · ')
 }
 

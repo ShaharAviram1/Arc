@@ -1,7 +1,8 @@
 """The qBittorrent Web API, as much of it as Arc needs (FR-A5).
 
 A handful of calls — ``auth/login``, ``torrents/add``, ``torrents/info``,
-``torrents/delete``, ``torrents/stop`` and ``app/setPreferences``
+``torrents/files``, ``torrents/filePrio``, ``torrents/delete``,
+``torrents/start``, ``torrents/stop`` and ``app/setPreferences``
 (architecture.md §6) — and one piece of arithmetic that is easy to get wrong
 and expensive to get wrong: **the path mapping**.
 
@@ -21,6 +22,21 @@ downloads in the same client are then invisible to Arc, which matters most for
 ``torrents/delete``: retention (M10) deletes by hash, and a bug there must not
 be able to reach anything Arc did not add — so :meth:`QbitClient.delete` looks
 the hashes up in the category listing and sends only the ones that are in it.
+
+**A batch is added as the ``.torrent`` file itself, stopped** (FR-A4's
+exception, FR-A11, owner 2026-09-18, the plan's D2). Every single Arc has ever
+fetched went in as a magnet, and a magnet cannot work here:
+``torrents/filePrio`` is **refused while the client has no metadata**, so the
+magnet route has an unavoidable window between the add and the arrival of the
+file list in which unwanted bytes are already being fetched. Posting the
+``.torrent`` as multipart means the metadata exists at add time, and adding it
+``stopped`` means nothing moves until every file has been set to priority 0,
+the identified ones back to 1, and the selection read back and verified. So
+there is no window at all, which is the whole of the byte guarantee — not one
+byte of an unwanted file can ever be fetched. :meth:`QbitClient.add_file`,
+:meth:`QbitClient.files`, :meth:`QbitClient.file_priority` and
+:meth:`QbitClient.start` are that sequence's four calls, and
+:func:`batch_save_path_for` is where its bytes land.
 
 **A 403 means the cookie expired, not that the credentials are wrong.**
 qBittorrent's session lasts an hour by default and the worker is long-lived,
@@ -43,6 +59,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -101,6 +118,27 @@ STOP_AT_SHARE_LIMIT: Final[int] = 0
 #: finished download, and waiting forever for the last bit would be silly.
 COMPLETE_PROGRESS: Final[float] = 0.999
 
+# --- Per-file selection, for a batch (FR-A11) --------------------------------
+
+#: ``torrents/filePrio``'s "do not download this file". The value every index
+#: of a freshly added batch is set to first, before any is turned back on.
+FILE_OFF: Final[int] = 0
+
+#: And "download it at normal priority". Deliberately not 6 (High) or 7
+#: (Maximum): the point of the exception is a small, polite download, and a
+#: batch jumping the client's own queue ahead of the singles everybody else is
+#: waiting for would be a cost paid by every other episode.
+FILE_ON: Final[int] = 1
+
+#: How many files Arc will read a selection out of. A pack of a long-running
+#: series is a few dozen files; anything past this is a collection somebody
+#: uploaded rather than a season, and mapping a thousand names to episodes is
+#: not a thing to attempt on a background job's clock.
+MAX_TORRENT_FILES: Final[int] = 500
+
+#: The directory batches are filed under, one level below the downloads root.
+BATCH_DIR: Final[str] = "batch"
+
 # --- What ``torrents.qbit_state`` may hold ----------------------------------
 #
 # Mostly it holds whatever qBittorrent last called the torrent. The four values
@@ -128,13 +166,27 @@ QBIT_CANCELLED: Final[str] = "cancelled"
 #: The torrent is not in Arc's category any more and Arc did not do it.
 QBIT_MISSING: Final[str] = "missing"
 
-#: The three values ``poll_qbit`` must never overwrite, in either direction:
-#: neither with a live state string from the client nor with
-#: :data:`QBIT_MISSING`. Each is a *decision* somebody or something made about
-#: this download, and the column is the only record of it — overwriting
-#: ``stalled`` with ``missing`` sixty seconds later, when Arc is the reason it
-#: is missing, would lose the answer to "why is this episode unavailable?".
-DECIDED_STATES: Final[frozenset[str]] = frozenset({QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED})
+#: A **batch** whose contents Arc could not read, deleted again before it had
+#: fetched anything (FR-A11). The row is kept with no ``torrent_files`` rows at
+#: all, and it exists for one reason: the pick skips any hash that already has
+#: a row, so this is what stops the same unreadable pack being fetched and
+#: added again every six hours, for every episode of the show. Only written for
+#: a reason that **cannot change** — files that could not be identified, more
+#: files than Arc will read a selection out of, a blob whose hash was not the
+#: one the feed advertised. A read-back the client disagreed with, or a Nyaa
+#: that would not hand the ``.torrent`` over, leave no row: those can change by
+#: tomorrow and the pack deserves another look.
+QBIT_UNREADABLE: Final[str] = "unreadable"
+
+#: The values ``poll_qbit`` must never overwrite, in either direction: neither
+#: with a live state string from the client nor with :data:`QBIT_MISSING`. Each
+#: is a *decision* somebody or something made about this download, and the
+#: column is the only record of it — overwriting ``stalled`` with ``missing``
+#: sixty seconds later, when Arc is the reason it is missing, would lose the
+#: answer to "why is this episode unavailable?".
+DECIDED_STATES: Final[frozenset[str]] = frozenset(
+    {QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED, QBIT_UNREADABLE}
+)
 
 #: Below what rate, in KiB/s, qBittorrent counts a torrent as "slow" and stops
 #: it occupying one of the active slots. 2 rather than 0: the client treats 0
@@ -266,6 +318,62 @@ class TorrentInfo:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FileInfo:
+    """One row of ``torrents/files``: a file inside a torrent (FR-A11).
+
+    :attr:`index` is the only field with any authority in it — it is what
+    ``torrents/filePrio`` takes, and it is the client's own numbering rather
+    than anything Arc computes, which is why the file list is read back from
+    the client instead of bencoded out of the ``.torrent``.
+    """
+
+    #: The client's index for this file. ``filePrio``'s ``id``.
+    index: int
+    #: The path the torrent gives it, relative to the save path. Slashes and
+    #: all: a pack usually puts its episodes in a directory of their own.
+    name: str
+    size: int
+    #: What the file's priority currently is: 0 is off, anything above it is
+    #: on. Read back after a write, as the byte-safety gate (§5 step 6).
+    priority: int
+    #: 0..1, this file's own — an episode inside a batch is complete when its
+    #: file is, not when the torrent is.
+    progress: float
+
+    @property
+    def wanted(self) -> bool:
+        """Whether the client will fetch this file at all."""
+        return self.priority > FILE_OFF
+
+    @property
+    def complete(self) -> bool:
+        return self.progress >= COMPLETE_PROGRESS
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any], *, position: int) -> FileInfo | None:
+        """One row, or ``None`` for a row with no usable name.
+
+        ``position`` is the fallback for :attr:`index`: qBittorrent only
+        started sending an explicit ``index`` field in 4.4, and before that the
+        position in the array *was* the index — which is also what ``filePrio``
+        took then, so the fallback is the right answer rather than a guess.
+        """
+        name = raw.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        index = raw.get("index")
+        return cls(
+            index=int(index)
+            if isinstance(index, int) and not isinstance(index, bool)
+            else position,
+            name=name,
+            size=_number(raw.get("size")),
+            priority=_number(raw.get("priority")),
+            progress=_fraction(raw.get("progress")),
+        )
+
+
 def _fraction(value: Any) -> float:
     """A 0..1 progress out of a JSON field.
 
@@ -326,6 +434,27 @@ def _added(response: httpx.Response) -> bool:
     return failures == 0 and isinstance(added, list) and len(added) > 0
 
 
+def _added_ids(response: httpx.Response) -> frozenset[str]:
+    """The hashes a 5.x ``torrents/add`` says it added, lower-cased.
+
+    Empty for 4.x, which answers ``Ok.`` and names nothing — so an empty
+    answer means "this body cannot confirm the identity", not "nothing was
+    added", and the caller asks the client instead (:meth:`QbitClient.add_file`).
+    """
+    if response.status_code >= 400:
+        return frozenset()
+    try:
+        payload = response.json()
+    except ValueError:
+        return frozenset()
+    if not isinstance(payload, dict):
+        return frozenset()
+    added = payload.get("added_torrent_ids")
+    if not isinstance(added, list):
+        return frozenset()
+    return frozenset(value.lower() for value in added if isinstance(value, str))
+
+
 def save_path_for(episode_id: int, *, downloads_path: str) -> str:
     """Where episode ``episode_id`` is downloaded to, container-side.
 
@@ -335,6 +464,23 @@ def save_path_for(episode_id: int, *, downloads_path: str) -> str:
     deletes: a directory whose name is an id needs no index to explain it.
     """
     return str(PurePosixPath(downloads_path) / str(episode_id))
+
+
+def batch_save_path_for(info_hash: str, *, downloads_path: str) -> str:
+    """Where a batch is downloaded to, container-side (FR-A11).
+
+    ``<downloads>/batch/<info hash>``, and the hash rather than an episode id
+    precisely because **every id-from-path inference must fail** for a batch:
+    :func:`arc.services.acquisition.reject.episode_id_of` does
+    ``int(relative.parts[0])`` on a reported path, and ``batch`` raises a
+    ``ValueError`` and answers ``None``. A pack holding episodes 1 to 26 under
+    a directory named for one of them is the one shape that could attribute
+    another episode's file to the wrong episode; this fails closed instead.
+
+    It is still under ``downloads_path``, so :func:`host_path` and retention's
+    root checks are unchanged.
+    """
+    return str(PurePosixPath(downloads_path) / BATCH_DIR / info_hash.lower())
 
 
 def host_path(container_path: str, *, downloads_path: str, host_downloads: Path) -> Path:
@@ -556,6 +702,178 @@ class QbitClient:
         )
         return save_path
 
+    async def add_file(
+        self,
+        blob: bytes,
+        *,
+        save_path: str,
+        info_hash: str,
+        tags: str,
+        stopped: bool = True,
+    ) -> str:
+        """Add a ``.torrent`` **file**, stopped by default. Returns the save path.
+
+        The batch path (FR-A11), and the reason it is a file rather than a
+        magnet is the module docstring's: ``torrents/filePrio`` is refused
+        while the client has no metadata, so the magnet route has a window in
+        which unwanted bytes arrive and this one has none.
+
+        **Both** ``stopped`` and ``paused`` are sent, with the same value. 5.x
+        reads the first and 4.x the second, each ignores the other, and getting
+        it wrong means a whole season starts downloading the instant it is
+        added — which is the one outcome this whole feature exists to prevent.
+        ``contentLayout=Original`` keeps the torrent's own directory structure,
+        because the names ``torrents/files`` reports have to be the names on
+        disk for the mapped path to open.
+
+        Duplicates are idempotent exactly as :meth:`add`'s are, through the
+        same :func:`_added` check and the same confirming :meth:`has` call: a
+        handler that crashed between the add and its commit must not fail
+        forever on a torrent that is already there.
+
+        **The client has to confirm the identity, not just the success.**
+        Everything after this call — the file list, the selection, the
+        read-back, the ``torrents`` row, the save path the library will open —
+        is keyed on ``info_hash``, which came out of a *feed*. If the blob
+        behind that feed item is some other torrent, a "200, added one" tells
+        Arc nothing it needs to know, and every later call would quietly act on
+        a hash the client has never heard of. So the hash must appear in 5.x's
+        ``added_torrent_ids`` or :meth:`has` must say the client is holding it;
+        neither, and this raises (which the batch pick reads as a refused
+        candidate). The cost of a mismatch, stated: the torrent the client
+        really did add is left behind, stopped, with nothing selected and
+        nothing fetched — visible in the Web UI under Arc's category, which is
+        a better ending than a selection written against the wrong torrent.
+        4.x names no ids at all, so on that client the confirming request is
+        always made; the batch path makes six calls anyway.
+        """
+        flag = "true" if stopped else "false"
+        response = await self.request(
+            "POST",
+            "/torrents/add",
+            allow_status=frozenset({httpx.codes.CONFLICT}),
+            files={"torrents": ("release.torrent", blob, "application/x-bittorrent")},
+            data={
+                "category": self.category,
+                "savepath": save_path,
+                "tags": tags,
+                "autoTMM": "false",
+                "contentLayout": "Original",
+                "stopped": flag,
+                "paused": flag,
+            },
+        )
+        accepted = _added(response)
+        if info_hash.lower() not in _added_ids(response) and not await self.has(info_hash):
+            raise QbitError(
+                f"qbittorrent did not accept the torrent file as {info_hash} "
+                f"({response.status_code}): {response.text.strip()[:200]}"
+            )
+        if not accepted:
+            log.info("torrent file was already in qbittorrent", extra={"hash": info_hash})
+            return save_path
+        log.info(
+            "torrent file added to qbittorrent",
+            extra={
+                "hash": info_hash,
+                "savepath": save_path,
+                "category": self.category,
+                "bytes": len(blob),
+                "stopped": stopped,
+            },
+        )
+        return save_path
+
+    async def files(self, info_hash: str) -> list[FileInfo]:
+        """Every file in one torrent, as the client indexes them (FR-A11).
+
+        The authority on two things Arc cannot work out for itself: the indices
+        :meth:`file_priority` takes, and what a selection actually *is* after
+        it has been written — step 6 of the add sequence reads this back and
+        refuses the torrent if any index other than the intended ones is on.
+
+        **A listing this cannot fully parse is an error, not a shorter
+        listing.** A row with no usable name used to be dropped, which is the
+        one way this function could be quietly unsafe: the index behind that
+        row would then never be named in the ``filePrio 0`` that turns every
+        file off — and a freshly added torrent has every file selected — while
+        being absent from both listings the read-back compares, so it would
+        download unseen and unrecorded. A pack Arc cannot enumerate is a pack
+        Arc does not start, so the count has to match the payload's exactly.
+        """
+        response = await self.request("GET", "/torrents/files", params={"hash": info_hash.lower()})
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise QbitError(f"qbittorrent answered unparseable JSON: {exc}") from exc
+        if not isinstance(payload, list):
+            raise QbitError("qbittorrent torrents/files did not answer with a list")
+        rows = [
+            FileInfo.from_json(raw, position=position) if isinstance(raw, dict) else None
+            for position, raw in enumerate(payload)
+        ]
+        kept = [row for row in rows if row is not None]
+        if len(kept) != len(payload):
+            raise QbitError(
+                f"qbittorrent listed {len(payload)} files for {info_hash.lower()} and "
+                f"{len(kept)} of them could be read"
+            )
+        return kept
+
+    async def file_priority(self, info_hash: str, indices: Sequence[int], priority: int) -> None:
+        """Set ``priority`` on the given file indices of one torrent.
+
+        ``id`` is a ``|``-joined list of indices, which is qBittorrent's own
+        shape for this endpoint. Sorted and de-duplicated before it is sent:
+        the client does not care about the order, and a request whose body is a
+        function of its arguments is a request a test can assert on.
+
+        An empty list makes no request — "select nothing" through this endpoint
+        would be a call with an empty ``id``, which the client reads as an
+        error rather than as a no-op. Callers turning every file off pass every
+        index explicitly (:data:`FILE_OFF`).
+        """
+        wanted = sorted({int(index) for index in indices})
+        if not wanted:
+            return
+        await self.request(
+            "POST",
+            "/torrents/filePrio",
+            data={
+                "hash": info_hash.lower(),
+                "id": "|".join(str(index) for index in wanted),
+                "priority": str(priority),
+            },
+        )
+        log.info(
+            "file priorities written",
+            extra={"hash": info_hash.lower(), "count": len(wanted), "priority": priority},
+        )
+
+    async def start(self, hashes: list[str]) -> None:
+        """Start (resume) torrents — the last step of adding a batch.
+
+        ``torrents/start`` is qBittorrent 5's name for it and 4.x calls the
+        same thing ``torrents/resume``, so a refusal that is not "the client is
+        unreachable" falls back once, exactly as :meth:`stop` falls back to
+        ``torrents/pause``. The client is whatever the operator pulled.
+
+        This is the only call in the batch sequence after which bytes may move,
+        which is why it is last: the selection is written and verified first.
+        """
+        wanted = sorted({value.lower() for value in hashes if value})
+        if not wanted:
+            return
+        data = {"hashes": "|".join(wanted)}
+        try:
+            await self.request("POST", "/torrents/start", data=data)
+        except QbitUnavailable:
+            raise
+        except QbitError:
+            log.info("this qbittorrent has no torrents/start; using torrents/resume")
+            await self.request("POST", "/torrents/resume", data=data)
+        log.info("torrents started", extra={"count": len(wanted)})
+
     async def apply_policy(
         self,
         *,
@@ -648,10 +966,12 @@ class QbitClient:
         or any other refusal that is not "the client is unreachable" — falls
         back once. The client is whatever the operator pulled.
 
-        **Only hashes from :meth:`torrents` may be passed.** That listing is
-        filtered to Arc's category, which is the same guarantee
-        :meth:`delete` buys itself with an extra request; this method is called
-        from ``poll_qbit``, which has just made that request.
+        **Only hashes Arc is entitled to act on.** Two ways to be sure of that
+        and both are in use: a hash that came out of :meth:`torrents`, which is
+        filtered to Arc's category — the same guarantee :meth:`delete` buys
+        itself with an extra request — or one Arc recorded itself when it added
+        the torrent, which is where ``qbit_reselect`` gets the pack it stops
+        (FR-A11). What must never be passed is a string from anywhere else.
         """
         wanted = sorted({value.lower() for value in hashes if value})
         if not wanted:
@@ -715,22 +1035,29 @@ class QbitClient:
 
 __all__ = [
     "API",
+    "BATCH_DIR",
     "COMPLETE_PROGRESS",
     "COMPLETE_STATES",
     "DECIDED_STATES",
     "DELETE_ON_SIGHT",
+    "FILE_OFF",
+    "FILE_ON",
+    "MAX_TORRENT_FILES",
     "QBIT_CANCELLED",
     "QBIT_MISSING",
     "QBIT_REJECTED",
     "QBIT_STALLED",
+    "QBIT_UNREADABLE",
     "SEEDING_STATES",
     "SLOW_INACTIVE_SECONDS",
     "SLOW_RATE_KIB",
     "STOP_AT_SHARE_LIMIT",
+    "FileInfo",
     "QbitClient",
     "QbitError",
     "QbitUnavailable",
     "TorrentInfo",
+    "batch_save_path_for",
     "host_path",
     "save_path_for",
 ]

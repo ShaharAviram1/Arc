@@ -222,6 +222,11 @@ _VALIDATORS: Final[dict[str, Any]] = {
     "grace_days_g": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "unwatched_days_d": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "acquisition_paused": _boolean,
+    # The batch fallback (FR-A11). A plain boolean like the pause above, and
+    # validated here for the same reason: the reader is lenient about a
+    # hand-edited row, and the panel is the one place a mistake can still be
+    # reported to the person making it.
+    "batch_fallback": _boolean,
     # The storage floor in whole GB (FR-T6). 0 is a legal value and means "no
     # reserve, fetch until the disk is full"; the ceiling is the same defensive
     # figure the reader clamps at, so what the panel accepts and what

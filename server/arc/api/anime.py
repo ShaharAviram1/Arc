@@ -380,7 +380,7 @@ async def detail(
         # above rather than asking for again.
         completed=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
         related=await _related_anime(session, anime),
-        torrents=extras.torrents,
+        releases=extras.torrents,
         renditions=extras.renditions,
         transcode_jobs=extras.transcode_jobs,
         # When Arc will look again, for the rows that are still being looked

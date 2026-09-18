@@ -1069,6 +1069,375 @@ the finish work (bugs found that way are fixed inside M16).
     within seconds of the worker start (the previous deploy left 39 jobs
     behind a parked encode); Demon Slayer 2019 episode 10 re-searches on
     its FR-A6 retry at 04:47 UTC, episode 11 on its daily retry.
+- [x] **Batch support with selective download for finished shows** (FR-A4
+      amendment + FR-A11, owner 2026-09-18): *"build batch support with
+      selective download."* Group narrowing (93b88cb) reaches the 2019 singles
+      for many old shows and for some there are none — *Kimetsu no Yaiba* has
+      seeded batches and nothing else. FR-A4's "never fetch whole seasons" is
+      about bytes, so a **finished** show with **no acceptable single** may
+      take a batch covering the wanted episode and download **only that
+      episode's file**: the `.torrent` is fetched from Nyaa and added **as a
+      file, stopped** (the magnet route cannot work — `filePrio` is refused
+      without metadata), every file set to priority 0, the identified ones to
+      1, the selection **read back and verified**, then started, so no
+      unwanted byte is ever fetched. Data model: `torrents.episode_id`
+      nullable with `kind` (`single`|`batch`) and a `CHECK` tying them,
+      `save_path`/`total_size`/`wanted_bytes`, and a `torrent_files` table
+      (index, path, size, episode, wanted, priority, progress) with a partial
+      unique index making "one live claim per episode" a database fact. One
+      batch serves several wants — episode 11 attaches to episode 10's torrent
+      for **zero** Nyaa requests — and a `qbit_reselect` job owns every later
+      change of selection plus the keep/stop/delete disposition. Retention
+      deletes the **file** and keeps the torrent, which falls out of the
+      nullable `episode_id` rather than being coded for. A file Arc cannot
+      identify is **not downloaded**: the episode keeps FR-A6's retry and says
+      so (FR-A7). Airing shows, films and one-episode entries are untouched,
+      the parser and query corpora must pass unchanged, and no batch candidate
+      is ever accepted by `acceptable()`'s default.
+      Plan: `notes/design/batch-selective-download-plan.md` (Plan agent,
+      2026-09-18), eight tasks T1–T8 grouped into six Writers W1–W6.
+  - [x] W1 (T1+T2) — data model, migration and the qBittorrent calls.
+        Built 2026-09-18. `TorrentKind` (`single`|`batch`) in
+        `models/enums.py`; on `torrents`, `episode_id` nullable, `kind` NOT
+        NULL DEFAULT `single`, `save_path`, `total_size`, `wanted_bytes` and
+        the table-level `ck_torrents_kind_episode`; the new `torrent_files`
+        table with `UNIQUE (torrent_id, file_index)`, the partial index on
+        `episode_id` and the partial **unique** index
+        `ux_torrent_files_one_wanted_per_episode` on `episode_id WHERE wanted
+        AND episode_id IS NOT NULL`. One hand-written revision,
+        `c3f81a5d27be` (revises `b63c05a9f1d2`), **no backfill** — every
+        existing row is a single by default — whose `downgrade()` restores the
+        `NOT NULL` and whose docstring says a batch row must be deleted first.
+        On the client (`acquisition/qbit.py`): `FILE_OFF`/`FILE_ON`,
+        `MAX_TORRENT_FILES` (500), `BATCH_DIR`, `batch_save_path_for`, the
+        `FileInfo` dataclass with a tolerant `from_json` (the position is the
+        index on a pre-4.4 client), and `files()`, `file_priority()`,
+        `start()` (404 → `torrents/resume`) and `add_file()` — multipart, both
+        `stopped` and `paused`, reusing `_added()`/`has()` so a duplicate add
+        is idempotent like `add()`. `add()`, `stop()`, `delete()`,
+        `apply_policy()` and `torrents()` are untouched, and nothing yet
+        writes a batch row, so singles take byte-identical paths. `QbitStub`
+        grew `torrents/files` (seeded per hash), `torrents/filePrio`
+        (recorded **in order** and applied, so the read-back the byte
+        guarantee needs is real), `torrents/start`/`resume` with the 4.x 404,
+        and a multipart `torrents/add` branch that keeps the blob and honours
+        `stopped`. 37 new tests (24 qbit-client, 9 model, 4 migration); the
+        whole server suite 3540 green and `make lint` clean. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - [x] W2 (T3) — Nyaa: batch candidates, ranking and the `.torrent` fetch.
+        Built 2026-09-18. `Candidate` gained `covers` (the episodes a name
+        claims, `()` for a pack that claims none), `is_batch` and
+        `torrent_url`; `acceptable(…, batches=False)` — **the default is the
+        guarantee**, so every existing caller, all 20 corpus cases and every
+        current rejection are unchanged — turns the early batch rejection into
+        a classification when asked: remake and seeders first as always, then
+        a range that must cover the episode (or `number + offset` under the
+        absolute rule, same four conditions as a single), a pack naming no
+        range allowed through with `covers=()`, season agreement, the title
+        threshold, a dub ranked rather than filtered, and a film refused
+        outright. `filter_items(…, batches=, only_batches=)`;
+        `rank(…, wanted_numbers=)` with one new term, `-covered_wanted`,
+        directly behind the dub and **for batches only** (a single's
+        five-tuple is asserted unchanged; the count floors at one so an empty
+        `wanted_numbers` is neutral); `Search.batches`, filled only where
+        `not ranked and deep_search(anime) and not single`, out of the
+        **already-merged pool** for **zero** extra requests. `NyaaClient._fetch`
+        returns the `httpx.Response` (`search` reads `.text`) and
+        `torrent_file()` reads `.content`: one paced, never-cached request,
+        refused off nyaa's own host, over `MAX_TORRENT_BYTES` (1 MiB) or not
+        starting `d`. 33 new tests in `test_nyaa.py`, 2 new corpus blocks
+        (*Kimetsu no Yaiba* episode 10 and episode 20) with `batch_accept` /
+        `batch_reject` fields and a guard test asserting every batch the
+        corpus rejects still rejects with the argument defaulted off; nothing
+        fetches a batch yet, so `Search.forms` and the airing-show path are
+        untouched.
+        **Corrected the same day, after the orchestrator's live check:** the
+        "zero extra requests, the packs were in the pool all along" claim was
+        true of *Kimetsu no Yaiba* episode 10 by accident — `10` is a token of
+        `1080p` — and false in general. Every query form carries the episode
+        number, no batch release name carries one, and Nyaa ANDs the words of
+        a query, so a numbered search's pool holds **no batch items at all**:
+        *One Week Friends* ep 3, 16 results and 0 batches; *Chivalry of a
+        Failed Knight*, 13 and 0; *Dagashi Kashi 2*, 10 and 0 — and
+        `Search.batches` could never be non-empty for any of them. So a new
+        pure `nyaa.batch_queries(anime)` builds up to three **numberless**
+        forms — `<romaji base>`, `<romaji base> BATCH`, `<english base> BATCH`
+        where the english base differs (`BATCH_WORD`, `MAX_BATCH_QUERIES`) —
+        asked inside the existing `not ranked and deep_search and not single`
+        branch, **before** the batch filter, deduplicated against the forms
+        already asked, each paced and cached, counted in `Search.requests` and
+        never in `Search.forms`, and under the same `MAX_REQUESTS` (20)
+        ceiling: worst case per episode is unchanged at 20 requests. The
+        three slots are **reserved** (orchestrator, 2026-09-18): the group
+        narrowing now stops at `MAX_REQUESTS - MAX_BATCH_QUERIES` (17) for a
+        `deep_search` entry that is not a single, so the ten-title-forms +
+        eighteen-narrowed case asks seven narrowed forms and then the three
+        packs — 20 in total — instead of never reaching them, which was the
+        shape most likely to have nothing but packs. A film keeps the plain
+        ceiling and an airing show never narrows. Nine more tests (the *One
+        Week Friends* pool with 0 batches end to end, the form list carrying
+        no digit, the season-stripped base, the two-form single-title case,
+        not asked when a single was found, not asked for an airing show, the
+        reservation, a film's plain ceiling, and the dedupe), and two existing
+        narrowing tests updated for the three new requests (16 → 19) since
+        that is a real behaviour change rather than a regression; `forms`
+        unchanged everywhere. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - [x] W3 (T4) — `batch.py`, the file plan, `search_release`'s batch branch
+        and the `batch_fallback` kill switch. Built 2026-09-18. New
+        `arc/services/acquisition/batch.py`: `plan_files` (**pure** — the
+        file→episode map through `library/parser.parse` on each basename, with
+        `nc`/`batch`/`movie`/`special`/`unknown` and non-video files mapping to
+        nothing, season agreement, the **candidate's own** absolute offset so a
+        per-season pack is read per-season, the title floor for a file that
+        names a title, and **exactly one** file per wanted episode or
+        `refused_reason`), `verify_selection` (pure: nothing selected that was
+        not asked for, nothing asked for left off, names/sizes/count
+        unchanged), `targets` (the searched episode plus the live wants the
+        release's own name claims, so a half-season pack is not refused for an
+        episode it never claimed), `claim_existing` (checked **before Nyaa is
+        asked at all** — the second episode of a pack costs zero requests),
+        `record_batch` (the `kind=batch`/`episode_id NULL` row and one
+        `torrent_files` row per file; raises by name on a hash another search
+        took first, so the retry attaches), `start_downloading` and the
+        `UNREADABLE_BATCH` sentence. `jobs._take_batch` runs the eight calls in
+        order — `.torrent` → multipart `add` stopped → `files` → `plan_files`
+        → `filePrio 0` for **every** index → `filePrio 1` for the wanted ones
+        → `files` read back and verified → `start` — deleting the pack on any
+        refusal and trying the next candidate, and taking FR-A6's retry with
+        FR-A7's own sentence when none is left. `names.py` gained
+        `QBIT_RESELECT`, priority 60 and `reselect_dedupe_key` (the handler is
+        W4's). New settings key `batch_fallback` (bool, default true, FR-D2):
+        `DEFAULT_SETTINGS`, `settings._VALIDATORS`, a lenient
+        `rules.batch_fallback` reader, revision `d81f4b6ca3e7` seeding it, and
+        a toggle row in Admin → Rules with one sentence of help.
+        **Reviewer round applied the same day**, and two of the nine were
+        blockers. The `torrents` row is now reserved (`reserve_batch`, flushed)
+        **between** the add and the first `filePrio`, with `record_files`
+        writing the sizes and per-file rows after the start: of two searches
+        racing on one pack the loser used to run `filePrio 0` over every index
+        of a torrent the winner had already selected and *started*. And
+        `QbitClient.files` now **raises** on a row it cannot parse instead of
+        dropping it — a dropped index is one that never gets turned off and
+        never appears in the read-back, so it would have downloaded unseen.
+        Then: `torrents/stop` after the add (a torrent the client already holds
+        is reported as added whatever state it is running in); the **hash** must
+        be confirmed, not just the success; an empty listing is a refused
+        candidate; `torrent_file` re-checks the answering URL and the
+        `Content-Length`; a free rider the pack does not hold is dropped rather
+        than refusing it; `claim_existing` skips `missing` too and is gated by
+        `batch_fallback` (turning the switch off stops new files being enabled,
+        not just new packs); only `wanted` episodes ride along, and
+        `covered_wanted` counts that same set; an unnamed-range pack is read
+        with the entry's absolute offset; a pack Arc could not read leaves a
+        `qbit_state = 'unreadable'` tombstone so it is not re-fetched every six
+        hours, while an episode whose candidates were only *skipped* keeps
+        FR-A6's ordinary reason. 78 new tests (38 pure in
+        `tests/test_batch_plan.py`, 32 in `tests/test_acquisition_jobs.py`, 4 in
+        `test_nyaa.py`, 3 in `test_qbit_client.py`, 1 client); singles, airing
+        shows, films, paused and storage-held runs asserted to make no
+        multipart add at all. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - [x] W4 (T5) — the batch poll's per-file completion and the `qbit_reselect`
+        job. Built 2026-09-18. `poll_qbit` keeps its original query for singles
+        (`WHERE episode_id IS NOT NULL`, which the inner join already said, so
+        that loop is byte for byte what it was) and adds a **second loop** over
+        the batch rows off the same one `torrents/info` answer: `torrents/files`
+        once per *in-flight* pack and **not at all** for a settled one (every
+        wanted row complete and the client reporting it stopped,
+        `jobs.SETTLED_STATES`), per-file progress onto `torrent_files` matched by
+        `file_index`, and a wanted file crossing `COMPLETE_PROGRESS` getting
+        `completed_at` and the **ordinary** hand-off for its own episode — the
+        row's own path, never `largest_video`, which inside a pack is another
+        episode — then `downloading → downloaded → matching` with no new state
+        edge. The hand-off is retried off the row rather than the listing, so a
+        file that lands a moment late is not stranded at `downloaded`. A pack
+        whose every wanted file is in gets `torrents.completed_at` and is
+        **stopped and kept** (whatever `QBIT_SEEDING` says; never deleted here).
+        A stall (`stall_reason` unchanged) and a pack gone from the client both
+        un-want the **wanted and not yet complete** rows and take those episodes
+        to `unavailable`, leaving a file already handed off alone — the un-want
+        matters because `ux_torrent_files_one_wanted_per_episode` would
+        otherwise refuse the episode its next pack. A stall deletes with files
+        through the same `DELETE_ON_SIGHT` list **only when the pack has handed
+        the library nothing** (orchestrator, 2026-09-18); one holding any
+        completed row is *stopped* and kept, since `deleteFiles=true` would take
+        a playable episode's file out from under the library, and those bytes
+        are retention's per episode (FR-T1). `stalled` batch rows stay in the
+        query so an undelivered request is retried and re-decided the same way.
+        A wanted file the client reports at
+        priority 0 is logged at WARNING and never re-enabled. New handler
+        `qbit_reselect` (payload `{torrent_id}`, idempotent because **the rows
+        are the instruction**): `batch.listing_mismatch` first (same count, same
+        name per index, else ERROR and nothing written), `filePrio` 0 for the
+        rows now off before 1 for the ones now on, then `batch.disposition()` —
+        KEEP → start, or stop where everything wanted is already in; STOP → stop
+        and keep the row, so the next episode attaches for nothing; DELETE →
+        `deleteFiles=true` and the row goes, `torrent_files` cascading.
+        `batch.LIVE_STATUSES` — what STOP is decided by — is `watching`,
+        `planned` **and `on_hold`** (orchestrator, 2026-09-18), wider than the
+        reconciler's two by design: a paused viewer comes back, and FR-A11's
+        parenthetical was extended to say so. 25 new
+        tests (16 in `tests/test_acquisition_jobs.py`, 9 pure-ish in the new
+        `tests/test_batch_disposition.py`); the 154 existing acquisition-job
+        tests, the single-episode poll among them, are untouched and green, and
+        the whole server suite is 3678 green with `make lint` clean. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - [x] W5 (T6) — cancel, reject and retention for a batch-backed episode.
+        Built 2026-09-18. One sentence behind all of it: **no path may do what
+        the single path does**, because `qbit_cancel` and the retention sweep
+        both delete a hash *with its files* and a pack's files belong to several
+        episodes. So each caller gives back one `torrent_files` row and queues
+        `qbit_reselect`, which is where the pack's fate is already decided (W4).
+        `wants.cancel_if_unwanted` takes a **new branch before** its existing
+        two writes — the episode's live claim is un-wanted, the same
+        `downloading → not_wanted` edge is taken, `qbit_reselect` is enqueued,
+        and `torrents.qbit_state` is **not** touched; the single path is byte for
+        byte unchanged and `release_if_unwanted` needed nothing (it only acts on
+        states with no bytes). `qbit_cancel` needed no change at all and is
+        asserted to be unreachable for a batch (it selects on `episode_id`
+        *and* `cancelled`; a batch row matches neither), so the cancel job queued
+        beside it finds nothing. `samples.cancel_sample` inherited the whole
+        branch through the two helpers it already called. `reject.reject_download`
+        gains the mirror branch: `episode_id_of` answers `None` for
+        `downloads/batch/<hash>/…` by design, so a new pure `batch_member_of`
+        reads `(info hash, path inside the torrent)` out of that layout and finds
+        the row it names — the episode goes `unavailable` with `WRONG_FILE`
+        exactly as today, the shared torrent is **never** marked `rejected`, and
+        this is the **one** caller that also clears `episode_id` on the row,
+        because otherwise FR-A6's fortnight of retries is handed the identical
+        wrong file back by `claim_existing` every day. Retention needed
+        `Targets.torrent_file_ids` (loaded set-based in `_facts`, named by the
+        preview and the dry run) and one step in `delete_episode_files`
+        **before anything is unlinked**: un-want the rows and queue the
+        re-selection, so a pack started again for another episode cannot
+        re-fetch what was just removed; `episode_id` is kept, so FR-T3's
+        "re-acquired" is `claim_existing` with no Nyaa request. The rest of
+        retention needed nothing — the file was already a loose file charged at
+        its own `media_files.size` and the pack was already unreachable by hash,
+        both falling out of the nullable `episode_id` — and `retained_usage` is
+        untouched. The three shared helpers live in a new
+        `arc/services/acquisition/claims.py` rather than in `batch`, because
+        `batch` reaches `nyaa` → `library.parser` → the library package's
+        `__init__` → the catalogue, and the catalogue imports `wants`: a
+        module-level `import batch` from the reconciler closes that circle.
+        **Second review round, all applied 2026-09-18.** Two blockers: a row
+        turned back on by `claim_existing` now forgets `completed_at` and
+        `progress` — kept, they told the job there was nothing to fetch, told
+        the poll the pack was settled and told the hand-off to look for a file
+        retention had deleted, once a minute, with the episode stranded in
+        `downloaded` holding the claim that stops it being fetched any other
+        way — and **the poll is now the reconciler for a pack's selection**,
+        since `enqueue` deduplicates against *running* jobs, so a want changing
+        mid-flight was dropped and the running job wrote the stale answer with
+        nothing left to correct it; a file whose selection disagrees with its
+        row, either way round, is logged and re-queued. That supersedes the
+        owner's "a file switched off in the Web UI is left off" (new dated line
+        in spec.md for the owner to object to). Four should-fixes: a listing
+        mismatch also marks the pack `missing`, so its episodes end with the
+        ordinary sentence instead of stranding; `disposition` never DELETEs a
+        pack with a `completed_at` row, because the library may hold those bytes
+        (and retention therefore clears the stamp with the file it deletes);
+        `qbit_reselect` and `claim_existing` both take `FOR UPDATE` on the pack
+        and the verdict is read after the listing check, so a DELETE cannot race
+        an attach; and `stall_reason` treats the client's `error` and
+        `missingFiles` as a failed attempt with no threshold — a pre-existing
+        gap for singles that retention unlinking a running pack's file makes
+        likely. Plus three docstring corrections and an M17 bullet for the one
+        thing left uncovered: a cancelled member's partial bytes sit in
+        `downloads/batch/<hash>/` with nothing naming them until the pack
+        reaches DELETE (documented in architecture §5.7). 27 new tests in all
+        (18 in the first round, 9 in the fix round), every existing
+        single-episode cancel, reject and retention test unchanged and green,
+        the whole server suite 3703 green (1 deselected, the slow marker) with
+        `make lint` clean. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - [x] W6 (T7+T8) — the library prior, the API and the UI, and the doc pass.
+        Built 2026-09-18, and it is the half of the feature a person can see.
+        **Library (T7):** `library/jobs._expected_episode` — the source of the
+        prior the *suggestion* model is given, since a suggestion asked from the
+        review page days later has no payload to carry one — gains a second
+        source. A single's episode is read from its save path; a pack's cannot
+        be, because `downloads/batch/<hash>/` is named for the torrent precisely
+        so no id can be read out of it, so the claim is read from the
+        `torrent_files` row instead. The lookup is **shared, not duplicated**:
+        `reject.batch_member_of` (W5's pure layout reader) and a new
+        `reject.batch_file_of` (the row it names) are the one implementation,
+        and `reject._reject_batch_member` now calls it too. It stays the
+        **existing** prior at its existing weight (plan D4): `matcher.py` is not
+        touched, FR-L4's confidence and title floors still decide, and a member
+        whose own filename says another show still goes to review — which is
+        the test that would fail if anybody ever turned a `torrent_files` row
+        into a link. **API and UI (T8):** `episode_extras.torrents_for` resolves
+        a batch-backed episode through the `torrent_files` row that still claims
+        it and returns an `EpisodeRelease` (the torrent, the **file's**
+        progress, and `batch`), so an episode row shows its own percentage and
+        not the pack's 93 %; `ReleaseOut` gains `batch`, the Show page's meta
+        line says `from a batch` after the group, and `releaseLine` does the
+        same. A claim given back stops answering for the episode at once. The
+        admin panel: `GET /api/acquisition/qbit` sends `kind` and
+        `wanted_bytes` (and `total_size` is on no API at all — a pack's payload
+        is not a figure anything may read), the Acquisition tab marks a pack
+        "batch · selected files only", sizes it by the files Arc asked for and
+        reads its null episode as "several" rather than "not linked", and the
+        retention preview sends `torrent_files` per row for the Storage tab's
+        one line, "N batch file claims released". **Doc pass:** spec FR-A7 and
+        the §5 page table now say what a batch-backed row shows; architecture
+        §5.2a's "a batch never reaches disk by acquisition" was stale and is
+        corrected, with the prior's two sources written out; §5b carries the
+        three API shapes; §5.7 names the preview field; §6's "a batch is never
+        picked" now says "by the ordinary path". 8 new server tests and 7 new
+        client ones, the whole server suite 3711 green (1 deselected) and 724
+        client, `make lint` clean, `matcher.py` unmodified. Verified 2026-09-18 (orchestrator): full server suite 3719, client 724,
+        lint clean; two Reviewer rounds (4 blockers, 14 should-fixes, all
+        fixed and re-verified); on dev's real stack Chivalry of a Failed
+        Knight (FINISHED, no seeded single) chose the HorribleSubs 01-12 pack,
+        mapped 12 files to episodes 1–12, enabled exactly two (3 and 4, 0.6 GB
+        of 3.4 GB), read back the selection, started it, attached episode 4 in
+        the same pick, and only those two files exist on disk; the show page
+        says "from a batch" and the Admin tab "batch · selected files only";
+        the qBittorrent 5.2.3 file-priority contract was also proven directly
+        with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
 - [x] Per-show overrides UI for group/resolution
       Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
       §4 `settings`, §5b). The `override:anime:<id>` row the ranker has
@@ -1105,16 +1474,41 @@ the finish work (bugs found that way are fixed inside M16).
       `override:anime:76` with de-duplicated groups, the Admin Rules row edit
       added 720p, Remove asked first and deleted the row; the summary line and
       the table agreed at every step
-- [ ] Accessibility pass (keyboard nav, contrast)
+- [x] Accessibility pass (keyboard nav, contrast) — **not doing** (owner, 2026-09-18: dropped from M16)
 - [ ] Performance: playlist/segment caching headers, DB indexes reviewed
-- [ ] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
-      of 2026-09-05; see architecture.md decision log)
-- [ ] Responsive/accessibility items not already closed by M15
+- [x] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
+      of 2026-09-05; see architecture.md decision log) — **not doing in M16** (owner, 2026-09-18: TS 7 is not ready; revisit when typescript-eslint supports it)
+- [x] Responsive/accessibility items not already closed by M15 — **not doing** (owner, 2026-09-18: dropped from M16)
 - [ ] Full test suite green in CI; coverage report
 - [ ] Final docs sweep: spec, architecture, roadmap, README all current
 - **DoD:** "finished product" — every FR in spec.md is implemented or
   explicitly marked out of scope; owner has used it daily for two weeks
   without manual intervention.
+
+### M17 — After the submission
+Approved by the owner on 2026-09-18, contents picked by the orchestrator
+from the "possible later" list (the owner may strike any). Starts after
+M16's DoD is met and the professor's review is done.
+- [ ] Email for **account events only**: invite delivery and password
+      reset/change. Explicitly **no** episode-ready or failure notifications
+      (owner, 2026-09-18) — those stay in-app (FR-W6).
+- [ ] Match review for batch files: a batch whose wanted file cannot be
+      identified is skipped today (FR-A4/FR-A11); let a person resolve the
+      file → episode mapping from the review queue instead.
+- [ ] Sweep `downloads/batch/` for files with no torrent_files claim (partial
+      bytes of cancelled batch members). A want withdrawn mid-download leaves
+      whatever had arrived inside the pack's directory with no `media_files`
+      row naming it, so retention — which measures per episode, off the rows —
+      cannot see it; those bytes go when the pack itself reaches DELETE, which
+      may be never for a show somebody keeps on their list (FR-A11, FR-T1).
+- [ ] Selectable subtitle and audio tracks at play time (multiple renditions
+      or on-the-fly selection) instead of one burned-in choice.
+- [ ] Per-show language overrides (audio/subtitle), on the pattern of the
+      per-show release-rule overrides.
+- [ ] Hardware transcoding, decided against the host (spec §9 open decision).
+- **DoD:** each item implemented or explicitly deferred with a dated
+  decision; spec/architecture current; suites green in CI; deployed on
+  production.
 
 ### Demo prep — the professor's walkthrough (after M16, before the review)
 Raised 2026-09-10. The reviewer does not know anime and has no MAL account,
@@ -1123,8 +1517,8 @@ closer to the date; candidates:
 - [x] Moved into M16 (2026-09-12): the demo account and the "How Arc works"
       page with the pipeline diagram and one sentence per external service —
       demo-account only
-- [ ] A live-status panel (jobs, integrations, VPN exit) the reviewer can open
-      to see the system working, reusing the M14 admin data
+- [x] A live-status panel (jobs, integrations, VPN exit) the reviewer can open
+      to see the system working, reusing the M14 admin data — **not doing** (owner, 2026-09-18: the Admin jobs tab covers it)
 
 ---
 

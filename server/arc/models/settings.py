@@ -57,6 +57,16 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # transcode's scratch, which is the smallest margin that still leaves
         # the machine somewhere to put what it is already holding.
         "min_free_gb": 10,
+        # Whether a finished show with no acceptable single at all may take a
+        # batch and download only the wanted episode's file (FR-A4's
+        # exception, FR-A11). True on a fresh install: it is the behaviour the
+        # owner asked for, and for an old show it is often the difference
+        # between an episode and a fortnight of "searching". It is here as the
+        # kill switch for the riskiest acquisition change since M6 — turning
+        # it off leaves every other path byte-identical, since nothing but
+        # ``search_release``'s batch branch reads it, and a batch already in
+        # flight is unaffected.
+        "batch_fallback": True,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

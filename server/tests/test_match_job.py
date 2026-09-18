@@ -17,7 +17,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Anime, Episode, EpisodeState, Job, JobStatus, MediaFile, ReviewState
+from arc.models import (
+    Anime,
+    Episode,
+    EpisodeState,
+    Job,
+    JobStatus,
+    MediaFile,
+    ReviewState,
+    Torrent,
+    TorrentFile,
+    TorrentKind,
+)
+from arc.services.acquisition.qbit import BATCH_DIR
 from arc.services.catalog import Breaker, CatalogService
 from arc.services.jobs.registry import JobContext
 from arc.services.library import jobs as library_jobs
@@ -73,6 +85,53 @@ async def add_file(session: AsyncSession, tmp_path: Path, name: str) -> MediaFil
     path = tmp_path / "manual" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\0")
+    media_file = MediaFile(
+        path=str(path.resolve()),
+        size=1,
+        parsed=parse(name).as_dict(),
+        review_state=ReviewState.PENDING,
+    )
+    session.add(media_file)
+    await session.flush()
+    return media_file
+
+
+async def add_batch_member(
+    session: AsyncSession,
+    tmp_path: Path,
+    name: str,
+    *,
+    episode_id: int | None = None,
+    info_hash: str = "b" * 40,
+) -> MediaFile:
+    """One file of a pack, where acquisition would have put it (FR-A11).
+
+    ``downloads/batch/<info hash>/<name>``, with the ``torrent_files`` row that
+    names it — the pair :func:`~arc.services.acquisition.reject.batch_file_of`
+    resolves, and the only way a member's claim can be read at all, since the
+    directory is named for the torrent and not for any episode.
+    """
+    path = tmp_path / "downloads" / BATCH_DIR / info_hash / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0")
+    torrent = Torrent(
+        info_hash=info_hash,
+        kind=TorrentKind.BATCH,
+        title="[Judas] Sousou no Frieren [BD 1080p]",
+        save_path=f"/data/downloads/{BATCH_DIR}/{info_hash}",
+    )
+    session.add(torrent)
+    await session.flush()
+    session.add(
+        TorrentFile(
+            torrent_id=torrent.id,
+            file_index=0,
+            path=name,
+            size=1,
+            episode_id=episode_id,
+            wanted=True,
+        )
+    )
     media_file = MediaFile(
         path=str(path.resolve()),
         size=1,
@@ -488,6 +547,64 @@ class TestALinkedFileIsNeverUnlinked:
 
         assert media_file.review_state is ReviewState.PENDING
         assert media_file.match_candidates == [{"reason": library_jobs.REASON_NO_CANDIDATES}]
+
+
+class TestBatchMembers:
+    """A file that came out of a pack takes the ordinary path (FR-A11).
+
+    The pack itself is still a review item (:class:`TestKinds`), but the files
+    *inside* one are ordinary episode names, and the whole of FR-A11's matching
+    story is that they are matched by the ordinary rules with the ordinary
+    prior. The second test is the non-negotiable: ``torrent_files.episode_id``
+    is the parser's reading of a filename and is offered as a prior, so a member
+    whose own name says another show must still go to review (plan D4).
+    """
+
+    async def test_a_member_links_through_the_expected_prior(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        anime = Anime(anilist_id=FRIEREN_ID, title_romaji="Sousou no Frieren")
+        db_session.add(anime)
+        await db_session.flush()
+        episode = Episode(anime_id=anime.id, number=5, state=EpisodeState.DOWNLOADED)
+        db_session.add(episode)
+        await db_session.flush()
+        media_file = await add_batch_member(
+            db_session, tmp_path, FRIEREN_FILE, episode_id=episode.id
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 5])
+
+        assert media_file.review_state is ReviewState.AUTO
+        assert media_file.episode_id == episode.id
+        assert episode.state is EpisodeState.MATCHED
+
+    async def test_a_member_whose_title_disagrees_is_not_linked(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """The pack claims it is Frieren 5; the filename says otherwise."""
+        anime = Anime(anilist_id=FRIEREN_ID, title_romaji="Sousou no Frieren")
+        db_session.add(anime)
+        await db_session.flush()
+        episode = Episode(anime_id=anime.id, number=5, state=EpisodeState.DOWNLOADED)
+        db_session.add(episode)
+        await db_session.flush()
+        media_file = await add_batch_member(
+            db_session, tmp_path, UNKNOWN_FILE, episode_id=episode.id
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 5])
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.episode_id is None, "a claim on a row is never a link"
 
 
 class TestKinds:

@@ -1,6 +1,6 @@
 """Deleting one episode's files, rows and torrent (FR-T3).
 
-:mod:`arc.services.retention.sweep` decides *whether*; this does it. Six
+:mod:`arc.services.retention.sweep` decides *whether*; this does it. Seven
 things go, in an order chosen so that a failure half-way leaves the least
 awkward state behind:
 
@@ -12,15 +12,27 @@ awkward state behind:
    warning (:meth:`~arc.services.acquisition.qbit.QbitClient.delete`), which
    is what makes "the torrent is not in the client any more" a no-op rather
    than a failure.
-2. the rendition directory, 3. the source directory, 4. any loose source file
+2. **the batch claims, un-wanted** (:func:`_release_claims`, FR-A11) — before
+   anything is unlinked, so that a pack started again for another episode
+   cannot re-fetch the file retention is about to remove,
+3. the rendition directory, 4. the source directory, 5. any loose source file
    (a manual drop lives in ``DATA_DIR/manual`` and has no directory of its
-   own), 5. the ``renditions``, ``media_files`` and ``torrents`` rows, and the
-   tombstoned ``wants`` rows that were the reason this episode could go
+   own; a batch member is a loose file too), 6. the ``renditions``,
+   ``media_files`` and ``torrents`` rows, and the tombstoned ``wants`` rows
+   that were the reason this episode could go
    (:func:`_delete_leftover_wants` — with one exception, which is the whole of
    its docstring), and
-6. the state change back to ``not_wanted`` (spec §6's ``ready → (retention) →
+7. the state change back to ``not_wanted`` (spec §6's ``ready → (retention) →
    not_wanted``), which is what lets a later want re-acquire the episode
    through the ordinary path.
+
+**A batch-backed episode loses its file and keeps its torrent** (FR-T1, FR-T3,
+FR-A11). Nothing here decides that: a pack's ``torrents`` row has a null
+``episode_id``, so ``targets.torrent_hashes`` is empty and step 1 cannot reach
+it, and the file is one of the loose ones. What the pack itself is worth is
+decided by ``batch.disposition`` inside the ``qbit_reselect`` job step 2 queues
+— so retention of the last wanted file of a show nobody is watching any more
+does end with the torrent deleted, one step removed and by one rule.
 
 **Everything is tolerant of already being gone.** A sweep that crashed after
 deleting the directories runs again an hour later and finds them missing;
@@ -44,11 +56,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, MediaFile, Rendition, Torrent, Want
+from arc.models import Episode, EpisodeState, MediaFile, Rendition, Torrent, TorrentFile, Want
+from arc.services.acquisition.claims import release_files
 from arc.services.acquisition.qbit import QbitClient
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import STALE_DROP_REASON
@@ -75,6 +89,10 @@ class Removed:
     loose_files: int = 0
     media_files: int = 0
     torrents: int = 0
+    #: ``torrent_files`` rows given back to their pack (FR-A11). Un-wanted and
+    #: kept, never deleted — the row is how the same pack serves the episode
+    #: again if somebody wants it back.
+    torrent_files: int = 0
     #: Tombstoned ``wants`` rows cleared with the files. Never the stale ones
     #: (:func:`_delete_leftover_wants`), and never a live want.
     wants: int = 0
@@ -91,6 +109,7 @@ class Removed:
             "loose_files": self.loose_files,
             "media_files": self.media_files,
             "torrents": self.torrents,
+            "torrent_files": self.torrent_files,
             "wants": self.wants,
             "hashes": list(self.hashes),
             "freed_bytes": self.freed_bytes,
@@ -163,6 +182,69 @@ async def _delete_leftover_wants(session: AsyncSession, episode_id: int) -> int:
     return cast("CursorResult[Any]", result).rowcount or 0
 
 
+async def _release_claims(session: AsyncSession, targets: Targets) -> int:
+    """Give this episode's batch files back before they are unlinked (FR-A11).
+
+    **The order is what the guarantee is made of**, and it is worth stating
+    precisely: not "priority 0 reaches the client before the file is unlinked"
+    — nothing here talks to the client — but *no start happens without a
+    priority write in the same job*. ``qbit_reselect`` writes the selection the
+    rows say and only then decides whether to start the pack, so a pack started
+    for another episode after this cannot be fetching the file retention
+    removed. Un-wanting the row first is what makes that true of every later
+    run as well.
+
+    **The row's history goes with the bytes.** ``completed_at`` and ``progress``
+    say "this file arrived and the library was given it", and retention has just
+    deleted the file, so they would be a claim about something that no longer
+    exists — one that
+    :func:`~arc.services.acquisition.batch.disposition` reads as "the library
+    may still be using this pack" and would refuse to delete a finished show's
+    pack over, for ever. The same reset ``claim_existing`` does when it asks for
+    a file again, for the same reason: what is known about a copy that is gone
+    is not known about anything.
+
+    The row itself stays, ``episode_id`` and all, and that is FR-T3's
+    "re-acquired" arriving for free: a later want is served from the same pack
+    by ``batch.claim_existing`` with no Nyaa request and no second copy of a
+    fourteen-gigabyte download. What decides the
+    pack's own fate is ``batch.disposition`` inside the job — KEEP while another
+    episode still wants a file, STOP while the show is on somebody's list,
+    DELETE with its files when neither is true, which is how retention of the
+    *last* file of a finished show removes the torrent without any path here
+    knowing about hashes.
+
+    Rows already un-wanted are included and are a no-op on the row; their pack's
+    re-selection is queued anyway, because a row whose ``priority`` never
+    reached the client is exactly the case this exists to make safe, and the job
+    is deduplicated per torrent and idempotent.
+    """
+    if not targets.torrent_file_ids:
+        return 0
+    rows = list(
+        (
+            await session.scalars(
+                select(TorrentFile).where(TorrentFile.id.in_(targets.torrent_file_ids))
+            )
+        ).all()
+    )
+    if not rows:
+        return 0
+    for row in rows:
+        row.completed_at = None
+        row.progress = None
+    torrent_ids = await release_files(session, rows)
+    log.info(
+        "retention gave a batch's files back before deleting them",
+        extra={
+            "episode_id": targets.episode_id,
+            "torrent_file_ids": list(targets.torrent_file_ids),
+            "torrent_ids": list(torrent_ids),
+        },
+    )
+    return len(rows)
+
+
 async def _delete_rows(session: AsyncSession, targets: Targets) -> tuple[int, int]:
     """The ``renditions``, ``media_files`` and ``torrents`` rows (FR-T3).
 
@@ -219,6 +301,7 @@ async def delete_episode_files(
             loose_files=len(targets.loose_files),
             media_files=len(targets.media_file_ids),
             torrents=len(targets.torrent_ids),
+            torrent_files=len(targets.torrent_file_ids),
             hashes=targets.torrent_hashes,
             freed_bytes=targets.bytes,
         )
@@ -228,6 +311,11 @@ async def delete_episode_files(
     if targets.torrent_hashes:
         async with QbitClient.from_settings(settings) as qbit:
             await qbit.delete(list(targets.torrent_hashes), delete_files=True)
+
+    # Before a single byte is unlinked, and after the client call for the same
+    # reason that one is first: this writes rows, and a run that fails at the
+    # client should not have changed a pack's selection (FR-A11).
+    claims = await _release_claims(session, targets)
 
     rendition_dir = (
         str(targets.rendition_dir)
@@ -253,6 +341,7 @@ async def delete_episode_files(
         loose_files=loose,
         media_files=files,
         torrents=torrents,
+        torrent_files=claims,
         wants=wants,
         hashes=targets.torrent_hashes,
         freed_bytes=targets.bytes,

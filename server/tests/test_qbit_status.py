@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from arc.config import Settings
 from arc.db import SessionFactory
 from arc.main import create_app
-from arc.models import EpisodeState, Torrent, UserRole
+from arc.models import EpisodeState, Torrent, TorrentKind, UserRole
 from arc.services.acquisition import status as qbit_status_module
 from arc.services.acquisition.qbit import QbitClient
 from tests.acquisition_helpers import (
@@ -124,6 +124,8 @@ async def test_a_reachable_client_reports_its_version_and_torrents(
             "dlspeed": 3_500_000,
             "upspeed": 120_000,
             "episode_id": episode_id,
+            "kind": "single",
+            "wanted_bytes": None,
         }
     ]
 
@@ -136,6 +138,59 @@ async def test_a_torrent_arc_has_no_row_for_carries_a_null_episode(
     body = (await admin.get("/api/acquisition/qbit")).json()
 
     assert body["torrents"][0]["episode_id"] is None
+
+
+async def test_a_batch_reports_its_kind_and_its_wanted_bytes(
+    admin: AsyncClient, stub: QbitStub, api_factory: SessionFactory
+) -> None:
+    """The payload is 14.8 GB; nothing on this page may say so (FR-A11).
+
+    ``size`` is the client's own figure for the **selected** files and
+    ``wanted_bytes`` is Arc's record of the same thing at pick time, so the two
+    agree and neither is the pack's total. ``episode_id`` is null because a pack
+    belongs to no episode, which is exactly why ``kind`` is worth sending: it is
+    what tells an admin that a row with no episode is a pack rather than a
+    torrent somebody added by hand.
+    """
+    async with api_factory() as session:
+        session.add(
+            Torrent(
+                info_hash="e" * 40,
+                kind=TorrentKind.BATCH,
+                title="[Judas] Kimetsu no Yaiba [BD 1080p]",
+                save_path="/data/downloads/batch/" + "e" * 40,
+                total_size=14_800_000_000,
+                wanted_bytes=1_100_000_000,
+            )
+        )
+        await session.commit()
+    stub.add_torrent(
+        "e" * 40,
+        name="[Judas] Kimetsu no Yaiba [BD 1080p]",
+        size=1_100_000_000,
+        state="stoppedUP",
+        progress=1.0,
+    )
+
+    body = (await admin.get("/api/acquisition/qbit")).json()
+
+    row = body["torrents"][0]
+    assert row["kind"] == "batch"
+    assert row["wanted_bytes"] == 1_100_000_000
+    assert row["size"] == 1_100_000_000, "the client's size is the selected files'"
+    assert row["episode_id"] is None
+    assert "total_size" not in row
+
+
+async def test_a_torrent_arc_has_no_row_for_carries_no_kind(
+    admin: AsyncClient, stub: QbitStub
+) -> None:
+    stub.add_torrent("f" * 40)
+
+    row = (await admin.get("/api/acquisition/qbit")).json()["torrents"][0]
+
+    assert row["kind"] is None
+    assert row["wanted_bytes"] is None
 
 
 async def test_an_empty_client_is_reachable_with_nothing_in_it(

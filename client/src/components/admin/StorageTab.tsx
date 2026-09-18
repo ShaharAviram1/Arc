@@ -48,6 +48,7 @@ import {
   type OfflineSource,
   type RetentionDisk,
   type RetentionItem,
+  type RetentionPreview,
 } from '@/lib/admin'
 import { episodeStateClass, episodeStateLabel } from '@/lib/anime'
 
@@ -167,6 +168,33 @@ function DiskPanel({ disk }: { disk: RetentionDisk }) {
         ))}
       </dl>
     </div>
+  )
+}
+
+/**
+ * How many batch file claims the whole preview would give back (FR-A11).
+ *
+ * A batch-backed episode's file is unlinked and its pack is kept, so the claim
+ * is the only thing "deleted" that is not bytes — and it is worth naming,
+ * because giving it back is what stops the pack fetching the same file again
+ * for another episode a minute later.
+ */
+function claimCount(episodes: RetentionItem[]): number {
+  return episodes.reduce((total, item) => total + (item.torrent_files ?? 0), 0)
+}
+
+/** What the sweep would free, and what it would hand back to a pack. */
+function PreviewSummary({ preview }: { preview: RetentionPreview }) {
+  const claims = claimCount(preview.episodes)
+  const episodes =
+    preview.episodes.length === 1 ? '1 episode' : `${String(preview.episodes.length)} episodes`
+  return (
+    <p className="mb-4 text-[14px] text-[var(--arc-text-muted)]">
+      {episodes} would be deleted, freeing {formatBytes(preview.bytes)}.
+      {claims > 0
+        ? ` ${String(claims)} batch file ${claims === 1 ? 'claim' : 'claims'} released.`
+        : ''}
+    </p>
   )
 }
 
@@ -335,12 +363,7 @@ export function StorageTab() {
               </p>
             ) : (
               <>
-                <p className="mb-4 text-[14px] text-[var(--arc-text-muted)]">
-                  {preview.data.episodes.length === 1
-                    ? '1 episode'
-                    : `${String(preview.data.episodes.length)} episodes`}{' '}
-                  would be deleted, freeing {formatBytes(preview.data.bytes)}.
-                </p>
+                <PreviewSummary preview={preview.data} />
                 <TableScroll>
                   <table className="min-w-full border-collapse">
                     <caption className="sr-only">Retention preview</caption>

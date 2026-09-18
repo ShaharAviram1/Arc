@@ -8,6 +8,7 @@ import { createQueryClient } from '@/lib/queryClient'
 import type { MalSync } from '@/lib/mal'
 import { Show } from '@/pages/Show'
 import {
+  BATCH_RELEASE,
   CHOSEN_RELEASE,
   FAILURE_REASON,
   FRIEREN,
@@ -615,6 +616,30 @@ describe('Show', () => {
     expect(screen.getByText('Downloading 42%')).toBeInTheDocument()
     // Only work in flight gets a bar: searching and wanted are just a word.
     expect(screen.getAllByRole('progressbar')).toHaveLength(2)
+  })
+
+  it('says when an episode is being served out of a pack (FR-A11)', async () => {
+    // The server has already resolved the percentage to *this file's* — the
+    // pack itself is 93 % done and that number never reaches the client — so
+    // what the row has to add is where the group name comes from.
+    mockApi({
+      'GET /api/auth/me': ME,
+      [DETAIL_PATH]: { body: withEpisode(3, { release: BATCH_RELEASE, download_progress: 0.3 }) },
+    })
+
+    renderShow()
+
+    expect(await screen.findByText(/1080p · Judas · from a batch$/)).toBeInTheDocument()
+    expect(screen.getByText('Downloading 30%')).toBeInTheDocument()
+  })
+
+  it('says nothing about a batch for an ordinary release', async () => {
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
+    expect(screen.queryByText(/from a batch/)).not.toBeInTheDocument()
   })
 
   it('shows how far a transcode has got, on the same bar (FR-P4)', async () => {

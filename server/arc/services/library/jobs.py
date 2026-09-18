@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import Anime, Episode, MediaFile, ReviewState
-from arc.services.acquisition.reject import episode_id_of
+from arc.services.acquisition.reject import batch_file_of, episode_id_of
 from arc.services.catalog.factory import catalog_for
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest, suggest
@@ -326,13 +326,34 @@ async def _expected_episode(
 ) -> suggest.ExpectedEpisode | None:
     """The episode Arc asked for, when Arc is what downloaded this file.
 
-    Derived from the save path rather than from the job payload
-    (:func:`arc.services.acquisition.reject.episode_id_of`: every download
-    lands in ``downloads/<episode id>/`` and nothing else does), so the prior
-    survives a suggestion asked for from the review page days later, where no
-    payload could carry it. ``None`` for a manual drop, which claims nothing.
+    Derived from where the file is rather than from the job payload, so the
+    prior survives a suggestion asked for from the review page days later,
+    where no payload could carry it. ``None`` for a manual drop, which claims
+    nothing.
+
+    **Two layouts, because acquisition writes two** (FR-A11). A single lands in
+    ``downloads/<episode id>/`` and nothing else does, so the directory name is
+    the answer (:func:`~arc.services.acquisition.reject.episode_id_of`). A pack
+    lands in ``downloads/batch/<info hash>/`` — named for the *torrent*
+    precisely so that no id can be read out of the path, since a directory
+    holding episodes 1 to 26 named after one of them would attribute
+    twenty-five files to the wrong episode — so the claim is read from the
+    ``torrent_files`` row instead
+    (:func:`~arc.services.acquisition.reject.batch_file_of`), which is where the
+    filename parser wrote it at pick time.
+
+    It is the same **prior** either way, with the same weight: what comes back
+    is offered to the suggestion model as "Arc downloaded this file believing it
+    to be X", and the matcher's own copy of the belief arrives through
+    ``expected`` in the job payload. Neither links anything. A row on a pack is
+    the parser's reading of a filename inside a torrent, which is a better guess
+    than nothing and no more authoritative than that (CLAUDE.md: never auto-link
+    a guess; plan D4).
     """
     episode_id = episode_id_of(media_file.path, downloads_dir=settings.downloads_dir)
+    if episode_id is None:
+        row = await batch_file_of(session, media_file.path, downloads_dir=settings.downloads_dir)
+        episode_id = row.episode_id if row is not None else None
     if episode_id is None:
         return None
     episode = await session.get(Episode, episode_id)

@@ -8,7 +8,14 @@ Importing this package is what makes ``Base.metadata`` complete: Alembic's
 from __future__ import annotations
 
 from arc.db import Base
-from arc.models.acquisition import Torrent, Want
+from arc.models.acquisition import (
+    EPISODE_FILE_INDEX,
+    KIND_EPISODE_PREDICATE,
+    WANTED_CLAIM_INDEX,
+    Torrent,
+    TorrentFile,
+    Want,
+)
 from arc.models.anime import Anime, Episode
 from arc.models.enums import (
     EpisodeState,
@@ -17,6 +24,7 @@ from arc.models.enums import (
     MalWriteCause,
     MalWriteStatus,
     ReviewState,
+    TorrentKind,
     UpdatedBy,
     UserRole,
 )
@@ -44,10 +52,13 @@ __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_PRIORITY",
     "DEFAULT_SETTINGS",
+    "EPISODE_FILE_INDEX",
     "IN_PROGRESS_INDEX",
+    "KIND_EPISODE_PREDICATE",
     "OFFLINE_SEARCH_INDEX",
     "OFFLINE_SEASON_INDEX",
     "TRANSCODE_EPISODE_INDEX",
+    "WANTED_CLAIM_INDEX",
     "Anime",
     "Base",
     "Episode",
@@ -71,6 +82,8 @@ __all__ = [
     "Session",
     "Setting",
     "Torrent",
+    "TorrentFile",
+    "TorrentKind",
     "UpdatedBy",
     "User",
     "UserRole",

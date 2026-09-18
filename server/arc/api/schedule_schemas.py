@@ -27,7 +27,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut, ListEntryOut
-from arc.models import EpisodeState, Job, ListStatus, Rendition, Torrent
+from arc.api.episode_extras import EpisodeRelease
+from arc.models import EpisodeState, Job, ListStatus, Rendition
 from arc.services.catalog.failures import FailureKind, FailureRow
 from arc.services.catalog.progress import BehindRow, NewEpisodeRow
 from arc.services.catalog.schedule import DAYS_IN_WEEK, PlacedEntry, WeekPlacement
@@ -232,7 +233,7 @@ class NewEpisodeEntry(BaseModel):
 
     The episode is the *same* :class:`~arc.api.anime_schemas.EpisodeOut` the
     show page renders, filled in the same way, which is the point of taking
-    ``torrent``, ``rendition`` and ``transcode_job``: an episode that aired
+    ``release``, ``rendition`` and ``transcode_job``: an episode that aired
     last night is exactly the one most likely to be downloading or preparing
     right now, and a card that showed only its state — with no percentage, no
     reason, and no way to tell "queued" from "half done" — would be at its
@@ -251,7 +252,7 @@ class NewEpisodeEntry(BaseModel):
         list_status: ListStatus | None = None,
         completed: bool = False,
         list_progress: int = 0,
-        torrent: Torrent | None = None,
+        release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
     ) -> NewEpisodeEntry:
@@ -267,7 +268,7 @@ class NewEpisodeEntry(BaseModel):
                 # MyAnimeList, which is the case the owner hit on production.
                 completed=completed,
                 list_progress=list_progress,
-                torrent=torrent,
+                release=release,
                 rendition=rendition,
                 transcode_job=transcode_job,
             ),
@@ -303,7 +304,7 @@ class ContinueWatchingEntry(BaseModel):
         now: datetime,
         list_status: ListStatus | None = None,
         list_progress: int = 0,
-        torrent: Torrent | None = None,
+        release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
     ) -> ContinueWatchingEntry:
@@ -322,7 +323,7 @@ class ContinueWatchingEntry(BaseModel):
                 # and then reopened here still carries its tick.
                 completed=row.completed,
                 list_progress=list_progress,
-                torrent=torrent,
+                release=release,
                 rendition=rendition,
                 transcode_job=transcode_job,
             ),

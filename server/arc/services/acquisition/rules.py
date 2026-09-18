@@ -4,8 +4,8 @@ Three global keys — ``preferred_groups``, ``preferred_resolution``,
 ``fallback_resolution`` — plus the window ``look_ahead_n`` that
 :mod:`~arc.services.acquisition.wants` needs, the kill switch
 ``acquisition_paused``, the storage floor ``min_free_gb`` (FR-T6), the per-user
-slot cap ``slot_cap_k`` (FR-A10), and an optional **per-show override** under
-``override:anime:<id>``.
+slot cap ``slot_cap_k`` (FR-A10), the batch fallback ``batch_fallback``
+(FR-A11), and an optional **per-show override** under ``override:anime:<id>``.
 
 **The slot cap** (FR-A10, owner 2026-09-13) is read here and applied in
 :mod:`arc.services.acquisition.slots`, which is where the rule and the argument
@@ -91,6 +91,15 @@ PAUSED_KEY: Final[str] = "acquisition_paused"
 #: data volume acquisition holds itself; 0 turns the guard off, which is the
 #: honest reading of "keep no free space in reserve".
 MIN_FREE_KEY: Final[str] = "min_free_gb"
+
+#: Whether a finished show with no acceptable single may take a batch and
+#: download only the wanted episode's file (FR-A4's exception, FR-A11). The
+#: kill switch for it, read in exactly one place —
+#: ``search_release``'s batch branch — so turning it off leaves every other
+#: path byte-identical rather than merely quieter. A batch already in flight is
+#: unaffected: the switch decides whether a *new* one is taken, the same way
+#: the pause decides whether a new search runs.
+BATCH_FALLBACK_KEY: Final[str] = "batch_fallback"
 
 #: Hard ceiling on N, whatever the table says. N is admin-editable, and an
 #: admin who types 200 has asked Arc to torrent a whole show — which FR-A1
@@ -282,6 +291,25 @@ async def set_paused(session: AsyncSession, paused: bool, *, admin_id: int | Non
     return paused
 
 
+async def batch_fallback(session: AsyncSession) -> bool:
+    """Whether a batch may be taken for a finished show (FR-A4, FR-A11).
+
+    Lenient in the same direction as :func:`is_paused` and for the same
+    reason — a missing or hand-mangled row reads as the documented default,
+    which here is **on** — but the consequence is the opposite way round: a
+    default that failed closed would silently take the feature away from an
+    installation that never touched the key, and the honest place to turn it
+    off is the admin panel.
+    """
+    stored = (await _values(session, [BATCH_FALLBACK_KEY])).get(BATCH_FALLBACK_KEY)
+    if stored is None:
+        return bool(DEFAULT_SETTINGS[BATCH_FALLBACK_KEY])
+    if not isinstance(stored, bool):
+        log.warning("batch_fallback is not a boolean, using the default")
+        return bool(DEFAULT_SETTINGS[BATCH_FALLBACK_KEY])
+    return stored
+
+
 async def min_free_gb(session: AsyncSession) -> int:
     """The storage floor in whole GB (FR-T6), clamped and type-checked.
 
@@ -412,6 +440,7 @@ async def load_rules(session: AsyncSession, anime_id: int | None = None) -> Rule
 
 
 __all__ = [
+    "BATCH_FALLBACK_KEY",
     "BYTES_PER_GB",
     "LOOK_AHEAD_KEY",
     "MAX_LOOK_AHEAD",
@@ -423,6 +452,7 @@ __all__ = [
     "RULE_KEYS",
     "SLOT_CAP_KEY",
     "Rules",
+    "batch_fallback",
     "is_paused",
     "is_storage_held",
     "load_rules",

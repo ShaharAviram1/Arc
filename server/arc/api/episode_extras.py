@@ -1,14 +1,17 @@
 """The four side lookups an :class:`~arc.api.anime_schemas.EpisodeOut` needs.
 
 An episode row on a page is more than the ``episodes`` row behind it: the
-download percentage comes from ``torrents`` (FR-A7), the preparing percentage
+download percentage comes from ``torrents`` — or, for an episode being served
+out of a pack, from the ``torrent_files`` row that claims it (FR-A7,
+FR-A11) — the preparing percentage
 and the failure sentence from the latest ``transcode`` job's payload (FR-P4),
 the duration and track languages from ``renditions`` (FR-P1), and *when Arc
 will look again* from the pending ``search_release`` job's ``run_after``
 (FR-A7, 2026-09-14). Four tables, none of them joinable into the episode query
 without turning one row into several.
 
-So they are four queries, each taking *every* episode id on the page at once.
+So they are four lookups — five queries, since the release is reached two ways
+— each taking *every* episode id on the page at once.
 That is the whole content of this module and the reason it exists rather than
 living in one of the two routers: the show page and the home page render the
 same episode shape, and a helper that only the show page had is how the home
@@ -27,12 +30,37 @@ from typing import cast
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job, JobStatus, Rendition, Torrent
+from arc.models import Job, JobStatus, Rendition, Torrent, TorrentFile, TorrentKind
 from arc.services.acquisition.names import SEARCH_RELEASE
 from arc.services.media.names import latest_transcode_jobs
 
 #: The payload key both job types happen to spell the same way.
 EPISODE_KEY = "episode_id"
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeRelease:
+    """The release behind one episode, and how far *the episode* has got.
+
+    A single and a batch answer "what is downloading here?" with the same
+    ``torrents`` row — the group, the title and the resolution are the release's
+    and are true of every file in it — and with **different percentages**
+    (FR-A11). A single's is the torrent's, because the torrent is the episode.
+    A pack's is its own file's: a season pack that is 80 % done says nothing
+    about whether *this* episode's file is one of the eighty, and a row that
+    read the torrent's number would show a viewer a bar that is not about
+    anything they asked for.
+
+    So the percentage is resolved here rather than in the schema, and
+    :attr:`batch` is carried beside it so the page can say where the file is
+    coming from instead of leaving "1 % for an hour, then done" unexplained.
+    """
+
+    torrent: Torrent
+    #: 0..1, or ``None`` when nothing has been reported yet.
+    progress: float | None
+    #: Whether this episode is one file of a pack (FR-A11).
+    batch: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +72,7 @@ class EpisodeExtras:
     yet, and the schema treats a missing entry and a null the same way.
     """
 
-    torrents: dict[int, Torrent] = field(default_factory=dict)
+    torrents: dict[int, EpisodeRelease] = field(default_factory=dict)
     renditions: dict[int, Rendition] = field(default_factory=dict)
     transcode_jobs: dict[int, Job] = field(default_factory=dict)
     #: ``episode_id → when the next search runs``, for the episodes that have
@@ -54,19 +82,61 @@ class EpisodeExtras:
     next_searches: dict[int, datetime] = field(default_factory=dict)
 
 
-async def torrents_for(session: AsyncSession, episode_ids: Sequence[int]) -> dict[int, Torrent]:
-    """``episode_id → torrent``, newest row per episode.
+async def torrents_for(
+    session: AsyncSession, episode_ids: Sequence[int]
+) -> dict[int, EpisodeRelease]:
+    """``episode_id → release``, newest row per episode.
 
-    Ordered by id so the last write wins when an episode has been re-fetched:
-    the release a user is shown is the one currently downloading, not the one
-    that was abandoned last week.
+    Two queries, because an episode's release is reached two ways (FR-A11).
+
+    The first is the one that has always been here: ``torrents`` keyed on
+    ``episode_id``, ordered by id so the last write wins when an episode has
+    been re-fetched — the release a user is shown is the one currently
+    downloading, not the one that was abandoned last week. ``episode_id`` is
+    nullable since batches and ``IN`` never matches a null, so a pack cannot
+    come back from it at all.
+
+    The second finds a pack through the claim it holds: a ``torrent_files`` row
+    that is still ``wanted``, which is precisely "this pack is holding this
+    episode for Arc" (``ux_torrent_files_one_wanted_per_episode`` makes it at
+    most one). A claim that has been given back — cancelled, rejected, swept —
+    is not a release to show, and leaves the episode's own ``torrents`` row, if
+    it ever had one, to answer for it.
+
+    **A live claim wins over a single row.** The two do not overlap in practice
+    — ``batch.claim_existing`` runs before Nyaa is asked, so a pack that holds
+    the episode is found before a single can be picked — and where they somehow
+    did, the claim is the one with bytes moving for this episode right now.
     """
     if not episode_ids:
         return {}
+    wanted = set(episode_ids)
     rows = await session.scalars(
-        select(Torrent).where(Torrent.episode_id.in_(set(episode_ids))).order_by(Torrent.id)
+        select(Torrent).where(Torrent.episode_id.in_(wanted)).order_by(Torrent.id)
     )
-    return {torrent.episode_id: torrent for torrent in rows.all()}
+    found: dict[int, EpisodeRelease] = {
+        torrent.episode_id: EpisodeRelease(torrent=torrent, progress=torrent.progress)
+        for torrent in rows.all()
+        if torrent.episode_id is not None
+    }
+
+    claims = await session.execute(
+        select(TorrentFile, Torrent)
+        .join(Torrent, Torrent.id == TorrentFile.torrent_id)
+        .where(
+            TorrentFile.episode_id.in_(wanted),
+            TorrentFile.wanted.is_(True),
+            Torrent.kind == TorrentKind.BATCH,
+        )
+        .order_by(TorrentFile.id)
+    )
+    for claim, torrent in claims.all():
+        if claim.episode_id is None:  # pragma: no cover - the WHERE says otherwise
+            continue
+        found[claim.episode_id] = EpisodeRelease(
+            torrent=torrent, progress=claim.progress, batch=True
+        )
+    return found
 
 
 async def renditions_for(session: AsyncSession, episode_ids: Sequence[int]) -> dict[int, Rendition]:
@@ -121,7 +191,7 @@ async def next_searches_for(
 
 
 async def episode_extras(session: AsyncSession, episode_ids: Sequence[int]) -> EpisodeExtras:
-    """All four lookups for one page's worth of episodes, in four queries."""
+    """All four lookups for one page's worth of episodes, in five queries."""
     if not episode_ids:
         return EpisodeExtras()
     return EpisodeExtras(
@@ -134,6 +204,7 @@ async def episode_extras(session: AsyncSession, episode_ids: Sequence[int]) -> E
 
 __all__ = [
     "EpisodeExtras",
+    "EpisodeRelease",
     "episode_extras",
     "next_searches_for",
     "renditions_for",

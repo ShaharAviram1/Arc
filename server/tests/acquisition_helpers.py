@@ -7,7 +7,7 @@ a fixture in ``conftest`` is a fixture every test collects.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -191,6 +191,16 @@ class NyaaStub:
     form is: ``"Kimetsu no Yaiba - 10"`` and ``"Kimetsu no Yaiba - 10
     HorribleSubs"`` are two keys and two different feeds, exactly as they are
     two different questions to Nyaa (2026-09-18).
+
+    It also answers the ``.torrent`` behind an item (FR-A11), and **not** into
+    :attr:`queries`: a blob fetch is not a search, and "how many times was Nyaa
+    asked for a feed?" is the assertion half these tests are built on —
+    ``queries == []`` is what proves a second episode attached to a batch for
+    free. A URL whose last path component is a 40-character hash answers
+    :func:`torrent_blob` of it, so a feed that writes the hash into its
+    ``<link>`` needs no registration at all; :attr:`blobs` overrides one by URL,
+    and anything else is a 404, which is what a candidate Arc cannot fetch
+    looks like.
     """
 
     def __init__(self, answers: dict[str, str] | None = None, *, default: str | None = None):
@@ -198,17 +208,48 @@ class NyaaStub:
         self.answers = answers or {}
         self.default = default if default is not None else read_fixture("search_empty.xml")
         self.queries: list[str] = []
+        #: URL → the exact body ``torrent_file`` should get back, for the tests
+        #: that care what the bytes are.
+        self.blobs: dict[str, bytes] = {}
+        #: Every ``.torrent`` URL asked for, in order.
+        self.fetched: list[str] = []
         self.status: int = 200
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.url.path.endswith(".torrent"):
+            self.fetched.append(url)
+            if self.status >= 400:
+                return httpx.Response(self.status, text="error")
+            registered = self.blobs.get(url)
+            if registered is not None:
+                return httpx.Response(200, content=registered)
+            stem = request.url.path.rsplit("/", 1)[-1].removesuffix(".torrent")
+            if len(stem) == 40 and all(char in "0123456789abcdef" for char in stem.lower()):
+                return httpx.Response(200, content=torrent_blob(stem))
+            return httpx.Response(404, text="not found")
         query = request.url.params.get("q", "")
         self.queries.append(query)
         if self.status >= 400:
             return httpx.Response(self.status, text="error")
         return httpx.Response(200, text=self.answers.get(query, self.default))
+
+
+def torrent_blob(info_hash: str) -> bytes:
+    """A stand-in for a bencoded ``.torrent`` whose hash the stub can read.
+
+    A real client reads the info hash out of the bencoded ``info`` dict, which
+    means a test would have to bencode one to say *which* torrent it uploaded.
+    This carries the hash in a single field instead, and
+    :meth:`QbitStub._blob_hash` reads it back — so an ``add_file`` test asserts
+    on the same identity the client passed, without a bencode encoder in the
+    fixtures for the sake of one string.
+    """
+    folded = info_hash.lower().encode()
+    return b"d4:hash" + str(len(folded)).encode() + b":" + folded + b"e"
 
 
 class QbitStub:
@@ -220,6 +261,19 @@ class QbitStub:
     — ``"4"`` answers ``Ok.`` to everything, ``"5"`` (the default, and what
     qBittorrent 5.2 / Web API 2.15 actually does) answers a JSON summary for a
     new torrent and **409 Conflict** for one it already holds.
+
+    ``api_version`` also decides the endpoint names: 4.x has ``torrents/pause``
+    and ``torrents/resume`` and answers **404** to the 5.x ``torrents/stop``
+    and ``torrents/start``, which is the fallback both client methods exist
+    for.
+
+    The batch half (FR-A11) is ``torrents/add`` with a **multipart** body — the
+    uploaded blob is kept in :attr:`uploaded` and the torrent is registered
+    stopped, so a read-back reports ``stoppedDL`` and no progress —
+    ``torrents/files``, seeded per hash with :meth:`add_files`, and
+    ``torrents/filePrio``, which records every call in :attr:`priorities`
+    **in order** and applies it to the seeded list so the read-back the byte
+    guarantee depends on reflects what was written.
     """
 
     def __init__(
@@ -236,6 +290,8 @@ class QbitStub:
         self.logged_in = False
         self.logins = 0
         self.added: list[dict[str, str]] = []
+        #: One entry per **multipart** add: the fields and the uploaded bytes.
+        self.uploaded: list[dict[str, Any]] = []
         self.deleted: list[dict[str, str]] = []
         #: Every ``app/setPreferences`` body, already decoded from its ``json``
         #: form field.
@@ -244,7 +300,22 @@ class QbitStub:
         #: ``torrents/pause`` — which is what that version calls it, and the
         #: only endpoint of the two it answers).
         self.stopped: list[str] = []
+        #: And to ``torrents/start`` / ``torrents/resume``.
+        self.started: list[str] = []
         self.torrents: list[dict[str, Any]] = []
+        #: hash → the rows ``torrents/files`` answers, in index order.
+        self.file_lists: dict[str, list[dict[str, Any]]] = {}
+        #: Every ``torrents/filePrio`` call, in the order they were made:
+        #: ``{"hash": …, "indices": [0, 1, …], "priority": 0}``. The order is
+        #: the assertion the byte guarantee needs — all files off *before* the
+        #: wanted ones on.
+        self.priorities: list[dict[str, Any]] = []
+        #: hash → indices whose priority this client silently refuses to
+        #: change. A client that accepted ``filePrio`` and did not honour it is
+        #: exactly what step 6's read-back exists to catch, and it is the one
+        #: failure a stub has to be able to stage: without it the byte-safety
+        #: gate is code no test ever reaches.
+        self.ignores_prio: dict[str, list[int]] = {}
         self.calls: list[str] = []
         #: Set to make the next non-login call answer 403 once, as an expired
         #: session does.
@@ -264,6 +335,45 @@ class QbitStub:
             key, _, value = chunk.partition("=")
             pairs[key] = httpx.URL(f"http://x/?{key}={value}").params.get(key, "")
         return pairs
+
+    @staticmethod
+    def _multipart(request: httpx.Request) -> tuple[dict[str, str], bytes | None]:
+        """A ``multipart/form-data`` body as (text fields, the uploaded file).
+
+        Parsed by hand rather than with a library: the only bodies that reach
+        here are the ones :meth:`QbitClient.add_file` builds, and a parser that
+        understands exactly those is shorter than a dependency.
+        """
+        content_type = request.headers.get("content-type", "")
+        _, _, marker = content_type.partition("boundary=")
+        boundary = b"--" + marker.strip('"').encode()
+        fields: dict[str, str] = {}
+        blob: bytes | None = None
+        for part in request.content.split(boundary):
+            head, separator, body = part.partition(b"\r\n\r\n")
+            if not separator:
+                continue
+            headers = head.decode(errors="replace")
+            if 'name="' not in headers:
+                continue
+            name = headers.split('name="', 1)[1].split('"', 1)[0]
+            payload = body.rstrip(b"\r\n-")
+            if "filename=" in headers:
+                blob = payload
+            else:
+                fields[name] = payload.decode()
+        return fields, blob
+
+    def _blob_hash(self, blob: bytes) -> str | None:
+        """The hash out of a :func:`torrent_blob`, as the client reads its own."""
+        marker = b"4:hash"
+        if marker not in blob:
+            return None
+        length, _, rest = blob.split(marker, 1)[1].partition(b":")
+        try:
+            return rest[: int(length)].decode()
+        except ValueError:
+            return None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -285,6 +395,8 @@ class QbitStub:
             return httpx.Response(403, text="Forbidden")
 
         if path.endswith("/torrents/add"):
+            if request.headers.get("content-type", "").startswith("multipart/form-data"):
+                return self._add_file(request)
             form = self._form(request)
             self.added.append(form)
             known = self._hash_of(form.get("urls", ""))
@@ -331,6 +443,35 @@ class QbitStub:
                 if torrent["hash"].lower() in hashes.lower().split("|"):
                     torrent["state"] = "stoppedUP" if self.api_version == "5" else "pausedUP"
             return httpx.Response(200, text="")
+        if path.endswith("/torrents/files"):
+            info_hash = (request.url.params.get("hash") or "").lower()
+            return httpx.Response(200, text=json.dumps(self.file_lists.get(info_hash, [])))
+        if path.endswith("/torrents/filePrio"):
+            form = self._form(request)
+            info_hash = form.get("hash", "").lower()
+            indices = [int(value) for value in form.get("id", "").split("|") if value]
+            priority = int(form.get("priority", "0"))
+            self.priorities.append({"hash": info_hash, "indices": indices, "priority": priority})
+            # Applied, not just recorded: step 6 of the batch sequence reads the
+            # list back and refuses the torrent if it disagrees, so a stub that
+            # did not apply a write would make that gate untestable.
+            stubborn = set(self.ignores_prio.get(info_hash, ()))
+            for row in self.file_lists.get(info_hash, []):
+                if row.get("index") in indices and row.get("index") not in stubborn:
+                    row["priority"] = priority
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/start") or path.endswith("/torrents/resume"):
+            # 4.x has only ``resume`` and answers 404 to ``start``, the other
+            # half of the pair ``stop``/``pause`` are in.
+            if self.api_version == "4" and path.endswith("/torrents/start"):
+                return httpx.Response(404, text="Not Found")
+            hashes = self._form(request).get("hashes", "")
+            wanted = [value for value in hashes.split("|") if value]
+            self.started.extend(wanted)
+            for torrent in self.torrents:
+                if torrent["hash"].lower() in {value.lower() for value in wanted}:
+                    torrent["state"] = "downloading"
+            return httpx.Response(200, text="")
         if path.endswith("/app/version"):
             return httpx.Response(200, text=self.version)
         if path.endswith("/app/setPreferences"):
@@ -338,6 +479,46 @@ class QbitStub:
             self.preferences.append(json.loads(raw))
             return httpx.Response(200, text="")
         return httpx.Response(404, text="not found")
+
+    def _add_file(self, request: httpx.Request) -> httpx.Response:
+        """``torrents/add`` with a ``.torrent`` in the body (FR-A11).
+
+        ``stopped`` is honoured — 5.x's field, falling back to 4.x's
+        ``paused``, which is why the client sends both — and the registered
+        torrent is therefore ``stoppedDL`` at 0 progress: a batch that reported
+        any progress out of this would mean the byte guarantee had been broken.
+        """
+        fields, blob = self._multipart(request)
+        self.added.append(dict(fields))
+        self.uploaded.append({"fields": dict(fields), "blob": blob})
+        known = self._blob_hash(blob) if blob else None
+        if known is not None and any(t["hash"].lower() == known for t in self.torrents):
+            if self.api_version == "4":
+                return httpx.Response(200, text="Ok.")
+            return httpx.Response(409, text="Conflict")
+        if known is not None:
+            stopped = (fields.get("stopped") or fields.get("paused") or "").lower() == "true"
+            self.add_torrent(
+                known,
+                name=fields.get("savepath", "").rsplit("/", 1)[-1] or "release",
+                progress=0.0,
+                state="stoppedDL" if stopped else "downloading",
+                content_path=fields.get("savepath"),
+                category=fields.get("category", "arc"),
+            )
+        if self.api_version == "4":
+            return httpx.Response(200, text="Ok.")
+        return httpx.Response(
+            200,
+            text=json.dumps(
+                {
+                    "added_torrent_ids": [known or "0" * 40],
+                    "failure_count": 0,
+                    "pending_count": 0,
+                    "success_count": 1,
+                }
+            ),
+        )
 
     @staticmethod
     def _hash_of(magnet: str) -> str | None:
@@ -401,6 +582,35 @@ class QbitStub:
                 "num_incomplete": num_incomplete,
             }
         self.torrents.append(row)
+
+    def add_files(
+        self,
+        info_hash: str,
+        names: Sequence[str],
+        *,
+        size: int = 400_000_000,
+        priority: int = 1,
+        progress: float = 0.0,
+    ) -> None:
+        """Seed ``torrents/files`` for one hash: one row per name, in order.
+
+        The defaults are what the client says about a freshly added torrent it
+        has not been told anything about yet — every file selected at normal
+        priority and nothing downloaded — which is precisely the state the add
+        sequence's ``filePrio 0`` for every index exists to replace. A test
+        wanting an odd row (no ``index``, a missing ``size``) writes
+        ``stub.file_lists[hash]`` itself.
+        """
+        self.file_lists[info_hash.lower()] = [
+            {
+                "index": index,
+                "name": name,
+                "size": size,
+                "priority": priority,
+                "progress": progress,
+            }
+            for index, name in enumerate(names)
+        ]
 
 
 def force_transport(cls: type, transport: httpx.MockTransport) -> Callable[..., None]:

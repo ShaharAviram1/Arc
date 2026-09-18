@@ -46,6 +46,25 @@ class EpisodeState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class TorrentKind(StrEnum):
+    """What a ``torrents`` row holds (spec §4.2 FR-A4, FR-A11).
+
+    ``single`` is everything Arc did before 2026-09-18: one release, one
+    episode, the whole payload wanted. ``batch`` is FR-A4's exception for a
+    **finished** show with no acceptable single — a release covering several
+    episodes, of which only the identified files are ever downloaded, with one
+    ``torrent_files`` row per file recording which episode it holds.
+
+    The two are kept apart by ``episode_id``: a batch belongs to no single
+    episode and its column is null, which is what makes every query written
+    before FR-A11 — retention's hashes, the cancel path, ``poll_qbit``'s join —
+    ignore a shared torrent by default rather than delete it with its files.
+    """
+
+    SINGLE = "single"
+    BATCH = "batch"
+
+
 class ListStatus(StrEnum):
     """spec §4.6 FR-W2 — the five list states, MAL's vocabulary."""
 

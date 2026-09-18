@@ -79,6 +79,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -95,6 +96,7 @@ from arc.models import (
     MediaFile,
     Rendition,
     Torrent,
+    TorrentFile,
     Want,
     WatchProgress,
 )
@@ -258,15 +260,32 @@ class Targets:
     #: somewhere other than under its episode's download directory.
     loose_files: tuple[Path, ...] = ()
     #: qBittorrent hashes to remove *with their data*, and the ``torrents``
-    #: rows that carry them.
+    #: rows that carry them. **Empty for a batch-backed episode**, and that is
+    #: the design rather than an omission: a batch's ``episode_id`` is null, so
+    #: the query that fills these cannot reach one, and deleting a pack by hash
+    #: with its files would take several other episodes' bytes (FR-A11).
     torrent_hashes: tuple[str, ...] = ()
     torrent_ids: tuple[int, ...] = ()
+    #: The ``torrent_files`` rows this episode's file is claimed by (FR-A11).
+    #: Not deleted — the row is the pack's record of what it holds, and keeping
+    #: its ``episode_id`` is what lets a later want be served from the same pack
+    #: with no Nyaa request (FR-T3). They are **un-wanted before the file is
+    #: unlinked**, so that a start for another episode cannot re-fetch what
+    #: retention has just removed.
+    torrent_file_ids: tuple[int, ...] = ()
     #: What all of that adds up to on disk.
     bytes: int = 0
 
     @property
     def empty(self) -> bool:
-        """Whether there is nothing at all to remove."""
+        """Whether there is nothing at all to remove.
+
+        :attr:`torrent_file_ids` is deliberately not counted. A pack's claim on
+        an episode is not bytes on the disk and is not a reason to sweep one: an
+        episode whose only trace is a not-wanted row in somebody's season pack
+        has nothing to free, and giving the row back would be work done for no
+        space.
+        """
         return not (
             self.rendition_dir
             or self.rendition_id
@@ -304,6 +323,7 @@ def build_targets(
     rendition: Rendition | None,
     media_files: list[MediaFile],
     torrents: list[Torrent],
+    torrent_files: Sequence[TorrentFile] = (),
 ) -> Targets:
     """Work out what deleting ``episode_id`` would remove. No I/O beyond stat.
 
@@ -313,6 +333,17 @@ def build_targets(
     moved has an absolute path from the old layout. Whichever of the two is on
     disk and inside the roots is deleted; a row whose directory is neither is
     still removed, because a row pointing at nothing is worse than no row.
+
+    **A batch-backed episode needs no case of its own here** (FR-A11), and that
+    is worth saying out loud because it is the whole of why retention is safe
+    for packs. Its file lives in ``downloads/batch/<hash>/``, so
+    ``downloads/<episode id>`` does not exist and the file falls into
+    :attr:`Targets.loose_files` — unlinked one file at a time and charged at its
+    own ``media_files.size``, which is per-episode accounting already correct.
+    Its ``torrents`` row has a null ``episode_id``, so ``torrents`` is empty and
+    the client is never told to delete the pack. *Delete the file, keep the
+    torrent* falls out of the data model rather than being coded for; the only
+    addition is ``torrent_files``, which names the claim the deleter gives back.
     """
     roots = allowed_roots(settings)
 
@@ -357,6 +388,7 @@ def build_targets(
         loose_files=tuple(loose),
         torrent_hashes=tuple(torrent.info_hash for torrent in torrents if torrent.info_hash),
         torrent_ids=tuple(torrent.id for torrent in torrents),
+        torrent_file_ids=tuple(row.id for row in torrent_files),
         bytes=total,
     )
 
@@ -382,12 +414,22 @@ async def targets_for_episode(
     torrents = list(
         (await session.scalars(select(Torrent).where(Torrent.episode_id == episode_id))).all()
     )
+    torrent_files = list(
+        (
+            await session.scalars(
+                select(TorrentFile)
+                .where(TorrentFile.episode_id == episode_id)
+                .order_by(TorrentFile.id)
+            )
+        ).all()
+    )
     return build_targets(
         settings,
         episode_id,
         rendition=rendition,
         media_files=media_files,
         torrents=torrents,
+        torrent_files=torrent_files,
     )
 
 
@@ -409,6 +451,10 @@ class _Facts:
     rendition: Rendition | None = None
     media_files: list[MediaFile] = field(default_factory=list)
     torrents: list[Torrent] = field(default_factory=list)
+    #: The batch claims on this episode (FR-A11). Empty for everything that is
+    #: not batch-backed, which is every episode written before FR-A11 and most
+    #: of them since.
+    torrent_files: list[TorrentFile] = field(default_factory=list)
 
     @property
     def anchor(self) -> tuple[datetime, str] | None:
@@ -539,7 +585,21 @@ async def _facts(session: AsyncSession) -> dict[int, _Facts]:
     for torrent in (
         await session.scalars(select(Torrent).where(Torrent.episode_id.in_(retained)))
     ).all():
-        facts[torrent.episode_id].torrents.append(torrent)
+        # ``episode_id`` is nullable since FR-A11's batches, and ``IN`` never
+        # matches a null, so the query cannot return one — the guard is here to
+        # say so to the reader and the type checker, as it is for media files.
+        if torrent.episode_id is not None:
+            facts[torrent.episode_id].torrents.append(torrent)
+
+    # The other half of that sentence (FR-A11): a batch-backed episode has no
+    # ``torrents`` row of its own, and this is where its claim is. Nothing is
+    # deleted through it — the pack stays and so does the row — but the file is
+    # given back before it is unlinked, and the preview names it.
+    for claim in (
+        await session.scalars(select(TorrentFile).where(TorrentFile.episode_id.in_(retained)))
+    ).all():
+        if claim.episode_id is not None:
+            facts[claim.episode_id].torrent_files.append(claim)
 
     return facts
 
@@ -592,6 +652,7 @@ async def candidates(
                         rendition=None,
                         media_files=[],
                         torrents=fact.torrents,
+                        torrent_files=fact.torrent_files,
                     ),
                 )
             )
@@ -617,6 +678,7 @@ async def candidates(
             rendition=fact.rendition,
             media_files=fact.media_files,
             torrents=fact.torrents,
+            torrent_files=fact.torrent_files,
         )
         if targets.empty:
             continue

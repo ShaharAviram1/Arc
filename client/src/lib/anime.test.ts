@@ -38,6 +38,7 @@ import {
 import { createQueryClient } from '@/lib/queryClient'
 import { homeQueryKey } from '@/lib/schedule'
 import {
+  BATCH_RELEASE,
   CHOSEN_RELEASE,
   EMPTY_HOME,
   FRIEREN,
@@ -126,6 +127,15 @@ describe('releaseLine', () => {
     expect(releaseLine({ ...CHOSEN_RELEASE, group: null, resolution: null, seeders: null })).toBe(
       CHOSEN_RELEASE.title,
     )
+  })
+
+  it('says when the file came out of a pack, after everything else', () => {
+    expect(releaseLine(BATCH_RELEASE)).toBe('[Judas] · 1080p · 41 seeders · from a batch')
+  })
+
+  it('says nothing about batches for an ordinary release', () => {
+    expect(releaseLine(CHOSEN_RELEASE)).not.toContain('batch')
+    expect(releaseLine({ ...CHOSEN_RELEASE, batch: false })).not.toContain('batch')
   })
 })
 

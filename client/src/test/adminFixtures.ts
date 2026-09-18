@@ -17,6 +17,7 @@ import type {
   OfflineCatalogue,
   QbitStatus,
   RetentionDisk,
+  RetentionItem,
   RetentionPreview,
   SettingsPayload,
   SettingsValues,
@@ -105,6 +106,7 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   sub_lang: 'en',
   audio_lang: 'ja',
   acquisition_paused: false,
+  batch_fallback: true,
 }
 
 /** What this server actually holds: three of them moved off the default. */
@@ -193,21 +195,39 @@ export const DISK: RetentionDisk = {
 
 export const RETENTION_REASON = 'watched 9 days ago; grace of 7 days ran out 2 days ago'
 
+const RETENTION_ITEM: RetentionItem = {
+  episode_id: 9005,
+  anime_id: 700,
+  anime_title: 'Sousou no Frieren',
+  number: 5,
+  state: 'ready',
+  reason: RETENTION_REASON,
+  bytes: 3_200_000_000,
+  rendition_dir: '/data/renditions/9005',
+  source_dir: '/data/library/frieren',
+  torrents: ['abc123'],
+  torrent_files: 0,
+}
+
 export const RETENTION_PREVIEW: RetentionPreview = {
   dry_run: false,
   bytes: 3_200_000_000,
+  episodes: [RETENTION_ITEM],
+}
+
+/**
+ * The same preview for an episode a season pack is holding (FR-A11): no hash
+ * to delete — the pack stays and serves the rest of the show — and one claim
+ * given back so it cannot fetch the file again the moment it is unlinked.
+ */
+export const RETENTION_PREVIEW_BATCH: RetentionPreview = {
+  ...RETENTION_PREVIEW,
   episodes: [
     {
-      episode_id: 9005,
-      anime_id: 700,
-      anime_title: 'Sousou no Frieren',
-      number: 5,
-      state: 'ready',
-      reason: RETENTION_REASON,
-      bytes: 3_200_000_000,
-      rendition_dir: '/data/renditions/9005',
-      source_dir: '/data/library/frieren',
-      torrents: ['abc123'],
+      ...RETENTION_ITEM,
+      source_dir: null,
+      torrents: [],
+      torrent_files: 1,
     },
   ],
 }
@@ -298,6 +318,23 @@ export const QBIT: QbitStatus = {
       dlspeed: 5_200_000,
       upspeed: 0,
       episode_id: 9006,
+      kind: 'single',
+      wanted_bytes: null,
+    },
+    {
+      // A pack: Arc's own row says so, it belongs to no single episode, and
+      // the size it reports is the one file it was taken for — 2.5 GB, never
+      // the payload it is sitting inside (FR-A11).
+      hash: 'def456',
+      name: '[Judas] Kimetsu no Yaiba [BD 1080p]',
+      state: 'downloading',
+      progress: 0.08,
+      size: 2_684_354_560,
+      dlspeed: 3_100_000,
+      upspeed: 0,
+      episode_id: null,
+      kind: 'batch',
+      wanted_bytes: 2_684_354_560,
     },
   ],
 }

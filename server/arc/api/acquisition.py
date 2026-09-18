@@ -145,13 +145,23 @@ class QbitTorrentOut(BaseModel):
     state: str
     #: 0..1.
     progress: float
-    #: Total bytes of the torrent's files; 0 while the metadata is unknown.
+    #: Bytes of the torrent's **selected** files — which is what
+    #: ``torrents/info`` means by ``size`` — so a pack reports the files Arc
+    #: asked for and not its payload (FR-A11). 0 while the metadata is unknown.
     size: int
     #: Bytes per second, right now.
     dlspeed: int
     upspeed: int
-    #: Null for anything in Arc's category that Arc has no ``torrents`` row for.
+    #: Null for anything in Arc's category that Arc has no ``torrents`` row for,
+    #: and null for every batch: a pack belongs to no single episode (FR-A11).
     episode_id: int | None = None
+    #: ``"single"`` or ``"batch"`` from Arc's row; null when there is no row.
+    kind: str | None = None
+    #: The sum of the files Arc asked for, recorded at pick time (FR-A11). Set
+    #: for a batch, null for a single — whose wanted bytes are its whole
+    #: payload. The pack's ``total_size`` is deliberately **not** on this
+    #: schema: it is not a figure any rule, log or reservation may read.
+    wanted_bytes: int | None = None
 
 
 class QbitStatusOut(BaseModel):
@@ -356,6 +366,8 @@ async def qbit(session: SessionDep, settings: SettingsDep) -> QbitStatusOut:
                 dlspeed=torrent.dlspeed,
                 upspeed=torrent.upspeed,
                 episode_id=torrent.episode_id,
+                kind=torrent.kind,
+                wanted_bytes=torrent.wanted_bytes,
             )
             for torrent in found.torrents
         ],

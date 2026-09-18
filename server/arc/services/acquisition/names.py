@@ -48,6 +48,17 @@ POLL_QBIT = "poll_qbit"
 #: the rest.
 QBIT_CANCEL = "qbit_cancel"
 
+#: Re-select a batch's files in the client and decide what becomes of it
+#: (FR-A11). The **only** place a batch's priorities and run state change after
+#: it was added: the pick writes them once and everything afterwards — a want
+#: withdrawn, a want attached, retention taking a file, a rejected member —
+#: writes the ``torrent_files`` rows and queues this. A job for the two reasons
+#: :data:`QBIT_CANCEL` is one: the reconciler and the retention sweep hold
+#: transactions that must not span an HTTP call, and a client that is not
+#: answering must not be able to fail them. Per torrent, so one unreachable
+#: re-selection does not hold up the rest.
+QBIT_RESELECT = "qbit_reselect"
+
 #: Write Arc's seeding policy to the client (spec §9: no seeding, upload
 #: capped). At worker start-up and daily after that, deduplicated on the type.
 #: A job rather than a line in the worker's start-up because qBittorrent is a
@@ -76,6 +87,11 @@ POLL_QBIT_PRIORITY = 50
 #: episode is waiting for.
 QBIT_CANCEL_PRIORITY = 60
 
+#: Beside the cancel, and the same argument: one request to a service on the
+#: same host, and what it changes is which bytes are arriving right now — an
+#: episode somebody is waiting for, or a file nobody wants any more.
+QBIT_RESELECT_PRIORITY = 60
+
 #: Above the default: reconciling the whole wants table is a handful of
 #: queries, but nothing is waiting on the answer within the minute.
 COMPUTE_WANTS_PRIORITY = 120
@@ -98,6 +114,17 @@ def search_dedupe_key(episode_id: int) -> str:
 def cancel_dedupe_key(episode_id: int) -> str:
     """One queued cancel per episode: the second would find nothing to delete."""
     return f"{QBIT_CANCEL}:{episode_id}"
+
+
+def reselect_dedupe_key(torrent_id: int) -> str:
+    """One queued re-selection per **torrent**, not per episode.
+
+    The keying is the point. Two episodes of one pack changing at the same
+    moment — one want withdrawn while another attaches — is one selection to
+    write, and the handler reads the rows rather than a payload, so the second
+    enqueue has nothing to add that the first will not already see.
+    """
+    return f"{QBIT_RESELECT}:{torrent_id}"
 
 
 async def enqueue_compute_wants(session: AsyncSession) -> Job:
@@ -124,9 +151,12 @@ __all__ = [
     "QBIT_CANCEL_PRIORITY",
     "QBIT_POLICY",
     "QBIT_POLICY_PRIORITY",
+    "QBIT_RESELECT",
+    "QBIT_RESELECT_PRIORITY",
     "SEARCH_RELEASE",
     "SEARCH_RELEASE_PRIORITY",
     "cancel_dedupe_key",
     "enqueue_compute_wants",
+    "reselect_dedupe_key",
     "search_dedupe_key",
 ]

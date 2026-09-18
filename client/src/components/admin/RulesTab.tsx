@@ -110,6 +110,19 @@ const NUMBER_FIELDS: {
   },
 ]
 
+/**
+ * The one boolean rule (FR-A11). `acquisition_paused` is the *other* boolean in
+ * the table and is deliberately not here (see the module docstring): it is a
+ * switch an admin flips while watching downloads. This one is a policy — "may
+ * Arc take a pack for an old show?" — so it is edited and saved like N and G.
+ */
+const BATCH_FALLBACK_HELP =
+  'When a show that has finished airing has no acceptable single release at all, Arc may take ' +
+  'a batch that covers the wanted episode and download only that episode’s file — no other ' +
+  'file in the pack is downloaded. Turn it off and such an episode waits for a single instead: ' +
+  'no new pack is taken and no further file is enabled in one Arc already has, while a pack ' +
+  'already downloading finishes the episodes it was taken for (FR-A4).'
+
 /** Codes worth offering; the input stays free text, because ours are not all. */
 const SUB_LANGS = ['en', 'es', 'pt', 'fr', 'de', 'it', 'ru', 'ar']
 const AUDIO_LANGS = ['ja', 'en', 'zh', 'ko']
@@ -155,6 +168,50 @@ function Field({
       <p className="text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">{help}</p>
       {error === undefined ? null : <InlineError message={error} />}
     </div>
+  )
+}
+
+/**
+ * A boolean rule, as a real checkbox rather than the shell's `aria-pressed`
+ * buttons: those are actions that happen when you press them, and every field
+ * in this form is a *draft* that happens when you press Save. A checkbox is
+ * also the one control `Field`'s `<label for>` can name, so the row reads the
+ * same way to a screen reader as the number fields beside it.
+ */
+function ToggleField({
+  id,
+  label,
+  help,
+  value,
+  onChange,
+  fallback,
+  onReset,
+  error,
+}: {
+  id: string
+  label: string
+  help: string
+  value: boolean
+  onChange: (value: boolean) => void
+  fallback: string
+  onReset: () => void
+  error: string | undefined
+}) {
+  return (
+    <Field id={id} label={label} help={help} fallback={fallback} onReset={onReset} error={error}>
+      <span className="inline-flex items-center gap-2">
+        <input
+          id={id}
+          type="checkbox"
+          checked={value}
+          className="h-5 w-5 accent-[var(--arc-focus)]"
+          onChange={(event) => {
+            onChange(event.target.checked)
+          }}
+        />
+        <span className="text-[14px] text-[var(--arc-text-muted)]">{value ? 'On' : 'Off'}</span>
+      </span>
+    </Field>
   )
 }
 
@@ -613,6 +670,21 @@ function RulesForm({ payload }: { payload: SettingsPayload }) {
           />
         </Field>
       ))}
+
+      <ToggleField
+        id="rules-batch-fallback"
+        label="Batch fallback for finished shows"
+        help={BATCH_FALLBACK_HELP}
+        value={draft.batch_fallback}
+        fallback={defaultLabel(defaults.batch_fallback)}
+        error={fieldErrors.batch_fallback}
+        onChange={(value) => {
+          set('batch_fallback', value)
+        }}
+        onReset={() => {
+          reset('batch_fallback')
+        }}
+      />
 
       <Field
         id="rules-sub-lang"

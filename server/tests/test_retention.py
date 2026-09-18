@@ -35,11 +35,15 @@ from arc.models import (
     MediaFile,
     Rendition,
     Torrent,
+    TorrentFile,
+    TorrentKind,
     User,
     Want,
 )
 from arc.services.acquisition import qbit as qbit_module
-from arc.services.acquisition.names import SEARCH_RELEASE
+from arc.services.acquisition.batch import claim_existing
+from arc.services.acquisition.jobs import poll_qbit, qbit_reselect
+from arc.services.acquisition.names import POLL_QBIT, QBIT_RESELECT, SEARCH_RELEASE
 from arc.services.acquisition.rules import PAUSED_KEY
 from arc.services.acquisition.wants import (
     REASON_NOT_WANTING,
@@ -1056,3 +1060,353 @@ async def test_a_want_that_appears_mid_sweep_saves_the_episode(
 
     assert output_dir_for(settings, episode.id).exists()
     assert episode.state is EpisodeState.READY
+
+
+# --- A batch-backed episode (FR-T1, FR-T3, FR-A11) --------------------------
+#
+# One torrent, several episodes, and therefore one rule retention must not
+# break: **the file goes and the torrent stays**. It falls out of the data
+# model rather than being coded for — a batch's ``episode_id`` is null, so
+# ``Targets.torrent_hashes`` is empty and the delete-with-files the sweep does
+# for a single cannot reach a pack — and what T6 adds is the other half: the
+# claim is given back *before* the file is unlinked, so that a pack started
+# again for another episode does not re-fetch what retention has removed.
+
+BATCH_HASH = "e" * 40
+
+#: Two files in the pack: this episode's, and one belonging to the episode
+#: after it, which is what makes "only its own file" an assertion worth making.
+MEMBER = "Retention Pack/Retention Test - 07.mkv"
+NEIGHBOUR = "Retention Pack/Retention Test - 08.mkv"
+
+
+async def make_batch_episode(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    anilist_id: int,
+    ready_at: datetime,
+    number: int = 7,
+    wanted: bool = True,
+    neighbour_wanted: bool = False,
+    status: ListStatus | None = None,
+    email: str | None = None,
+) -> tuple[Episode, Torrent, TorrentFile]:
+    """A ready episode whose bytes are one file inside a pack.
+
+    Built by hand rather than through ``search_release`` because what is under
+    test is the sweep, not the pick: what matters is the *shape* — a file under
+    ``downloads/batch/<hash>/`` with no directory of its own, a ``media_files``
+    row naming it, a ``torrents`` row with a null ``episode_id`` and a
+    ``torrent_files`` row carrying the claim.
+    """
+    episode = await make_retained_episode(
+        session,
+        settings,
+        anilist_id=anilist_id,
+        number=number,
+        ready_at=ready_at,
+        with_source=False,
+    )
+    if status is not None and email is not None:
+        user = await make_user(session, email)
+        anime = await session.get(Anime, episode.anime_id)
+        assert anime is not None
+        await make_entry(session, user, anime, status=status)
+
+    directory = settings.downloads_dir / "batch" / BATCH_HASH / "Retention Pack"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "Retention Test - 07.mkv"
+    path.write_bytes(b"0" * 4096)
+    (directory / "Retention Test - 08.mkv").write_bytes(b"0" * 8192)
+    session.add(
+        MediaFile(
+            episode_id=episode.id,
+            path=str(path.resolve()),
+            size=path.stat().st_size,
+            created_at=ready_at,
+        )
+    )
+
+    torrent = Torrent(
+        kind=TorrentKind.BATCH,
+        episode_id=None,
+        info_hash=BATCH_HASH,
+        title="[Group] Retention Test - 01 ~ 12 [BATCH]",
+        save_path=f"/data/downloads/batch/{BATCH_HASH}",
+        qbit_state="stoppedUP",
+        progress=1.0,
+    )
+    session.add(torrent)
+    await session.flush()
+    claim = TorrentFile(
+        torrent_id=torrent.id,
+        file_index=0,
+        path=MEMBER,
+        size=4096,
+        episode_id=episode.id,
+        wanted=wanted,
+        priority=1 if wanted else 0,
+        # What production leaves behind: the file arrived, the poll stamped the
+        # row and handed the path to the library. Retention clears both again
+        # when it deletes those bytes, which is what keeps ``disposition`` from
+        # reading a swept pack as one the library is still drawing on.
+        progress=1.0,
+        completed_at=ready_at,
+    )
+    session.add(claim)
+    session.add(
+        TorrentFile(
+            torrent_id=torrent.id,
+            file_index=1,
+            path=NEIGHBOUR,
+            size=8192,
+            episode_id=None,
+            wanted=neighbour_wanted,
+            priority=1 if neighbour_wanted else 0,
+        )
+    )
+    await session.flush()
+    return episode, torrent, claim
+
+
+async def test_a_batch_backed_episode_is_charged_only_its_own_file(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Per-episode accounting, with no code of its own (the plan's §2).
+
+    ``downloads/<episode id>`` does not exist for a pack, so the file falls into
+    ``loose_files`` and is measured at its own size — not the pack's fourteen
+    gigabytes, and not the neighbour's eight kilobytes sitting beside it.
+    """
+    settings = acquisition_settings(tmp_path)
+    episode, _torrent, claim = await make_batch_episode(
+        db_session, settings, anilist_id=970200, ready_at=days_ago(30)
+    )
+
+    (target,) = await candidates(db_session, settings, now=NOW)
+
+    assert target.episode_id == episode.id
+    assert target.targets.source_dir is None, "a pack has no directory of its own"
+    assert target.targets.torrent_hashes == (), "and no hash the deleter could reach"
+    assert target.targets.torrent_ids == ()
+    assert target.targets.torrent_file_ids == (claim.id,)
+    loose = target.targets.loose_files
+    assert [path.name for path in loose] == ["Retention Test - 07.mkv"]
+    # The rendition's segments plus this one file, and nothing of the pack's.
+    assert 4096 <= target.bytes < 8192 + 4096
+
+
+async def test_deleting_a_batch_backed_episode_keeps_the_torrent(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule in one run: the file goes, the pack stays, the claim is given back."""
+    settings = acquisition_settings(tmp_path)
+    stub = qbit_stub(monkeypatch, holding=BATCH_HASH)
+    episode, torrent, claim = await make_batch_episode(
+        db_session, settings, anilist_id=970201, ready_at=days_ago(30)
+    )
+    member = settings.downloads_dir / "batch" / BATCH_HASH / MEMBER
+    neighbour = settings.downloads_dir / "batch" / BATCH_HASH / NEIGHBOUR
+
+    await retention_sweep(context(db_session, settings))
+
+    assert not member.exists(), "its own file is gone"
+    assert neighbour.exists(), "and nobody else's"
+    assert stub.deleted == [], "the client is never told to remove a shared pack"
+    assert await db_session.get(Torrent, torrent.id) is not None
+    assert claim.wanted is False, "given back before the file was unlinked"
+    assert claim.episode_id == episode.id, "and kept, so a later want costs no search"
+    assert await rows_for(db_session, MediaFile, episode.id) == 0
+    assert episode.state is EpisodeState.NOT_WANTED
+
+    queued = await db_session.scalars(select(Job).where(Job.type == QBIT_RESELECT))
+    assert [job.payload["torrent_id"] for job in queued.all()] == [torrent.id]
+
+
+async def test_a_batch_dry_run_names_the_rows_and_touches_nothing(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``RETENTION_DRY_RUN`` is the switch for the first night on a deployment."""
+    settings = acquisition_settings(tmp_path, retention_dry_run=True)
+    qbit_stub(monkeypatch, holding=BATCH_HASH)
+    _episode, torrent, claim = await make_batch_episode(
+        db_session, settings, anilist_id=970202, ready_at=days_ago(30)
+    )
+    member = settings.downloads_dir / "batch" / BATCH_HASH / MEMBER
+
+    with caplog.at_level(logging.INFO):
+        await retention_sweep(context(db_session, settings))
+
+    assert member.exists()
+    assert claim.wanted is True, "not a row, not a file, not the state"
+    assert await db_session.get(Torrent, torrent.id) is not None
+    assert (await db_session.scalars(select(Job).where(Job.type == QBIT_RESELECT))).all() == []
+    planned = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "retention dry run: would delete"
+    )
+    assert planned.__dict__["torrent_files"] == 1
+    assert planned.__dict__["loose_files"] == 1
+
+
+async def test_retention_of_the_last_file_ends_a_finished_shows_pack(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the sweep, then the job it queued, then an empty client.
+
+    Nothing in retention knows the pack's hash. It un-wants the claim and queues
+    the re-selection; ``batch.disposition`` reads the rows, finds nothing wanted
+    and no live list entry behind what is left, and answers DELETE — which is
+    how the torrent goes without any path in this module deleting by hash.
+    """
+    settings = acquisition_settings(tmp_path)
+    stub = qbit_stub(monkeypatch, holding=BATCH_HASH)
+    stub.add_files(BATCH_HASH, [MEMBER, NEIGHBOUR])
+    _episode, torrent, _claim = await make_batch_episode(
+        db_session,
+        settings,
+        anilist_id=970203,
+        ready_at=days_ago(30),
+        status=ListStatus.COMPLETED,
+        email="batch-retention-done@arc.test",
+    )
+    await retention_sweep(context(db_session, settings))
+
+    await qbit_reselect(
+        context(db_session, settings, {"torrent_id": torrent.id}, job_type=QBIT_RESELECT)
+    )
+
+    assert stub.deleted == [{"hashes": BATCH_HASH, "deleteFiles": "true"}]
+    assert await db_session.get(Torrent, torrent.id) is None, "and the row with it"
+
+
+async def test_retention_leaves_a_watched_shows_pack_stopped_and_kept(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same decision: a pack the show may want again.
+
+    Deleting it would cost the next episode a fourteen-gigabyte metadata fetch
+    and a fresh pick; keeping it stopped costs a row — and the episode swept
+    here is itself the one the pack could serve again.
+    """
+    settings = acquisition_settings(tmp_path)
+    stub = qbit_stub(monkeypatch, holding=BATCH_HASH)
+    stub.add_files(BATCH_HASH, [MEMBER, NEIGHBOUR])
+    _episode, torrent, claim = await make_batch_episode(
+        db_session,
+        settings,
+        anilist_id=970204,
+        ready_at=days_ago(30),
+        status=ListStatus.WATCHING,
+        email="batch-retention-watching@arc.test",
+    )
+
+    await retention_sweep(context(db_session, settings))
+    await qbit_reselect(
+        context(db_session, settings, {"torrent_id": torrent.id}, job_type=QBIT_RESELECT)
+    )
+
+    assert claim.wanted is False
+    assert stub.deleted == []
+    assert stub.stopped == [BATCH_HASH], "stopped, not deleted, and not started"
+    assert stub.started == []
+    assert await db_session.get(Torrent, torrent.id) is not None
+    # Every index off, and no second call: nothing is wanted to turn back on.
+    assert [(call["priority"], call["indices"]) for call in stub.priorities] == [(0, [0, 1])]
+
+
+async def test_a_swept_batch_episode_is_re_acquired_from_the_same_pack(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-T3's "re-acquired", for free: the row kept its episode (FR-A11)."""
+    settings = acquisition_settings(tmp_path)
+    qbit_stub(monkeypatch, holding=BATCH_HASH)
+    await set_setting(db_session, PAUSED_KEY, False)
+    episode, torrent, claim = await make_batch_episode(
+        db_session, settings, anilist_id=970205, number=1, ready_at=days_ago(30)
+    )
+    await retention_sweep(context(db_session, settings))
+    assert episode.state is EpisodeState.NOT_WANTED
+
+    # Somebody wants it again, so the reconciler puts it back into ``wanted``
+    # and queues a search — and the search's very first act, before Nyaa is
+    # asked anything at all, is this.
+    newcomer = await make_user(db_session, "batch-newcomer@arc.test")
+    anime = await db_session.get(Anime, episode.anime_id)
+    assert anime is not None
+    await make_entry(db_session, newcomer, anime, progress=0)
+    await compute_wants(db_session, now=NOW)
+    assert episode.state is EpisodeState.WANTED
+
+    attached = await claim_existing(db_session, episode)
+
+    assert attached is not None and attached.id == claim.id
+    assert claim.wanted is True
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert await db_session.get(Torrent, torrent.id) is not None
+
+
+async def test_a_re_wanted_episode_fetches_its_file_again_from_the_start(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole cycle, because the bug only shows up at the end of it.
+
+    A file arrives and is handed to the library, retention deletes it, somebody
+    wants the episode again and it attaches to the same pack. If the row kept
+    its ``completed_at``, everything downstream would read the old copy as the
+    new one: ``qbit_reselect`` would stop the pack instead of starting it (there
+    is "nothing left to fetch"), the poll would treat it as settled and never
+    ask for a file list again, and the hand-off would look for a path retention
+    deleted — once a minute, for ever, with the episode stranded in
+    ``downloaded`` holding the one claim that stops it being fetched any other
+    way. So the claim resets the row's history, and this asserts the three
+    consequences in order: a START, a file list, and a hand-off.
+    """
+    settings = acquisition_settings(tmp_path)
+    stub = qbit_stub(monkeypatch, holding=BATCH_HASH)
+    stub.add_files(BATCH_HASH, [MEMBER, NEIGHBOUR], progress=1.0)
+    await set_setting(db_session, PAUSED_KEY, False)
+    episode, torrent, claim = await make_batch_episode(
+        db_session, settings, anilist_id=970206, number=1, ready_at=days_ago(30)
+    )
+    assert claim.completed_at is not None, "the file arrived and was handed off"
+
+    await retention_sweep(context(db_session, settings))
+    assert not (settings.downloads_dir / "batch" / BATCH_HASH / MEMBER).exists()
+
+    newcomer = await make_user(db_session, "batch-again@arc.test")
+    anime = await db_session.get(Anime, episode.anime_id)
+    assert anime is not None
+    await make_entry(db_session, newcomer, anime, progress=0)
+    await compute_wants(db_session, now=NOW)
+    attached = await claim_existing(db_session, episode)
+
+    assert attached is not None
+    assert claim.wanted is True
+    assert claim.completed_at is None and claim.progress is None, "asking again, from the start"
+
+    # 1. the job starts the pack rather than stopping it.
+    stub.stopped.clear()
+    await qbit_reselect(
+        context(db_session, settings, {"torrent_id": torrent.id}, job_type=QBIT_RESELECT)
+    )
+    assert stub.started == [BATCH_HASH]
+    assert stub.stopped == []
+
+    # 2. the poll asks for the file list again — a settled pack asks for none —
+    # and 3. hands the file over once the client says it is back.
+    stub.add_torrent(BATCH_HASH, state="downloading", progress=0.5)
+    path = settings.downloads_dir / "batch" / BATCH_HASH / MEMBER
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"0" * 4096)
+    stub.calls.clear()
+    await poll_qbit(context(db_session, settings, {}, job_type=POLL_QBIT))
+
+    assert any(call.endswith("/torrents/files") for call in stub.calls)
+    assert claim.completed_at is not None
+    assert episode.state is EpisodeState.MATCHING

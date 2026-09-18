@@ -188,6 +188,7 @@ from arc.models import (
     Want,
     WatchProgress,
 )
+from arc.services.acquisition.claims import live_claim, release_files
 from arc.services.acquisition.dormancy import REASON_DORMANT, is_dormant
 from arc.services.acquisition.names import (
     QBIT_CANCEL,
@@ -1273,6 +1274,31 @@ async def cancel_if_unwanted(
     still holding the file sitting in somebody's review queue, and deleting it
     from under them is not what "nobody wants the next episode" should mean.
 
+    **An episode downloading out of a batch takes the branch above the two
+    writes** (FR-A11). Its bytes are arriving inside a pack several episodes
+    share, and it has no ``torrents`` row of its own at all — a batch's
+    ``episode_id`` is null, which is precisely what keeps the query below from
+    reaching one. So the file is given back instead
+    (:func:`~arc.services.acquisition.claims.release_files`): its
+    ``torrent_files`` row stops being wanted, the ``qbit_reselect`` job writes
+    priority 0 for it, and ``batch.disposition`` decides whether the torrent is
+    then worth keeping. The torrent is **never** marked ``cancelled`` — that
+    value is ``qbit_cancel``'s mandate and ``qbit_cancel`` deletes with files,
+    which for a pack means the other episodes' bytes. The episode takes the same
+    ``downloading → not_wanted`` edge either way, so nothing above this function
+    can tell the two apart.
+
+    ``episode_id`` stays on the row. Changing your mind a minute later is then
+    free: the next search finds the pack through ``batch.claim_existing`` and
+    asks Nyaa nothing, which is the batch's version of "the release is not
+    barred from being chosen again".
+
+    The caller's ``qbit_cancel`` job is queued for this episode as it is for any
+    other, and finds nothing marked ``cancelled`` to delete — one query and a
+    log line. Left that way on purpose: making the return value carry *which*
+    kind of cancellation it was would put the batch distinction into every
+    caller, to save a job that is already written to find nothing.
+
     Only from :data:`CANCELLABLE`. Anything with bytes already landed is
     retention's (FR-T1), and anything before ``downloading`` has nothing in the
     client to remove — :func:`release_if_unwanted` is that half.
@@ -1281,6 +1307,21 @@ async def cancel_if_unwanted(
         return False
     if await _still_wanted(session, episode, wanted_ids):
         return False
+
+    claim = await live_claim(session, episode.id)
+    if claim is not None:
+        transition(episode, EpisodeState.NOT_WANTED, reason=NOBODY_WANTS)
+        torrent_ids = await release_files(session, (claim,))
+        log.info(
+            "batch file given back, nobody wants the episode",
+            extra={
+                "episode_id": episode.id,
+                "torrent_ids": list(torrent_ids),
+                "file_index": claim.file_index,
+                "path": claim.path,
+            },
+        )
+        return True
 
     torrents = [
         torrent

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from arc.config import Settings
 from arc.db import SessionFactory
 from arc.main import create_app
-from arc.models import EpisodeState, UserRole
+from arc.models import EpisodeState, Torrent, TorrentFile, TorrentKind, UserRole
 from arc.services.media.names import output_dir_for
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
 from tests.acquisition_helpers import make_user
@@ -98,6 +98,56 @@ async def test_the_preview_lists_the_episode_with_a_reason_and_its_size(
     assert row["rendition_dir"] == str(output_dir_for(retention_settings, episode_id).resolve())
     assert row["source_dir"] == str((retention_settings.downloads_dir / str(episode_id)).resolve())
     assert row["anime_title"].startswith("Retention Test")
+    assert row["torrent_files"] == 0, "nothing of a single's is a claim on a pack"
+
+
+async def test_the_preview_names_the_pack_claim_it_would_give_back(
+    retention_app: FastAPI,
+    retention_settings: Settings,
+    api_factory: SessionFactory,
+    admin: AsyncClient,
+) -> None:
+    """A batch-backed episode: one claim released, and no hash to delete.
+
+    The pair is the whole of FR-A11's retention story on one row — ``torrents``
+    empty because deleting a pack by hash with its files would take twenty-five
+    other episodes' bytes, and ``torrent_files`` at 1 because the claim is given
+    back so the pack cannot fetch the file again the moment it is unlinked.
+    """
+    async with api_factory() as session:
+        episode = await make_retained_episode(
+            session, retention_settings, anilist_id=971020, ready_at=days_ago(40)
+        )
+        user = await make_user(session, "watcher-pack@arc.test")
+        await add_completion(session, user, episode, at=days_ago(30))
+        torrent = Torrent(
+            info_hash="d" * 40,
+            kind=TorrentKind.BATCH,
+            title="[Judas] Retention Test [BD 1080p]",
+            save_path="/data/downloads/batch/" + "d" * 40,
+        )
+        session.add(torrent)
+        await session.flush()
+        session.add(
+            TorrentFile(
+                torrent_id=torrent.id,
+                file_index=6,
+                path="[Judas] Retention Test - 07.mkv",
+                size=1_100_000_000,
+                episode_id=episode.id,
+                wanted=True,
+                progress=1.0,
+            )
+        )
+        await session.commit()
+        episode_id = episode.id
+
+    body = (await admin.get("/api/retention/preview")).json()
+
+    (row,) = body["episodes"]
+    assert row["episode_id"] == episode_id
+    assert row["torrent_files"] == 1
+    assert row["torrents"] == [], "a pack is never deleted by hash with its files"
 
 
 async def test_the_preview_leaves_out_an_episode_somebody_still_wants(

@@ -45,6 +45,20 @@ def _seconds(value: float) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _Known:
+    """The three columns Arc's own row adds to what the client reported."""
+
+    episode_id: int | None = None
+    kind: str | None = None
+    wanted_bytes: int | None = None
+
+
+#: What a hash Arc has no row for reads as: a torrent in Arc's category that
+#: somebody else added, or one whose row has since been deleted.
+_UNKNOWN: Final[_Known] = _Known()
+
+
+@dataclass(frozen=True, slots=True)
 class TorrentStatus:
     """One live torrent, with the episode it belongs to when Arc knows it."""
 
@@ -53,12 +67,29 @@ class TorrentStatus:
     state: str
     #: 0..1.
     progress: float
+    #: What the client reports, which is already **the selected files only** —
+    #: ``torrents/info``'s ``size`` is the total of the files chosen for
+    #: download, not of the payload — so a pack whose one wanted file is 1.1 GB
+    #: of 14.8 GB reads as 1.1 GB here with no arithmetic of Arc's own (FR-A11).
     size: int
     dlspeed: int
     upspeed: int
     #: From the ``torrents`` table, by info hash. Null for anything in Arc's
-    #: category that Arc did not add, or whose row has been deleted since.
+    #: category that Arc did not add, or whose row has been deleted since — and
+    #: null for **every** pack, whose row belongs to no single episode (FR-A11).
     episode_id: int | None = None
+    #: ``single`` or ``batch`` from that row, or null when Arc has no row. The
+    #: one thing an admin cannot infer from the name: a pack looks like an
+    #: ordinary torrent in the client and is holding twenty-five files nobody
+    #: asked for at priority 0.
+    kind: str | None = None
+    #: The sum of the files Arc asked for, as the pick recorded it. Set for a
+    #: pack and null for a single, whose wanted bytes are its whole payload.
+    #: **``total_size`` is deliberately not reported**: the payload of a pack is
+    #: not a figure any rule, log or reservation in Arc may read (FR-A11), and a
+    #: panel that showed 14.8 GB beside a 1.1 GB download would be the one place
+    #: it leaked back in.
+    wanted_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +154,11 @@ async def qbit_status(
         log.info("qbittorrent status probe failed", extra={"error": error})
         return QbitStatus(reachable=False, error=error)
 
-    episodes = await _episode_ids(session, found)
-    return QbitStatus(
-        reachable=True,
-        version=version or None,
-        torrents=[
+    known = await _known(session, found)
+    torrents: list[TorrentStatus] = []
+    for info in found:
+        row = known.get(info.hash, _UNKNOWN)
+        torrents.append(
             TorrentStatus(
                 hash=info.hash,
                 name=info.name,
@@ -136,22 +167,28 @@ async def qbit_status(
                 size=info.size,
                 dlspeed=info.dlspeed,
                 upspeed=info.upspeed,
-                episode_id=episodes.get(info.hash),
+                episode_id=row.episode_id,
+                kind=row.kind,
+                wanted_bytes=row.wanted_bytes,
             )
-            for info in found
-        ],
-    )
+        )
+    return QbitStatus(reachable=True, version=version or None, torrents=torrents)
 
 
-async def _episode_ids(session: AsyncSession, found: list[TorrentInfo]) -> dict[str, int]:
-    """``info_hash → episode_id`` for the hashes the client just reported."""
+async def _known(session: AsyncSession, found: list[TorrentInfo]) -> dict[str, _Known]:
+    """``info_hash → what Arc's row says`` for the hashes just reported."""
     hashes = [info.hash for info in found]
     if not hashes:
         return {}
     rows = await session.execute(
-        select(Torrent.info_hash, Torrent.episode_id).where(Torrent.info_hash.in_(hashes))
+        select(Torrent.info_hash, Torrent.episode_id, Torrent.kind, Torrent.wanted_bytes).where(
+            Torrent.info_hash.in_(hashes)
+        )
     )
-    return {info_hash.lower(): episode_id for info_hash, episode_id in rows.all()}
+    return {
+        info_hash.lower(): _Known(episode_id=episode_id, kind=kind.value, wanted_bytes=wanted_bytes)
+        for info_hash, episode_id, kind, wanted_bytes in rows.all()
+    }
 
 
 __all__ = ["STATUS_TIMEOUT_SECONDS", "TIMED_OUT", "QbitStatus", "TorrentStatus", "qbit_status"]

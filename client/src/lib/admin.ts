@@ -127,6 +127,14 @@ export interface SettingsValues {
   sub_lang: string
   audio_lang: string
   acquisition_paused: boolean
+  /**
+   * Whether a finished show with no acceptable single may take a batch and
+   * download only the wanted episode's file (spec §4.2 FR-A4, FR-A11). The
+   * kill switch for it, and unlike `acquisition_paused` it *is* edited in the
+   * rules form: it is a policy, not a button somebody flips while watching
+   * downloads.
+   */
+  batch_fallback: boolean
 }
 
 export type SettingsKey = keyof SettingsValues
@@ -274,7 +282,20 @@ export interface RetentionItem {
   bytes: number
   rendition_dir: string | null
   source_dir: string | null
+  /**
+   * qBittorrent hashes that would be removed with their data. Always empty for
+   * a batch-backed episode (FR-A11): a pack's row belongs to no episode, and
+   * deleting it by hash with its files would take other episodes' bytes.
+   */
   torrents: string[]
+  /**
+   * How many `torrent_files` claims the deletion would give back — 1 for an
+   * episode a pack is holding, 0 for everything else (FR-A11). The pack and the
+   * row both survive; what is released is the claim, which is what stops the
+   * file being fetched again for another episode. Optional on the wire so a
+   * cached payload from before batches still parses.
+   */
+  torrent_files?: number
 }
 
 /** `GET /api/retention/preview` — the sweep's own rule, with no deletion. */
@@ -332,10 +353,22 @@ export interface QbitTorrent {
   state: string
   /** 0–1, as qBittorrent gives it. */
   progress: number
+  /**
+   * Bytes of the torrent's **selected** files, which is what qBittorrent means
+   * by `size` — so a pack reports what Arc asked for, not its payload (FR-A11).
+   */
   size: number
   dlspeed: number
   upspeed: number
+  /** Null for a torrent Arc has no row for, and for every batch (FR-A11). */
   episode_id: number | null
+  /** `"single"` or `"batch"` from Arc's row; null when there is no row. */
+  kind?: string | null
+  /**
+   * The sum of the files Arc asked for, recorded at pick time — set for a
+   * batch, null for a single. The pack's total is deliberately never sent.
+   */
+  wanted_bytes?: number | null
 }
 
 /**

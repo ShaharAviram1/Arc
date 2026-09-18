@@ -67,6 +67,20 @@ end — the admin's :attr:`~arc.services.acquisition.rules.Rules.preferred_group
 first, then :data:`DEEP_SEARCH_GROUPS` — stopping the moment there is enough to
 rank and never spending more than :data:`MAX_REQUESTS` requests on one episode.
 
+**A finished show with no single at all may be offered a batch**
+(``acceptable(..., batches=True)``, FR-A11, 2026-09-18). For a show that
+finished years ago the only seeded releases are often complete-season packs:
+the same *Kimetsu no Yaiba* pool held several, and the filter threw every one
+of them away before comparing the episode number, because FR-A4's "never fetch
+whole seasons" is a non-negotiable. It is a statement about **bytes** rather
+than about torrents, though, and a torrent whose contents are read before a
+single one of them is fetched can be asked for one file. So a batch is a
+*candidate* — never by default, only for a :func:`deep_search` entry, and only
+when no acceptable single exists at all — carrying the episodes its name claims
+in :attr:`Candidate.covers`, or nothing at all where its name claims none.
+Which of its files are fetched is settled elsewhere (FR-A11); nothing in this
+module downloads anything.
+
 **Ranking is FR-A3's four rules in order**: preferred group, then resolution,
 then seeders, then Nyaa's trusted flag — behind one rule that comes first, an
 **English dub ranks below every subbed candidate** and is only ever chosen for
@@ -81,7 +95,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Final, Self
@@ -139,6 +153,24 @@ TIMEOUT_SECONDS: Final[float] = 20.0
 
 #: How long to wait before the single retry after a 5xx or a timeout.
 RETRY_AFTER: Final[float] = 3.0
+
+#: Most bytes a ``.torrent`` may be (:meth:`NyaaClient.torrent_file`). One
+#: mebibyte: a file list is a few kilobytes per file and the piece hashes are
+#: twenty bytes per piece, so a 50 GB batch of 26 files is well under a
+#: hundred kilobytes. The ceiling is not about disk — the blob is posted
+#: straight to qBittorrent and never stored — it is about what a feed's
+#: ``<link>`` might point at if Nyaa ever answers something other than a
+#: torrent, and about not holding an unbounded body in memory for it.
+MAX_TORRENT_BYTES: Final[int] = 1024 * 1024
+
+#: What a bencoded ``.torrent`` starts with: ``d``, the opening of the
+#: top-level dictionary. A Cloudflare interstitial, an HTML error page and a
+#: redirect to a login form all start with ``<`` or whitespace, and none of
+#: them is something to hand a torrent client. This is a *shape* check and not
+#: a parse: Arc never decodes the file (D3 of the plan — qBittorrent's own
+#: ``torrents/files`` is authoritative about the indices ``filePrio`` takes),
+#: so the only thing worth asserting here is that it is a bencoded dict at all.
+BENCODE_DICT_PREFIX: Final[bytes] = b"d"
 
 #: Fewest seeders a release may have and still be a candidate. One: a torrent
 #: with nobody holding it cannot be downloaded, however well its name matches,
@@ -205,6 +237,29 @@ DEEP_SEARCH_STATUS: Final[str] = "FINISHED"
 #: de-duplicated against it, so an admin who prefers Judas asks Judas first and
 #: never asks it twice.
 DEEP_SEARCH_GROUPS: Final[tuple[str, ...]] = ("HorribleSubs", "SubsPlease", "Erai-raws")
+
+#: The word a batch uploader writes, and the only one worth a query
+#: (:func:`batch_queries`, 2026-09-18). ``[Erai-raws] … [BATCH]``,
+#: ``[Judas] … [BATCH]``: it is in the name of most packs and in the name of
+#: almost no single. ``Complete`` and ``Season Pack`` are the other two
+#: spellings and neither earns a request — the *bare* form above it already
+#: reaches those uploads, and each extra word is two more seconds of a
+#: volunteer-run site's patience spent on a guess about wording.
+BATCH_WORD: Final[str] = "BATCH"
+
+#: Most forms one search may spend on finding a pack: the bare title, the
+#: title with :data:`BATCH_WORD`, and the english title with it. Three,
+#: because these are asked **only** when everything else has failed — a
+#: finished show with no acceptable single at all — and they are asked after
+#: the narrowed forms have had their turn.
+#:
+#: It is also the **reservation**: the group narrowing stops this many
+#: requests short of :data:`MAX_REQUESTS` for any entry that could still ask
+#: for a pack (:func:`search_for_episode`, owner 2026-09-18). A show with ten
+#: title forms and eighteen narrowed ones would otherwise spend the entire
+#: budget looking for a single, and that is exactly the show whose only
+#: seeded releases are packs.
+MAX_BATCH_QUERIES: Final[int] = 3
 
 #: Punctuation a release group drops and a catalogue keeps. Every one of these
 #: either glues two words into one token (``Yarichin☆Bitch-bu``) or hangs off
@@ -517,8 +572,14 @@ class NyaaClient:
             await _sleep(self._min_interval - elapsed)
         self._last_request = _now()
 
-    async def _fetch(self, url: str) -> str:
-        """One GET, retried once on a 5xx or a transport failure."""
+    async def _fetch(self, url: str) -> httpx.Response:
+        """One GET, retried once on a 5xx or a transport failure.
+
+        The **response** rather than its text, because two callers want two
+        different halves of it: :meth:`search` reads ``.text`` (an RSS
+        document, whose encoding httpx works out) and :meth:`torrent_file`
+        reads ``.content`` (a bencoded blob, where a decode would be damage).
+        """
         for attempt in (1, 2):
             await self._pace()
             try:
@@ -538,7 +599,7 @@ class NyaaClient:
             if response.status_code >= 400:
                 # A 4xx is final: asking again changes nothing.
                 raise NyaaUnavailable(f"nyaa answered {response.status_code}")
-            return response.text
+            return response
         raise NyaaUnavailable("nyaa could not be reached")  # pragma: no cover - unreachable
 
     async def search(self, query: str) -> list[NyaaItem]:
@@ -551,7 +612,7 @@ class NyaaClient:
                 return cached[1]
 
             started = _now()
-            items = parse_feed(await self._fetch(self.url_for(query)))
+            items = parse_feed((await self._fetch(self.url_for(query))).text)
             self._cache[query] = (_now(), items)
             log.info(
                 "nyaa search",
@@ -562,6 +623,67 @@ class NyaaClient:
                 },
             )
             return items
+
+    async def torrent_file(self, url: str) -> bytes:
+        """The ``.torrent`` behind one RSS item. Paced like a search, never cached.
+
+        The one request in this module that is not a search, and it exists for
+        the byte guarantee behind FR-A11 (plan §4): qBittorrent refuses
+        ``torrents/filePrio`` while it has no metadata, so a batch added as a
+        *magnet* has an unavoidable window in which unwanted files are fetched.
+        Handing the client the file itself means the metadata is there at add
+        time and the priorities can be written before a single byte moves.
+
+        Five guards, and each of them closes a way for a feed to point Arc
+        somewhere it should not go:
+
+        * the URL must be on **this client's own host** — ``link`` is a string
+          out of somebody else's XML, and a request Arc makes because a feed
+          told it to is a request to an arbitrary address otherwise. The
+          trailing slash is part of the check, so ``https://nyaa.si.example``
+          does not pass for ``https://nyaa.si``;
+        * and the URL the answer **came from** must be on that host too. The
+          client follows redirects (it has to: Nyaa moves ``/download`` about),
+          so the first check is a statement about where Arc *asked* and this
+          one is a statement about who *answered* — a 302 to anywhere is
+          otherwise the same request to an arbitrary address with an extra hop;
+        * ``Content-Length``, where the answer carries one, must be within
+          :data:`MAX_TORRENT_BYTES`, so a body Arc will refuse anyway is
+          refused on its header rather than after it has been held in memory;
+        * the body must be no larger than :data:`MAX_TORRENT_BYTES` — the
+          header is a claim and this is the measurement;
+        * and it must begin with :data:`BENCODE_DICT_PREFIX`, which an HTML
+          interstitial does not.
+
+        Not cached, unlike :meth:`search`: a blob is asked for exactly once,
+        immediately before it is added, and the cache exists to spare Nyaa the
+        *repeated* question rather than to hold megabytes of payload. It does
+        take the same lock, so the two-second gap covers it like everything
+        else — a ``.torrent`` fetch is counted in ``Search.requests``' budget
+        by the caller.
+        """
+        if not self._is_mine(url):
+            raise NyaaUnavailable(f"refusing a torrent URL off nyaa's own host: {url!r}")
+        async with self._lock:
+            response = await self._fetch(url)
+        if not self._is_mine(str(response.url)):
+            raise NyaaUnavailable(
+                f"a torrent URL redirected off nyaa's own host: {str(response.url)!r}"
+            )
+        claimed = response.headers.get("content-length")
+        if claimed is not None and claimed.strip().isdigit() and int(claimed) > MAX_TORRENT_BYTES:
+            raise NyaaUnavailable(f"torrent file claims {claimed} bytes, over {MAX_TORRENT_BYTES}")
+        blob = response.content
+        if len(blob) > MAX_TORRENT_BYTES:
+            raise NyaaUnavailable(f"torrent file is {len(blob)} bytes, over {MAX_TORRENT_BYTES}")
+        if not blob.startswith(BENCODE_DICT_PREFIX):
+            raise NyaaUnavailable("nyaa did not answer with a bencoded torrent")
+        log.info("nyaa torrent file", extra={"url": url, "bytes": len(blob)})
+        return blob
+
+    def _is_mine(self, url: str) -> bool:
+        """Whether ``url`` is on the host this client was built for."""
+        return url.startswith(f"{self._base_url}/")
 
 
 #: The process-wide client and the URL it was built for. Module state rather
@@ -1251,11 +1373,41 @@ class Candidate:
     #: entry's own (:func:`absolute_offset`). Zero for every candidate whose
     #: number needed no arithmetic at all, which is nearly all of them.
     offset: int = 0
+    #: Every episode number a **batch** claims to hold, as its name gives them
+    #: — :attr:`~arc.services.library.parser.ParsedName.episode_span`, so in
+    #: the release's own numbering (absolute where :attr:`absolute` is true).
+    #: Empty for every single, and empty for a batch that names **no** range at
+    #: all: a ``[BATCH]`` or ``Complete Series`` marker with no numbers is a
+    #: candidate whose coverage is unknowable from its name and is settled from
+    #: its file list at pick time (FR-A11, plan §3).
+    covers: tuple[int, ...] = ()
 
     @property
     def absolute(self) -> bool:
         """Whether this release was accepted by the absolute-numbering rule."""
         return self.offset > 0
+
+    @property
+    def is_batch(self) -> bool:
+        """Whether this candidate is a batch rather than one episode's file.
+
+        Only ever true where the caller asked for batches
+        (``acceptable(..., batches=True)``); the default filter rejects every
+        one of them before a :class:`Candidate` exists, which is what keeps
+        FR-A4's "never fetch whole seasons" true of every path written before
+        FR-A11.
+        """
+        return self.parsed.is_batch
+
+    @property
+    def torrent_url(self) -> str:
+        """The ``.torrent`` URL, for a batch that is added as a file.
+
+        Nyaa's RSS ``<link>`` *is* the direct download
+        (``https://nyaa.si/download/2088261.torrent``), which is the whole
+        reason :meth:`NyaaClient.torrent_file` needs nothing but the item.
+        """
+        return self.item.link
 
     @property
     def group(self) -> str | None:
@@ -1281,6 +1433,59 @@ def _rejected(item: NyaaItem, reason: str) -> None:
     log.debug("nyaa rejected", extra={"title": item.title, "reason": reason})
 
 
+def _acceptable_batch(
+    item: NyaaItem,
+    parsed: ParsedName,
+    *,
+    titles: Sequence[str],
+    number: int,
+    season: int | None,
+    threshold: float,
+    offset: int | None,
+    covered: str,
+) -> Candidate | None:
+    """The batch half of :func:`acceptable` (FR-A11), reached only with ``batches=True``.
+
+    Split out because it is a different question with the same three
+    ingredients, and because keeping it beside the single-episode path made
+    that path harder to read than either of them is on its own. The checks and
+    their order are the episode path's, with the coverage test standing where
+    the episode-number test stands:
+
+    1. the range, where the name gives one, must **cover** the episode — or
+       cover ``number + offset``, the absolute reading, which as always is only
+       offered to a release that names no season at all (:func:`acceptable`);
+    2. the season must agree, unless the absolute reading is what accepted it,
+       in which case the release named no season by construction;
+    3. the title must reach ``threshold`` against the entry's own names.
+
+    A batch that names **no** range is exempt from (1) only: it still has to be
+    this show's, and this season's, and :attr:`Candidate.covers` is empty so
+    that the pick can see that its coverage was never claimed.
+    """
+    span = parsed.episode_span
+    running = number + offset if offset else None
+    absolute = running is not None and parsed.season is None and running in span
+    if span and number not in span and not absolute:
+        wanted = f"{number} or {running}" if running is not None else f"{number}"
+        _rejected(item, f"batch release{covered}, and this is episode {wanted}")
+        return None
+    if not absolute and (parsed.season or 1) != (season or 1):
+        _rejected(item, f"batch release of season {parsed.season or 1}, not {season or 1}")
+        return None
+    similarity = title_score(parsed.title_key, titles)
+    if similarity < threshold:
+        _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+        return None
+    return Candidate(
+        item=item,
+        parsed=parsed,
+        title_similarity=similarity,
+        offset=(offset or 0) if absolute else 0,
+        covers=span,
+    )
+
+
 def acceptable(
     item: NyaaItem,
     *,
@@ -1291,6 +1496,7 @@ def acceptable(
     single: bool = False,
     year: int | None = None,
     offset: int | None = None,
+    batches: bool = False,
 ) -> Candidate | None:
     """``item`` as a :class:`Candidate`, or ``None`` with a reason logged.
 
@@ -1338,6 +1544,35 @@ def acceptable(
     non-negotiable. The parser is what knows this — a range or a ``BATCH``
     marker makes :attr:`~arc.services.library.parser.ParsedName.kind` ``batch``
     — and the filter's job is only to refuse to look past it.
+
+    ``batches`` (FR-A11, 2026-09-18) is the **only** way past that rejection,
+    and it defaults to ``False`` so that every caller written before it, the
+    whole query corpus and every current rejection are unchanged. With
+    ``batches=True`` the rejection becomes a *classification* instead, in this
+    order:
+
+    * ``remake`` and the seeder floor still come first, because neither has
+      anything to do with what the torrent holds;
+    * where the name gives a **range**, it must cover ``number`` — or
+      ``number + offset`` under the absolute rule, which needs the same four
+      conditions a single's does, the release naming no season among them. A
+      pack of episodes 1–12 asked for episode 20 is not this episode's batch
+      any more than ``- 12`` is episode 20;
+    * where the name gives **no range at all** (``[Judas] Kimetsu no Yaiba [BD
+      1080p][BATCH]``, ``Complete Series``) it is a candidate with
+      :attr:`Candidate.covers` empty: its coverage is unknowable from its name
+      and is settled from its **file list** before anything is fetched, which
+      is the one thing FR-A4 could not do before and the reason this is a
+      candidate rather than a guess;
+    * the season must agree and the title must reach ``threshold``, exactly as
+      for a single, and a dub is **ranked** rather than filtered (FR-A3);
+    * and a ``single=True`` entry never gets one: a film is one file, and a
+      franchise's three films in one torrent is the download FR-A4 forbids
+      with no episode for the file plan to identify.
+
+    Nothing here decides that a batch *will* be fetched. It decides that one
+    may be **considered**, and only :func:`search_for_episode` asks — for a
+    finished show, and only when no acceptable single exists at all.
 
     **Absolute numbering** (``offset``, 2026-09-17) is the one way a release
     whose number is *not* ``number`` may still be this episode: with an offset
@@ -1388,6 +1623,26 @@ def acceptable(
             covered = f" covering episode {span[0]}"
         else:
             covered = ""
+        if batches and parsed.is_batch and not single:
+            return _acceptable_batch(
+                item,
+                parsed,
+                titles=titles,
+                number=number,
+                season=season,
+                threshold=threshold,
+                offset=offset,
+                covered=covered,
+            )
+        if batches and single:
+            # A film is one file: there is no episode for a file plan to
+            # identify, and a franchise's three films in one torrent is
+            # exactly the download FR-A4 forbids.
+            _rejected(item, f"batch release{covered}, and this entry is one release")
+            return None
+        # Not asked for, or a range inside something that is not episodes at
+        # all — a creditless opening outranks the range in the parser, so
+        # ``kind`` is ``nc`` and there is no batch of episodes here.
         _rejected(item, f"batch release{covered}, not a single episode")
         return None
     if single and number == 1:
@@ -1464,6 +1719,8 @@ def filter_items(
     single: bool = False,
     year: int | None = None,
     offset: int | None = None,
+    batches: bool = False,
+    only_batches: bool = False,
 ) -> list[Candidate]:
     """Every acceptable item, in the order the feed gave them.
 
@@ -1473,6 +1730,15 @@ def filter_items(
     right about the same episode, one of them is a group's own statement of
     which season it uploaded and the other is Arc's arithmetic, and a pool
     holding both would let the ranker settle it on seeders. Explicit wins.
+
+    ``batches`` is :func:`acceptable`'s and means what it means there.
+    ``only_batches`` drops every **single** from the answer, which is how
+    :func:`search_for_episode` asks its second question of the pool it already
+    has (FR-A11): the two lists are ranked apart and a single always wins, so
+    mixing them would only give the ranker a choice it must not make. The
+    explicit-season rule above is then applied to the batch list **on its own
+    terms** — an absolute pack loses to a pack that names the season, and to
+    nothing else.
     """
     kept = []
     for item in items:
@@ -1485,8 +1751,9 @@ def filter_items(
             single=single,
             year=year,
             offset=offset,
+            batches=batches,
         )
-        if candidate is not None:
+        if candidate is not None and (not only_batches or candidate.is_batch):
             kept.append(candidate)
     explicit = [
         candidate
@@ -1517,6 +1784,10 @@ class Ranked:
     seeders: int
     trusted: bool
     reasons: tuple[str, ...] = field(default=())
+    #: How many of the show's currently wanted episodes this **batch** covers
+    #: (:func:`rank`). Zero for every single, where it is not part of the sort
+    #: key at all, and at least one for every batch.
+    covered_wanted: int = 0
 
     @property
     def item(self) -> NyaaItem:
@@ -1527,8 +1798,28 @@ class Ranked:
         return self.candidate.dubbed
 
     @property
-    def sort_key(self) -> tuple[int, int, int, int, int]:
+    def is_batch(self) -> bool:
+        return self.candidate.is_batch
+
+    @property
+    def torrent_url(self) -> str:
+        """The ``.torrent`` URL, for a batch that is added as a file (FR-A11)."""
+        return self.candidate.torrent_url
+
+    @property
+    def sort_key(self) -> tuple[int, ...]:
         """A dub last, then FR-A3's four rules in the order the spec lists them.
+
+        **A batch gains one term and only a batch** (FR-A11, 2026-09-18):
+        ``-covered_wanted`` directly behind the dub, so of two packs that both
+        hold the episode the one that also holds the *other* episodes somebody
+        is waiting for is taken — one torrent then serves several wants and the
+        second of them costs no Nyaa request and no new bytes of overhead. It
+        sits behind the dub for the same reason everything does, and in front
+        of the group because which episodes a pack holds is a fact about the
+        download and group, resolution, seeders and trusted are preferences
+        about the copy. A single's key is the five-tuple it has always been,
+        untouched, which is asserted rather than assumed.
 
         **The dub comes before the group**, which is to say it outranks every
         other preference: a dubbed release is not a worse copy of the episode,
@@ -1543,8 +1834,10 @@ class Ranked:
         when nothing else was found, a file somebody can watch beats fourteen
         days of ``searching`` (``_pick`` logs the choice when it happens).
         """
+        coverage = (-self.covered_wanted,) if self.is_batch else ()
         return (
             1 if self.dubbed else 0,
+            *coverage,
             self.group_rank,
             self.resolution_rank,
             -self.seeders,
@@ -1552,8 +1845,38 @@ class Ranked:
         )
 
 
+def covered_wanted(candidate: Candidate, wanted_numbers: Collection[int]) -> int:
+    """How many of ``wanted_numbers`` this batch covers — at least one (FR-A11).
+
+    Zero for a single, which does not carry the term at all. For a batch:
+
+    * the numbers are the **entry's** episode numbers and
+      :attr:`Candidate.covers` is the *release's*, so the offset an absolute
+      candidate was accepted under is applied here too — a ``25 ~ 47`` pack of
+      a second season that follows 24 covers that entry's episodes 1–23;
+    * a pack that names **no** range covered nothing it can be counted on, and
+      scores the floor;
+    * and the floor is one, for every batch, because a batch is only a
+      candidate at all if it may hold the episode being searched for. That is
+      what makes an empty ``wanted_numbers`` — the default, and what a caller
+      with no live wants to hand over passes — score every batch alike, so the
+      term drops out of the key and FR-A3's four rules decide, rather than
+      quietly promoting the packs whose coverage is unknown.
+    """
+    if not candidate.is_batch:
+        return 0
+    span = set(candidate.covers)
+    if not span:
+        return 1
+    return max(1, sum(1 for number in set(wanted_numbers) if number + candidate.offset in span))
+
+
 def _reasons(
-    candidate: Candidate, rules: Rules, group_rank: int, resolution_rank: int
+    candidate: Candidate,
+    rules: Rules,
+    group_rank: int,
+    resolution_rank: int,
+    covered: int = 0,
 ) -> list[str]:
     reasons: list[str] = []
     group = candidate.group
@@ -1573,6 +1896,18 @@ def _reasons(
         reasons.append(f"{resolution} is neither preferred nor fallback")
 
     reasons.append(f"{candidate.item.seeders} seeders")
+    if candidate.is_batch:
+        # The one reason that is about *what the torrent holds* rather than
+        # which copy of the episode it is, and the sentence FR-A11 is judged
+        # by: a chosen batch has to say how much of it Arc asked for.
+        span = (
+            f"episodes {candidate.covers[0]}-{candidate.covers[-1]}"
+            if len(candidate.covers) > 1
+            else f"episode {candidate.covers[0]}"
+            if candidate.covers
+            else "an unnamed range"
+        )
+        reasons.append(f"batch covering {span}, {covered} of them wanted")
     if candidate.absolute and candidate.parsed.episode is not None:
         # The one reason that is about *which episode this is* rather than
         # which copy of it: a chosen release whose name says 25 lands in an
@@ -1590,12 +1925,27 @@ def _reasons(
     return reasons
 
 
-def rank(candidates: Iterable[Candidate], rules: Rules) -> list[Ranked]:
-    """Order candidates by FR-A3's rules, best first, each with its reasons."""
+def rank(
+    candidates: Iterable[Candidate],
+    rules: Rules,
+    *,
+    wanted_numbers: Collection[int] = (),
+) -> list[Ranked]:
+    """Order candidates by FR-A3's rules, best first, each with its reasons.
+
+    ``wanted_numbers`` are the episodes of this show somebody is waiting for
+    right now, and they matter to **batches only** (:func:`covered_wanted`,
+    :attr:`Ranked.sort_key`): of two packs that both hold the episode being
+    searched for, the one that also holds the others is one torrent instead of
+    two. It is empty by default and empty is neutral — every batch then scores
+    the same and FR-A3's four rules decide, which is exactly what a caller with
+    nothing to say about the rest of the show should get.
+    """
     ranked = []
     for candidate in candidates:
         group_rank = rules.group_rank(candidate.group)
         resolution_rank = rules.resolution_rank(candidate.resolution)
+        covered = covered_wanted(candidate, wanted_numbers)
         ranked.append(
             Ranked(
                 candidate=candidate,
@@ -1603,7 +1953,8 @@ def rank(candidates: Iterable[Candidate], rules: Rules) -> list[Ranked]:
                 resolution_rank=resolution_rank,
                 seeders=candidate.item.seeders,
                 trusted=candidate.item.trusted,
-                reasons=tuple(_reasons(candidate, rules, group_rank, resolution_rank)),
+                reasons=tuple(_reasons(candidate, rules, group_rank, resolution_rank, covered)),
+                covered_wanted=covered,
             )
         )
     ranked.sort(key=lambda entry: entry.sort_key)
@@ -1690,6 +2041,66 @@ def group_queries(anime: Anime, number: int, rules: Rules) -> list[str]:
     return list(built)
 
 
+def batch_queries(anime: Anime) -> list[str]:
+    """``"<base>"`` and ``"<base> BATCH"`` — the forms a **pack** is named by.
+
+    The correction of 2026-09-18, and the reason the first version of the
+    batch fallback could never fire. **Every form :func:`queries` builds
+    carries the episode number**, and a batch release name does not carry one:
+    ``[Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p]`` holds no token ``03``,
+    and Nyaa ANDs the words of a query. So the merged pool of a numbered
+    search contains **no batches at all** — verified against the live feed on
+    2026-09-18: *One Week Friends* episode 3 returned 16 results and 0
+    batches, *Chivalry of a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and
+    0. The one case that appeared to work, *Kimetsu no Yaiba* episode 10, did
+    so by accident: ``10`` is a token of ``1080p``, which is in every batch's
+    name. The plan's "no extra request, the batches were in the pool all
+    along" was true of that accident and of nothing else.
+
+    So a batch has to be **asked for**, and asked for by the shape a pack's
+    name actually has: the title with no number on it, and the title with the
+    word every batch uploader writes.
+
+    Three forms at most, best first:
+
+    1. ``"<romaji base>"`` — the season-stripped romaji title, bare. The
+       broadest of the three and the one that finds a pack whose name says
+       ``Complete Series``, ``Seasons 1-2`` or nothing at all. Season-stripped
+       for the same reason :func:`_short_forms` is: *Dagashi Kashi 2*'s packs
+       are named ``Dagashi Kashi 2`` and ``Dagashi Kashi S2`` and the query
+       has to be a subset of both, and the season check on the way back in
+       (:func:`_acceptable_batch`) is what keeps season one's pack out.
+    2. ``"<romaji base> BATCH"`` — narrower, and it is the *word* Erai-raws
+       and most others put in the name.
+    3. ``"<english base> BATCH"``, where the english base says something the
+       romaji one did not.
+
+    Deliberately **not** ``Complete`` or ``Season Pack``: each extra word is
+    another paced request for a spelling, the bare form already reaches those
+    uploads, and the budget is the thing being spent.
+
+    Pure, like :func:`queries` and :func:`group_queries`, and asked only where
+    :func:`search_for_episode` asks them — a finished show, not a film, with
+    no acceptable single at all.
+    """
+    bases: list[str] = []
+    for name in (anime.title_romaji, anime.title_english):
+        if not name:
+            continue
+        base = " ".join((strip_season(name).base or name).split())
+        if base and base not in bases:
+            bases.append(base)
+    if not bases:
+        return []
+    # The bare form is built from the **first** base there is, which is romaji
+    # where the entry has one: it is what release groups write, and a second
+    # bare form in another language would spend a slot to ask the same
+    # question twice.
+    forms = [bases[0], f"{bases[0]} {BATCH_WORD}"]
+    forms.extend(f"{base} {BATCH_WORD}" for base in bases[1:])
+    return forms[:MAX_BATCH_QUERIES]
+
+
 @dataclass(frozen=True, slots=True)
 class Search:
     """What one episode's search asked, saw and kept (FR-A7).
@@ -1716,15 +2127,26 @@ class Search:
     forms: int
     #: Distinct releases every form returned between them, before the filter.
     results: int
-    #: Requests made, title forms and narrowed forms together (some possibly
-    #: answered from the ten-minute cache). Equal to ``forms`` for an airing
-    #: show and for a finished one that found what it needed, so a larger
-    #: number is itself the statement that this search had to go narrower
-    #: (:func:`group_queries`).
+    #: Requests made: title forms, narrowed forms and batch forms together
+    #: (some possibly answered from the ten-minute cache). Equal to ``forms``
+    #: for an airing show and for a finished one that found what it needed, so
+    #: a larger number is itself the statement that this search had to go
+    #: narrower (:func:`group_queries`) or had to ask for a pack
+    #: (:func:`batch_queries`).
     requests: int
+    #: Batch releases worth considering, ranked, and **only** where ``ranked``
+    #: is empty: a finished show with no acceptable single at all (FR-A11,
+    #: 2026-09-18). Always empty for an airing show, for a film and for any
+    #: search that found a single, however poorly seeded. It costs no extra
+    #: request — these come out of the pool the title and narrowed forms had
+    #: already merged — and it is a *list of candidates*, not a decision:
+    #: whether one is taken is ``search_release``'s, which reads the torrent's
+    #: contents before it fetches anything.
+    batches: list[Ranked] = field(default_factory=list)
 
     @property
     def kept(self) -> int:
+        """How many **singles** were kept, which is what FR-A7's row reports."""
         return len(self.ranked)
 
 
@@ -1736,6 +2158,7 @@ async def search_for_episode(
     *,
     threshold: float = TITLE_THRESHOLD,
     offset: int | None = None,
+    wanted_numbers: Collection[int] = (),
 ) -> Search:
     """Run **every** :func:`queries` form, merge by info hash, filter and rank.
 
@@ -1773,7 +2196,9 @@ async def search_for_episode(
       is what the ranker was short of;
     * and :data:`MAX_REQUESTS` is the ceiling on the lot — title forms
       included — so one episode's search cannot cost more than 20 requests
-      however the forms and groups multiply out.
+      however the forms and groups multiply out; where a pack could still be
+      asked for, the narrowing stops :data:`MAX_BATCH_QUERIES` short of it and
+      leaves those three to :func:`batch_queries`.
 
     The narrowed forms are **not** counted against :data:`MAX_QUERIES`: that
     cap is the budget for ways of writing the *title*, and these are not that.
@@ -1784,6 +2209,42 @@ async def search_for_episode(
     filter into the same ranking, so a group that was asked for by name still
     wins or loses on preferred group, resolution, seeders and trusted. The pool
     was the bug.
+
+    **And a finished show with no single at all is offered batches**
+    (``Search.batches``, FR-A11, 2026-09-18) — the last question this function
+    asks, of the pool it already has:
+
+    * ``not ranked``, literally "no acceptable single exists". Stricter than
+      the narrowing's "fewer than three": a single, however poorly seeded,
+      always wins, because it is the episode and nothing else;
+    * :func:`deep_search`, so ``FINISHED`` only. An airing show never sees a
+      batch — its own week's release is inside the newest 75 — and a null
+      status reads as not-finished, which is the airing show's answer;
+    * not a :func:`is_single` entry, which has no episode for a file plan to
+      identify;
+    * and **up to three more requests** (:func:`batch_queries`, corrected
+      2026-09-18). This was written as "no new request, the batches were in
+      the pool all along", and that was true of exactly one case and wrong in
+      general: every form above carries the episode number, no batch name
+      carries one, and Nyaa ANDs the words of a query, so a numbered search's
+      pool holds **no batches at all** — 16 results and 0 batches for *One
+      Week Friends* episode 3, 13 and 0 for *Chivalry of a Failed Knight*, 10
+      and 0 for *Dagashi Kashi 2*, against the live feed. *Kimetsu no Yaiba*
+      episode 10 looked like it worked because ``10`` is a token of
+      ``1080p``. So the pack is asked for by name, with no number and with
+      the word ``BATCH``, and those requests are the **last** this search
+      makes: they are counted in ``requests`` (never in ``forms``) and they
+      are inside :data:`MAX_REQUESTS` like everything else. The narrowing
+      above **stops** :data:`MAX_BATCH_QUERIES` **requests short of that
+      ceiling** so the three are always reachable (owner, 2026-09-18): a show
+      with ten title forms and eighteen narrowed ones would otherwise spend
+      the whole budget looking for a single, and it is exactly the show
+      likeliest to have nothing but packs. The narrowing still goes first —
+      it is looking for a *single*, and a single beats every pack.
+
+    ``wanted_numbers`` are that show's currently wanted episodes, supplied by
+    the caller because it is the caller that has a session, and they only
+    order the batch list (:func:`covered_wanted`). Empty is neutral.
     """
     titles = anime_titles(anime)
     season = anime_season(anime)
@@ -1791,6 +2252,7 @@ async def search_for_episode(
 
     merged: dict[str, NyaaItem] = {}
     counts: list[int] = []
+    asked: set[str] = set()
     requests = 0
 
     def enough() -> bool:
@@ -1812,6 +2274,7 @@ async def search_for_episode(
         nonlocal requests
         items = await client.search(query)
         requests += 1
+        asked.add(query)
         before = len(merged)
         for item in items:
             merged.setdefault(item.info_hash, item)
@@ -1840,11 +2303,25 @@ async def search_for_episode(
         # Narrowed by group, and only for what the title forms could not
         # reach: the newest 75 matches of a finished show's query are its
         # franchise's later seasons, and the feed cannot be paged past them.
+        #
+        # **The narrowing stops three requests short of the ceiling** for an
+        # entry that could still ask for a pack (owner, 2026-09-18). Without
+        # the reservation, a show with ten title forms and eighteen narrowed
+        # ones spends the whole budget looking for a single and the batch
+        # forms are never reached — which is precisely the show most likely to
+        # have nothing but packs. A film keeps the plain ceiling, because it
+        # never asks for one, and an airing show never gets here at all.
+        narrowing_ceiling = MAX_REQUESTS if single else MAX_REQUESTS - MAX_BATCH_QUERIES
         for query in group_queries(anime, number, rules):
-            if requests >= MAX_REQUESTS:
+            if requests >= narrowing_ceiling:
                 log.warning(
                     "nyaa request ceiling reached, narrowed forms left unasked",
-                    extra={"anime_id": anime.id, "number": number, "requests": requests},
+                    extra={
+                        "anime_id": anime.id,
+                        "number": number,
+                        "requests": requests,
+                        "ceiling": narrowing_ceiling,
+                    },
                 )
                 break
             if enough():
@@ -1866,6 +2343,49 @@ async def search_for_episode(
         offset=offset,
     )
     ranked = rank(candidates, rules)
+
+    batches: list[Ranked] = []
+    narrowed = requests - len(counts)
+    if not ranked and deep_search(anime) and not single:
+        # A pack has to be **asked for** (:func:`batch_queries`, corrected
+        # 2026-09-18): every form above carries the episode number, no batch
+        # name carries one, and Nyaa ANDs the words of a query — so the pool
+        # merged so far holds no batches at all. Up to three more forms, the
+        # last requests this search will make, each of them paced, cached and
+        # inside the same ceiling as everything else.
+        for query in batch_queries(anime):
+            if query in asked:
+                continue
+            if requests >= MAX_REQUESTS:
+                log.warning(
+                    "nyaa request ceiling reached, batch forms left unasked",
+                    extra={"anime_id": anime.id, "number": number, "requests": requests},
+                )
+                break
+            log.debug(
+                "nyaa batch query",
+                extra={"query": query, "anime_id": anime.id, "number": number},
+            )
+            await ask(query)
+        # ``only_batches`` keeps the two lists apart: a single always wins, so
+        # there is nothing for a mixed ranking to decide.
+        batches = rank(
+            filter_items(
+                merged.values(),
+                titles=titles,
+                number=number,
+                season=season,
+                threshold=threshold,
+                single=single,
+                year=anime.season_year,
+                offset=offset,
+                batches=True,
+                only_batches=True,
+            ),
+            rules,
+            wanted_numbers=wanted_numbers,
+        )
+
     log.info(
         "nyaa candidates",
         extra={
@@ -1875,14 +2395,23 @@ async def search_for_episode(
             "queries": len(counts),
             "per_query": counts,
             "requests": requests,
-            "narrowed": requests - len(counts),
+            "narrowed": narrowed,
+            "batch_forms": requests - len(counts) - narrowed,
             "merged": len(merged),
             "kept": len(candidates),
+            "batches": len(batches),
             "top": ranked[0].item.title if ranked else None,
             "reasons": list(ranked[0].reasons) if ranked else [],
+            "top_batch": batches[0].item.title if batches else None,
         },
     )
-    return Search(ranked=ranked, forms=len(counts), results=len(merged), requests=requests)
+    return Search(
+        ranked=ranked,
+        forms=len(counts),
+        results=len(merged),
+        requests=requests,
+        batches=batches,
+    )
 
 
 def as_dict(ranked: Ranked) -> dict[str, Any]:
@@ -1902,15 +2431,19 @@ def as_dict(ranked: Ranked) -> dict[str, Any]:
 __all__ = [
     "ABSOLUTE_COUNTED_FORMATS",
     "ABSOLUTE_SKIPPED_FORMATS",
+    "BATCH_WORD",
+    "BENCODE_DICT_PREFIX",
     "CACHE_TTL",
     "CATEGORY",
     "DEEP_SEARCH_GROUPS",
     "DEEP_SEARCH_STATUS",
     "ENOUGH_CANDIDATES",
     "MAX_PREQUEL_HOPS",
+    "MAX_BATCH_QUERIES",
     "MAX_QUERIES",
     "MAX_REQUESTS",
     "MAX_SYNONYM_QUERIES",
+    "MAX_TORRENT_BYTES",
     "MIN_INTERVAL",
     "MIN_SEEDERS",
     "NYAA_NS",
@@ -1935,7 +2468,9 @@ __all__ = [
     "anime_season",
     "anime_titles",
     "as_dict",
+    "batch_queries",
     "close_shared_client",
+    "covered_wanted",
     "deep_search",
     "filter_items",
     "group_queries",

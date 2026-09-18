@@ -8,7 +8,7 @@ not it had seen the hash before.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import httpx
 import pytest
@@ -17,17 +17,21 @@ from arc.config import ConfigurationError
 from arc.services.acquisition.qbit import (
     API,
     COMPLETE_STATES,
+    FILE_OFF,
+    FILE_ON,
     SLOW_INACTIVE_SECONDS,
     SLOW_RATE_KIB,
     STOP_AT_SHARE_LIMIT,
+    FileInfo,
     QbitClient,
     QbitError,
     QbitUnavailable,
     TorrentInfo,
+    batch_save_path_for,
     host_path,
     save_path_for,
 )
-from tests.acquisition_helpers import QbitStub, acquisition_settings
+from tests.acquisition_helpers import QbitStub, acquisition_settings, torrent_blob
 
 
 def client(stub: QbitStub, **overrides: object) -> QbitClient:
@@ -150,6 +154,300 @@ async def test_a_refusal_from_a_4x_client_raises() -> None:
     async with client(stub, transport=httpx.MockTransport(refuse)) as qbit:
         with pytest.raises(QbitError, match="refused"):
             await qbit.add(MAGNET, episode_id=1, info_hash=HASH)
+
+
+# --- Adding a batch: the .torrent itself, stopped (FR-A11) -------------------
+
+BATCH_HASH = "e" * 40
+BATCH_PATH = f"/data/downloads/batch/{BATCH_HASH}"
+PACK = ["Kimetsu/NCOP.mkv", "Kimetsu/07.mkv", "Kimetsu/08.mkv"]
+
+
+async def add_batch(stub: QbitStub, **overrides: object) -> str:
+    async with client(stub) as qbit:
+        return await qbit.add_file(
+            torrent_blob(BATCH_HASH),
+            save_path=BATCH_PATH,
+            info_hash=BATCH_HASH,
+            tags="arc,batch",
+            **overrides,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("api_version", ["4", "5"])
+async def test_a_file_add_is_multipart_stopped_and_moves_nothing(api_version: str) -> None:
+    """The byte guarantee at the moment of the add (FR-A4's exception, D2).
+
+    ``filePrio`` is refused while the client has no metadata, so the whole
+    sequence depends on the torrent being added **as a file** and **stopped**:
+    the client reports it ``stoppedDL`` at zero progress, which is the only
+    state out of which "not one byte of an unwanted file" can still be true.
+    """
+    stub = QbitStub(api_version=api_version)
+
+    save_path = await add_batch(stub)
+
+    assert save_path == BATCH_PATH
+    uploaded = stub.uploaded[0]
+    assert uploaded["blob"] == torrent_blob(BATCH_HASH), "the .torrent went in the body"
+    fields = uploaded["fields"]
+    assert fields["savepath"] == BATCH_PATH
+    assert fields["category"] == "arc"
+    assert fields["tags"] == "arc,batch"
+    assert fields["autoTMM"] == "false"
+    assert fields["contentLayout"] == "Original"
+    # Both, with the same value: 5.x reads the first, 4.x the second.
+    assert (fields["stopped"], fields["paused"]) == ("true", "true")
+
+    async with client(stub) as qbit:
+        row = (await qbit.torrents())[0]
+    assert row.state == "stoppedDL"
+    assert row.progress == 0.0
+    assert row.complete is False
+
+
+async def test_a_second_file_add_of_the_same_torrent_succeeds() -> None:
+    """A handler that crashed between the add and its commit must retry clean."""
+    stub = QbitStub()
+
+    first = await add_batch(stub)
+    second = await add_batch(stub)
+
+    assert first == second == BATCH_PATH
+    assert len(stub.uploaded) == 2, "both adds were sent"
+    assert [t["hash"] for t in stub.torrents] == [BATCH_HASH], "and one torrent exists"
+
+
+async def test_a_file_add_the_client_refuses_and_does_not_hold_raises() -> None:
+    """The 409 that means "no" rather than "already there" — hence the check."""
+    stub = QbitStub()
+
+    def conflict(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, text="Ok.")
+        if request.url.path.endswith("/torrents/add"):
+            return httpx.Response(409, text="Conflict")
+        return httpx.Response(200, text="[]")
+
+    async with client(stub, transport=httpx.MockTransport(conflict)) as qbit:
+        with pytest.raises(QbitError, match="did not accept the torrent file"):
+            await qbit.add_file(
+                torrent_blob(BATCH_HASH),
+                save_path=BATCH_PATH,
+                info_hash=BATCH_HASH,
+                tags="arc,batch",
+            )
+
+
+async def test_an_unstopped_file_add_says_so_in_both_fields() -> None:
+    """``stopped=False`` exists for completeness; no Arc path passes it."""
+    stub = QbitStub()
+
+    await add_batch(stub, stopped=False)
+
+    fields = stub.uploaded[0]["fields"]
+    assert (fields["stopped"], fields["paused"]) == ("false", "false")
+    assert stub.torrents[0]["state"] == "downloading"
+
+
+# --- Reading and writing the file selection ---------------------------------
+
+
+async def test_files_are_read_with_their_indices() -> None:
+    stub = QbitStub()
+    stub.add_files(BATCH_HASH, PACK, size=1_400_000_000)
+
+    async with client(stub) as qbit:
+        rows = await qbit.files(BATCH_HASH)
+
+    assert [row.index for row in rows] == [0, 1, 2]
+    assert [row.name for row in rows] == PACK
+    assert rows[1].size == 1_400_000_000
+    assert rows[1].wanted is True, "a freshly added torrent has everything selected"
+
+
+async def test_files_maps_missing_and_odd_fields_safely() -> None:
+    """The client is whatever the operator pulled, and 4.3 sent no ``index``."""
+    stub = QbitStub()
+    stub.file_lists[BATCH_HASH] = [
+        {"name": "07.mkv"},  # nothing but a name: index from the position
+        {"name": "08.mkv", "index": 1, "size": -1, "priority": 1, "progress": 1.4},
+        {"name": "09.mkv", "index": "2", "progress": None},
+    ]
+
+    async with client(stub) as qbit:
+        rows = await qbit.files(BATCH_HASH)
+
+    assert [row.index for row in rows] == [0, 1, 2]
+    assert (rows[0].size, rows[0].priority, rows[0].progress) == (0, 0, 0.0)
+    assert rows[1].size == 0, "-1 is 'not known yet', not a negative size"
+    assert rows[1].progress == 1.0, "clamped: it is rendered into a progress bar"
+    assert rows[1].complete is True
+    assert rows[2].index == 2, "a string index falls back to the position"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"index": 2, "size": 10},  # listed, and not nameable
+        {"index": 2, "name": "", "size": 10},  # named nothing at all
+        ["07.mkv"],  # not even an object
+    ],
+)
+async def test_a_listing_with_a_row_it_cannot_read_raises(row: object) -> None:
+    """**Fail closed.** A row with no usable name used to be dropped.
+
+    That is the one way this could be quietly unsafe. The dropped index would
+    never be named in the ``filePrio 0`` that turns every file off — and a
+    freshly added torrent has every file selected — while being absent from both
+    listings the read-back compares, so it would download unseen and unrecorded.
+    A pack Arc cannot enumerate is a pack Arc must not start, so the count has
+    to match the payload's exactly.
+    """
+    stub = QbitStub()
+    stub.file_lists[BATCH_HASH] = [{"name": "07.mkv", "index": 0}, row]  # type: ignore[list-item]
+
+    async with client(stub) as qbit:
+        with pytest.raises(QbitError, match="could be read"):
+            await qbit.files(BATCH_HASH)
+
+
+async def test_files_of_a_torrent_the_client_does_not_hold_is_empty() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        assert await qbit.files(BATCH_HASH) == []
+
+
+async def test_unparseable_file_json_raises() -> None:
+    stub = QbitStub()
+
+    def garbage(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, text="Ok.")
+        return httpx.Response(200, text="not json")
+
+    async with client(stub, transport=httpx.MockTransport(garbage)) as qbit:
+        with pytest.raises(QbitError, match="unparseable"):
+            await qbit.files(BATCH_HASH)
+
+
+async def test_file_priority_sends_the_indices_joined_by_pipes() -> None:
+    """qBittorrent's own shape for ``id``; the read-back must then agree."""
+    stub = QbitStub()
+    stub.add_files(BATCH_HASH, PACK)
+
+    async with client(stub) as qbit:
+        await qbit.file_priority(BATCH_HASH, [2, 0, 1, 1], FILE_OFF)
+        await qbit.file_priority(BATCH_HASH, [1], FILE_ON)
+        rows = await qbit.files(BATCH_HASH)
+
+    assert stub.priorities == [
+        {"hash": BATCH_HASH, "indices": [0, 1, 2], "priority": FILE_OFF},
+        {"hash": BATCH_HASH, "indices": [1], "priority": FILE_ON},
+    ], "every index off first, then only the wanted one on — in that order"
+    assert [(row.index, row.priority) for row in rows] == [(0, 0), (1, 1), (2, 0)]
+    assert [row.name for row in rows if row.wanted] == ["Kimetsu/07.mkv"]
+
+
+async def test_setting_the_priority_of_nothing_makes_no_request() -> None:
+    """An empty ``id`` is an error to the client rather than a no-op."""
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.file_priority(BATCH_HASH, [], FILE_OFF)
+
+    assert stub.priorities == []
+    assert stub.calls == []
+
+
+def test_normal_priority_is_one_not_high() -> None:
+    """A batch must not jump the client's queue ahead of everybody's singles."""
+    assert (FILE_OFF, FILE_ON) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("priority", "wanted"), [(FILE_OFF, False), (FILE_ON, True), (6, True), (7, True)]
+)
+def test_any_priority_above_off_means_the_client_will_fetch_it(priority: int, wanted: bool) -> None:
+    """Read-back asks "is anything on?", so it is ``> 0`` and not ``== 1``.
+
+    An operator who raised a file's priority by hand in the Web UI has still
+    selected it, and the gate that refuses a batch has to say so.
+    """
+    row = FileInfo(index=0, name="07.mkv", size=1, priority=priority, progress=0.0)
+
+    assert row.wanted is wanted
+
+
+# --- Starting ---------------------------------------------------------------
+
+
+async def test_start_sends_the_hashes_folded_and_deduplicated() -> None:
+    stub = QbitStub()
+    stub.add_torrent(BATCH_HASH, state="stoppedDL")
+
+    async with client(stub) as qbit:
+        await qbit.start(["E" * 40, BATCH_HASH])
+
+    assert stub.started == [BATCH_HASH]
+    assert stub.calls[-1].endswith("/torrents/start")
+    assert stub.torrents[0]["state"] == "downloading"
+
+
+async def test_start_falls_back_to_resume_on_a_four_x_client() -> None:
+    stub = QbitStub(api_version="4")
+
+    async with client(stub) as qbit:
+        await qbit.start([BATCH_HASH])
+
+    assert stub.started == [BATCH_HASH]
+    assert stub.calls[-2:] == [f"{API}/torrents/start", f"{API}/torrents/resume"]
+
+
+async def test_starting_nothing_makes_no_request() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.start([])
+
+    assert stub.calls == []
+
+
+async def test_an_unreachable_client_is_not_mistaken_for_one_without_start() -> None:
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        stub.down = True
+        with pytest.raises(QbitUnavailable):
+            await qbit.start([BATCH_HASH])
+
+
+async def test_an_expired_session_is_renewed_for_the_batch_calls_too() -> None:
+    """Every new call goes through ``request``, so all four re-login on a 403."""
+    stub = QbitStub()
+    stub.add_files(BATCH_HASH, PACK)
+
+    async with client(stub) as qbit:
+        await qbit.version()
+        for expired_call in (
+            lambda: qbit.add_file(
+                torrent_blob(BATCH_HASH),
+                save_path=BATCH_PATH,
+                info_hash=BATCH_HASH,
+                tags="arc,batch",
+            ),
+            lambda: qbit.files(BATCH_HASH),
+            lambda: qbit.file_priority(BATCH_HASH, [0], FILE_OFF),
+            lambda: qbit.start([BATCH_HASH]),
+        ):
+            stub.expire_once = True
+            await expired_call()
+
+    assert stub.logins == 5, "the first call, then one renewal per expiry"
+    assert len(stub.uploaded) == 1
+    assert stub.priorities[0]["priority"] == FILE_OFF
+    assert stub.started == [BATCH_HASH]
 
 
 # --- Info -------------------------------------------------------------------
@@ -456,6 +754,42 @@ async def test_an_unreachable_client_is_not_mistaken_for_an_old_one() -> None:
 
 def test_the_save_path_is_the_episode_id() -> None:
     assert save_path_for(42, downloads_path="/data/downloads") == "/data/downloads/42"
+
+
+def test_a_batch_is_filed_under_its_hash_folded() -> None:
+    """``downloads/batch/<hash>``, and the hash is lowercased on the way in.
+
+    The directory name is deliberately not a number: every id-from-path
+    inference (``reject.episode_id_of``, retention's ``source_dir``) does
+    ``int(parts[0])`` and must **fail** for a batch rather than attribute one
+    episode's file to another.
+    """
+    path = batch_save_path_for("ABCDEF1234", downloads_path="/data/downloads")
+
+    assert path == "/data/downloads/batch/abcdef1234"
+
+
+def test_a_batch_path_stays_under_the_downloads_root() -> None:
+    """So ``host_path`` and retention's root checks need no change at all."""
+    path = batch_save_path_for("a" * 40, downloads_path="/data/downloads")
+
+    mapped = host_path(
+        f"{path}/Kimetsu/07.mkv",
+        downloads_path="/data/downloads",
+        host_downloads=Path("/srv/arc/downloads"),
+    )
+
+    assert mapped == Path("/srv/arc/downloads/batch") / ("a" * 40) / "Kimetsu/07.mkv"
+
+
+def test_a_batch_directory_name_is_not_an_episode_id() -> None:
+    """The one property the choice of directory exists for."""
+    first = PurePosixPath(
+        batch_save_path_for("b" * 40, downloads_path="/data/downloads")
+    ).relative_to("/data/downloads")
+
+    with pytest.raises(ValueError):
+        int(first.parts[0])
 
 
 def test_a_container_path_maps_onto_the_host_directory() -> None:

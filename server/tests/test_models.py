@@ -25,6 +25,8 @@ from arc.models import (
     MalWriteLog,
     MediaFile,
     Torrent,
+    TorrentFile,
+    TorrentKind,
     UpdatedBy,
     User,
     UserRole,
@@ -285,6 +287,256 @@ async def test_torrent_info_hash_is_unique(db_session: AsyncSession) -> None:
     with pytest.raises(IntegrityError):
         await db_session.commit()
     await db_session.rollback()
+
+
+async def test_a_torrent_defaults_to_a_single_of_its_episode(db_session: AsyncSession) -> None:
+    """The no-backfill claim: a row today's code writes is still a single.
+
+    ``kind`` is not a column any pre-FR-A11 caller sets, and every such row
+    must keep meaning "the whole payload is this episode's" — which is what
+    every path written before the batch work assumes.
+    """
+    anime = await _fixture_anime(db_session, anilist_id=20, mal_id=20)
+    episode = await _fixture_episode(db_session, anime)
+    torrent = Torrent(episode_id=episode.id, info_hash="b" * 40)
+    db_session.add(torrent)
+    await db_session.commit()
+
+    stored = await db_session.get(Torrent, torrent.id)
+    assert stored is not None
+    assert stored.kind is TorrentKind.SINGLE
+    assert (stored.save_path, stored.total_size, stored.wanted_bytes) == (None, None, None)
+
+
+async def test_a_batch_belongs_to_no_episode(db_session: AsyncSession) -> None:
+    """FR-A11: one row, no episode of its own, one ``torrent_files`` row per file."""
+    anime = await _fixture_anime(db_session, anilist_id=21, mal_id=21)
+    episode = await _fixture_episode(db_session, anime, number=7)
+    batch = Torrent(
+        info_hash="c" * 40,
+        kind=TorrentKind.BATCH,
+        save_path="/data/downloads/batch/" + "c" * 40,
+        total_size=14_800_000_000,
+        wanted_bytes=1_100_000_000,
+    )
+    db_session.add(batch)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            TorrentFile(
+                torrent_id=batch.id,
+                file_index=6,
+                path="Kimetsu no Yaiba/07.mkv",
+                size=1_100_000_000,
+                episode_id=episode.id,
+                wanted=True,
+                priority=1,
+            ),
+            TorrentFile(
+                torrent_id=batch.id,
+                file_index=0,
+                path="Kimetsu no Yaiba/NCOP.mkv",
+                size=40_000_000,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    stored = await db_session.get(Torrent, batch.id)
+    assert stored is not None
+    assert stored.episode_id is None
+    assert stored.kind is TorrentKind.BATCH
+    assert stored.wanted_bytes is not None and stored.total_size is not None
+    assert stored.wanted_bytes < stored.total_size, "the point of the exception"
+
+    files = (
+        await db_session.execute(
+            select(TorrentFile)
+            .where(TorrentFile.torrent_id == batch.id)
+            .order_by(TorrentFile.file_index)
+        )
+    ).scalars()
+    creditless, wanted = list(files)
+    assert (creditless.wanted, creditless.priority, creditless.episode_id) == (False, None, None)
+    assert (wanted.wanted, wanted.priority, wanted.episode_id) == (True, 1, episode.id)
+    assert wanted.progress is None and wanted.completed_at is None
+
+    # …and the column really holds the spec's string, not the member name.
+    raw = await db_session.execute(
+        select(Torrent.__table__.c.kind).where(Torrent.__table__.c.id == batch.id)
+    )
+    assert raw.scalar_one() == "batch"
+
+
+async def test_a_batch_may_not_claim_an_episode_of_its_own(db_session: AsyncSession) -> None:
+    """``ck_torrents_kind_episode``, the half that keeps batches out of queries.
+
+    Every query keyed on ``torrents.episode_id`` — the reconciler's cancel,
+    ``qbit_cancel``, ``reject_download``, retention's hashes — would otherwise
+    reach a torrent several episodes share and delete it with its files.
+    """
+    anime = await _fixture_anime(db_session, anilist_id=22, mal_id=22)
+    episode = await _fixture_episode(db_session, anime)
+    await db_session.commit()
+
+    db_session.add(Torrent(episode_id=episode.id, info_hash="d" * 40, kind=TorrentKind.BATCH))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def test_a_single_must_name_its_episode(db_session: AsyncSession) -> None:
+    """The other half: a row with neither an episode nor a file list is nothing."""
+    db_session.add(Torrent(info_hash="e" * 40, kind=TorrentKind.SINGLE))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def _fixture_batch(db_session: AsyncSession, info_hash: str) -> Torrent:
+    batch = Torrent(info_hash=info_hash, kind=TorrentKind.BATCH)
+    db_session.add(batch)
+    await db_session.flush()
+    return batch
+
+
+async def test_one_episode_has_at_most_one_wanted_file(db_session: AsyncSession) -> None:
+    """``ux_torrent_files_one_wanted_per_episode`` (FR-A11).
+
+    The invariant behind "one batch, several wants": two live claims on one
+    episode would be two downloads of it, and the pick, the reconciler and the
+    retention sweep all write ``wanted``, so the database is the only place all
+    three can agree.
+    """
+    anime = await _fixture_anime(db_session, anilist_id=23, mal_id=23)
+    episode = await _fixture_episode(db_session, anime, number=7)
+    first = await _fixture_batch(db_session, "f" * 40)
+    second = await _fixture_batch(db_session, "0" * 40)
+    db_session.add(
+        TorrentFile(
+            torrent_id=first.id,
+            file_index=6,
+            path="07.mkv",
+            size=1,
+            episode_id=episode.id,
+            wanted=True,
+        )
+    )
+    await db_session.commit()
+
+    db_session.add(
+        TorrentFile(
+            torrent_id=second.id,
+            file_index=6,
+            path="07v2.mkv",
+            size=1,
+            episode_id=episode.id,
+            wanted=True,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def test_an_episode_may_have_any_number_of_unwanted_files(
+    db_session: AsyncSession,
+) -> None:
+    """The predicate is what makes the attach path (``claim_existing``) possible.
+
+    An un-wanted row is the history "this pack holds episode 7" — retention
+    leaves it behind so a re-wanted episode is served with no Nyaa request at
+    all, and two packs may both hold it.
+    """
+    anime = await _fixture_anime(db_session, anilist_id=24, mal_id=24)
+    episode = await _fixture_episode(db_session, anime, number=7)
+    first = await _fixture_batch(db_session, "1" * 40)
+    second = await _fixture_batch(db_session, "2" * 40)
+    db_session.add_all(
+        [
+            TorrentFile(
+                torrent_id=first.id, file_index=6, path="07.mkv", size=1, episode_id=episode.id
+            ),
+            TorrentFile(
+                torrent_id=second.id, file_index=9, path="07.mkv", size=1, episode_id=episode.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    # …and one of them may then take the claim while the other keeps the history.
+    third = await _fixture_batch(db_session, "3" * 40)
+    db_session.add(
+        TorrentFile(
+            torrent_id=third.id,
+            file_index=1,
+            path="07.mkv",
+            size=1,
+            episode_id=episode.id,
+            wanted=True,
+        )
+    )
+    await db_session.commit()
+
+    claims = await db_session.scalar(
+        select(func.count())
+        .select_from(TorrentFile)
+        .where(TorrentFile.episode_id == episode.id, TorrentFile.wanted.is_(True))
+    )
+    assert claims == 1
+
+
+async def test_a_files_index_is_unique_within_its_torrent(db_session: AsyncSession) -> None:
+    """``filePrio`` takes an index; two rows for one index is a wrong write."""
+    batch = await _fixture_batch(db_session, "4" * 40)
+    db_session.add(TorrentFile(torrent_id=batch.id, file_index=3, path="a.mkv", size=1))
+    await db_session.commit()
+
+    db_session.add(TorrentFile(torrent_id=batch.id, file_index=3, path="b.mkv", size=1))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def test_deleting_a_torrent_takes_its_files_with_it(db_session: AsyncSession) -> None:
+    """CASCADE: the file rows describe the torrent and outlive nothing."""
+    batch = await _fixture_batch(db_session, "5" * 40)
+    db_session.add_all(
+        [
+            TorrentFile(torrent_id=batch.id, file_index=0, path="01.mkv", size=1),
+            TorrentFile(torrent_id=batch.id, file_index=1, path="02.mkv", size=1),
+        ]
+    )
+    await db_session.commit()
+
+    await db_session.delete(batch)
+    await db_session.commit()
+
+    remaining = await db_session.scalar(select(func.count()).select_from(TorrentFile))
+    assert remaining == 0
+
+
+async def test_deleting_an_episode_only_unlinks_its_file(db_session: AsyncSession) -> None:
+    """SET NULL: the file is still in the pack after the episode row goes.
+
+    A cascade here would delete another episode's rows' sibling — the whole
+    point of a batch is that the payload outlives any one episode's claim on it.
+    """
+    anime = await _fixture_anime(db_session, anilist_id=25, mal_id=25)
+    episode = await _fixture_episode(db_session, anime, number=7)
+    batch = await _fixture_batch(db_session, "6" * 40)
+    row = TorrentFile(
+        torrent_id=batch.id, file_index=6, path="07.mkv", size=1, episode_id=episode.id
+    )
+    db_session.add(row)
+    await db_session.commit()
+
+    await db_session.delete(episode)
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert row.episode_id is None
+    assert await db_session.get(Torrent, batch.id) is not None, "the batch is not the episode's"
 
 
 async def test_deleting_an_anime_with_a_mal_write_log_is_refused(

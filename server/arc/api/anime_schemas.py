@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from arc.api.episode_extras import EpisodeRelease
 from arc.api.schemas import OverrideOut
 from arc.core.text import trim_middle
 from arc.models import (
@@ -32,7 +33,6 @@ from arc.models import (
     ListEntry,
     ListStatus,
     Rendition,
-    Torrent,
     Want,
 )
 from arc.services.acquisition.dormancy import is_dormant
@@ -382,14 +382,21 @@ class ReleaseOut(BaseModel):
     title: str | None = None
     #: Seeders **at pick time**, not now — it is what the ranker saw.
     seeders: int | None = None
+    #: Whether this episode is one selected file of a batch (FR-A4, FR-A11).
+    #: The group and the title are the *pack's*, which is exactly what they are
+    #: for a member of it, and the percentage beside them is the file's own —
+    #: so the flag is what keeps "1080p · [Judas]" on episode 7 of a
+    #: twenty-six-episode pack from reading as a release of episode 7.
+    batch: bool = False
 
     @classmethod
-    def from_torrent(cls, torrent: Torrent) -> ReleaseOut:
+    def from_release(cls, release: EpisodeRelease) -> ReleaseOut:
         return cls(
-            group=torrent.group,
-            resolution=torrent.resolution,
-            title=torrent.title,
-            seeders=torrent.seeders,
+            group=release.torrent.group,
+            resolution=release.torrent.resolution,
+            title=release.torrent.title,
+            seeders=release.torrent.seeders,
+            batch=release.batch,
         )
 
 
@@ -618,7 +625,7 @@ class EpisodeOut(BaseModel):
         out_of_order: bool = False,
         completed: bool = False,
         list_progress: int = 0,
-        torrent: Torrent | None = None,
+        release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
         next_search_at: datetime | None = None,
@@ -653,13 +660,13 @@ class EpisodeOut(BaseModel):
             watched=source is not None,
             watched_source=source,
             download_progress=(
-                torrent.progress
-                if torrent is not None and episode.state in PROGRESS_STATES
+                release.progress
+                if release is not None and episode.state in PROGRESS_STATES
                 else None
             ),
             unavailable_reason=episode.unavailable_reason,
             search=_search_out(episode, next_search_at),
-            release=ReleaseOut.from_torrent(torrent) if torrent is not None else None,
+            release=ReleaseOut.from_release(release) if release is not None else None,
             prepare_progress=prepare.progress,
             failure_reason=prepare.failure_reason,
             rendition=(
@@ -911,7 +918,7 @@ class AnimeDetail(AnimeCore):
         mal_sync: MalSyncOut | None = None,
         completed: frozenset[int] = frozenset(),
         related: dict[tuple[str, int], RelatedAnime] | None = None,
-        torrents: dict[int, Torrent] | None = None,
+        releases: dict[int, EpisodeRelease] | None = None,
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
         next_searches: dict[int, datetime] | None = None,
@@ -978,7 +985,7 @@ class AnimeDetail(AnimeCore):
                     # holds, so the watched marks cost no query of their own.
                     completed=episode.id in completed,
                     list_progress=list_entry.progress if list_entry is not None else 0,
-                    torrent=(torrents or {}).get(episode.id),
+                    release=(releases or {}).get(episode.id),
                     rendition=(renditions or {}).get(episode.id),
                     transcode_job=(transcode_jobs or {}).get(episode.id),
                     next_search_at=(next_searches or {}).get(episode.id),

@@ -21,9 +21,11 @@ from sqlalchemy.pool import NullPool
 
 from alembic import command
 from arc.models import (
+    EPISODE_FILE_INDEX,
     IN_PROGRESS_INDEX,
     OFFLINE_SEARCH_INDEX,
     TRANSCODE_EPISODE_INDEX,
+    WANTED_CLAIM_INDEX,
     Base,
 )
 from arc.models.settings import DEFAULT_SETTINGS
@@ -75,6 +77,34 @@ def _index_definition(url: str, table: str, name: str) -> str | None:
     return asyncio.run(run())
 
 
+def _check_constraint(url: str, table: str, name: str) -> str | None:
+    """One CHECK constraint's definition, or ``None`` if it is not there.
+
+    Its own helper because autogenerate does **not** compare check
+    constraints: ``test_models_and_migrations_agree`` would stay green with
+    ``ck_torrents_kind_episode`` missing from the database entirely.
+    """
+
+    async def run() -> str | None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE t.relname = :table AND c.conname = :name"
+                    ),
+                    {"table": table, "name": name},
+                )
+                row = found.first()
+                return None if row is None else str(row[0])
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
 def _fetch_settings(url: str) -> dict[str, Any]:
     async def run() -> dict[str, Any]:
         engine = create_async_engine(url, poolclass=NullPool)
@@ -114,7 +144,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 11
+    assert len(seeded) == 12
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -131,6 +161,10 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     assert seeded["min_free_gb"] == 10
     # And the per-user slot cap (FR-A10): five shows fetching at once.
     assert seeded["slot_cap_k"] == 5
+    # The batch fallback is seeded **on** (FR-A11): a finished show with no
+    # single may take a pack and fetch one file out of it. It is the switch for
+    # the riskiest acquisition change since M6, so it has to be findable.
+    assert seeded["batch_fallback"] is True
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:
@@ -206,3 +240,68 @@ def test_the_offline_search_index_is_a_trigram_index(
     assert definition is not None, f"{OFFLINE_SEARCH_INDEX} is not on the offline_anime table"
     assert "USING gin" in definition
     assert "gin_trgm_ops" in definition
+
+
+def test_the_wanted_claim_index_is_partial_and_unique(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The invariant behind "one batch, several wants" (FR-A11, 2026-09-18).
+
+    An episode has at most **one** live claim anywhere, and it is a partial
+    unique index rather than a rule in code because three modules write
+    ``wanted``: the pick, the reconciler's cancel and the retention sweep. If
+    the predicate were lost the index would become "one row per episode ever",
+    which would refuse the un-wanted history the attach path reads — and if the
+    uniqueness were lost two torrents could fetch the same episode.
+    """
+    definition = _index_definition(test_database_url, "torrent_files", WANTED_CLAIM_INDEX)
+
+    assert definition is not None, f"{WANTED_CLAIM_INDEX} is not on the torrent_files table"
+    assert "UNIQUE INDEX" in definition
+    assert "(episode_id)" in definition
+    assert "WHERE (wanted AND (episode_id IS NOT NULL))" in definition
+
+
+def test_the_torrent_file_episode_index_is_partial(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """ "Which file holds this episode?", over the rows that name one.
+
+    Partial because most of a pack's files — fonts, NCOPs, extras — name no
+    episode at all, and an index over those rows would be an index of nulls.
+    """
+    definition = _index_definition(test_database_url, "torrent_files", EPISODE_FILE_INDEX)
+
+    assert definition is not None, f"{EPISODE_FILE_INDEX} is not on the torrent_files table"
+    assert "UNIQUE" not in definition
+    assert "WHERE (episode_id IS NOT NULL)" in definition
+
+
+def test_the_torrent_file_index_is_unique_per_torrent(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``filePrio`` takes an index, so two rows for one index is a wrong write."""
+    definition = _index_definition(
+        test_database_url, "torrent_files", "ux_torrent_files_torrent_index"
+    )
+
+    assert definition is not None
+    assert "UNIQUE INDEX" in definition
+    assert "(torrent_id, file_index)" in definition
+
+
+def test_the_kind_episode_check_is_created_by_a_migration(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``ck_torrents_kind_episode``: a single names its episode, a batch none.
+
+    Autogenerate does not compare check constraints at all, so nothing else in
+    this file would notice it missing — and it is the constraint that keeps a
+    batch out of every ``episode_id``-keyed query, each of which would
+    otherwise delete a torrent several episodes share with its files.
+    """
+    definition = _check_constraint(test_database_url, "torrents", "ck_torrents_kind_episode")
+
+    assert definition is not None, "ck_torrents_kind_episode is not on the torrents table"
+    assert "'single'" in definition and "episode_id IS NOT NULL" in definition
+    assert "'batch'" in definition and "episode_id IS NULL" in definition

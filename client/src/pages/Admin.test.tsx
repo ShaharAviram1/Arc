@@ -24,6 +24,7 @@ import {
   QBIT,
   QBIT_DOWN,
   RETENTION_PREVIEW,
+  RETENTION_PREVIEW_BATCH,
   RETENTION_REASON,
   SETTINGS,
   WANTS,
@@ -575,6 +576,26 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     expect(field).toHaveAttribute('min', '0')
   })
 
+  it('saves the batch fallback like any other rule (FR-A11)', async () => {
+    const { fetchMock } = await openRules()
+
+    const field = screen.getByLabelText('Batch fallback for finished shows')
+    // Seeded on, which is what a fresh install holds.
+    expect(field).toBeChecked()
+    await userEvent.click(field)
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ batch_fallback: false })
+    // The sentence under it says what turning it off costs, not what the
+    // field is called again.
+    expect(
+      within(fieldOf('Batch fallback for finished shows')).getByText(/only that episode/),
+    ).toBeVisible()
+  })
+
   it('keeps the browser from sending a number outside its range', async () => {
     const { fetchMock } = await openRules()
 
@@ -819,6 +840,19 @@ describe('Admin — Storage (FR-D3, FR-T4)', () => {
     expect(screen.getByText(/1 episode would be deleted/)).toBeInTheDocument()
   })
 
+  it('says how many batch file claims the sweep would release (FR-A11)', async () => {
+    await openStorage({ [PREVIEW_PATH]: { body: RETENTION_PREVIEW_BATCH } })
+
+    expect(await screen.findByText(/1 batch file claim released/)).toBeInTheDocument()
+  })
+
+  it('says nothing about claims when there are none', async () => {
+    await openStorage()
+
+    expect(await screen.findByText(/1 episode would be deleted/)).toBeInTheDocument()
+    expect(screen.queryByText(/batch file/)).not.toBeInTheDocument()
+  })
+
   it('queues a sweep on demand', async () => {
     const { fetchMock } = await openStorage({
       'POST /api/retention/sweep': { status: 202, body: { ...PENDING_JOB, id: 501 } },
@@ -949,6 +983,17 @@ describe('Admin — Acquisition (FR-D3)', () => {
     const table = await screen.findByRole('table', { name: 'Torrents' })
     expect(within(table).getByText(/Sousou no Frieren - 06/)).toBeInTheDocument()
     expect(within(table).getByText('42%')).toBeInTheDocument()
+  })
+
+  it('marks a batch and sizes it by the files Arc asked for (FR-A11)', async () => {
+    await openAcquisition()
+
+    const table = await screen.findByRole('table', { name: 'Torrents' })
+    expect(within(table).getByText(/batch · selected files only/)).toBeInTheDocument()
+    // Its ``wanted_bytes``: the files Arc asked for, not the pack's payload.
+    expect(within(table).getByText('2.5 GB')).toBeInTheDocument()
+    // It belongs to no single episode, which is not the same as "not linked".
+    expect(within(table).getByText('several')).toBeInTheDocument()
   })
 
   it('renders an unreachable qBittorrent as an answer, not a failed page', async () => {

@@ -31,6 +31,7 @@ import {
 import {
   anilistUrl,
   backdropArt,
+  BATCH_HINT,
   catalogErrorMessage,
   episodeProgressPercent,
   episodeProblem,
@@ -372,6 +373,12 @@ function episodeState(episode: EpisodeOut, tz?: string): EpisodeState {
  * it runs, and which release Arc actually has. The fansub group is part of the
  * information, not noise (FR-A3, FR-P4); anything the catalogue or the parser
  * did not fill is dropped rather than shown empty.
+ *
+ * An episode served out of a season pack adds `from a batch` (FR-A11), because
+ * the group and the resolution in front of it are the *pack's* and the
+ * percentage on the row is this one file's: without the phrase, "[Judas] ·
+ * 1080p" on episode 7 reads as a release of episode 7, and a bar that sits at
+ * 4 % while the torrent says 93 % reads as broken.
  */
 function episodeMeta(episode: EpisodeOut, tz?: string): string {
   const parts = [formatAirDate(episode.air_at, tz)]
@@ -385,6 +392,7 @@ function episodeMeta(episode: EpisodeOut, tz?: string): string {
       : release?.resolution
   if (resolution !== null && resolution !== undefined && resolution !== '') parts.push(resolution)
   if (release !== null && release.group !== null && release.group !== '') parts.push(release.group)
+  if (release?.batch === true) parts.push(BATCH_HINT)
   return parts.join(' · ')
 }
 

@@ -70,8 +70,17 @@ class RetentionItemOut(BaseModel):
     #: that half is not on the disk (a rendition row whose directory is gone).
     rendition_dir: str | None = None
     source_dir: str | None = None
-    #: qBittorrent hashes that would be removed with their data.
+    #: qBittorrent hashes that would be removed with their data. **Empty for a
+    #: batch-backed episode** (FR-A11): a pack's row belongs to no episode, so
+    #: the query behind this cannot reach one, and deleting it by hash with its
+    #: files would take several other episodes' bytes.
     torrents: list[str] = []
+    #: How many ``torrent_files`` claims the deletion would give back (FR-A11).
+    #: 1 for an episode being held by a pack, 0 for everything else. The row is
+    #: not deleted and the bytes above are the file's own; what this counts is
+    #: the claim, which is un-wanted *before* the file is unlinked so that a
+    #: start for another episode cannot re-fetch what retention just removed.
+    torrent_files: int = 0
 
 
 class RetentionPreviewOut(BaseModel):
@@ -119,6 +128,7 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
                 ),
                 source_dir=(str(target.targets.source_dir) if target.targets.source_dir else None),
                 torrents=list(target.targets.torrent_hashes),
+                torrent_files=len(target.targets.torrent_file_ids),
             )
             for target in found
         ],

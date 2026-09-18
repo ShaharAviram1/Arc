@@ -24,12 +24,15 @@ from arc.models import (
     ListStatus,
     OfflineId,
     Torrent,
+    TorrentFile,
+    TorrentKind,
     Want,
     WatchProgress,
 )
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     QBIT_CANCEL,
+    QBIT_RESELECT,
     SEARCH_RELEASE,
     search_dedupe_key,
 )
@@ -1070,3 +1073,62 @@ async def test_a_sample_never_activates_the_entry(db_session: AsyncSession) -> N
     )
 
     assert entry.activated_at is None
+
+
+# --- A sample served out of a batch (FR-A8 + FR-A11) ------------------------
+
+
+async def test_cancelling_a_sample_backed_by_a_pack_un_wants_only_its_file(
+    db_session: AsyncSession,
+) -> None:
+    """A sample is an ordinary want to everything downstream, packs included.
+
+    Nothing in :func:`request_sample` or ``search_release`` treats a sample
+    differently from any other want, so the first episode of a **finished** show
+    with no acceptable single is fetched out of a batch exactly as a watched
+    episode would be. What this pins is that Cancel then inherits the batch
+    branch for free: ``cancel_sample`` already calls ``cancel_if_unwanted``, so
+    the file is given back, the pack is left in the client, and the torrent is
+    **not** marked ``cancelled`` — which for a pack would hand it to a job that
+    deletes with files.
+    """
+    anime = await make_anime(db_session, anilist_id=964085, status=FINISHED)
+    rows = await make_episodes(db_session, anime, 12, aired_through=12)
+    user = await make_user(db_session, "sample-batch@arc.test")
+    await request_sample(
+        db_session, settings=TMDB_ON, user_id=user.id, anime_id=anime.id, now=now()
+    )
+    rows[0].state = EpisodeState.DOWNLOADING
+    torrent = Torrent(
+        kind=TorrentKind.BATCH, episode_id=None, info_hash="9" * 40, qbit_state="downloading"
+    )
+    db_session.add(torrent)
+    await db_session.flush()
+    claim = TorrentFile(
+        torrent_id=torrent.id,
+        file_index=0,
+        path="pack/01.mkv",
+        size=1024,
+        episode_id=rows[0].id,
+        wanted=True,
+    )
+    neighbour = TorrentFile(
+        torrent_id=torrent.id,
+        file_index=1,
+        path="pack/02.mkv",
+        size=1024,
+        episode_id=rows[1].id,
+        wanted=True,
+    )
+    db_session.add_all([claim, neighbour])
+    await db_session.flush()
+
+    assert await cancel_sample(db_session, user_id=user.id, anime_id=anime.id, now=now()) is True
+
+    assert (await episode_states(db_session, anime.id))[1] is EpisodeState.NOT_WANTED
+    assert claim.wanted is False
+    assert claim.episode_id == rows[0].id, "kept, so wanting it again costs no search"
+    assert neighbour.wanted is True, "another episode's file is none of this cancel's business"
+    assert torrent.qbit_state == "downloading", "never cancelled: that job deletes with files"
+    reselects = await db_session.scalars(select(Job).where(Job.type == QBIT_RESELECT))
+    assert [job.payload["torrent_id"] for job in reselects.all()] == [torrent.id]

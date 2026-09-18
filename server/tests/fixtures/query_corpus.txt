@@ -38,6 +38,16 @@
 #   reject     a release name it MUST reject: a batch, another season, a
 #              dubbed-only upload of the wrong show, the wrong film.
 #              Repeat the line.
+#   batch_accept
+#              a **batch** release name `acceptable(..., batches=True)` must
+#              accept as a candidate — the finished-show fallback of
+#              2026-09-18 (FR-A11). Every one of these is also asserted to be
+#              rejected by the *default* call, because `batches` defaulting to
+#              false is the whole of FR-A4's guarantee. Repeat the line.
+#   batch_reject
+#              a batch it must refuse even when batches are asked for: the
+#              wrong season, a range that does not cover the episode, a pack
+#              of another show. Repeat the line.
 #   prefer     which of the accepted releases `rank()` must put first. One
 #              line, and the point of it is the dub rule: a dub with four
 #              thousand seeders still ranks below a sub with twelve.
@@ -327,3 +337,70 @@ reject: [SubsPlease] Jujutsu Kaisen - 01 (1080p) [B2C3D4E5].mkv
 reject: [SubsPlease] Jujutsu Kaisen - 24 (1080p) [C3D4E5F6].mkv
 reject: [SubsPlease] Jujutsu Kaisen S2 - 25 (1080p) [D4E5F6A7].mkv
 reject: [Erai-raws] Jujutsu Kaisen 2nd Season - 25 ~ 47 [1080p][Multiple Subtitle]
+# And the batch half of the same arithmetic (FR-A11, 2026-09-18): a pack
+# numbered 25-47 that names no season covers this entry's episode 1, because
+# 1 + 24 is inside its range and it makes no season claim to contradict. The
+# one directly above it does name the season, so it is judged per-season like
+# every marked release and 25-47 is not episode 1 — the same conservative
+# answer `acceptable` gives a marked *single* numbered 25.
+batch_accept: [Erai-raws] Jujutsu Kaisen - 25 ~ 47 [BATCH]
+batch_reject: [Erai-raws] Jujutsu Kaisen 2nd Season - 25 ~ 47 [1080p][Multiple Subtitle]
+batch_reject: [Erai-raws] Jujutsu Kaisen - 01 ~ 24 [BATCH]
+
+case: kimetsu-s1-batch-fallback
+# AniList 101922, and the case the batch fallback exists for (2026-09-18).
+# Episode 10 was searched on production under seven forms and six
+# group-narrowed ones: 91 merged results, no season-one single anywhere, and
+# several complete-season packs that the filter threw away before it compared
+# the episode number. FR-A4's "never fetch whole seasons" is about *bytes*, so
+# a finished show with no single at all may take a pack and fetch one file out
+# of it — and every one of these is still rejected by the default call.
+romaji: Kimetsu no Yaiba
+english: Demon Slayer: Kimetsu no Yaiba
+format: TV
+episodes: 26
+year: 2019
+number: 10
+query: Kimetsu no Yaiba - 10
+query: Demon Slayer: Kimetsu no Yaiba - 10
+query: Kimetsu no Yaiba S01E10
+accept: [HorribleSubs] Kimetsu no Yaiba - 10 [1080p].mkv
+reject: [Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [BATCH]
+batch_accept: [Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [BATCH]
+batch_accept: [Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [1080p][Multiple Subtitle]
+# The unnamed pack: a `[BATCH]` marker and no range at all, so its coverage is
+# unknowable from its name and is settled from its file list before a byte is
+# fetched. This is the exact shape FR-A4 could not accept before, and the
+# reason it can now is that Arc reads the contents first.
+batch_accept: [Judas] Kimetsu no Yaiba [BD 1080p][HEVC x265 10bit][BATCH]
+batch_accept: [Judas] Kimetsu no Yaiba Complete Series [BD 1080p]
+# A pack of the wrong season is the wrong season, batch or not — the one
+# mistake that is worse than a missing file, since the matcher's own prior
+# would link it and it would play as though it were right.
+batch_reject: [Erai-raws] Kimetsu no Yaiba S2 - 01 ~ 11 [BATCH]
+batch_reject: [Erai-raws] Kimetsu no Yaiba 2nd Season - 01 ~ 11 [1080p][Multiple Subtitle]
+# Another show's pack, and the creditless openings that ship beside one: a
+# batch of things that are not episodes is not a batch of episodes.
+batch_reject: [Erai-raws] Jujutsu Kaisen - 01 ~ 24 [BATCH]
+batch_reject: [Judas] Kimetsu no Yaiba - NCOP 01-04 [BD 1080p]
+# And the bare Blu-ray rip, which says nothing at all: no episode, no range
+# and no batch marker. It parses as `unknown`, not as a batch, so it is not a
+# candidate under either reading — the cost FR-A4 already stated, kept.
+batch_reject: [Judas] Kimetsu no Yaiba [BD 1080p]
+
+case: kimetsu-s1-batch-out-of-range
+# The same entry, a later episode, and the pack that does not hold it. A
+# batch's low end *is* the number Arc asked for often enough that the range
+# has to be read rather than glanced at: 01-12 is not episode 20's pack, and
+# accepting it would download a torrent from which no wanted file could be
+# identified at all.
+romaji: Kimetsu no Yaiba
+english: Demon Slayer: Kimetsu no Yaiba
+format: TV
+episodes: 26
+year: 2019
+number: 20
+query: Kimetsu no Yaiba - 20
+batch_accept: [Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [BATCH]
+batch_reject: [Erai-raws] Kimetsu no Yaiba - 01 ~ 12 [BATCH]
+batch_reject: [Erai-raws] Kimetsu no Yaiba - 10 [1080p][Multiple Subtitle][Batch]

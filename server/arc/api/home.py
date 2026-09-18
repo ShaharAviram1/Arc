@@ -152,7 +152,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 now=at,
                 list_status=statuses.get(row.anime.id),
                 list_progress=progress.get(row.anime.id, 0),
-                torrent=extras.torrents.get(row.episode.id),
+                release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
             )
@@ -169,7 +169,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 # round trip for an answer the ``WHERE`` clause already gave.
                 completed=False,
                 list_progress=progress.get(row.anime.id, 0),
-                torrent=extras.torrents.get(row.episode.id),
+                release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
             )
@@ -189,7 +189,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 list_status=statuses.get(row.anime.id),
                 completed=row.episode.id in completed,
                 list_progress=progress.get(row.anime.id, 0),
-                torrent=extras.torrents.get(row.episode.id),
+                release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
             )
