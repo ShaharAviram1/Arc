@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-18 (M0–M15.5 done; M16 in progress; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-18 (M0–M15.5 done; M16 down to the performance item; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -187,7 +187,9 @@ that must be verified before the next milestone starts.
 - [~] Responsive pass on Home and Player for phone → moved to M15 (UI
       overhaul) by owner decision
 - [x] Hosting decided 2026-09-08: Hetzner CX33 + 250 GB volume, own project,
-      seeding off, qBittorrent behind gluetun (see spec §9 / architecture §8)
+      seeding off, qBittorrent behind gluetun — **revised 2026-09-09 to a
+      CPX22 + 100 GB volume** when the CX line went out of stock, which is what
+      shipped (see spec §9 / architecture §8)
 - [x] Production Compose hardened: healthchecks (incl. worker heartbeat),
       restart policies, log rotation, backup service + restore, client baked
       into the Caddy image, security headers, startup config check, VPN
@@ -1485,7 +1487,7 @@ the finish work (bugs found that way are fixed inside M16).
 - [x] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
       of 2026-09-05; see architecture.md decision log) — **not doing in M16** (owner, 2026-09-18: TS 7 is not ready; revisit when typescript-eslint supports it)
 - [x] Responsive/accessibility items not already closed by M15 — **not doing** (owner, 2026-09-18: dropped from M16)
-- [ ] Full test suite green in CI; coverage report — built 2026-09-18:
+- [x] Full test suite green in CI; coverage report — built 2026-09-18:
       `.github/workflows/ci.yml`, on push to `main` and on every pull request,
       three parallel jobs with per-toolchain caches. **server**: a `postgres:18`
       service container, uv + Python 3.14, `uv sync --all-groups`, then
@@ -1503,9 +1505,22 @@ the finish work (bugs found that way are fixed inside M16).
       89.67 % of branches; 3718 passed, 2 deselected, 10 m 32 s), client
       95.78 % (2863/2989).
       README gained a status badge and a "Continuous integration" section;
-      architecture.md §10 and its decision log record the shape.
-      — awaiting orchestrator validation
-- [ ] Final docs sweep: spec, architecture, roadmap, README all current
+      architecture.md §10 and its decision log record the shape..
+      Verified 2026-09-18 (orchestrator): shipped as 15edf19; the first GitHub run
+      (35337571043) was green — client and lint in ~1 min each, the server suite
+      in 8.5 min against a postgres:18 service; local coverage 96.5 % server /
+      95.8 % client lines; actionlint clean; server job timeout raised to 35 min
+- [x] Final docs sweep: spec, architecture, roadmap, README all current.
+      Done 2026-09-18: a Writer reconciled spec.md, architecture.md, README.md
+      and deploy/README.md with the code (LLM provider chain, one uvicorn
+      worker, `catalog_refresh`, CPX22 host, `ingest_file` as a function, the
+      full router/page/Makefile lists, five missing env vars, the compose
+      invocation with the host override, worker capacity table, demo-account
+      section, CLI flags) and ran out of budget before this file; the
+      orchestrator finished roadmap.md by hand. Verified 2026-09-18
+      (orchestrator): every correction spot-checked against the code
+      (`--workers 1`, `INVITE_RATE_LIMIT_PER_IP`, `CATALOG_REFRESH`, the CPX22
+      decision line); no code changed
 - **DoD:** "finished product" — every FR in spec.md is implemented or
   explicitly marked out of scope; owner has used it daily for two weeks
   without manual intervention.

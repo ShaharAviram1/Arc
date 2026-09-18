@@ -103,6 +103,25 @@ each log **one ERROR line per key** that is missing or still an example value
 (`change-me`, blank, `adminadmin`), and `GET /api/health` reports the count as
 `config_warnings`. A healthy deployment answers `0`. See §7.
 
+**The compose invocation.** Every `docker compose …` line in this runbook is
+written short. On a host that sets `ARC_DATA_DIR` — which is every host that
+keeps media on a data disk — the host override has to come with it, or compose
+builds the stack against a plain named volume on the root disk instead. That is
+what `make` does, and the exact form is:
+
+```bash
+C="docker compose --env-file .env \
+     -f deploy/docker-compose.yml \
+     -f deploy/docker-compose.host.yml"     # drop the last line if ARC_DATA_DIR is unset
+$C ps
+```
+
+Set `C` once and read every `docker compose --env-file .env -f
+deploy/docker-compose.yml` below as `$C`. Compose reads `COMPOSE_PROFILES`
+from `.env` by itself, so the torrent-client profile needs nothing on the
+command line — only `make` supplies a *default* (`vpn`) for an `.env` that
+names none (§5.4).
+
 ### 2.3 Register the MAL redirect URI
 
 On the MyAnimeList API application (the same one whose client id you used),
@@ -205,29 +224,48 @@ no role, so the order is invite → accept → `--admin`.
 
 ### 2.7 Give a fresh deployment something to show
 
-A brand-new deployment has an empty schedule and an empty Home page until the
-nightly sweeps run at 03:30 UTC. Two commands fix that:
+The worker does two of these by itself on its **first start**: it queues the
+season pre-cache when it has never run or the current season has no cached rows
+(FR-C7), and it runs the offline-catalogue import when those tables have never
+been filled (§5.0a of architecture.md). What is left is the detail — covers,
+episode counts — and somebody's list:
 
 ```bash
-C="docker compose --env-file .env -f deploy/docker-compose.yml run --rm api"
+R="$C run --rm api"   # $C from §2.2
 
-# Cache this season and the next (the schedule renders from those rows) and
-# queue a refresh of every followed show (covers, episode counts).
-$C python -m arc.cli warm-catalogue
+# Queue the season pre-cache again and a refresh of every followed show
+# (covers, episode counts) without waiting for 03:30 UTC.
+$R python -m arc.cli warm-catalogue
 
-# Put shows on somebody's list as "watching", looked up by title.
-$C python -m arc.cli demo-list --user-email prof@example.edu \
-     --add "Sousou no Frieren" --add "Vinland Saga"
+# Import the offline catalogue in the foreground rather than waiting for the
+# worker's own first-start run or Monday's job. Half a minute; exits 1 if
+# either source failed.
+$R python -m arc.cli import-catalogue
+
+# Put shows on somebody's list, looked up by title. One status group and one
+# progress per invocation, so a plausible list is a few runs.
+$R python -m arc.cli demo-list --user-email prof@example.edu \
+     --add "Sousou no Frieren" --add "Vinland Saga" --status watching --progress 3
+$R python -m arc.cli demo-list --user-email prof@example.edu \
+     --add "Death Note" --status completed
+
+# And, for the demo account, the flag and one recommendation run so the
+# Recommendations page has content without anybody signing in as it.
+$R python -m arc.cli demo-list --user-email prof@example.edu --add "Frieren" --demo
+$R python -m arc.cli recs --user-email prof@example.edu
 ```
 
-Both are idempotent — the sweeps deduplicate on their job type, and a list
-entry describes a state rather than an event, so running either twice changes
-nothing. `demo-list` needs AniList (or MAL) to be reachable; it prints the
+All of them are idempotent except `recs` — the sweeps deduplicate on their job
+type, a list entry describes a state rather than an event, `--demo` sets a
+boolean, and an import whose files have not changed does nothing at all. A
+recommendation run is an event and spends one of the ten a user gets per day
+(FR-R5). `demo-list` needs AniList (or MAL) to be reachable; it prints the
 title it actually matched, so a wrong top hit is visible rather than silent.
 
 **Note:** `demo-list` puts shows on a list, and a list is what drives
 acquisition (FR-A1). If acquisition is not paused, Arc will start looking for
-episodes of whatever you add.
+episodes of whatever you add — a seeded entry is active rather than dormant
+(FR-A9).
 
 ### 2.8 Link MyAnimeList
 
@@ -287,6 +325,24 @@ Those packs land in **`downloads/batch/<info hash>/`** rather than
 files Arc selected, with every other file in the pack left at priority 0 and
 never fetched. Nothing else reads that directory by name, and retention deletes
 a batch-backed episode's own file while leaving the torrent in the client.
+
+### Worker capacity
+
+Four environment variables decide what one worker does at once. All four are
+read by `arc/config.py`, so they change with a restart of the `worker` service
+and nothing else.
+
+| Key | Default | What it bounds |
+|---|---|---|
+| `WORKER_CONCURRENCY` | 2 | Jobs of **any** type claimed at once. |
+| `MAX_TRANSCODES` | 2 (≤ vCPU/2 on this host, so `1`) | ffmpeg encodes at once. The claim loop will not take a transcode while it is already running this many, so an encode waiting for a slot never holds a concurrency slot the short jobs need. |
+| `WORKER_DRAIN_TIMEOUT` | 10 s | The shutdown grace: how long in-flight jobs get on `SIGTERM` before they are cancelled and put back on the queue. **It must stay below the worker container's `stop_grace_period` (15 s)** — Docker's `SIGKILL` lands at the end of that grace whatever the drain is doing, and a row killed mid-drain stays `running` under a dead lock. A test pins the two together. |
+| `WORKER_STALE_AFTER` | 7200 s | When a `running` job whose worker died is requeued **by age**. It bounds silence, not work: a transcode pushes its lock forward while it encodes, which is why the three-hour ffmpeg timeout may exceed it. A worker *restart* no longer waits for it — the next worker reclaims by identity at start-up. |
+
+Exactly **one** worker container runs, and that is not a capacity choice: the
+start-up reclaim treats any lock that is not its own as orphaned, so two live
+workers would requeue each other's work. More encoding capacity is
+`MAX_TRANSCODES`, not a second container.
 
 ### The status summary
 
@@ -595,5 +651,6 @@ docker run --rm -e PUBLIC_HOST=arc.example.com \
 | A queue that is not moving | `arc.cli status` for jobs by status; the admin queue view for the detail. |
 
 All compose commands must be run **from the repository root** with
-`--env-file .env` — `.env` lives at the root, not in `deploy/`. The `make`
-targets do it for you.
+`--env-file .env` — `.env` lives at the root, not in `deploy/` — and with
+`-f deploy/docker-compose.host.yml` after the base file wherever `.env` sets
+`ARC_DATA_DIR` (§2.2). The `make` targets do both for you.

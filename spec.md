@@ -18,8 +18,8 @@ The client is the face: continue watching, what you are behind on, the
 seasonal schedule, a show page, an in-browser player, search/add, and (phase
 2) recommendations, match review, and admin.
 
-The site will be hosted publicly so that the course professor can log in at
-any time, and the owner uses it daily.
+The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9), so
+that the course professor can log in at any time, and the owner uses it daily.
 
 ## 2. Users and roles
 
@@ -34,8 +34,8 @@ any time, and the owner uses it daily.
     and job queues, resolve match-review items, delete files.
   - User: everything else (watch, track, add shows, request acquisition via
     their own list, link MAL, get recommendations, resolve match-review
-    items — any signed-in user may resolve any item in phase 1; scoping to
-    the requesting user is an M14 admin-panel refinement).
+    items — any signed-in user may resolve any item, which M14 left as it
+    was and M16 has not narrowed; the queue is global, per FR-D4).
 - Each user has a timezone (detected at signup from the browser, editable
   from the Schedule page); schedule and air dates render in it.
 - Sessions: HTTP-only secure cookie sessions. Passwords hashed with Argon2.
@@ -1469,3 +1469,10 @@ is and the grace period decides.
   asked **last**, after the group narrowing has had the budget, because the
   narrowing is looking for a single and a single beats every pack. An airing
   show, a film and a search that found a single ask none of them.
+- 2026-09-18 — **Docs sweep** (M16's last item; no requirement changed, only
+  statements about the code reconciled with it). In this file: §1 now says the
+  site *is* hosted, at `arc.atomworks.dev`, rather than that it will be; §2's
+  match-review line no longer promises a scoping refinement in M14 that neither
+  M14 nor M16 made — the queue is global, as FR-D4 says. §8's out-of-scope list
+  and §9's open decisions are unchanged: nothing in them has been decided since
+  they were last dated.

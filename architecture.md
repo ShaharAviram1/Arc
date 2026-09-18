@@ -18,7 +18,7 @@
 | Catalogue | AniList GraphQL API (no auth) | Titles, relations, airing schedule, cover art. |
 | List sync | MyAnimeList API v2 (OAuth 2.0 PKCE) | Where users' lists live. |
 | Releases | Nyaa RSS search feed | Public, no account. |
-| LLM | Anthropic API, model `claude-opus-5`, adaptive thinking, structured outputs | Recommendations with argued cases; match suggestions for unsure files. |
+| LLM | A provider chain (§5.6, FR-R7): Gemini's free AI Studio tier by default over its OpenAI-compatible endpoint, a paid OpenRouter fallback, Anthropic (`claude-opus-5`, adaptive thinking, structured outputs) selectable at either end | Recommendations with argued cases; match suggestions for unsure files. |
 | Client | React 19 + TypeScript 6 + Vite | SPA; rich player ecosystem. |
 | Client data | TanStack Query + fetch | Cache/invalidation for API data. |
 | Live updates | Postgres `LISTEN`/`NOTIFY` → server-sent events (`GET /api/events`) → `EventSource` | The write is in the worker and the tab is on the api, so the event has to cross a process boundary; the database is the one thing both already hold a connection to. No broker, no dependency. Polling stays as the fallback (§5.9). |
@@ -27,7 +27,7 @@
 | Auth | Session cookies (HTTP-only, Secure, SameSite=Lax), Argon2 password hashes | Simple, robust for a small user base. |
 | Deploy | Docker Compose: `api`, `worker`, `db`, `qbittorrent`, `caddy` | One-box deploy on any VPS that permits torrent traffic. Caddy terminates TLS and serves the built client. |
 | Tests | pytest + pytest-asyncio, httpx test client, Vitest for client | ffmpeg and qBittorrent mocked in CI. |
-| Lint/format | ruff, mypy (strict on core packages), typescript-eslint (type-checked rules) + prettier | TypeScript stays on 6.x until typescript-eslint supports 7 (tracked in roadmap M16). |
+| Lint/format | ruff, mypy (strict on core packages), typescript-eslint (type-checked rules) + prettier | TypeScript stays on 6.x until typescript-eslint supports 7. M16 looked and dropped it (owner, 2026-09-18: TS 7 is not ready); revisit when typescript-eslint does. |
 
 ## 2. System diagram
 
@@ -149,8 +149,14 @@ arc/
       config.py                  pydantic-settings (env)
       db/                        engine, session, base models
       models/                    SQLAlchemy models (one file per aggregate)
-      api/                       routers: auth, users, anime, list, episodes,
-                                 progress, media, mal, schedule, recs, admin
+      api/                       routers: health, events, auth, invites, users,
+                                 jobs, settings, anime, catalog, catalogue,
+                                 list, schedule, home, review, acquisition,
+                                 retention, media, media_stream, playback,
+                                 mal, recs (+ csrf, deps and the schema and
+                                 `episode_extras` helpers they share; there is
+                                 no `admin` router — the admin panel is the
+                                 admin-gated half of these)
       services/
         anilist/                 GraphQL client + cache refresh
         mal/                     OAuth, import, write log, sync rules
@@ -184,25 +190,35 @@ arc/
   client/
     package.json, vite.config.ts   (Tailwind v4: theme lives in src/index.css, no tailwind.config)
     src/
-      api/                       typed client (generated from OpenAPI)
-      pages/                     Home, Schedule, Search, Show, Player, Mal,
-                                 Recs, Review, Admin, Login, Invite
+      app/                       the route table (router.tsx)
+      pages/                     Home, Schedule, Search, List, Show, Player,
+                                 Mal, Recs, Review, Admin, HowArcWorks,
+                                 Login, Invite, NotFound
       components/                Layout (the app shell), route guards, shared
                                  pieces (CoverThumb, ListStatusControl, …)
+        admin/                   the five admin tabs (Users, Rules, Jobs,
+                                 Storage, Acquisition)
         ui/                      design primitives (M15): Artwork, Button,
                                  Chip, Row, Shelf, Segmented, Eyebrow,
                                  HeroFrame, PosterWash, AspectProbe, Skeleton,
                                  EmptyState + styles.ts, aspect.ts (the
                                  remembered shape of every picture measured)
       player/                    hls.js wrapper, progress reporter
-      lib/                       auth context, query hooks, media queries
+      lib/                       the typed API layer (hand-written fetch +
+                                 TanStack Query hooks, one module per area),
+                                 auth context, the event stream, media queries
   deploy/
     docker-compose.yml         production stack
     docker-compose.dev.yml     override: db + qbittorrent on localhost for local dev
+    docker-compose.host.yml    override: binds arc_data to ARC_DATA_DIR (added by make)
     Caddyfile
+    backup.sh / restore.sh     the backup sidecar's loop and the restore path
   scripts/
     dev.sh                     make dev: compose db+qbit, then api + worker + vite
-  Makefile                     dev / test / lint / fmt / migrate / revision / up / down
+    capture_*.py               fixture recorders (AniList, MAL, TMDB, offline, matching)
+  .github/workflows/ci.yml     server / client / lint, on push and PR (§10)
+  Makefile                     dev / dev-db / test / lint / fmt / migrate / revision /
+                               up / down / logs / ps / backup / backups / restore / clean
   .env.example                 at repo root (compose is invoked with --env-file .env)
   spec.md
   architecture.md
@@ -422,7 +438,8 @@ stores — which rows a reader has dismissed — lives in that browser's
    to qBittorrent with category `arc` and save path `/data/downloads/<episode
    id>/`; state `downloading`. No candidate → schedule retry per FR-A6.
 4. `poll_qbit` (every 60 s): sync progress; on completion → state
-   `downloaded`, enqueue `ingest_file` with the largest video file.
+   `downloaded`, ingest the largest video file (`library.ingest_file`, called
+   inline) and enqueue `match_file` for the row it wrote.
 
 ### 5.1a Acquisition as built (M6)
 - **Dormant imports (FR-A9, 2026-09-13).** Before the window there is a
@@ -976,7 +993,9 @@ stores — which rows a reader has dismissed — lives in that browser's
   pacing and cache shared across concurrent searches.
 
 ### 5.2 Ingest and match
-1. `ingest_file`: create `media_files`, ffprobe it, parse filename.
+1. `ingest_file` (a function, called by `library_scan` and by the poll's
+   hand-off — not a job type of its own): create `media_files`, ffprobe it,
+   parse filename.
 2. `match_file`: candidates = expected episode (if Arc downloaded it, prior
    0.6) ∪ local anime cache fuzzy hits ∪ AniList search hits. Score =
    weighted title similarity (token-set ratio over romaji/english/synonyms),
@@ -2354,7 +2373,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert. The revert writes `updated_by=arc`, `mal_dirty=true` and stamps `activated_at` if null (FR-A9: it is FR-M7's third user-originated event), on the entry it recreates as well as the one it edits |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
 | `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column). The episode's `release` carries `batch: true` when it is one selected file of a pack (FR-A11), and its `download_progress` is then **that file's** and not the pack's: the same `episode_extras` pass resolves a batch-backed episode through the `torrent_files` row that still claims it (one more query for the whole list, never one per episode), so the group and the title a row shows are the pack's — true of every episode in it — and the flag is what keeps the client from rendering them as a release of this one. A claim given back (cancelled, rejected, swept) stops answering for the episode at once, leaving its own `torrents` row, if it ever had one, to answer for it. And `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
-| `POST /api/anime/{id}/refresh` | admin | enqueue `anilist_refresh` |
+| `POST /api/anime/{id}/refresh` | admin | enqueue `catalog_refresh` for this show (deduped per anime id) |
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
@@ -2457,7 +2476,10 @@ dump freshness; `depends_on` uses `service_healthy`):
   with `network_mode: service:gluetun`; `novpn` runs a plain `qbittorrent`
   on the backend network. `QBIT_URL=http://qbittorrent:8080` is identical in
   both modes. Dev always uses `novpn`.
-- `api` — `uvicorn arc.main:app`, 2 workers.
+- `api` — `uvicorn arc.main:app`, **1 worker** (`--workers 1`): the login rate
+  limiter lives in process memory (§7), so N processes would be N times the
+  budget. `--no-access-log`, and `--forwarded-allow-ips` pinned to the frontend
+  subnet.
 - `worker` — `python -m arc.worker`, **exactly 1 instance** (ffmpeg
   concurrency is raised with `MAX_TRANSCODES`, not with a second container:
   the start-up reclaim of §2 treats any lock that is not its own as orphaned,
@@ -2503,15 +2525,19 @@ on Cloudflare Registrar, the owner's umbrella for hobby projects; Arc is
 `arc.atomworks.dev` (`PUBLIC_HOST`), an A record with the Cloudflare proxy
 off (DNS only) so Caddy terminates TLS and streams directly. Measured: software x264 `veryfast`
 transcodes a 24-min 1080p episode in ~4 min on an M-series laptop; expect
-5–8 min on the CX33. Hardware encode is not available on CX; not needed.
+5–8 min on the CPX22 at that preset, and 1.5–2× that at the `fast` default
+(§5.3a). Hardware encode is not available on Hetzner's shared-vCPU lines; not
+needed.
 
 Torrent isolation: qBittorrent runs with `network_mode: service:gluetun`
 behind a `gluetun` container holding a WireGuard config from the VPN
 provider (kill switch on, so a tunnel drop stops qBittorrent's traffic
 instead of leaking to the host IP); `api`/`worker` reach its WebUI through
 gluetun's exposed port on the backend network. qBittorrent preferences set
-at startup by Arc: stop seeding on completion (ratio limit 0, action
-pause), upload rate capped low during transfer. Nothing else uses the VPN.
+at startup by Arc: stop seeding on completion (ratio limit 0, action **stop**
+— never one of the two that delete, because what happens to the data is
+retention's decision), upload rate capped low during transfer, plus the queue
+policy of §6. Nothing else uses the VPN.
 
 Local dev: `make dev` (see `scripts/dev.sh`) starts `db` and `qbittorrent`
 via the dev compose override, then runs `api` and `worker` with hot reload
@@ -2550,8 +2576,9 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `TRANSCODE_CRF` (19), `TRANSCODE_TUNE` (animation; empty means no `-tune`),
 `TRANSCODE_MAXRATE_KBPS` / `TRANSCODE_BUFSIZE_KBPS` (both unset; a maxrate
 with no bufsize gets twice the maxrate), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
-(10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400),
-`BACKUP_KEEP_DAYS` (14), `QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
+(10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400) and
+`BACKUP_KEEP_DAYS` (14) — read by `deploy/backup.sh`, not by the app —
+`QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
 (false), `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `QBIT_MAX_ACTIVE_TORRENTS` (12),
 `STALL_METADATA_MINUTES` (60), `STALL_NO_BYTES_HOURS` (6) — the four of §5.1a's
 queue and stall policy; the two stall thresholds count the client's own
@@ -2572,10 +2599,18 @@ requeued *by age*, default 7200; transcodes heartbeat their lock, and a worker
 start-up, §2),
 `SESSION_TTL_DAYS` (30), `LOGIN_RATE_LIMIT_PER_IP` (10),
 `LOGIN_RATE_LIMIT_PER_EMAIL` (5), `LOGIN_RATE_WINDOW_SECONDS` (900),
+`INVITE_RATE_LIMIT_PER_IP` (20, the two public invite routes in the same
+window),
 `CORS_ALLOWED_ORIGINS` (comma list, optional; dev origins are added
-automatically when `ENV` is not prod), `MAL_OAUTH_URL`
-(https://myanimelist.net, the authorize/token host), `MAL_IMPORT_INTERVAL_HOURS`
-(6), `OFFLINE_MANAMI_URL` / `OFFLINE_FRIBB_URL` (the two public datasets of
+automatically when `ENV` is not prod), `MAL_API_URL`
+(https://api.myanimelist.net/v2) and `MAL_OAUTH_URL`
+(https://myanimelist.net/v1/oauth2, the authorize/token host — a separate
+setting because MAL puts those on the main site rather than on the API host),
+`MAL_IMPORT_INTERVAL_HOURS`
+(6), `ANILIST_URL` (https://graphql.anilist.co),
+`ANILIST_MIN_INTERVAL_MS` (700, the client's own pacing floor, §6),
+`CATALOG_BREAKER_SECONDS` (300, how long a failed catalogue source is skipped
+— FR-C6), `OFFLINE_MANAMI_URL` / `OFFLINE_FRIBB_URL` (the two public datasets of
 §5.0a; overridable for a mirror or a test), `OFFLINE_CATALOGUE_STALE_DAYS` (14), `TMDB_API_KEY` (unset; a free v3 key from
 themoviedb.org/settings/api turns on the enrichment of §5.8 — without it shows
 render whatever art AniList and MAL provided, and no attribution line is
@@ -4363,3 +4398,24 @@ asked*, so `make test` is exactly as fast as it was.
   and uploaded as artifacts. Chosen over a single job so a red run says which
   half of the repo broke, and over adding ffmpeg to the runner because the one
   test that needs it is the one test the `slow` mark was created for.
+- 2026-09-18 — **Docs sweep** (M16's last item). Statements about the code
+  reconciled with the code; no component boundary, integration or decision
+  changed. In this file: §1's LLM row said "Anthropic API, `claude-opus-5`"
+  where the shipped default is the Gemini-first provider chain of §5.6, and its
+  lint row tracked the TypeScript 7 bump against M16, which dropped it on
+  2026-09-18. §3's repository layout claimed a generated `client/src/api`
+  (there is none — the typed layer is hand-written in `lib/`), listed the API
+  routers and the client pages as they stood before M14–M16, and named four
+  Makefile targets out of fifteen; it now also lists `docker-compose.host.yml`,
+  the backup scripts, `scripts/capture_*.py` and the CI workflow. §5.1 and
+  §5.2 called `ingest_file` a job — it is a function the poll and the scan
+  call. §5b's refresh route named a job type (`anilist_refresh`) that does not
+  exist; it is `catalog_refresh`. §8 said the api runs 2 uvicorn workers where
+  the compose file pins `--workers 1` for the reason §7 gives, sized the
+  transcode against the CX33 the host has not been since 2026-09-09, and said
+  the share-limit action is *pause* where `apply_policy` writes *stop*. §9 was
+  missing five variables `config.py` reads (`ANILIST_URL`,
+  `ANILIST_MIN_INTERVAL_MS`, `CATALOG_BREAKER_SECONDS`,
+  `INVITE_RATE_LIMIT_PER_IP`, `MAL_API_URL`), gave `MAL_OAUTH_URL` without its
+  path, and listed the two `BACKUP_*` values as app settings when
+  `deploy/backup.sh` is what reads them.

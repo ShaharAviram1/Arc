@@ -19,8 +19,12 @@ the code: [spec.md](spec.md) (what it does and why),
   the server's virtualenv (`uv python install 3.14` if you have no 3.14 yet)
 - Node 24 and [pnpm](https://pnpm.io/) — for the client
 - Docker with Compose v2+ — for Postgres, qBittorrent, and the production stack
-- ffmpeg is **not** needed on the host: it ships inside the server image and
-  is only exercised by the transcode pipeline (M7)
+- ffmpeg is **not** needed to run the production stack: it ships inside the
+  server image. `make dev` runs the worker on the host, so transcoding
+  anything locally (M7) needs an ffmpeg **built with libass** — Homebrew's
+  `ffmpeg` has none, so install `ffmpeg-full` and point `FFMPEG_BIN` /
+  `FFPROBE_BIN` at it. Without one, everything else still runs and the `slow`
+  test skips itself
 
 ## Running locally
 
@@ -90,8 +94,8 @@ make revision m="…"       # autogenerate a migration, then review it by hand
 
 ```bash
 make test                 # pytest (server) + vitest (client); starts the db first
-make lint                 # ruff check, ruff format --check, mypy, eslint
-make fmt                  # ruff format + prettier
+make lint                 # ruff check, ruff format --check, mypy, eslint, tsc, prettier --check
+make fmt                  # ruff format + ruff check --fix + prettier
 ```
 
 Server-only, from `server/`:
@@ -125,8 +129,8 @@ the run summary and uploads its report as an artifact — `server-coverage`
 ```
 server/     FastAPI app (arc.main), worker (arc.worker), CLI (arc.cli), Alembic, pytest
 client/     React + TypeScript + Vite SPA, and the Dockerfile that builds it into Caddy
-deploy/     docker-compose.yml, docker-compose.dev.yml, Caddyfile, backup/restore, README (the runbook)
-scripts/    dev.sh (what `make dev` runs)
+deploy/     docker-compose{,.dev,.host}.yml, Caddyfile, backup.sh/restore.sh, README (the runbook)
+scripts/    dev.sh (what `make dev` runs) and the capture_*.py fixture recorders
 ```
 
 ## Operator commands
@@ -142,7 +146,9 @@ uv run python -m arc.cli invite --email prof@example.edu     # prints the link, 
 uv run python -m arc.cli warm-catalogue                       # season cache + refresh sweep
 uv run python -m arc.cli import-catalogue                     # offline catalogue, now
 uv run python -m arc.cli demo-list --user-email prof@example.edu \
-    --add "Sousou no Frieren" --add "Vinland Saga"
+    --add "Sousou no Frieren" --add "Vinland Saga" \
+    --status watching --progress 3 --demo
+uv run python -m arc.cli recs --user-email prof@example.edu    # one picks run
 ```
 
 In production the same commands run inside the api container, which already
@@ -153,23 +159,50 @@ docker compose --env-file .env -f deploy/docker-compose.yml \
   run --rm api python -m arc.cli status
 ```
 
+On a host whose `.env` sets `ARC_DATA_DIR`, add `-f
+deploy/docker-compose.host.yml` to that invocation, exactly as the `make`
+targets do — see [deploy/README.md §2.2](deploy/README.md).
+
 - `invite` — a seven-day, single-use link (`--expires-in-hours` up to 720).
   Printed once: Arc stores only `sha256(token)`. `--admin` promotes an address
   that already has an account — invites carry no role, so the order is
   invite → accept → `--admin`.
 - `warm-catalogue` — queues the season pre-cache (what the schedule renders
-  from) and a refresh of every followed show. Without it a fresh deployment
-  has an empty schedule until 03:30 UTC.
+  from) and a refresh of every followed show, which is what fills in covers and
+  episode counts. The worker queues the season pre-cache itself at start-up
+  when it has never run or the current season has no cached rows (FR-C7), so
+  this is mostly about the refresh sweep — and about asking for both again
+  without waiting for 03:30 UTC.
 - `import-catalogue` — downloads and imports the offline catalogue (manami's
   anime database + Fribb's id map, ~14 MB, about half a minute) instead of
-  waiting for the weekly job on Monday at 03:30 UTC. Replaces what it imported
+  waiting for the weekly job on Monday at 03:30 UTC. The worker also runs it
+  once at start-up when the tables have never been filled, so this is for a
+  run you want to watch. Replaces what it imported
   last time, and does nothing at all when neither file has changed. Exits 1 if
   either source failed; the tables of a source that failed are untouched.
-- `demo-list` — adds shows to a user's list as *watching*, looked up by title
-  through the catalogue, so a new user's first Home page is not empty. It
-  prints the title it matched. A list entry is what drives acquisition, so
+- `demo-list` — adds shows to a user's list, looked up by title through the
+  catalogue, so a new user's first Home page is not empty. It prints the title
+  it matched. One invocation seeds one `--status` group (default `watching`)
+  with one `--progress`, so a plausible list is a few runs rather than one long
+  command line; `--demo` also flags the account as the demo one
+  (`users.is_demo`). A list entry is what drives acquisition, so
   this will start Arc looking for episodes unless acquisition is paused.
+- `recs` — produces one recommendation run for an account through the same
+  service the Recommendations page uses, so the demo account's page has
+  content without anybody signing in as it. The one command here that is not
+  idempotent: a run spends one of the ten a user gets per day.
 - `status` — read-only; safe against a live deployment.
+
+### The demo account
+
+One account can be flagged as the demo one — from the admin Users tab, or with
+`demo-list --demo`. The flag changes presentation and nothing else: that
+account gets a fourth nav entry, **How Arc works** (`/how-arc-works`), and a
+one-line dismissable strip above Watch Now pointing at it. The page is
+informational — the pipeline from a list entry to a MyAnimeList write, one
+sentence per external service, the three rules that matter — and its route is
+open to any signed-in account, so a link somebody shares opens rather than
+404s. No credentials live in this repository.
 
 ## Deploy
 
@@ -199,7 +232,9 @@ Production keys that must be real before `make up` — `PUBLIC_HOST`,
 (`https://<host>/api/mal/callback`, registered on the MAL application too),
 `QBIT_PASS`, the `WIREGUARD_*` values from the VPN provider's config file
 (unless `COMPOSE_PROFILES=novpn`), `BOOTSTRAP_ADMIN_*` for the first boot, and
-`ANTHROPIC_API_KEY` for phase 2. Arc checks the list itself: in production the api and worker log
+`GEMINI_API_KEY` for the recommendations (`RECS_PROVIDER=gemini` by default;
+`OPENROUTER_API_KEY` is the paid fallback and `ANTHROPIC_API_KEY` only for an
+`anthropic` chain entry or match suggestions). Arc checks the list itself: in production the api and worker log
 one ERROR per key that is missing or still an example value, and
 `GET /api/health` reports the count as `config_warnings` (a healthy deployment
 answers `0`).
@@ -221,6 +256,10 @@ Raw `docker compose` invocations must be run from the repository root with
 docker compose --env-file .env -f deploy/docker-compose.yml ps
 ```
 
+and must add `-f deploy/docker-compose.host.yml` after it wherever `.env` sets
+`ARC_DATA_DIR`, since that override is what binds the media volume to the data
+disk.
+
 **The full runbook is [deploy/README.md](deploy/README.md)**: host
 requirements and disk sizing, DNS, the whole `.env` table, registering the MAL
 redirect URI, qBittorrent's first-run password in production, the first login
@@ -228,6 +267,6 @@ and the professor's invite, seeding a fresh deployment, pausing and resuming
 acquisition, the VPN (getting a WireGuard config, verifying the tunnel, running
 without it), logs, backups and restore, upgrading, and a troubleshooting table.
 
-The host is a Hetzner CX33 with a 250 GB volume ([spec.md §9](spec.md)); the
-runbook assumes nothing about the provider beyond its own requirements
+The host is a Hetzner Cloud CPX22 with a 100 GB volume ([spec.md §9](spec.md));
+the runbook assumes nothing about the provider beyond its own requirements
 section.
