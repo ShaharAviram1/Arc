@@ -1,7 +1,7 @@
 # Arc — Roadmap
 
 > Living document. Tick items as they land; add or reorder as reality
-> changes. Last updated: 2026-09-18 (M0–M15.5 done; M16 down to the performance item; production at arc.atomworks.dev).
+> changes. Last updated: 2026-09-18 (M0–M15.5 done; every M16 item shipped or dropped — only the two-week daily-use DoD remains; production at arc.atomworks.dev).
 > Companions: [spec.md](spec.md), [architecture.md](architecture.md),
 > [CLAUDE.md](CLAUDE.md).
 
@@ -1483,7 +1483,16 @@ the finish work (bugs found that way are fixed inside M16).
       added 720p, Remove asked first and deleted the row; the summary line and
       the table agreed at every step
 - [x] Accessibility pass (keyboard nav, contrast) — **not doing** (owner, 2026-09-18: dropped from M16)
-- [ ] Performance: playlist/segment caching headers, DB indexes reviewed
+- [x] Performance: playlist/segment caching headers, DB indexes reviewed.
+      Reviewed 2026-09-18 (orchestrator, no code change): segments already
+      ship `private, max-age=31536000, immutable` with an ETag and 304
+      handling and playlists revalidate (media_stream.py, since M8). On
+      production (30,661 episodes, 16,412 jobs) `EXPLAIN ANALYZE` shows the
+      queue claim on `ix_jobs_status_run_after_priority` (4 buffers), per-show
+      episode lookups on `uq_episodes_anime_id_number` (10 buffers), and the
+      one sequential scan — episodes by state — at 578 buffers, about a
+      millisecond, reached in practice through the user's wants index. No
+      index is justified at this scale; revisit when episodes pass ~500k
 - [x] Bump TypeScript to 7.x once typescript-eslint supports it (blocked as
       of 2026-09-05; see architecture.md decision log) — **not doing in M16** (owner, 2026-09-18: TS 7 is not ready; revisit when typescript-eslint supports it)
 - [x] Responsive/accessibility items not already closed by M15 — **not doing** (owner, 2026-09-18: dropped from M16)

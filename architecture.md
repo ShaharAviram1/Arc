@@ -4398,6 +4398,14 @@ asked*, so `make test` is exactly as fast as it was.
   and uploaded as artifacts. Chosen over a single job so a red run says which
   half of the repo broke, and over adding ffmpeg to the runner because the one
   test that needs it is the one test the `slow` mark was created for.
+- 2026-09-18 — **Performance review** (M16's last item; no change). Cache
+  headers on the media routes were already right (segments immutable for a
+  year with an ETag, playlists revalidate — §5.4a). `EXPLAIN ANALYZE` on
+  production: the job claim and the per-show episode lookups are index
+  scans; the only sequential scan is episodes filtered by state alone
+  (~30k rows, 578 buffers), which the callers reach through an indexed join
+  in practice. No index added; the threshold to revisit is noted in the
+  roadmap.
 - 2026-09-18 — **Docs sweep** (M16's last item). Statements about the code
   reconciled with the code; no component boundary, integration or decision
   changed. In this file: §1's LLM row said "Anthropic API, `claude-opus-5`"
