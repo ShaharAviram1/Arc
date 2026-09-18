@@ -1438,6 +1438,12 @@ the finish work (bugs found that way are fixed inside M16).
         says "from a batch" and the Admin tab "batch · selected files only";
         the qBittorrent 5.2.3 file-priority contract was also proven directly
         with a 26-file Kimetsu pack (one file downloaded, the rest at zero)
+  - Batch support deployed 2026-09-18 as f1e75cb (migrations c3f81a5d27be and
+    d81f4b6ca3e7 applied on the host; `batch_fallback` seeded true). Post-
+    deploy: `/api/health` ok, every existing torrent row a `single`, no
+    orphaned running job. Also observed the same morning: Demon Slayer
+    episode 10 on the demo account went searching → ready on its own via
+    the group narrowing (93b88cb), which is what the narrowing was for.
 - [x] Per-show overrides UI for group/resolution
       Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
       §4 `settings`, §5b). The `override:anime:<id>` row the ranker has
