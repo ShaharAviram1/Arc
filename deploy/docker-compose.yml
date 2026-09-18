@@ -415,6 +415,8 @@ services:
         condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      # Tribunal's public name, when this host serves it too (Caddyfile).
+      TRIBUNAL_HOST: ${TRIBUNAL_HOST:-tribunal.localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -436,6 +438,10 @@ services:
     <<: *logging
     networks:
       - frontend
+      # The shared edge network the Tribunal container also joins, so that
+      # `reverse_proxy tribunal:8888` resolves. Created once on the host:
+      #   docker network create atomworks
+      - atomworks
 
 # Two networks with pinned subnets. Pinned because the api has to name the
 # range it will trust X-Forwarded-For from, and Docker's default pool hands
@@ -446,6 +452,8 @@ services:
 # worker need to reach the database and qBittorrent. Nothing on `backend` can
 # present itself to the api as the proxy.
 networks:
+  atomworks:
+    external: true
   frontend:
     ipam:
       config:

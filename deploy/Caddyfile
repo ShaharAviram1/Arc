@@ -126,3 +126,20 @@
 		}
 	}
 }
+
+# Tribunal — the other course project, hosted on this box since 2026-09-18
+# (architecture.md §8). One site block, proxied to a container that Arc's
+# compose does not own: it runs from /opt/tribunal on the shared external
+# network `atomworks`, which Caddy joins for this purpose alone. The name
+# defaults to a loopback alias so that a deployment without a Tribunal —
+# every dev run, and any host that has not set TRIBUNAL_HOST — parses and
+# serves Arc exactly as before.
+{$TRIBUNAL_HOST:tribunal.localhost} {
+	encode zstd gzip
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+	reverse_proxy tribunal:8888
+}

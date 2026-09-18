@@ -4398,6 +4398,16 @@ asked*, so `make test` is exactly as fast as it was.
   and uploaded as artifacts. Chosen over a single job so a red run says which
   half of the repo broke, and over adding ffmpeg to the runner because the one
   test that needs it is the one test the `slow` mark was created for.
+- 2026-09-18 — **A second site behind Arc's Caddy.** The owner's other course
+  project, The Tribunal, moves onto this host as its own container
+  (`/opt/tribunal`, its own compose file) at `tribunal.atomworks.dev`.
+  Arc's part is deliberately small: `deploy/Caddyfile` gains one site block
+  for `{$TRIBUNAL_HOST}` (defaulting to `tribunal.localhost`, so a host or a
+  dev run without a Tribunal parses and serves Arc unchanged) proxying to
+  `tribunal:8888`, and the `caddy` service joins an external Docker network
+  named `atomworks` (`docker network create atomworks`, once) that the
+  Tribunal container also joins. Nothing else in Arc knows the Tribunal
+  exists; the two projects share a TLS terminator and nothing more.
 - 2026-09-18 — **Performance review** (M16's last item; no change). Cache
   headers on the media routes were already right (segments immutable for a
   year with an ETag, playlists revalidate — §5.4a). `EXPLAIN ANALYZE` on

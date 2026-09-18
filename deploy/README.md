@@ -103,6 +103,13 @@ each log **one ERROR line per key** that is missing or still an example value
 (`change-me`, blank, `adminadmin`), and `GET /api/health` reports the count as
 `config_warnings`. A healthy deployment answers `0`. See §7.
 
+**Another site on the same host.** Since 2026-09-18 the Caddy in this stack
+also terminates `tribunal.atomworks.dev` for the owner's other project, which
+runs from `/opt/tribunal` with its own compose file. The link between them is
+one external Docker network — `docker network create atomworks` before the
+first `make up` on a host that sets `TRIBUNAL_HOST` in `.env` — and one site
+block in `deploy/Caddyfile`. A host without `TRIBUNAL_HOST` needs neither.
+
 **The compose invocation.** Every `docker compose …` line in this runbook is
 written short. On a host that sets `ARC_DATA_DIR` — which is every host that
 keeps media on a data disk — the host override has to come with it, or compose
