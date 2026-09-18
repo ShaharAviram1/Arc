@@ -980,6 +980,11 @@ the finish work (bugs found that way are fixed inside M16).
     within a minute, four downloading; zero MAL writes, no MAL link. One
     Piece needed its progress reseeded at 1176 because the cached episodes
     past 1178 are 2027 air dates.
+  - Failure banner + overrides editor deployed 2026-09-18 as ec52665 (no
+    migration). Post-deploy: `/api/health` ok, no orphaned running job,
+    and the demo account's Watch Now showed its first real row within
+    minutes — Demon Slayer episode 11, "no metadata after 60 minutes — Arc
+    retries daily", linking to the show page.
 - [x] Per-show overrides UI for group/resolution
       Built 2026-09-18 (FR-A3, FR-D2; spec §4.7, §5 page table; architecture
       §4 `settings`, §5b). The `override:anime:<id>` row the ranker has
