@@ -143,3 +143,14 @@
 	}
 	reverse_proxy tribunal:8888
 }
+
+# A spare site slot, wired the same way as the block above: one more container
+# on the shared `atomworks` network, owned by its own compose project, reached
+# through this Caddy for TLS. Both halves come from the host's .env
+# (SITE3_HOST, SITE3_UPSTREAM) and default to loopback names, so a deployment
+# that sets neither parses and serves exactly as before. No `encode` and no
+# headers here: the upstream is itself a web server and sets its own, and
+# compressing twice only costs CPU.
+{$SITE3_HOST:site3.localhost} {
+	reverse_proxy {$SITE3_UPSTREAM:site3.localhost:80}
+}

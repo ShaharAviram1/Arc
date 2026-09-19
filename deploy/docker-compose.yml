@@ -417,6 +417,9 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
       # Tribunal's public name, when this host serves it too (Caddyfile).
       TRIBUNAL_HOST: ${TRIBUNAL_HOST:-tribunal.localhost}
+      # The spare site slot (Caddyfile): unset on every host that has no third site.
+      SITE3_HOST: ${SITE3_HOST:-site3.localhost}
+      SITE3_UPSTREAM: ${SITE3_UPSTREAM:-site3.localhost:80}
     ports:
       - "80:80"
       - "443:443"

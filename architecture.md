@@ -4437,3 +4437,7 @@ asked*, so `make test` is exactly as fast as it was.
   `INVITE_RATE_LIMIT_PER_IP`, `MAL_API_URL`), gave `MAL_OAUTH_URL` without its
   path, and listed the two `BACKUP_*` values as app settings when
   `deploy/backup.sh` is what reads them.
+- 2026-09-19 — Caddy gains a spare site slot (`SITE3_HOST` → `SITE3_UPSTREAM`), wired
+  like the Tribunal block: another compose project's container on the shared
+  `atomworks` network, reached through this Caddy for TLS. Both variables
+  default to loopback names, so a host that sets neither is unchanged.
