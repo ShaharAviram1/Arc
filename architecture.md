@@ -4441,3 +4441,11 @@ asked*, so `make test` is exactly as fast as it was.
   like the Tribunal block: another compose project's container on the shared
   `atomworks` network, reached through this Caddy for TLS. Both variables
   default to loopback names, so a host that sets neither is unchanged.
+- 2026-09-20 — `vpn-watchdog` sidecar (profile `vpn`). gluetun rebuilt its
+  tunnel after a failed health check on 2026-09-19 21:04 UTC; qBittorrent,
+  sharing its network namespace, kept sockets on the old interface and nothing
+  downloaded for 19 hours while both containers reported healthy (DHT at zero
+  nodes, every tracker failing, magnets stuck fetching metadata). The watchdog
+  restarts the client whenever gluetun has logged a completed tunnel setup
+  since the client's own start time, and only once gluetun is healthy again.
+  It holds the Docker socket and therefore has no network.

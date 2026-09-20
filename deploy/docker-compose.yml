@@ -283,6 +283,28 @@ services:
         # moment the host's own IP could appear in a swarm.
         condition: service_healthy
 
+  # Restarts the torrent client when gluetun has rebuilt its tunnel since the
+  # client started (deploy/vpn-watchdog.sh says why, and why both containers
+  # stay "healthy" while nothing downloads). A sidecar for the reason the
+  # backup is one: the fix arrives with `docker compose up` and survives the
+  # host being rebuilt, where a cron job on the host would not.
+  #
+  # It holds the Docker socket, which is root on this host, so it gets nothing
+  # else: no network at all, a read-only script, the stock CLI image.
+  vpn-watchdog:
+    profiles: ["vpn"]
+    image: docker:27-cli
+    entrypoint: ["/bin/sh", "/vpn-watchdog.sh"]
+    environment:
+      COMPOSE_PROJECT: arc
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-60}
+    volumes:
+      - ./vpn-watchdog.sh:/vpn-watchdog.sh:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    network_mode: none
+    restart: unless-stopped
+    <<: *logging
+
   qbittorrent:
     <<: [*qbittorrent, *logging]
     profiles: ["novpn"]
