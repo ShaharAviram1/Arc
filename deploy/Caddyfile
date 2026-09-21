@@ -121,7 +121,12 @@
 		format filter {
 			wrap console
 			fields {
-				request>uri regexp "^/api/invites/[^/?]+" "/api/invites/REDACTED"
+				# Three URLs carry a live credential: the invite link a person opens
+				# (`/invite/<token>` — a page, served and logged here, which the
+				# api's own redaction never sees), the API call that page makes, and
+				# MyAnimeList's callback with its `code` and `state`. One pattern,
+				# because a field takes one filter.
+				request>uri regexp "^((?:/api)?/invites?/|/api/mal/callback\\?).*$" "${1}REDACTED"
 			}
 		}
 	}

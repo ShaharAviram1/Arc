@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from typing import Any
 
@@ -75,6 +76,31 @@ class PrettyFormatter(logging.Formatter):
         return line
 
 
+#: URLs that carry a live credential. An invite's token is the path of the
+#: link the invited person follows (`/api/invites/<token>`), and MyAnimeList
+#: hands back the OAuth `code` and our `state` in the callback's query string.
+#: Everything after the prefix goes: nothing to the right of it is worth a log.
+_SECRET_URL = re.compile(r"(/api/invites/|/api/mal/callback\?)[^\s\"]+")
+
+
+class RedactSecretUrls(logging.Filter):
+    """Take tokens out of access lines before anything is written.
+
+    Works on the record's arguments (uvicorn passes the path as one of them)
+    and on a pre-formatted message, and never drops the record.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _SECRET_URL.sub(r"\1REDACTED", arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        if isinstance(record.msg, str):
+            record.msg = _SECRET_URL.sub(r"\1REDACTED", record.msg)
+        return True
+
+
 def setup_logging(settings: Settings) -> None:
     """Configure the root logger for this process. Idempotent."""
     formatter: logging.Formatter
@@ -97,6 +123,15 @@ def setup_logging(settings: Settings) -> None:
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers.clear()
         uvicorn_logger.propagate = True
+
+    # Access lines reach this handler even though the api is started with
+    # `--no-access-log` (11,000 of them in production on 2026-09-21): the loop
+    # above re-enables propagation on `uvicorn.access`. An invite link is a
+    # credential and travels in the path, so it is removed here rather than
+    # trusted to a flag.
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactSecretUrls) for f in access.filters):
+        access.addFilter(RedactSecretUrls())
 
     # httpx logs every request URL at INFO, query string included — and the
     # TMDB v3 key travels as ``?api_key=`` (M15.5). Arc's own clients log what

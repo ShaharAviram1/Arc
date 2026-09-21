@@ -4449,3 +4449,10 @@ asked*, so `make test` is exactly as fast as it was.
   restarts the client whenever gluetun has logged a completed tunnel setup
   since the client's own start time, and only once gluetun is healthy again.
   It holds the Docker socket and therefore has no network.
+- 2026-09-21 — Credentials in URLs are redacted from both logs. The api emits
+  access lines despite `--no-access-log` (`setup_logging` re-enables propagation
+  on `uvicorn.access`), and an invite token is the path of the link a person
+  follows; MyAnimeList's callback carries the OAuth `code` and our `state` in
+  its query. `core/logging.py` now filters both out of access lines, and the
+  Caddy log filter also covers the invite *page* URL `/invite/<token>`, which it
+  had been writing in clear. No such line was present in the retained logs.
