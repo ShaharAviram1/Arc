@@ -159,3 +159,9 @@
 {$SITE3_HOST:site3.localhost} {
 	reverse_proxy {$SITE3_UPSTREAM:site3.localhost:80}
 }
+
+# A fourth slot, identical to the third (SITE4_HOST, SITE4_UPSTREAM). Added
+# 2026-10-03 for SectorWatch, once Audiosey had taken the third.
+{$SITE4_HOST:site4.localhost} {
+	reverse_proxy {$SITE4_UPSTREAM:site4.localhost:80}
+}

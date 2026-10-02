@@ -442,6 +442,9 @@ services:
       # The spare site slot (Caddyfile): unset on every host that has no third site.
       SITE3_HOST: ${SITE3_HOST:-site3.localhost}
       SITE3_UPSTREAM: ${SITE3_UPSTREAM:-site3.localhost:80}
+      # A fourth slot, the same way (SectorWatch, 2026-10-03).
+      SITE4_HOST: ${SITE4_HOST:-site4.localhost}
+      SITE4_UPSTREAM: ${SITE4_UPSTREAM:-site4.localhost:80}
     ports:
       - "80:80"
       - "443:443"
