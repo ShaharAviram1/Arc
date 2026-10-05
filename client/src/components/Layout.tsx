@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { InstallHint } from '@/components/InstallHint'
 import { cx, FOCUS_RING } from '@/components/ui/styles'
 import { useAcquisitionStatus } from '@/lib/acquisition'
 import { useLogout, useMe } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/events'
 import { useIsPhone } from '@/lib/media'
 import { useReviewSummary } from '@/lib/review'
+import { useOffline } from '@/offline/network'
+import { canDownloadInApp } from '@/offline/opfs'
 
 /**
  * The app shell (M15).
@@ -154,6 +157,9 @@ function useAccountMenu(): AccountMenu | null {
       badge: pending > 0 ? <ReviewCountPill count={pending} /> : undefined,
     },
   ]
+  // Episodes kept on this device (FR-S9): never for the demo account, which
+  // may not download, and only where the browser can keep them.
+  if (!me.is_demo && canDownloadInApp()) entries.push({ to: '/downloads', label: 'Downloads' })
   if (me.role === 'admin') entries.push({ to: '/admin', label: 'Admin' })
 
   return {
@@ -359,7 +365,7 @@ function AvatarMenu({ account }: { account: AccountMenu }) {
           setOpen(true)
         }}
         className={cx(
-          'flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[rgba(255,255,255,0.05)] text-[13px] text-[var(--arc-text)] transition-colors duration-200 hover:bg-[rgba(255,255,255,0.1)]',
+          'flex h-9 w-9 pointer-coarse:h-11 pointer-coarse:w-11 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[rgba(255,255,255,0.05)] text-[13px] text-[var(--arc-text)] transition-colors duration-200 hover:bg-[rgba(255,255,255,0.1)]',
           FOCUS_RING,
         )}
       >
@@ -482,14 +488,26 @@ function navPillClass({ isActive }: { isActive: boolean }): string {
   )
 }
 
+/**
+ * The shell's side gutters: 16px on a phone and 40px from `md`, or the
+ * safe-area inset where that is wider (M18). The inset is zero in a browser
+ * tab; it matters once the installed app draws edge to edge
+ * (`viewport-fit=cover`) on a phone held sideways, where the notch would
+ * otherwise sit over the mark and the first poster of every shelf.
+ */
+const SAFE_GUTTER = cx(
+  'pr-[max(16px,env(safe-area-inset-right))] pl-[max(16px,env(safe-area-inset-left))]',
+  'md:pr-[max(40px,env(safe-area-inset-right))] md:pl-[max(40px,env(safe-area-inset-left))]',
+)
+
 function Toolbar({ account, isPhone }: { account: AccountMenu | null; isPhone: boolean }) {
   // Phone: the field would leave no room for the mark, so it starts as a
   // 44px control and expands over the bar when it is asked for.
   const [searchOpen, setSearchOpen] = useState(false)
 
   return (
-    <header className="sticky top-0 z-30 border-b-[0.5px] border-[var(--arc-hairline)] bg-[rgba(8,11,17,0.8)] backdrop-blur-toolbar backdrop-saturate-[180%]">
-      <div className="flex h-[68px] items-center gap-[22px] px-4 md:px-10">
+    <header className="sticky top-0 z-30 border-b-[0.5px] pt-[env(safe-area-inset-top)] border-[var(--arc-hairline)] bg-[rgba(8,11,17,0.8)] backdrop-blur-toolbar backdrop-saturate-[180%]">
+      <div className={cx('flex h-[68px] items-center gap-[22px]', SAFE_GUTTER)}>
         {isPhone && searchOpen ? (
           <>
             <ToolbarSearch className="flex-1" autoFocus />
@@ -705,11 +723,50 @@ function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => 
 
 /* --- Shell ------------------------------------------------------------- */
 
+/**
+ * The one line every page carries while Arc cannot reach its server (FR-S9).
+ *
+ * Pages with a remembered payload (Watch Now, a show page already opened)
+ * render it underneath; the rest fail as they always did. Either way the way
+ * out is the same: the episodes on this device, which need no network.
+ */
+function OfflineStrip({ downloads }: { downloads: boolean }) {
+  // The demo account may not download, so it is told only the fact.
+  if (!downloads) {
+    return (
+      <p
+        role="status"
+        className="mb-5 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-4 py-3 text-[14px] text-[var(--arc-text-muted)]"
+      >
+        You’re offline.
+      </p>
+    )
+  }
+  return (
+    <p
+      role="status"
+      className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-4 py-3 text-[14px] text-[var(--arc-text-muted)]"
+    >
+      <span>You’re offline — your downloads are here.</span>
+      <Link
+        to="/downloads"
+        className={cx(
+          'font-medium text-[var(--arc-text)] underline-offset-4 hover:underline',
+          FOCUS_RING,
+        )}
+      >
+        Go to Downloads
+      </Link>
+    </p>
+  )
+}
+
 export function Layout() {
   const isPhone = useIsPhone()
   const account = useAccountMenu()
   const location = useLocation()
   const [moreOpen, setMoreOpen] = useState(false)
+  const offline = useOffline()
 
   // One `EventSource` for the tab, here because this is the one component that
   // is mounted exactly once for the whole signed-in app (§5.9). It renders
@@ -734,8 +791,11 @@ export function Layout() {
 
       <main
         className={cx(
-          'flex-1 px-4 pt-6 md:px-10 md:pt-11',
-          isPhone ? 'pb-[calc(88px+env(safe-area-inset-bottom))]' : 'pb-24',
+          'flex-1 pt-6 md:pt-11',
+          SAFE_GUTTER,
+          isPhone
+            ? 'pb-[calc(88px+env(safe-area-inset-bottom))]'
+            : 'pb-[calc(96px+env(safe-area-inset-bottom))]',
         )}
       >
         {/*
@@ -744,6 +804,15 @@ export function Layout() {
          * repaint. The reduced-motion rule in index.css turns it off.
          */}
         <div key={location.pathname} className="mx-auto w-full max-w-[1180px] animate-rise">
+          {/*
+           * The install hint (M18) sits above Watch Now and nowhere else: it
+           * renders nothing outside Safari or Chrome on an iPad or iPhone, or
+           * once Arc is on the Home Screen, or once dismissed.
+           */}
+          {location.pathname === '/' ? <InstallHint /> : null}
+          {offline && location.pathname !== '/downloads' ? (
+            <OfflineStrip downloads={account?.isDemo !== true} />
+          ) : null}
           <Outlet />
         </div>
       </main>

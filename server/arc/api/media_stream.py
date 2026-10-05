@@ -1,8 +1,9 @@
-"""Authenticated HLS: the playlist and the segments (FR-S1, architecture §5.4).
+"""Authenticated HLS and episode downloads (FR-S1, FR-S7, architecture §5.4).
 
-Two routes, mounted at ``/media`` and deliberately **not** under ``/api``:
+Three routes, mounted at ``/media`` and deliberately **not** under ``/api``:
 
 * ``GET /media/{episode_id}/index.m3u8``
+* ``GET /media/{episode_id}/episode.mp4`` — the whole episode as one file
 * ``GET /media/{episode_id}/{init.mp4 | seg_NNNNN.m4s}``
 
 They are outside ``/api`` because they are not part of the JSON API — nothing
@@ -14,6 +15,15 @@ unauthenticated request gets the same 401 JSON as anywhere else rather than a
 redirect a media element could not follow. The CSRF middleware is untouched by
 this module — it guards ``/api/`` and only unsafe methods, and both routes are
 ``GET``.
+
+**The download is the same files, concatenated.** ``episode.mp4`` is
+``init.mp4`` followed by every segment the playlist names, streamed back to
+back with no ffmpeg and no temporary file — fMP4 makes that a valid MP4 on its
+own (:mod:`arc.services.media.download` has the reasoning and the pure
+arithmetic). It answers ranges, ``If-Range`` and ``If-None-Match`` itself,
+against an ETag over every part, and refuses the demo account with a 403.
+Every part it sends has passed the same name, symlink and confinement checks
+as a segment request, described next.
 
 **Paths are derived from the id and a closed vocabulary of names.** The
 episode id decides the directory (:func:`~arc.services.media.names.
@@ -73,18 +83,38 @@ from __future__ import annotations
 import logging
 import os
 import stat
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
-from typing import Annotated, Any, Final, NoReturn
+from typing import IO, Annotated, Any, Final, NoReturn
 
+import anyio
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi import Path as PathParam
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
 
 from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep, get_current_user
-from arc.models import Episode, EpisodeState
+from arc.models import Anime, Episode, EpisodeState
+from arc.services.catalog import preferred_title
+from arc.services.media.download import (
+    MAX_PLAYLIST_BYTES,
+    PART_NAME_PATTERN,
+    ByteSpan,
+    PartRead,
+    PlaylistError,
+    RangeMalformed,
+    RangeNotSatisfiable,
+    content_disposition,
+    download_etag,
+    if_range_matches,
+    parse_range,
+    playlist_parts,
+    slice_parts,
+)
 from arc.services.media.names import output_dir_for
 from arc.services.media.plan import PLAYLIST_NAME
 
@@ -110,7 +140,11 @@ router = APIRouter(prefix="/media", tags=["media"], dependencies=[Depends(get_cu
 #: crate, and the two spell end-of-input differently. Switching pydantic to
 #: ``python-re`` would raise here at import rather than quietly widen the
 #: pattern, which is the right way round for a check that guards the disk.
-SEGMENT_PATTERN: Final[str] = r"\A(init\.mp4|seg_\d{5}\.m4s)\z"
+#:
+#: The constant itself lives in :mod:`arc.services.media.download`, which
+#: checks every name a playlist hands the whole-episode download against the
+#: same vocabulary — one definition, so the two cannot drift apart.
+SEGMENT_PATTERN: Final[str] = PART_NAME_PATTERN
 
 #: Apple's type for an HLS playlist. ``application/x-mpegURL`` is the older
 #: spelling and hls.js accepts either; this is the one RFC 8216 registers.
@@ -144,6 +178,24 @@ RANGE_ERRORS: Final[dict[int, str]] = {
 }
 
 
+#: The whole-episode download's name (FR-S7). Not in :data:`SEGMENT_PATTERN`,
+#: so it can never be mistaken for a part, and registered before the segment
+#: route so the literal wins the match.
+DOWNLOAD_NAME: Final[str] = "episode.mp4"
+
+#: Revalidate rather than reuse: the file is a view over a rendition that a
+#: ``force`` re-encode can replace under the same URL, and the ETag makes
+#: revalidation a 304. ``private`` for the same reason as everything else here.
+DOWNLOAD_CACHE: Final[str] = "private, no-cache"
+
+#: How much of a part one read takes. Bounded, so a download costs one chunk of
+#: memory however long the episode is; a megabyte is about one segment.
+DOWNLOAD_CHUNK: Final[int] = 1 << 20
+
+#: The demo account may watch but not take files away (owner, 2026-10-04).
+DEMO_REFUSED: Final[str] = "downloads are turned off for the demo account"
+
+
 def playlist_url(episode_id: int) -> str:
     """Where a client points hls.js for one episode.
 
@@ -152,6 +204,15 @@ def playlist_url(episode_id: int) -> str:
     together.
     """
     return f"{router.prefix}/{episode_id}/{PLAYLIST_NAME}"
+
+
+def download_url(episode_id: int) -> str:
+    """Where a client downloads one ready episode as a single MP4 (FR-S7).
+
+    Beside :func:`playlist_url` for the same reason: the URL the show page is
+    sent and the route that answers it live in one file.
+    """
+    return f"{router.prefix}/{episode_id}/{DOWNLOAD_NAME}"
 
 
 def _miss() -> NoReturn:
@@ -280,22 +341,17 @@ class _JSONRangeErrors(FileResponse):
         )
 
 
-def _serve(
-    request: Request, directory: Path, path: Path, *, media_type: str, cache: str
-) -> Response:
-    """One file from inside ``directory``, with caching, conditionals, ranges.
+def _checked_stat(directory: Path, path: Path) -> os.stat_result:
+    """``stat`` of a plain file inside ``directory``, or 404.
 
-    The two filesystem checks come first and are described at the top of this
-    module: ``path`` may not be a symlink, and it must resolve to somewhere
-    inside ``directory``. Both sides are resolved before they are compared —
+    The two filesystem checks described at the top of this module: ``path``
+    may not be a symlink, and it must resolve to somewhere inside
+    ``directory``. Both sides are resolved before they are compared —
     ``DATA_DIR`` is routinely a path with a link in it (``/tmp`` on macOS, a
     mounted volume anywhere), and comparing a resolved target against an
-    unresolved root would refuse every legitimate request on such a host.
-
-    ``stat`` is taken here rather than left to ``FileResponse`` for two
-    reasons: a missing file has to become a 404 (``FileResponse`` raises
-    ``RuntimeError`` and 500s), and the ETag has to exist before the
-    ``If-None-Match`` comparison that may mean no file is read at all.
+    unresolved root would refuse every legitimate request on such a host. Then
+    it has to exist and be a regular file. Shared by :func:`_serve` and the
+    whole-episode download, which asks it of every part.
     """
     if _is_symlink(path):
         log.warning("refusing a symlink under a rendition", extra={"path": str(path)})
@@ -315,7 +371,21 @@ def _serve(
         _miss()
     if not stat.S_ISREG(info.st_mode):
         _miss()
+    return info
 
+
+def _serve(
+    request: Request, directory: Path, path: Path, *, media_type: str, cache: str
+) -> Response:
+    """One file from inside ``directory``, with caching, conditionals, ranges.
+
+    The filesystem checks come first (:func:`_checked_stat`). ``stat`` is
+    taken there rather than left to ``FileResponse`` for two reasons: a
+    missing file has to become a 404 (``FileResponse`` raises ``RuntimeError``
+    and 500s), and the ETag has to exist before the ``If-None-Match``
+    comparison that may mean no file is read at all.
+    """
+    info = _checked_stat(directory, path)
     etag = _etag(info)
     headers = {
         "Cache-Control": cache,
@@ -380,6 +450,364 @@ async def playlist(
     return response
 
 
+# --- The whole episode as one file (FR-S7) --------------------------------------
+
+
+class _PartChanged(RuntimeError):
+    """A part is no longer the file the response's headers were computed from.
+
+    Raised mid-body, after the status and ``Content-Length`` have gone out, so
+    there is no clean answer left: the exception aborts the connection, and a
+    client that checks the length it was promised (the offline downloader
+    does) sees a short body rather than a silently spliced one.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class _Part:
+    """One file of the concatenation, as it was when the headers were computed.
+
+    ``dev`` and ``ino`` as well as size and mtime: a part replaced by another
+    file of the same length and the same timestamp (a restore, a ``cp -p``) is
+    a different file, and only its identity says so.
+    """
+
+    name: str
+    size: int
+    mtime_ns: int
+    dev: int
+    ino: int
+
+
+@dataclass(slots=True)
+class _Rendition:
+    """An open rendition directory and the parts the playlist names.
+
+    The directory is opened once — ``O_DIRECTORY | O_NOFOLLOW`` — and every
+    file below it is opened *relative to that descriptor* (``dir_fd=``) with
+    ``O_NOFOLLOW``. No path is resolved again for the life of the response, so
+    a rendition directory renamed, swapped or replaced by a link twenty minutes
+    into a download cannot redirect the reads still to come: they go to the
+    directory that was checked, or fail. Whoever holds one must call
+    :meth:`close`, on every path out.
+    """
+
+    fd: int
+    parts: list[_Part]
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            fd, self.fd = self.fd, -1
+            os.close(fd)
+
+
+def _open_at(dir_fd: int, name: str) -> int:
+    """A read-only descriptor for ``name`` inside ``dir_fd``; never a link."""
+    return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+
+
+def _regular_at(dir_fd: int, name: str) -> os.stat_result:
+    """``lstat`` of ``name`` inside ``dir_fd`` if it is a plain file, else 404.
+
+    The segment route's checks, relative to the open directory: a link is
+    refused outright, and so is anything that is not a regular file.
+    Confinement needs no resolving here — every name has been matched against
+    the closed vocabulary, which admits no separator, so a name looked up
+    under ``dir_fd`` is inside it by construction.
+    """
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        _miss()
+    if stat.S_ISLNK(info.st_mode):
+        log.warning("refusing a symlink under a rendition", extra={"part": name})
+        _miss()
+    if not stat.S_ISREG(info.st_mode):
+        _miss()
+    return info
+
+
+def _read_playlist(dir_fd: int) -> str:
+    """``index.m3u8`` under ``dir_fd``, at most :data:`MAX_PLAYLIST_BYTES`."""
+    with os.fdopen(_open_at(dir_fd, PLAYLIST_NAME), "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise PlaylistError("the playlist is not a regular file")
+        raw = handle.read(MAX_PLAYLIST_BYTES + 1)
+    if len(raw) > MAX_PLAYLIST_BYTES:
+        raise PlaylistError("the playlist is larger than any the encoder writes")
+    return raw.decode("utf-8")
+
+
+def _open_rendition(directory: Path, episode_id: int) -> _Rendition:
+    """Open the rendition directory and check every part; or 404.
+
+    Blocking (a few hundred ``stat`` calls and one small read), so the handler
+    runs it in a worker thread. The directory is opened without following a
+    link (:func:`_ready_dir` has refused one already; this closes the window
+    after it), the playlist is read through it, every name the playlist hands
+    back has been matched against the router's vocabulary by
+    :func:`playlist_parts`, and each part gets :func:`_regular_at`. Any
+    refusal is the router's one 404 and a warning in the log — never a file
+    with a hole in it. The descriptor is closed here on every refusal; on
+    success it belongs to the caller.
+    """
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        log.warning(
+            "refusing a download: the rendition directory cannot be opened as one",
+            extra={"episode_id": episode_id},
+        )
+        _miss()
+    try:
+        try:
+            names = playlist_parts(_read_playlist(dir_fd))
+        except (OSError, UnicodeDecodeError, PlaylistError) as exc:
+            log.warning(
+                "refusing a download: the playlist does not describe a whole rendition",
+                extra={"episode_id": episode_id, "reason": str(exc)},
+            )
+            _miss()
+
+        parts: list[_Part] = []
+        for name in names:
+            try:
+                info = _regular_at(dir_fd, name)
+            except HTTPException:
+                log.warning(
+                    "refusing a download: a part is missing or refused",
+                    extra={"episode_id": episode_id, "part": name},
+                )
+                raise
+            parts.append(
+                _Part(
+                    name=name,
+                    size=info.st_size,
+                    mtime_ns=info.st_mtime_ns,
+                    dev=info.st_dev,
+                    ino=info.st_ino,
+                )
+            )
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return _Rendition(fd=dir_fd, parts=parts)
+
+
+def _open_part(dir_fd: int, part: _Part) -> IO[bytes]:
+    """Open one part and confirm it is still the file the headers describe."""
+    handle = os.fdopen(_open_at(dir_fd, part.name), "rb")
+    try:
+        info = os.fstat(handle.fileno())
+        now = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if now != (part.dev, part.ino, part.size, part.mtime_ns):
+            raise _PartChanged(part.name)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+async def _stream_parts(
+    rendition: _Rendition, reads: list[PartRead], episode_id: int
+) -> AsyncGenerator[bytes]:
+    """The bytes of ``reads``, in bounded chunks, without blocking the loop.
+
+    Opens, seeks and reads all run in worker threads (``anyio.wrap_file``), one
+    part open at a time, at most :data:`DOWNLOAD_CHUNK` bytes in hand. A
+    client that goes away stops it: Starlette's ``StreamingResponse`` cancels
+    the iteration on ``http.disconnect``, and :class:`_PartsResponse` closes
+    the generator, whose ``finally`` closes the file that was open.
+
+    The open is shielded from that cancellation. A cancelled
+    ``to_thread.run_sync`` still waits for its thread, and the thread still
+    opens the file — but the handle it returns would then have nowhere to go.
+    Shielded, it always reaches the ``try`` that closes it, and the
+    cancellation lands at the next await inside it.
+    """
+    try:
+        for read in reads:
+            part = rendition.parts[read.index]
+            with anyio.CancelScope(shield=True):
+                handle = await anyio.to_thread.run_sync(_open_part, rendition.fd, part)
+            try:
+                source = anyio.wrap_file(handle)
+                await source.seek(read.offset)
+                remaining = read.length
+                while remaining:
+                    chunk = await source.read(min(DOWNLOAD_CHUNK, remaining))
+                    if not chunk:
+                        raise _PartChanged(part.name)
+                    remaining -= len(chunk)
+                    yield chunk
+            finally:
+                # Synchronously, not ``await source.aclose()``: on a disconnect
+                # this runs inside a cancelled scope, where any await is
+                # cancelled again before the close happens. Closing a file
+                # opened for reading does not block.
+                handle.close()
+    except (_PartChanged, OSError) as exc:
+        log.warning(
+            "a rendition changed during a download; aborting the response",
+            extra={"episode_id": episode_id, "reason": repr(exc)},
+        )
+        raise
+
+
+class _PartsResponse(StreamingResponse):
+    """``StreamingResponse`` that cleans up however the response ends.
+
+    Starlette cancels the iteration when the client disconnects but leaves the
+    suspended generator for the garbage collector, and with it the open file
+    handle. ``aclose`` runs the generator's ``finally`` now instead. The
+    rendition's directory descriptor is closed here rather than in the
+    generator, because a generator that never started — a disconnect before
+    the first chunk — never runs its ``finally`` at all.
+    """
+
+    def __init__(
+        self, content: AsyncGenerator[bytes], *, rendition: _Rendition, **kwargs: Any
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._generator = content
+        self._rendition = rendition
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await self._generator.aclose()
+            finally:
+                self._rendition.close()
+
+
+@router.get(
+    f"/{{episode_id}}/{DOWNLOAD_NAME}",
+    summary="The whole episode as one MP4 file (FR-S7)",
+    response_class=StreamingResponse,
+    responses={
+        200: {"content": {SEGMENT_TYPE: {}}, "description": "the whole file"},
+        206: {"description": "a byte range of the file"},
+        304: {"description": "the caller's copy is current"},
+        400: {"description": RANGE_ERRORS[status.HTTP_400_BAD_REQUEST]},
+        401: {"description": "not authenticated"},
+        403: {"description": DEMO_REFUSED},
+        404: {"description": NOT_FOUND},
+        416: {"description": RANGE_ERRORS[status.HTTP_416_RANGE_NOT_SATISFIABLE]},
+    },
+)
+async def download(
+    episode_id: EpisodeId,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    """Serve ``init.mp4`` and every segment, concatenated, as one MP4 file.
+
+    No ffmpeg and no temporary file: fMP4's init segment followed by its
+    fragments is already a valid MP4 (:mod:`arc.services.media.download`), so
+    the response is computed from the parts' sizes and streamed from the
+    files themselves. Range, ``If-Range`` and ``If-None-Match`` are answered
+    here, against a strong ETag over every part, because there is no single
+    file for ``FileResponse`` to do it with — and because the in-app offline
+    downloader that will consume this route resumes 8 MB ranges and restarts
+    whenever that ETag moves.
+
+    The demo account is refused before anything is looked up, so the 403 says
+    nothing about which episodes exist.
+    """
+    if user.is_demo:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
+    directory = await _ready_dir(session, settings, episode_id)
+    # Both already loaded or one primary-key lookup away; :func:`_ready_dir`
+    # has established the episode exists and is ready.
+    episode = await session.get(Episode, episode_id)
+    anime = await session.get(Anime, episode.anime_id) if episode is not None else None
+    if episode is None or anime is None:
+        _miss()
+    disposition = content_disposition(preferred_title(anime), episode.number)
+    # Give the connection back before the body starts: FastAPI closes a
+    # ``yield`` dependency only after the response has been *sent*, and a
+    # download is sent over minutes. Nothing below touches the database, and
+    # the dependency's own close later is a no-op on a closed session.
+    await session.close()
+    rendition = await anyio.to_thread.run_sync(_open_rendition, directory, episode_id)
+    # The directory descriptor is closed here on every answer that does not
+    # stream (304, 400, 416, HEAD, an exception), and by the response itself
+    # once it has been handed one.
+    try:
+        response = _download_response(request, rendition, disposition, user.id, episode_id)
+    except BaseException:
+        rendition.close()
+        raise
+    if not isinstance(response, _PartsResponse):
+        rendition.close()
+    return response
+
+
+def _download_response(
+    request: Request, rendition: _Rendition, disposition: str, user_id: int, episode_id: int
+) -> Response:
+    """The answer for an open, checked rendition: 200, 206, 304, 400 or 416."""
+    parts = rendition.parts
+    sizes = [part.size for part in parts]
+    total = sum(sizes)
+    etag = download_etag([(part.name, part.size, part.mtime_ns) for part in parts])
+    validators = {"Cache-Control": DOWNLOAD_CACHE, "ETag": etag, "Accept-Ranges": "bytes"}
+    if _matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=validators)
+
+    span: ByteSpan | None = None
+    if if_range_matches(request.headers.get("if-range"), etag):
+        try:
+            span = parse_range(request.headers.get("range"), total)
+        except RangeMalformed:
+            code = status.HTTP_400_BAD_REQUEST
+            return JSONResponse(
+                {"detail": RANGE_ERRORS[code]}, status_code=code, headers=validators
+            )
+        except RangeNotSatisfiable:
+            code = status.HTTP_416_RANGE_NOT_SATISFIABLE
+            return JSONResponse(
+                {"detail": RANGE_ERRORS[code]},
+                status_code=code,
+                headers={**validators, "Content-Range": f"bytes */{total}"},
+            )
+
+    headers = {**validators, "Content-Disposition": disposition}
+    if span is None:
+        code = status.HTTP_200_OK
+        span = ByteSpan(first=0, last=total - 1, total=total)
+    else:
+        code = status.HTTP_206_PARTIAL_CONTENT
+        headers["Content-Range"] = span.content_range()
+    headers["Content-Length"] = str(max(span.length, 0))
+
+    # One line per request: a resuming downloader makes a few dozen of them
+    # for one episode (8 MB at a time), far fewer than the segments a playback
+    # fetches, and each says which bytes went to whom.
+    log.info(
+        "episode download",
+        extra={
+            "user_id": user_id,
+            "episode_id": episode_id,
+            "status": code,
+            "range": headers.get("Content-Range"),
+        },
+    )
+    if request.method == "HEAD":
+        return Response(status_code=code, headers=headers, media_type=SEGMENT_TYPE)
+    return _PartsResponse(
+        _stream_parts(rendition, slice_parts(sizes, span), episode_id),
+        rendition=rendition,
+        status_code=code,
+        headers=headers,
+        media_type=SEGMENT_TYPE,
+    )
+
+
 @router.get(
     "/{episode_id}/{name}",
     summary="One init or media segment (FR-S1)",
@@ -420,20 +848,25 @@ async def segment(
     )
 
 
-# HEAD as well as GET, on both. A media element's first act is often to ask how
-# big a thing is, and HEAD is defined as GET without the body — Starlette's
-# ``FileResponse`` already answers it that way, so the only thing missing was
-# the method being allowed. Registered separately and out of the schema rather
+# HEAD as well as GET, on all three. A media element's first act is often to
+# ask how big a thing is, and HEAD is defined as GET without the body —
+# Starlette's ``FileResponse`` already answers it that way, and the download
+# handler answers it itself, so the only thing missing was the method being
+# allowed. Registered separately and out of the schema rather
 # than as ``methods=["GET", "HEAD"]``, which would publish two operations under
 # one id and make the generated client types ambiguous.
 for _route, _endpoint in (
     ("/{episode_id}/index.m3u8", playlist),
+    (f"/{{episode_id}}/{DOWNLOAD_NAME}", download),
     ("/{episode_id}/{name}", segment),
 ):
     router.add_api_route(_route, _endpoint, methods=["HEAD"], include_in_schema=False)
 
 
 __all__ = [
+    "DEMO_REFUSED",
+    "DOWNLOAD_CACHE",
+    "DOWNLOAD_NAME",
     "NOT_FOUND",
     "PLAYLIST_CACHE",
     "PLAYLIST_TYPE",
@@ -441,6 +874,7 @@ __all__ = [
     "SEGMENT_CACHE",
     "SEGMENT_PATTERN",
     "SEGMENT_TYPE",
+    "download_url",
     "playlist_url",
     "router",
 ]

@@ -23,6 +23,7 @@ import {
 import { useEffect, useRef } from 'react'
 import { ApiError, apiFetch } from '@/lib/api'
 import { errorDetail } from '@/lib/auth'
+import { animePayloadKey, withRemembered } from '@/offline/cache'
 // Type-only, and erased under `verbatimModuleSyntax`: `mal.ts` imports values
 // from here, so this must never become a runtime import.
 import type { MalSync } from '@/lib/mal'
@@ -288,6 +289,14 @@ export interface EpisodeOut {
   release: EpisodeRelease | null
   /** What the transcode produced; sent once the episode is `ready` (FR-P3). */
   rendition: EpisodeRendition | null
+  /**
+   * Where the episode downloads as one MP4 file (FR-S7), sent exactly when
+   * `rendition` is — so only for a `ready` episode. Built by the server beside
+   * the route that answers it, like the player's `playlist_url`; nothing here
+   * assembles a media path. Optional on the wire so a cached payload from
+   * before 2026-10-04 still parses.
+   */
+  download_url?: string | null
 }
 
 /**
@@ -1015,7 +1024,9 @@ export function useAnime(id: number): UseQueryResult<AnimeDetail, Error> {
 
   return useQuery<AnimeDetail, Error>({
     queryKey: animeQueryKey(id),
-    queryFn: () => apiFetch<AnimeDetail>(`/api/anime/${id}`),
+    // A show page once opened is kept for a launch with no network (FR-S9).
+    queryFn: () =>
+      withRemembered(animePayloadKey(id), () => apiFetch<AnimeDetail>(`/api/anime/${id}`)),
     enabled: Number.isInteger(id) && id > 0,
     retry: false,
     // Two reasons to re-ask, both on the server's clock rather than on
@@ -1083,7 +1094,11 @@ function applyToSchedule(client: QueryClient, animeId: number, status: ListStatu
   client.setQueriesData<SchedulePage>({ queryKey: [SCHEDULE_QUERY_KEY] }, (current) => {
     if (current === undefined) return current
     // A season this show does not air in is left alone, object identity and all.
-    if (!current.days.some((day) => holds(day.entries)) && !holds(current.unscheduled)) {
+    if (
+      !current.days.some((day) => holds(day.entries)) &&
+      !holds(current.unscheduled) &&
+      !holds(current.ended)
+    ) {
       return current
     }
     return {
@@ -1094,6 +1109,7 @@ function applyToSchedule(client: QueryClient, animeId: number, status: ListStatu
       unscheduled: holds(current.unscheduled)
         ? current.unscheduled.map(patch)
         : current.unscheduled,
+      ended: holds(current.ended) ? current.ended.map(patch) : current.ended,
     }
   })
 }

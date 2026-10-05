@@ -16,14 +16,13 @@ import {
 import { catalogErrorMessage } from '@/lib/anime'
 import { authErrorMessage, timezoneOptions, useUpdateTimezone } from '@/lib/auth'
 import {
-  currentSeason,
+  dayLabel,
   parseSeason,
   parseYear,
   seasonLabel,
   SEASONS,
+  todayInTimezone,
   useSchedule,
-  weekDates,
-  weekdayInTimezone,
   WEEKDAY_CODES,
   WEEKDAY_LABELS,
   type ScheduleDay,
@@ -43,6 +42,33 @@ const ESTIMATED_HINT = 'Estimated from the broadcast slot'
 const VIA_MAL_HINT = 'AniList is unavailable; this row came from MyAnimeList'
 
 /**
+ * What an entry with no slot on screen says instead of a time (owner,
+ * 2026-10-04): "Starts 14 Oct" for a show of this season that has not started,
+ * "Next 13 Oct" for an airing one whose next broadcast is past the dates on
+ * screen — read in the schedule's zone, as every date here is — and "Time
+ * unknown" when nothing says.
+ */
+function unslottedLabel(entry: ScheduleEntry, timezone: string | undefined): string {
+  const starts = entry.starts_on === null ? undefined : dayLabel(entry.starts_on)
+  if (starts !== undefined) return `Starts ${starts}`
+  if (entry.anime.status === 'RELEASING' && entry.next_at !== null && timezone !== undefined) {
+    const day = todayInTimezone(timezone, new Date(entry.next_at))
+    const next = day === null ? undefined : dayLabel(day)
+    if (next !== undefined) return `Next ${next}`
+  }
+  return 'Time unknown'
+}
+
+/** " · Ep 7", or " · Ep 3–4" when one date carries two of the show's. */
+function episodeLabel(entry: ScheduleEntry): string | null {
+  if (entry.next_episode === null) return null
+  const last = entry.last_episode
+  return last === null || last <= entry.next_episode
+    ? ` · Ep ${String(entry.next_episode)}`
+    : ` · Ep ${String(entry.next_episode)}–${String(last)}`
+}
+
+/**
  * "20:00 est. · Ep 7", with the parts the server actually knows. The marker
  * sits against the time because that is what it qualifies: the episode number
  * is not a guess even when the moment it airs is.
@@ -50,10 +76,10 @@ const VIA_MAL_HINT = 'AniList is unavailable; this row came from MyAnimeList'
  * A `<span>` rather than a `<p>`: the whole row is one `<a>`, and a paragraph
  * inside a link is legal but reads oddly to anything walking the tree.
  */
-function SlotLine({ entry }: { entry: ScheduleEntry }) {
+function SlotLine({ entry, timezone }: { entry: ScheduleEntry; timezone?: string }) {
   return (
     <span className="mt-1 block text-[15px] tabular-nums text-[var(--arc-text-muted)]">
-      {entry.air_time_local ?? 'Time unknown'}
+      {entry.air_time_local ?? unslottedLabel(entry, timezone)}
       {entry.next_at_estimated ? (
         <>
           {' '}
@@ -62,7 +88,7 @@ function SlotLine({ entry }: { entry: ScheduleEntry }) {
           </span>
         </>
       ) : null}
-      {entry.next_episode === null ? null : ` · Ep ${String(entry.next_episode)}`}
+      {episodeLabel(entry)}
     </span>
   )
 }
@@ -91,9 +117,11 @@ function CarriedOverLine({ entry }: { entry: ScheduleEntry }) {
       ? seasonLabel(year, season as Season)
       : String(year)
 
-  return (
-    <span className="mt-0.5 block text-[12px] text-[var(--arc-text-faint)]">{`Since ${label}`}</span>
-  )
+  // A premiere carried in ahead of its own season (the turnover week) has not
+  // been on since anything: it names the season it belongs to and no more.
+  const text = entry.next_episode === 1 ? label : `Since ${label}`
+
+  return <span className="mt-0.5 block text-[12px] text-[var(--arc-text-faint)]">{text}</span>
 }
 
 /**
@@ -124,6 +152,7 @@ function CarriedOverLine({ entry }: { entry: ScheduleEntry }) {
 function EntryRow({
   entry,
   statusClassName = 'px-3 pb-3 lg:hidden',
+  timezone,
 }: {
   entry: ScheduleEntry
   /**
@@ -132,6 +161,8 @@ function EntryRow({
    * at every size.
    */
   statusClassName?: string
+  /** The schedule's zone, for the "Next 13 Oct" an unslotted row can say. */
+  timezone?: string
 }) {
   const { anime } = entry
   const href = `/anime/${String(anime.id)}`
@@ -166,7 +197,7 @@ function EntryRow({
           <span className="block text-[15px] leading-[1.35] font-medium break-words text-[var(--arc-text)]">
             {anime.title.preferred}
           </span>
-          <SlotLine entry={entry} />
+          <SlotLine entry={entry} timezone={timezone} />
           <CarriedOverLine entry={entry} />
         </span>
       </Link>
@@ -182,7 +213,8 @@ function EntryRow({
 }
 
 /**
- * One day of the three on screen: "Wed 17 Sep" over its shows.
+ * One day of the three on screen: "Wed 17 Sep" over the shows airing that
+ * date — and only those (owner, 2026-10-04).
  *
  * The heading is both the column's title and its cell of the day-and-date bar
  * — one row of headings with the chevrons at its ends *is* the bar — so the
@@ -203,8 +235,8 @@ function DayColumn({
 }: {
   weekday: number
   /**
-   * "17 Sep" — undefined before the timezone is known, and on a browsed
-   * season, which is a set of weekday slots rather than a week with dates.
+   * "17 Sep" — the server's own date for the column; undefined on a browsed
+   * season, which is a set of weekday slots rather than days with dates.
    */
   date: string | undefined
   entries: ScheduleEntry[]
@@ -256,13 +288,10 @@ const CHEVRON = cx(
 /** How many days are on screen at once (owner, 2026-09-17). */
 const WINDOW_DAYS = 3
 
-/** The last day the window can start on and still hold three days. */
-const MAX_START = WEEKDAY_LABELS.length - WINDOW_DAYS
-
 const DAY_BAR_LABEL = 'Days shown'
 
 /**
- * Three days of the week the server sent, with arrows at both ends.
+ * Three of the days the server sent, with arrows at both ends.
  *
  * The seven-column grid was cramped from the day the current week started
  * carrying every airing show, long-runners included (owner, 2026-09-17):
@@ -270,9 +299,12 @@ const DAY_BAR_LABEL = 'Days shown'
  * columns of the same 1180px measure are ~350px each, which is a whole title,
  * a legible time and a 56px thumb.
  *
- * The window never runs off either end of the week: the arrows stop at Monday
- * and at Friday-start, because the week is all the server sent and a fourth
- * column of nothing is not what the arrow promised. Stepping seasons is a
+ * The window never runs off either end of what the server sent: the arrows
+ * stop at Monday and at the third-from-last day, because a fourth column of
+ * nothing is not what the arrow promised. On the current season that is
+ * Monday of this week through six days past today — on a Sunday the columns
+ * after today are next week's, each showing that date's own airings, never
+ * this week's (owner, 2026-10-04). Stepping seasons is a
  * different axis and keeps its own pair of buttons.
  *
  * Left/right move the window whenever focus is anywhere in the group — except
@@ -281,19 +313,14 @@ const DAY_BAR_LABEL = 'Days shown'
  */
 function DayWindow({
   days,
-  dates,
   today,
   start,
   onMove,
   dimmed,
 }: {
+  /** Dated on the current season; weekday names alone on a browse. */
   days: ScheduleDay[]
-  /**
-   * Week dates by weekday index; empty until the timezone is known and on a
-   * browsed season, where the bar is weekday names alone.
-   */
-  dates: string[]
-  /** The weekday to mark, or -1 for none — a browse has no today. */
+  /** The index into `days` to mark, or -1 for none — a browse has no today. */
   today: number
   start: number
   onMove: (delta: number) => void
@@ -332,13 +359,13 @@ function DayWindow({
           dimmed ? 'opacity-60' : '',
         )}
       >
-        {days.slice(start, start + WINDOW_DAYS).map((day) => (
+        {days.slice(start, start + WINDOW_DAYS).map((day, offset) => (
           <DayColumn
-            key={day.weekday}
+            key={day.date ?? day.weekday}
             weekday={day.weekday}
-            date={dates[day.weekday]}
+            date={day.date === null ? undefined : dayLabel(day.date)}
             entries={day.entries}
-            isToday={day.weekday === today}
+            isToday={start + offset === today}
           />
         ))}
       </div>
@@ -346,7 +373,7 @@ function DayWindow({
       <button
         type="button"
         aria-label="Next day"
-        disabled={start >= MAX_START}
+        disabled={start >= maxStart(days)}
         onClick={() => {
           onMove(1)
         }}
@@ -360,9 +387,11 @@ function DayWindow({
 
 /**
  * Collapsed by default: films and OVAs have no slot, so they are a footnote to
- * a weekday grid rather than part of it.
+ * a grid of days rather than part of it. On the current season it also holds
+ * the season's shows with nothing airing on the dates on screen — one that has
+ * not started reads "Starts 14 Oct" (owner, 2026-10-04).
  */
-function Unscheduled({ entries }: { entries: ScheduleEntry[] }) {
+function Unscheduled({ entries, timezone }: { entries: ScheduleEntry[]; timezone: string }) {
   const [open, setOpen] = useState(false)
   if (entries.length === 0) return null
 
@@ -381,7 +410,12 @@ function Unscheduled({ entries }: { entries: ScheduleEntry[] }) {
       {open ? (
         <ul className="mt-4 grid gap-0.5 sm:grid-cols-2 lg:grid-cols-3">
           {entries.map((entry) => (
-            <EntryRow key={entry.anime.id} entry={entry} statusClassName="px-3 pb-3" />
+            <EntryRow
+              key={entry.anime.id}
+              entry={entry}
+              statusClassName="px-3 pb-3"
+              timezone={timezone}
+            />
           ))}
         </ul>
       ) : null}
@@ -392,9 +426,9 @@ function Unscheduled({ entries }: { entries: ScheduleEntry[] }) {
 /**
  * "Times in Europe/Berlin", with a way to change it (spec §4.1 FR-C3).
  *
- * The zone belongs to the account, not to this page: the server groups the
- * grid into weekday columns in it, so saving one re-fetches the schedule
- * rather than re-formatting what is on screen. Until that answer lands the
+ * The zone belongs to the account, not to this page: the server dates the
+ * current week's days in it (and groups a browse into weekdays), so saving one
+ * re-fetches the schedule rather than re-formatting what is on screen. Until that answer lands the
  * header reads the zone off the user the save returned — the response in
  * flight still carries the old one, and a header that flicked back to it would
  * read as the save having failed.
@@ -500,25 +534,21 @@ function TimezoneControl({ timezone }: { timezone: string }) {
  */
 const TODAY_INTERVAL_MS = 60_000
 
-/** Keeps the window inside the week the server sent. */
-function clampStart(value: number): number {
-  return Math.min(Math.max(value, 0), MAX_START)
+/** The last day the window can start on and still hold three days. */
+function maxStart(days: ScheduleDay[]): number {
+  return Math.max(days.length - WINDOW_DAYS, 0)
+}
+
+/** Keeps the window inside the days the server sent. */
+function clampStart(value: number, days: ScheduleDay[]): number {
+  return Math.min(Math.max(value, 0), maxStart(days))
 }
 
 /**
- * Which column is today, what the week's dates are and which season is the
- * live one — all kept current while the page stays open, the first two read in
- * the schedule's own zone and the third in UTC, where the server reads it.
- * `today` is -1 and `dates` empty until the response says which zone that is.
- *
- * One interval for the three: they answer the same question ("what day is it,
- * and where does that put the viewer"), and two would tick apart.
+ * Today's date in the schedule's own zone ("2026-10-06"), kept current while
+ * the page stays open; null until the response says which zone that is.
  */
-function useClock(timezone: string | undefined): {
-  today: number
-  dates: string[]
-  season: SeasonRef
-} {
+function useToday(timezone: string | undefined): string | null {
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -530,12 +560,10 @@ function useClock(timezone: string | undefined): {
     }
   }, [])
 
-  return useMemo(() => {
-    const at = new Date(now)
-    const season = currentSeason(at)
-    if (timezone === undefined) return { today: -1, dates: [], season }
-    return { today: weekdayInTimezone(timezone, at), dates: weekDates(timezone, at), season }
-  }, [timezone, now])
+  return useMemo(
+    () => (timezone === undefined ? null : todayInTimezone(timezone, new Date(now))),
+    [timezone, now],
+  )
 }
 
 /**
@@ -560,17 +588,18 @@ export function Schedule() {
     setSearchParams({ year: String(ref.year), season: ref.season })
   }
 
-  const { today, dates, season: liveSeason } = useClock(data?.timezone)
+  const todayDate = useToday(data?.timezone)
+  const days = data?.days ?? []
 
   /**
-   * Whether the grid on screen is this week or a catalogue browse. Only the
-   * live season's grid is a real Monday–Sunday week — it is the one the server
-   * fills with every show on air — so only it gets dates on its bar and a day
-   * marked today (owner, 2026-09-17). A browse is the shows of that season by
-   * weekday, and printing this week's dates over them would say they air then.
+   * Which column is today. Only the current season's days are dated — the
+   * server sends a date per day there and none on a browse, which is the
+   * shows of that season by weekday — so a browse has no today and its bar is
+   * weekday names alone (owner, 2026-09-17). Read off the dates rather than
+   * the weekday, which is what keeps Sunday's "tomorrow" next Monday rather
+   * than this one (owner, 2026-10-04).
    */
-  const thisWeek =
-    data !== undefined && data.year === liveSeason.year && data.season === liveSeason.season
+  const today = todayDate === null ? -1 : days.findIndex((day) => day.date === todayDate)
 
   /**
    * How far the viewer has walked from today, not which day is on the left.
@@ -580,11 +609,11 @@ export function Schedule() {
    * browse has no today to start from, so it starts on Monday.
    */
   const [offset, setOffset] = useState(0)
-  const anchor = thisWeek && today >= 0 ? today : 0
-  const start = clampStart(anchor + offset)
+  const anchor = today >= 0 ? today : 0
+  const start = clampStart(anchor + offset, days)
 
   function move(delta: number) {
-    setOffset(clampStart(start + delta) - anchor)
+    setOffset(clampStart(start + delta, days) - anchor)
   }
 
   const isEmpty =
@@ -654,13 +683,12 @@ export function Schedule() {
               phone's own reading of "what is on tonight". */}
           <DayWindow
             days={data.days}
-            dates={thisWeek ? dates : []}
-            today={thisWeek ? today : -1}
+            today={today}
             start={start}
             onMove={move}
             dimmed={isFetching}
           />
-          <Unscheduled entries={data.unscheduled} />
+          <Unscheduled entries={data.unscheduled} timezone={data.timezone} />
         </>
       )}
     </section>

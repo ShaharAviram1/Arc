@@ -205,6 +205,7 @@ async def record_progress(
     duration_s: float,
     now: datetime | None = None,
     force_complete: bool = False,
+    reported_at: datetime | None = None,
 ) -> ProgressOutcome:
     """Upsert one ``watch_progress`` row and, if it just finished, the list.
 
@@ -213,10 +214,19 @@ async def record_progress(
     so it takes the identical path down to the list advance and the wants
     recompute rather than a parallel one that could drift.
 
+    ``reported_at`` is FR-S8's offline replay
+    (:mod:`arc.services.playback.sync`): the moment the *device* recorded the
+    sample, which becomes the row's ``updated_at`` (and ``completed_at``, if
+    this completes it) instead of ``now``, and which never moves
+    ``updated_at`` backwards. Everything else — the list advance, its MAL
+    write, the activation stamp — is still measured against ``now``, exactly
+    as an online report is. ``None`` (every online caller) changes nothing.
+
     Flushed, not committed. The caller's transaction is what makes the
     progress, the list advance and the queued reconciliation one thing.
     """
     at = now or datetime.now(UTC)
+    stamp = reported_at or at
     completing = force_complete or is_completed(position_s, duration_s)
 
     statement = pg_insert(WatchProgress).values(
@@ -225,8 +235,8 @@ async def record_progress(
         position_s=position_s,
         duration_s=duration_s,
         completed=completing,
-        completed_at=at if completing else None,
-        updated_at=at,
+        completed_at=stamp if completing else None,
+        updated_at=stamp,
     )
     upsert = statement.on_conflict_do_update(
         index_elements=[WatchProgress.user_id, WatchProgress.episode_id],
@@ -242,7 +252,13 @@ async def record_progress(
             ),
             # ``onupdate`` does not fire for the DO UPDATE half of an upsert
             # (see :func:`arc.models._columns.updated_at`), so it is set here.
-            "updated_at": statement.excluded.updated_at,
+            # A replayed offline report never moves it backwards: it is what
+            # the next replayed sample is judged stale against (FR-S8).
+            "updated_at": (
+                statement.excluded.updated_at
+                if reported_at is None
+                else func.greatest(WatchProgress.updated_at, statement.excluded.updated_at)
+            ),
         },
     )
 
@@ -465,7 +481,12 @@ class UnmarkOutcome:
 
 
 async def unmark_watched(
-    session: AsyncSession, *, user_id: int, episode: Episode, now: datetime | None = None
+    session: AsyncSession,
+    *,
+    user_id: int,
+    episode: Episode,
+    now: datetime | None = None,
+    reported_at: datetime | None = None,
 ) -> UnmarkOutcome:
     """Take back one watched mark, and the list progress if it was the latest.
 
@@ -501,8 +522,26 @@ async def unmark_watched(
     *below* the progress (taking back episode 4 of a list that says 9 would
     have to say something about 5…9 that nobody said), and one of an episode
     *above* it (there is nothing to lower). Both still clear the row.
+
+    ``reported_at`` is FR-S8's offline replay, as in :func:`record_progress`:
+    the row's ``updated_at`` becomes the device's moment (never moving
+    backwards) so a position recorded after the un-mark, on the same device,
+    is not judged stale against the moment the queue happened to reach the
+    server. The list rule above is untouched and still measured at ``now``.
+
+    **``unmarked_at`` records the un-mark** (owner, 2026-10-05): the device's
+    moment for a replay, ``now`` otherwise, never moving backwards. A
+    completion recorded *before* it and replayed later (FR-S8) is then judged
+    stale instead of re-completing what the user took back. It lives on the
+    ``watch_progress`` row, so when the un-mark lowered a list-vouched episode
+    that had no row, one is written — not completed, position 0, nothing but
+    the un-mark — because that un-mark is exactly the one an older offline
+    completion could otherwise undo. Every other un-mark without a row still
+    writes nothing.
     """
     at = now or datetime.now(UTC)
+    when = reported_at or at
+    updated = at if reported_at is None else func.greatest(WatchProgress.updated_at, reported_at)
     # ``RETURNING`` rather than ``rowcount``: it is the same round trip, and it
     # is a typed answer to "was there a row?" rather than a driver attribute.
     touched = await session.scalars(
@@ -511,11 +550,35 @@ async def unmark_watched(
             WatchProgress.user_id == user_id,
             WatchProgress.episode_id == episode.id,
         )
-        .values(completed=False, completed_at=None, updated_at=at)
+        .values(
+            completed=False,
+            completed_at=None,
+            updated_at=updated,
+            unmarked_at=func.greatest(func.coalesce(WatchProgress.unmarked_at, when), when),
+        )
         .returning(WatchProgress.episode_id)
     )
     cleared = touched.first() is not None
     lowered = await _retreat_list(session, user_id=user_id, episode=episode, now=at)
+    if not cleared and lowered is not None:
+        statement = pg_insert(WatchProgress).values(
+            user_id=user_id,
+            episode_id=episode.id,
+            position_s=0.0,
+            completed=False,
+            unmarked_at=when,
+            updated_at=when,
+        )
+        await session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[WatchProgress.user_id, WatchProgress.episode_id],
+                set_={
+                    "unmarked_at": func.greatest(
+                        func.coalesce(WatchProgress.unmarked_at, when), when
+                    ),
+                },
+            )
+        )
     return UnmarkOutcome(cleared=cleared, list_progress=lowered)
 
 
@@ -536,7 +599,17 @@ async def _retreat_list(
     the reconciliation is queued — FR-T3's "if a user later rewinds … it is
     re-acquired" is precisely this.
     """
-    entry = await session.get(ListEntry, (user_id, episode.anime_id))
+    # Locked and re-read: two un-marks of the same episode arriving together
+    # (two tabs, a replayed offline queue racing the show page) must lower the
+    # list — and log the MAL write — once. The second waits here for the first
+    # to commit and then finds the number already moved.
+    await session.flush()
+    entry = await session.get(
+        ListEntry,
+        (user_id, episode.anime_id),
+        with_for_update=True,
+        populate_existing=True,
+    )
     if entry is None or entry.progress <= 0 or entry.progress != episode.number:
         return None
 

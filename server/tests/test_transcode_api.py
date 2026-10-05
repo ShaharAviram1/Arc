@@ -107,10 +107,13 @@ async def test_the_show_page_reports_preparation_state_per_episode(
     }
     assert ready["prepare_progress"] is None
     assert ready["failure_reason"] is None
+    # FR-S7: the download URL travels exactly with the rendition.
+    assert ready["download_url"] == f"/media/{ready['id']}/episode.mp4"
 
     assert preparing["prepare_progress"] == pytest.approx(0.43)
     assert preparing["failure_reason"] is None
     assert preparing["rendition"] is None
+    assert preparing["download_url"] is None
 
     assert failed["failure_reason"].endswith("no such file or directory")
     assert failed["prepare_progress"] is None
@@ -118,6 +121,7 @@ async def test_the_show_page_reports_preparation_state_per_episode(
     assert matched["prepare_progress"] is None
     assert matched["failure_reason"] is None
     assert matched["rendition"] is None
+    assert matched["download_url"] is None
 
 
 async def test_a_ready_episode_carries_the_notes_its_transcode_recorded(

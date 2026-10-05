@@ -269,7 +269,8 @@ async def test_the_schedule_defaults_to_the_current_season(
     assert (body["year"], body["season"]) == (2026, "FALL")
     assert body["prev"] == {"year": 2026, "season": "SUMMER"}
     assert body["next"] == {"year": 2027, "season": "WINTER"}
-    assert [day["weekday"] for day in body["days"]] == [0, 1, 2, 3, 4, 5, 6]
+    # Monday of this week to a week of upcoming dates (owner, 2026-10-04).
+    assert [day["weekday"] for day in body["days"]] == [0, 1, 2, 3, 4, 5, 6, 0, 1]
 
 
 async def test_an_explicit_season_is_used_as_given(
@@ -325,7 +326,9 @@ async def test_each_kind_of_row_lands_where_it_belongs(
 
     body = response.json()
     assert body["timezone"] == "UTC"
-    assert titles(body["days"][MONDAY]) == ["Monday Rerun"]
+    # The finished show is on no date of the current view (owner, 2026-10-04):
+    # it used to sit on the Monday it last aired, weeks ago.
+    assert titles(body["days"][MONDAY]) == []
     assert titles(body["days"][FRIDAY]) == ["Friday Night Show"]
     assert titles(body["days"][SATURDAY]) == ["Saturday Late Show"]
     # The film and the show with no dates at all.
@@ -334,7 +337,7 @@ async def test_each_kind_of_row_lands_where_it_belongs(
         "Announced Only",
     ]
     placed = sum(len(day["entries"]) for day in body["days"])
-    assert placed == 3
+    assert placed == 2
 
 
 async def test_the_entries_carry_the_next_broadcast_when_the_source_knows_it(
@@ -356,12 +359,9 @@ async def test_the_entries_carry_the_next_broadcast_when_the_source_knows_it(
     assert mal_row["next_at"] is not None
     assert mal_row["next_at_estimated"] is True
 
-    # The finished show has only its episode rows to go on.
-    finished = body["days"][MONDAY]["entries"][0]
-    assert finished["air_time_local"] == "10:00"
-    assert finished["next_episode"] is None
-    assert finished["next_at"] is None
-    assert finished["next_at_estimated"] is False
+    # The finished show is on no date of the current view; how a browse still
+    # places one on its old weekday is tested below.
+    assert body["days"][MONDAY]["entries"] == []
 
 
 async def test_the_week_is_the_users_own(
@@ -532,14 +532,16 @@ async def test_an_episode_dated_this_week_carries_a_slotless_show_in(
 
     body = (await user_client.get("/api/schedule")).json()
 
-    assert titles(body["days"][MONDAY]) == ["Monday Rerun", "Undated Slot Show"]
-    assert body["days"][MONDAY]["entries"][1]["carried_over"] is True
+    # Monday Rerun, finished, is no longer beside it (owner, 2026-10-04).
+    assert titles(body["days"][MONDAY]) == ["Undated Slot Show"]
+    assert body["days"][MONDAY]["entries"][0]["carried_over"] is True
 
 
-async def test_a_finished_show_from_the_previous_season_is_not_carried_in(
+async def test_a_finished_show_from_the_previous_season_is_only_on_its_finale(
     user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
 ) -> None:
-    """It aired two days ago and is over; it is not on this week."""
+    """Its finale aired two days ago, on a displayed date: it was on then, and
+    on no other day (owner, 2026-10-04)."""
     anime_id = await add_two_cour(
         api_factory, title="Summer, Over", status="FINISHED", season="SUMMER", next_at=None
     )
@@ -549,11 +551,38 @@ async def test_a_finished_show_from_the_previous_season_is_not_carried_in(
 
     body = (await user_client.get("/api/schedule")).json()
 
-    assert "Summer, Over" not in [
-        entry["anime"]["title"]["preferred"] for day in body["days"] for entry in day["entries"]
+    placed = [
+        (day["date"], entry["anime"]["title"]["preferred"], entry["next_episode"])
+        for day in body["days"]
+        for entry in day["entries"]
+        if entry["anime"]["title"]["preferred"] == "Summer, Over"
     ]
+    assert placed == [("2026-11-02", "Summer, Over", 12)]
     assert "Summer, Over" not in [
-        entry["anime"]["title"]["preferred"] for entry in body["unscheduled"]
+        entry["anime"]["title"]["preferred"] for entry in [*body["unscheduled"], *body["ended"]]
+    ]
+
+
+async def test_a_finished_show_from_the_previous_season_with_no_date_here_is_absent(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    anime_id = await add_two_cour(
+        api_factory, title="Summer, Long Over", status="FINISHED", season="SUMMER", next_at=None
+    )
+    await add_episodes(
+        api_factory, anime_id, count=12, first_at=LAST_MONDAY_1000Z - timedelta(weeks=14)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert "Summer, Long Over" not in [
+        entry["anime"]["title"]["preferred"]
+        for entries in [
+            *(day["entries"] for day in body["days"]),
+            body["unscheduled"],
+            body["ended"],
+        ]
+        for entry in entries
     ]
 
 
@@ -568,7 +597,8 @@ async def test_an_airing_show_with_no_air_time_anywhere_is_not_carried_in(
     assert "On Air, Somewhere" not in [
         entry["anime"]["title"]["preferred"] for entry in body["unscheduled"]
     ]
-    assert sum(len(day["entries"]) for day in body["days"]) == 3
+    # Friday's and Saturday's shows; the finished Monday Rerun is on no date.
+    assert sum(len(day["entries"]) for day in body["days"]) == 2
 
 
 async def test_an_airing_show_of_this_season_with_no_air_time_stays_unscheduled(
@@ -751,6 +781,346 @@ async def test_another_users_progress_does_not_tick_this_slot(
     entry = (await user_client.get("/api/schedule")).json()["days"][WEDNESDAY]["entries"][0]
 
     assert entry["watched"] is False
+
+
+# --- The dated current view (owner, 2026-10-04) ------------------------------
+#
+# "The schedule should only show what's really playing that date." Each day of
+# the current view is one local date and lists exactly the shows with an
+# episode airing on it. Under :data:`NOW` (Wednesday 4 Nov) that is Monday 2 to
+# Tuesday 10 Nov: this week so far, then a week of upcoming dates.
+
+#: The Sunday of :data:`NOW`'s week, at noon UTC.
+SUNDAY_NOON = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+
+
+def everywhere(body: dict[str, object]) -> list[tuple[str, str]]:
+    """``(date, title)`` for every dated entry of a current-view page."""
+    days = body["days"]
+    assert isinstance(days, list)
+    return [(day["date"], title) for day in days for title in titles(day)]
+
+
+def listed(body: dict[str, object], key: str) -> list[str]:
+    entries = body[key]
+    assert isinstance(entries, list)
+    return [entry["anime"]["title"]["preferred"] for entry in entries]
+
+
+def dates_of(body: dict[str, object], title: str) -> list[str]:
+    return [day for day, shown in everywhere(body) if shown == title]
+
+
+async def test_the_current_view_runs_from_monday_to_a_week_ahead(
+    user_client: AsyncClient, season: dict[str, int]
+) -> None:
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert [day["date"] for day in body["days"]] == [
+        "2026-11-02",
+        "2026-11-03",
+        "2026-11-04",
+        "2026-11-05",
+        "2026-11-06",
+        "2026-11-07",
+        "2026-11-08",
+        "2026-11-09",
+        "2026-11-10",
+    ]
+
+
+async def test_a_finished_show_of_this_season_is_on_no_day_but_still_listed(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """Off the calendar, still a show of Fall 2026 for Search and Home."""
+    anime_id = await add_anime(
+        api_factory, title="Ended Show", anilist_id=900301, status="FINISHED"
+    )
+    await add_episodes(
+        api_factory, anime_id, count=12, first_at=LAST_MONDAY_1000Z - timedelta(weeks=14)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    shown = [title for _, title in everywhere(body)]
+    assert "Ended Show" not in shown
+    assert "Monday Rerun" not in shown
+    assert "Ended Show" not in listed(body, "unscheduled")
+    assert listed(body, "ended") == ["Ended Show", "Monday Rerun"]
+
+
+async def test_a_finale_this_week_is_on_its_date(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    anime_id = await add_anime(
+        api_factory, title="Finale Monday", anilist_id=900312, status="FINISHED"
+    )
+    await add_episodes(
+        api_factory, anime_id, count=12, first_at=LAST_MONDAY_1000Z - timedelta(weeks=11)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Finale Monday") == ["2026-11-02"]
+    assert "Finale Monday" not in listed(body, "ended")
+
+
+async def test_a_premiere_ten_days_out_is_listed_with_its_date_not_on_a_day(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    await add_anime(
+        api_factory,
+        title="Starts Later",
+        anilist_id=900302,
+        status="NOT_YET_RELEASED",
+        next_at=NOW + timedelta(days=10),
+        next_episode=1,
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Starts Later") == []
+    entry = next(
+        row for row in body["unscheduled"] if row["anime"]["title"]["preferred"] == "Starts Later"
+    )
+    assert entry["starts_on"] == "2026-11-14"
+    # A film's date is a release, not a premiere of a run; it says nothing new.
+    film = next(row for row in body["unscheduled"] if row["anime"]["id"] == season["film"])
+    assert film["starts_on"] is None
+
+
+async def test_a_premiere_with_only_an_episode_row_still_names_its_date(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    anime_id = await add_anime(
+        api_factory, title="Dated Premiere", anilist_id=900303, status="NOT_YET_RELEASED"
+    )
+    await add_episodes(api_factory, anime_id, count=3, first_at=NOW + timedelta(days=20))
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    entry = next(
+        row for row in body["unscheduled"] if row["anime"]["title"]["preferred"] == "Dated Premiere"
+    )
+    assert entry["starts_on"] == "2026-11-24"
+
+
+async def test_a_premiere_on_a_displayed_date_is_on_that_date_only(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    await add_anime(
+        api_factory,
+        title="Premieres Friday",
+        anilist_id=900304,
+        status="NOT_YET_RELEASED",
+        next_at=FRIDAY_1400Z,
+        next_episode=1,
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Premieres Friday") == ["2026-11-06"]
+    assert "Premieres Friday" not in listed(body, "unscheduled")
+
+
+async def test_next_seasons_premiere_in_the_turnover_week_is_on_its_date(
+    user_client: AsyncClient, api_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tuesday 29 Sep is still SUMMER by the UTC quarter; a Fall premiere on
+    Thursday 1 Oct is on Thursday all the same."""
+    monkeypatch.setattr("arc.api.schedule.now", lambda: datetime(2026, 9, 29, 12, 0, tzinfo=UTC))
+    await add_anime(
+        api_factory,
+        title="Fall Premiere",
+        anilist_id=900313,
+        status="NOT_YET_RELEASED",
+        season="FALL",
+        next_at=datetime(2026, 10, 1, 15, 0, tzinfo=UTC),
+        next_episode=1,
+    )
+    dated_only = await add_anime(
+        api_factory, title="Fall Dated Premiere", anilist_id=900314, status="NOT_YET_RELEASED"
+    )
+    await add_episodes(
+        api_factory, dated_only, count=2, first_at=datetime(2026, 10, 2, 15, 0, tzinfo=UTC)
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert body["season"] == "SUMMER"
+    assert dates_of(body, "Fall Premiere") == ["2026-10-01"]
+    assert dates_of(body, "Fall Dated Premiere") == ["2026-10-02"]
+
+
+async def test_a_show_that_aired_two_days_ago_is_on_that_date_and_its_next(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    """Monday's episode aired and ``next_airing`` rolled to next Monday."""
+    anime_id = await add_anime(
+        api_factory,
+        title="Monday Weekly",
+        anilist_id=900305,
+        next_at=NOW + timedelta(days=5),
+        next_episode=5,
+    )
+    await add_episodes(api_factory, anime_id, count=4, first_at=NOW - timedelta(days=2, weeks=3))
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Monday Weekly") == ["2026-11-02", "2026-11-09"]
+    entry = body["days"][MONDAY]["entries"][0]
+    # The slot names the episode that aired that day, not the next one.
+    assert entry["next_episode"] == 4
+    assert entry["next_at"] == "2026-11-02T12:00:00Z"
+    assert entry["air_time_local"] == "12:00"
+    assert body["days"][7]["entries"][0]["next_episode"] == 5
+
+
+async def test_on_a_sunday_the_next_days_are_next_weeks(
+    user_client: AsyncClient,
+    season: dict[str, int],
+    api_factory: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sunday's "tomorrow" is next Monday, with next Monday's real airings."""
+    monkeypatch.setattr("arc.api.schedule.now", lambda: SUNDAY_NOON)
+    dated = await add_anime(
+        api_factory,
+        title="Monday Dated",
+        anilist_id=900306,
+        next_at=datetime(2026, 11, 9, 12, 0, tzinfo=UTC),
+        next_episode=5,
+    )
+    await add_episodes(
+        api_factory,
+        dated,
+        count=4,
+        first_at=datetime(2026, 11, 2, 12, 0, tzinfo=UTC) - timedelta(weeks=3),
+    )
+    # Its last episode aired this Monday and nothing follows: not next Monday.
+    ended_run = await add_anime(api_factory, title="This Monday Only", anilist_id=900307)
+    await add_episodes(
+        api_factory, ended_run, count=1, first_at=datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
+    )
+    # A Tuesday show with no episode rows at all: next Tuesday from the slot,
+    # this Tuesday inferred one week before it.
+    await add_anime(
+        api_factory,
+        title="Tuesday Slot",
+        anilist_id=900308,
+        next_at=datetime(2026, 11, 10, 15, 0, tzinfo=UTC),
+        next_episode=9,
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert body["days"][0]["date"] == "2026-11-02"
+    assert body["days"][-1]["date"] == "2026-11-14"
+    assert [day["weekday"] for day in body["days"]][6:9] == [6, 0, 1]
+    assert dates_of(body, "Monday Dated") == ["2026-11-02", "2026-11-09"]
+    assert dates_of(body, "This Monday Only") == ["2026-11-02"]
+    assert dates_of(body, "Tuesday Slot") == ["2026-11-03", "2026-11-10"]
+    next_monday = body["days"][7]["entries"]
+    assert [(e["anime"]["title"]["preferred"], e["next_episode"]) for e in next_monday] == [
+        ("Monday Dated", 5)
+    ]
+    inferred = body["days"][1]["entries"][0]
+    assert (inferred["next_episode"], inferred["air_time_local"]) == (8, "15:00")
+
+
+async def test_a_carried_in_two_cour_show_is_on_its_date(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    await add_two_cour(api_factory)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Second Cour") == ["2026-11-06"]
+
+
+async def test_dates_are_the_users_across_midnight(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory, season: dict[str, int]
+) -> None:
+    """20:00Z Monday is 05:00 Tuesday in Tokyo; 16:00Z Saturday is Sunday."""
+    anime_id = await add_anime(
+        api_factory,
+        title="Late Monday",
+        anilist_id=900309,
+        next_at=datetime(2026, 11, 9, 20, 0, tzinfo=UTC),
+        next_episode=5,
+    )
+    await add_episodes(
+        api_factory, anime_id, count=4, first_at=datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    )
+    await set_timezone(api_factory, user, "Asia/Tokyo")
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert dates_of(body, "Late Monday") == ["2026-11-03", "2026-11-10"]
+    assert dates_of(body, "Saturday Late Show") == ["2026-11-08"]
+    assert body["days"][1]["entries"][0]["air_time_local"] == "05:00"
+
+
+async def test_two_episodes_on_one_date_are_both_named(
+    user_client: AsyncClient, season: dict[str, int], api_factory: SessionFactory
+) -> None:
+    anime_id = await add_anime(api_factory, title="Double Bill", anilist_id=900315)
+    await add_episodes(
+        api_factory,
+        anime_id,
+        count=4,
+        first_at=LAST_MONDAY_1000Z - timedelta(hours=3),
+        step=timedelta(hours=1),
+    )
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    entry = body["days"][MONDAY]["entries"][0]
+    assert (entry["next_episode"], entry["last_episode"]) == (1, 4)
+
+
+async def test_an_aired_day_carries_the_tick_for_its_own_episode(
+    user_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Monday's slot names episode 4, watched; next Monday's is not asked."""
+    anime_id = await add_anime(
+        api_factory,
+        title="Monday Weekly",
+        anilist_id=900310,
+        next_at=NOW + timedelta(days=5),
+        next_episode=5,
+    )
+    await add_episodes(api_factory, anime_id, count=4, first_at=NOW - timedelta(days=2, weeks=3))
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=4)
+
+    body = (await user_client.get("/api/schedule")).json()
+
+    assert body["days"][MONDAY]["entries"][0]["watched"] is True
+    assert body["days"][7]["entries"][0]["watched"] is None
+
+
+async def test_a_browsed_season_is_still_seven_undated_weekdays(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Prev/next are unchanged: finished shows on the weekday they aired."""
+    anime_id = await add_anime(
+        api_factory,
+        title="Summer Finished",
+        anilist_id=900311,
+        status="FINISHED",
+        season="SUMMER",
+    )
+    await add_episodes(api_factory, anime_id, count=6, first_at=MONDAY_1000Z - timedelta(weeks=10))
+
+    body = (
+        await user_client.get("/api/schedule", params={"year": 2026, "season": "SUMMER"})
+    ).json()
+
+    assert [day["date"] for day in body["days"]] == [None] * 7
+    assert titles(body["days"][MONDAY]) == ["Summer Finished"]
+    entry = body["days"][MONDAY]["entries"][0]
+    assert (entry["air_time_local"], entry["next_at"], entry["starts_on"]) == ("10:00", None, None)
+    assert body["ended"] == []
 
 
 # --- The admin season sweep ---------------------------------------------------

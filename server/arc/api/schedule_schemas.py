@@ -14,12 +14,18 @@ one date that exists (``next_at``) is carried separately as a real instant so
 the client can render a countdown from it.
 
 ``ScheduleDay.weekday`` is 0–6 with Monday at 0 — :meth:`date.weekday`'s
-convention, in the *user's* timezone. The client decides where its week
-starts; the server does not reorder the array.
+convention, in the *user's* timezone. On a browsed season the array is those
+seven weekdays and ``ScheduleDay.date`` is null. On the current season every
+day carries its local ``date`` instead, Monday of this week through six days
+after today — seven to thirteen days — because a column there stands for one
+calendar date and lists only what airs on it (owner, 2026-10-04).
 """
 
 from __future__ import annotations
 
+# ``date`` is also a field name on ``ScheduleDay``, and a field shadows its own
+# annotation inside a pydantic model; the alias keeps the two apart.
+from datetime import date as LocalDate
 from datetime import datetime, time
 from enum import StrEnum
 from typing import Any
@@ -60,9 +66,11 @@ class ScheduleEntry(BaseModel):
     #: Local time of day, ``"HH:MM"`` in the user's timezone. Null only for an
     #: unscheduled entry, which has no slot to render.
     air_time_local: str | None = None
-    #: The next episode number, when the source publishes one. Null for a slot
-    #: synthesised from a MAL broadcast time, which knows when but not which
-    #: (FR-C6), and for a season that has finished airing.
+    #: The episode this slot names, when the source publishes one: on a browse
+    #: the next one, on a dated day the one airing that date (which may have
+    #: aired already). Null for a slot synthesised from a MAL broadcast time,
+    #: which knows when but not which (FR-C6), and for a season that has
+    #: finished airing.
     next_episode: int | None = None
     #: When that episode airs, as an instant.
     next_at: datetime | None = None
@@ -101,6 +109,14 @@ class ScheduleEntry(BaseModel):
     #: rather than off the episode on the card. The flag now belongs to the
     #: named episode or to no one.
     watched: bool | None = None
+    #: The local date a show that has not started premieres on, or null. Set
+    #: only on the current season's unscheduled entries: a show starting after
+    #: the displayed dates is not on any day, and stays reachable beside the
+    #: grid as "Starts 14 Oct" (owner, 2026-10-04).
+    starts_on: LocalDate | None = None
+    #: The highest episode airing the same date as ``next_episode`` when a
+    #: dated day holds more than one of the show's ("Ep 3–4"); null otherwise.
+    last_episode: int | None = None
 
     @classmethod
     def from_placed(cls, entry: PlacedEntry, *, watched: bool | None = None) -> ScheduleEntry:
@@ -121,6 +137,8 @@ class ScheduleEntry(BaseModel):
             list_status=entry.list_status,
             carried_over=entry.carried_over,
             watched=watched,
+            starts_on=entry.starts_on,
+            last_episode=entry.last_episode,
         )
 
 
@@ -130,10 +148,14 @@ def _hhmm(at: time | None) -> str | None:
 
 
 class ScheduleDay(BaseModel):
-    """One weekday of the grid, in the user's timezone."""
+    """One column of the grid, in the user's timezone."""
 
     #: 0 = Monday … 6 = Sunday.
     weekday: int = Field(ge=0, le=DAYS_IN_WEEK - 1)
+    #: The local calendar date this column stands for on the current season,
+    #: whose entries are exactly the shows airing that date; null on a browsed
+    #: season, whose columns are weekdays.
+    date: LocalDate | None = None
     #: Sorted by local air time, earliest first.
     entries: list[ScheduleEntry] = Field(default_factory=list)
 
@@ -149,10 +171,19 @@ class SchedulePage(BaseModel):
     #: ``users.timezone``, or ``"UTC"`` if that is not a zone this server
     #: knows.
     timezone: str
-    #: Always seven, index 0 = Monday.
+    #: A browse: always seven, index 0 = Monday, undated. The current season:
+    #: one per local date from Monday of this week to six days past today
+    #: (seven to thirteen), each dated.
     days: list[ScheduleDay]
-    #: Movies, OVAs, specials, and anything the cache has no air time for.
+    #: Movies, OVAs, specials, and anything the cache has no air time for; on
+    #: the current season also the season's shows with nothing airing in the
+    #: displayed dates, an upcoming one carrying ``starts_on``.
     unscheduled: list[ScheduleEntry] = Field(default_factory=list)
+    #: The current season's own weekly shows that have finished and have no
+    #: episode on the dates sent. On no day — the calendar shows what airs —
+    #: but still shows of the season, which Search's and Home's season listings
+    #: include. Always empty on a browse, which puts them on their weekday.
+    ended: list[ScheduleEntry] = Field(default_factory=list)
 
     @classmethod
     def build(
@@ -167,12 +198,15 @@ class SchedulePage(BaseModel):
         # the length of the method.
         upcoming: tuple[int, str],
         timezone: str,
-        # ``anime_id → watched``, and present only for the entries whose named
-        # episode has aired. One entry per show in a week, so the show's id
-        # identifies the slot; see :attr:`ScheduleEntry.watched`.
-        watched: dict[int, bool] | None = None,
+        # ``(anime_id, episode number) → watched``, and present only for the
+        # entries whose named episode has aired. Keyed by the episode as well
+        # as the show because a dated view can hold one show twice; see
+        # :attr:`ScheduleEntry.watched`.
+        watched: dict[tuple[int, int], bool] | None = None,
     ) -> SchedulePage:
         marks = watched or {}
+        # A browse's columns are weekdays and carry no date.
+        dates = placement.dates or (None,) * len(placement.days)
         return cls(
             year=year,
             season=season,
@@ -181,19 +215,28 @@ class SchedulePage(BaseModel):
             timezone=timezone,
             days=[
                 ScheduleDay(
-                    weekday=weekday,
+                    weekday=day.weekday() if day is not None else position,
+                    date=day,
                     entries=[
-                        ScheduleEntry.from_placed(entry, watched=marks.get(entry.anime.id))
+                        ScheduleEntry.from_placed(entry, watched=_mark(marks, entry))
                         for entry in entries
                     ],
                 )
-                for weekday, entries in enumerate(placement.days)
+                for position, (day, entries) in enumerate(zip(dates, placement.days, strict=True))
             ],
             unscheduled=[
-                ScheduleEntry.from_placed(entry, watched=marks.get(entry.anime.id))
+                ScheduleEntry.from_placed(entry, watched=_mark(marks, entry))
                 for entry in placement.unscheduled
             ],
+            ended=[ScheduleEntry.from_placed(entry) for entry in placement.ended],
         )
+
+
+def _mark(marks: dict[tuple[int, int], bool], entry: PlacedEntry) -> bool | None:
+    """The caller's tick for the episode ``entry`` names, if anyone asked."""
+    if entry.next_episode is None:
+        return None
+    return marks.get((entry.anime.id, entry.next_episode))
 
 
 class BehindEntry(BaseModel):

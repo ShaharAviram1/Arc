@@ -305,3 +305,31 @@ def test_the_kind_episode_check_is_created_by_a_migration(
     assert definition is not None, "ck_torrents_kind_episode is not on the torrents table"
     assert "'single'" in definition and "episode_id IS NOT NULL" in definition
     assert "'batch'" in definition and "episode_id IS NULL" in definition
+
+
+def test_the_unmarked_at_column_is_created_by_a_migration(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``watch_progress.unmarked_at`` (FR-S8, owner 2026-10-05): nullable timestamptz.
+
+    Nullable because every row that existed before it has no recorded un-mark,
+    and a backfilled time would be a claim about when somebody pressed a button
+    that nobody can make.
+    """
+
+    async def run() -> tuple[str, str] | None:
+        engine = create_async_engine(test_database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT data_type, is_nullable FROM information_schema.columns "
+                        "WHERE table_name = 'watch_progress' AND column_name = 'unmarked_at'"
+                    )
+                )
+                row = found.first()
+                return None if row is None else (str(row[0]), str(row[1]))
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(run()) == ("timestamp with time zone", "YES")

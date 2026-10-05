@@ -20,7 +20,17 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query'
-import { apiFetch } from '@/lib/api'
+import { ApiError, apiFetch, isOffline, isUnreachable } from '@/lib/api'
+import { recallPosition, type LocalPosition } from '@/offline/cache'
+import {
+  downloadedNeighbours,
+  downloads,
+  type DownloadManager,
+  type DownloadRecord,
+  type Downloads,
+} from '@/offline/downloads'
+import { outbox, type Outbox } from '@/offline/outbox'
+import { pendingWatched } from '@/offline/useOutbox'
 import { animeQueryKey, ANIME_QUERY_KEY, type AnimeSummary, type EpisodeOut } from '@/lib/anime'
 import { HOME_QUERY_KEY } from '@/lib/schedule'
 
@@ -57,6 +67,12 @@ export interface PlayInfo {
   resume_position: number | null
   previous: EpisodeRef | null
   next: EpisodeRef | null
+  /**
+   * Client-side only: this payload was rebuilt on the device from a download
+   * (FR-S9) because the server could not be reached, or no longer has the
+   * rendition. `playlist_url` is then empty and the episode plays from its file.
+   */
+  from_device?: boolean
 }
 
 /** What every progress write answers with (FR-S4). */
@@ -70,6 +86,12 @@ export interface ProgressResult {
    * watched episode (FR-S4 as revised 2026-09-13). Null when nothing moved.
    */
   list_progress: number | null
+  /**
+   * Client-side only: the write could not reach the server and is kept in the
+   * on-device outbox for replay (FR-S8). The other fields then describe what
+   * the viewer did, not what the server said.
+   */
+  queued?: boolean
 }
 
 export interface ReportProgressInput {
@@ -106,7 +128,11 @@ export function shouldResume(position: number | null, duration: number): boolean
   if (position === null || !Number.isFinite(position) || position <= RESUME_MIN_SECONDS) {
     return false
   }
-  if (!Number.isFinite(duration) || duration <= 0) return true
+  // Not knowing how long the episode is (a fragmented MP4 can report
+  // `Infinity` or `NaN`, and the caller had no recorded length to fall back
+  // on) is a reason *not* to seek: a jump to a stored position past the end
+  // is worse than starting at zero (FR-S9).
+  if (!Number.isFinite(duration) || duration <= 0) return false
   return position < duration * RESUME_MAX_FRACTION
 }
 
@@ -128,10 +154,103 @@ export function resumeLabel(seconds: number): string {
   return `Resumed from ${formatClock(seconds)}`
 }
 
+function refOf(record: DownloadRecord | null): EpisodeRef | null {
+  if (record === null) return null
+  return {
+    id: record.episodeId,
+    number: record.snapshot.episode.number,
+    state: 'ready',
+    ready: true,
+  }
+}
+
+/**
+ * The player's payload rebuilt from a download, for when the server cannot
+ * answer (FR-S9). Pure: everything it needs is passed in.
+ *
+ * - **Resume** is the last position watched *on this device*: the server's
+ *   is unreachable, and the device's is the newest the viewer can have made
+ *   anyway, since nothing else could have reached this iPad meanwhile.
+ * - **Previous / next** are the nearest *downloaded* episodes of the show,
+ *   the only ones that can play — never a link to one that cannot.
+ * - **Watched** is what the download saw, overridden by a mark or un-mark
+ *   still waiting in the outbox.
+ */
+export function offlinePlayInfo(
+  record: DownloadRecord,
+  records: Downloads,
+  local: LocalPosition | null,
+  pending: ReadonlyMap<number, boolean> = new Map(),
+): PlayInfo {
+  const { previous, next } = downloadedNeighbours(records, record)
+  const queued = pending.get(record.episodeId)
+  const episode: EpisodeOut =
+    queued === undefined
+      ? record.snapshot.episode
+      : {
+          ...record.snapshot.episode,
+          watched: queued,
+          watched_source: queued ? ('arc' as const) : null,
+        }
+  return {
+    episode,
+    anime: record.snapshot.anime,
+    playlist_url: '',
+    duration: record.snapshot.duration,
+    resume_position: local === null ? null : local.position_s,
+    previous: refOf(previous),
+    next: refOf(next),
+    from_device: true,
+  }
+}
+
+export interface PlayInfoDeps {
+  fetch: (episodeId: number) => Promise<PlayInfo>
+  manager: DownloadManager
+  recall: (userId: number, episodeId: number) => Promise<LocalPosition | null>
+  pending: () => ReadonlyMap<number, boolean>
+}
+
+function defaultPlayInfoDeps(): PlayInfoDeps {
+  return {
+    fetch: (episodeId) => apiFetch<PlayInfo>(`/api/episodes/${String(episodeId)}/play`),
+    manager: downloads(),
+    recall: recallPosition,
+    pending: () => pendingWatched(outbox().getSnapshot().pending),
+  }
+}
+
+/**
+ * `GET /api/episodes/{id}/play`, or — when the server cannot be reached, or no
+ * longer has a rendition (retention removed it) — the payload rebuilt from
+ * this account's download of the episode. Anything else, and any episode not
+ * downloaded, fails exactly as before.
+ */
+export async function loadPlayInfo(
+  episodeId: number,
+  deps: PlayInfoDeps = defaultPlayInfoDeps(),
+): Promise<PlayInfo> {
+  try {
+    return await deps.fetch(episodeId)
+  } catch (error) {
+    if (!isUnreachable(error) && !isStatus404(error)) throw error
+    await deps.manager.whenHydrated()
+    const owner = deps.manager.ownerId
+    const record = deps.manager.record(episodeId)
+    if (owner === null || record === undefined || record.state !== 'downloaded') throw error
+    const local = await deps.recall(owner, episodeId)
+    return offlinePlayInfo(record, deps.manager.getSnapshot(), local, deps.pending())
+  }
+}
+
+function isStatus404(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
 export function usePlayInfo(episodeId: number): UseQueryResult<PlayInfo, Error> {
   return useQuery<PlayInfo, Error>({
     queryKey: playQueryKey(episodeId),
-    queryFn: () => apiFetch<PlayInfo>(`/api/episodes/${episodeId}/play`),
+    queryFn: () => loadPlayInfo(episodeId),
     enabled: Number.isInteger(episodeId) && episodeId > 0,
     // A 404 here means "not ready", which asking again will not change; the
     // resume position must also not be re-read behind a playing video, hence
@@ -146,6 +265,70 @@ export function usePlayInfo(episodeId: number): UseQueryResult<PlayInfo, Error> 
     // fresh request without weakening the rule above.
     gcTime: 0,
   })
+}
+
+/**
+ * Whether a failed write is worth keeping for later (FR-S8) rather than
+ * reporting. No response at all, a server error, an expired session and a
+ * rate limit are all "not now"; a 404 or a 422 is the server's final word,
+ * and replaying it later would only be rejected again.
+ */
+export function shouldQueue(error: unknown): boolean {
+  if (isOffline(error)) return true
+  if (!(error instanceof ApiError)) return false
+  return error.status >= 500 || error.status === 401 || error.status === 408 || error.status === 429
+}
+
+/**
+ * One progress report (FR-S3), falling into the outbox when it cannot be
+ * delivered. Online it is exactly the `POST /api/progress` it always was.
+ * With nobody to attribute the record to (no account has signed in on this
+ * page) the error stands, because a record nobody owns could never be sent.
+ */
+export async function sendProgress(
+  body: ReportProgressInput,
+  box: Outbox = outbox(),
+): Promise<ProgressResult> {
+  let result: ProgressResult
+  try {
+    result = await apiFetch<ProgressResult>(PROGRESS_PATH, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  } catch (error) {
+    const owner = box.recordingAs
+    if (owner === null || !shouldQueue(error)) throw error
+    await box.recordPosition(owner, body.episode_id, body.position_s, body.duration_s)
+    return { completed: false, newly_completed: false, list_progress: null, queued: true }
+  }
+  // Remembered so the exit beacon past the mark queues nothing: the server
+  // has already said this episode is done (B1, 2026-10-05).
+  const owner = box.recordingAs
+  if (owner !== null && result.completed) box.noteCompleted(owner, body.episode_id, true)
+  return result
+}
+
+/** FR-W3's mark, or FR-S4's un-mark, falling into the outbox when offline (FR-S8). */
+export async function sendWatched(
+  episodeId: number,
+  watched: boolean,
+  box: Outbox = outbox(),
+): Promise<ProgressResult> {
+  let result: ProgressResult
+  try {
+    result = await apiFetch<ProgressResult>(`/api/episodes/${String(episodeId)}/watched`, {
+      method: watched ? 'POST' : 'DELETE',
+    })
+  } catch (error) {
+    const owner = box.recordingAs
+    if (owner === null || !shouldQueue(error)) throw error
+    if (watched) await box.recordCompletion(owner, episodeId)
+    else await box.recordUnmark(owner, episodeId)
+    return { completed: watched, newly_completed: false, list_progress: null, queued: true }
+  }
+  const owner = box.recordingAs
+  if (owner !== null) box.noteCompleted(owner, episodeId, watched)
+  return result
 }
 
 /**
@@ -168,8 +351,7 @@ export function useReportProgress(): UseMutationResult<ProgressResult, Error, Re
   const client = useQueryClient()
 
   return useMutation<ProgressResult, Error, ReportProgressInput>({
-    mutationFn: (body) =>
-      apiFetch<ProgressResult>(PROGRESS_PATH, { method: 'POST', body: JSON.stringify(body) }),
+    mutationFn: (body) => sendProgress(body),
     retry: false,
     onSuccess: (result) => {
       if (!result.newly_completed) return
@@ -183,9 +365,10 @@ export function useMarkWatched(): UseMutationResult<ProgressResult, Error, Watch
   const client = useQueryClient()
 
   return useMutation<ProgressResult, Error, WatchedInput>({
-    mutationFn: ({ episodeId }) =>
-      apiFetch<ProgressResult>(`/api/episodes/${episodeId}/watched`, { method: 'POST' }),
-    onSuccess: (_result, { animeId }) => {
+    mutationFn: ({ episodeId }) => sendWatched(episodeId, true),
+    onSuccess: (result, { animeId }) => {
+      // Queued offline: there is nothing new on the server to refetch yet.
+      if (result.queued === true) return
       invalidateAfterCompletion(client, animeId)
     },
   })
@@ -202,9 +385,9 @@ export function useUnmarkWatched(): UseMutationResult<ProgressResult, Error, Wat
   const client = useQueryClient()
 
   return useMutation<ProgressResult, Error, WatchedInput>({
-    mutationFn: ({ episodeId }) =>
-      apiFetch<ProgressResult>(`/api/episodes/${episodeId}/watched`, { method: 'DELETE' }),
-    onSuccess: (_result, { animeId }) => {
+    mutationFn: ({ episodeId }) => sendWatched(episodeId, false),
+    onSuccess: (result, { animeId }) => {
+      if (result.queued === true) return
       invalidateAfterCompletion(client, animeId)
     },
   })

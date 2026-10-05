@@ -7,10 +7,12 @@ import { createQueryClient } from '@/lib/queryClient'
 import type { AnimeSummary, EpisodeOut, MyListItem } from '@/lib/anime'
 import type { RecsPage } from '@/lib/recs'
 import {
+  todayInTimezone,
   weekdayInTimezone,
   WEEKDAY_LABELS,
   type FailureEntry,
   type HomePage,
+  type ScheduleDay,
   type ScheduleEntry,
   type SchedulePage,
 } from '@/lib/schedule'
@@ -92,12 +94,44 @@ const TODAY = weekdayInTimezone(TEST_USER.timezone)
  * the server would send `watched: null` for it — which is what `tonight` lets a
  * test override when it wants the aired-and-watched case instead.
  */
+/**
+ * The current season's dated days as the server sends them: Monday of the
+ * viewer's week through six days past today, in the test user's zone, read
+ * off whatever the clock says (owner, 2026-10-04).
+ */
+function datedDays(at: Date = new Date()): ScheduleDay[] {
+  const today = todayInTimezone(TEST_USER.timezone, at) ?? '2026-10-06'
+  const [year, month, day] = today.split('-').map(Number) as [number, number, number]
+  const noon = Date.UTC(year, month - 1, day, 12)
+  const weekday = (new Date(noon).getUTCDay() + 6) % 7
+  return Array.from({ length: weekday + 7 }, (_, index) => {
+    const date = new Date(noon + (index - weekday) * 86_400_000)
+    return {
+      weekday: (date.getUTCDay() + 6) % 7,
+      date: date.toISOString().slice(0, 10),
+      entries: [],
+    }
+  })
+}
+
+/** The day `offset` days from today in `days` (0 = today). */
+function dayAt(days: ScheduleDay[], offset: number, at: Date = new Date()): ScheduleDay {
+  const today = todayInTimezone(TEST_USER.timezone, at)
+  const index = days.findIndex((day) => day.date === today) + offset
+  const found = days[index]
+  if (found === undefined) throw new Error(`no day ${String(offset)} from today`)
+  return found
+}
+
 function weekSchedule(tonight: Partial<ScheduleEntry> = {}): SchedulePage {
-  const other = (TODAY + 2) % 7
+  const days = datedDays()
+  const today = dayAt(days, 0)
+  const later = dayAt(days, 2)
   return {
     ...EMPTY_SCHEDULE,
-    days: EMPTY_SCHEDULE.days.map((day) => {
-      if (day.weekday === TODAY) {
+    days: days.map((day) => {
+      if (day !== today && day !== later) return day
+      if (day === today) {
         return {
           ...day,
           entries: [
@@ -112,7 +146,7 @@ function weekSchedule(tonight: Partial<ScheduleEntry> = {}): SchedulePage {
           ],
         }
       }
-      if (day.weekday === other) {
+      if (day === later) {
         return {
           ...day,
           entries: [
@@ -407,6 +441,24 @@ describe('Watch Now hero', () => {
     expect(
       within(hero()).queryByRole('button', { name: OLD_PICK.title.preferred }),
     ).not.toBeInTheDocument()
+  })
+
+  it('still ranks the season’s finished shows, which are on no date (owner, 2026-10-04)', async () => {
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': {
+        body: { ...seasonSchedule(HALF_MATCH), ended: [scheduleEntry(KAIJU)] },
+      },
+      'GET /api/recs': { body: recsWith(SEASON_PICK) },
+      'GET /api/list': { body: MY_LIST },
+    })
+
+    await screen.findByText('Recommended this season')
+    expect(heroSlides()).toEqual([
+      SEASON_PICK.title.preferred,
+      KAIJU.title.preferred,
+      HALF_MATCH.title.preferred,
+    ])
   })
 
   it('still offers the season when its rows have no genres yet', async () => {
@@ -1160,6 +1212,96 @@ describe('Watch Now shelves', () => {
 
     expect(week.getByText('Watched')).toBeInTheDocument()
     expect(week.getAllByText('Watched')).toHaveLength(1)
+  })
+
+  /** A followed Frieren slot on `day`, naming `episode`. */
+  function frierenOn(day: ScheduleDay, episode: number, extra: Partial<ScheduleEntry> = {}) {
+    return {
+      ...day,
+      entries: [
+        scheduleEntry(FRIEREN, {
+          air_time_local: '20:00',
+          next_episode: episode,
+          following: true,
+          list_status: 'watching',
+          ...extra,
+        }),
+      ],
+    }
+  }
+
+  function withSlots(days: ScheduleDay[], slots: Map<ScheduleDay, ScheduleDay>): SchedulePage {
+    return { ...EMPTY_SCHEDULE, days: days.map((day) => slots.get(day) ?? day) }
+  }
+
+  it('shows the next broadcast, not one that aired yesterday (owner, 2026-10-04)', async () => {
+    const days = datedDays()
+    const yesterday = days.findIndex((day) => day === dayAt(days, 0)) - 1
+    const slots = new Map([[dayAt(days, 6), frierenOn(dayAt(days, 6), 12)]])
+    const aired = yesterday >= 0 ? days[yesterday] : undefined
+    if (aired !== undefined) slots.set(aired, frierenOn(aired, 11, { watched: true }))
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: withSlots(days, slots) },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'This week' })
+    const week = within(shelf('This week'))
+
+    expect(week.getByText('Episode 12')).toBeInTheDocument()
+    expect(week.getByText(WEEKDAY_LABELS[(TODAY + 6) % 7] as string)).toBeInTheDocument()
+    expect(week.queryByText('Episode 11')).not.toBeInTheDocument()
+    expect(week.queryByText('Watched')).not.toBeInTheDocument()
+  })
+
+  it('keeps tomorrow’s broadcast as tomorrow’s appointment', async () => {
+    const days = datedDays()
+    const tomorrow = dayAt(days, 1)
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': { body: withSlots(days, new Map([[tomorrow, frierenOn(tomorrow, 5)]])) },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'This week' })
+    const week = within(shelf('This week'))
+
+    expect(week.getByText(WEEKDAY_LABELS[(TODAY + 1) % 7] as string)).toBeInTheDocument()
+    expect(week.getByText('Episode 5')).toBeInTheDocument()
+    expect(week.queryByText('Tonight')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['Saturday', '2026-10-10T10:00:00Z'],
+    ['Sunday', '2026-10-11T10:00:00Z'],
+  ])('on a %s, takes next Monday rather than the one that aired', async (_, now) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const days = datedDays()
+    // Monday 5 Oct aired; Monday 12 Oct is ahead. Both are in the response.
+    const thisMonday = days[0]
+    const nextMonday = days.find((day) => day.date === '2026-10-12')
+    if (thisMonday === undefined || nextMonday === undefined) throw new Error('fixture')
+    renderHome({
+      'GET /api/home': { body: EMPTY_HOME },
+      'GET /api/schedule': {
+        body: withSlots(
+          days,
+          new Map([
+            [thisMonday, frierenOn(thisMonday, 1, { watched: true })],
+            [nextMonday, frierenOn(nextMonday, 2)],
+          ]),
+        ),
+      },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'This week' })
+    const week = within(shelf('This week'))
+
+    expect(week.getByText('Episode 2')).toBeInTheDocument()
+    expect(week.getByText('Monday')).toBeInTheDocument()
+    expect(week.queryByText('Episode 1')).not.toBeInTheDocument()
+    expect(week.queryByText('Watched')).not.toBeInTheDocument()
+    vi.useRealTimers()
   })
 
   it('counts what has piled up in prose, with no badge on the artwork', async () => {

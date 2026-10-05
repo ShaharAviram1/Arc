@@ -1,6 +1,8 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { useMe } from '@/lib/auth'
+import { useDownloadsSession } from '@/offline/useDownloads'
+import { useOutboxSession } from '@/offline/useOutbox'
 
 /** Minimal centred placeholder used while the session is being resolved. */
 export function AuthPending() {
@@ -22,6 +24,12 @@ export function AuthPending() {
 export function RequireAuth() {
   const location = useLocation()
   const { data: me, isPending, isError, refetch } = useMe()
+  // The progress outbox's owner and flush triggers (FR-S8), wired once for
+  // every signed-in page — the player included, which renders outside Layout.
+  useOutboxSession(me?.id ?? null)
+  // And the downloads' (FR-S9): whose episodes are visible and playable, the
+  // launch-time check of records against files, and the resume triggers.
+  useDownloadsSession(me?.id ?? null)
 
   if (isPending) return <AuthPending />
 

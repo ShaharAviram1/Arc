@@ -5,6 +5,7 @@ import { ListStatusControl } from '@/components/ListStatusControl'
 import {
   Artwork,
   Button,
+  BUTTON_PRESSED,
   buttonClass,
   cx,
   EmptyState,
@@ -58,6 +59,10 @@ import {
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
+import { downloads, SCREEN_NOTE } from '@/offline/downloads'
+import { canDownloadInApp } from '@/offline/opfs'
+import { useDownloads } from '@/offline/useDownloads'
+import { usePendingWatched } from '@/offline/useOutbox'
 
 /**
  * The show page (spec §5, §4.6 FR-W2, roadmap M3, restyled for M15).
@@ -812,6 +817,8 @@ function RetryTranscode({ animeId, episodeId }: { animeId: number; episodeId: nu
 const WATCHED = 'Watched'
 const UNWATCH = 'Unwatch'
 const MARK_WATCHED = 'Mark watched'
+/** A mark or un-mark made offline, kept on this device until it syncs (FR-S8). */
+const PENDING_SYNC = 'Saved on this device; syncs when Arc is reachable again'
 
 /**
  * Marking an episode watched by hand (FR-W3), and taking the mark off again.
@@ -844,8 +851,28 @@ function WatchedControl({ animeId, episode }: { animeId: number; episode: Episod
   const unmark = useUnmarkWatched()
   const pending = mark.isPending || unmark.isPending
   const failed = mark.isError || unmark.isError
+  // The state a queued offline mark / un-mark will set, if there is one.
+  const queued = usePendingWatched().get(episode.id)
 
-  if (!episode.watched && !episode.aired) return null
+  if (!episode.watched && !episode.aired && queued === undefined) return null
+
+  // Waiting to sync: show the state the viewer asked for, quietly, and do not
+  // invite a second press that would only queue the opposite.
+  if (queued !== undefined) {
+    return (
+      <Button
+        variant="chip"
+        pressed={queued}
+        aria-disabled
+        title={PENDING_SYNC}
+        className="px-4 text-[13px] opacity-70"
+      >
+        {queued ? <CheckGlyph /> : null}
+        {queued ? WATCHED : 'Unwatched'}
+        <span className="text-[var(--arc-text-muted)]">· pending sync</span>
+      </Button>
+    )
+  }
 
   // A payload with no `watched_source` at all predates FR-W5, and back then
   // `watched` could only have been a completion row — so the absent value
@@ -902,6 +929,163 @@ function WatchedControl({ animeId, episode }: { animeId: number; episode: Episod
 }
 
 /**
+ * Save a ready episode as one MP4 file (FR-S7).
+ *
+ * A plain `<a download>` to the URL the server sent rather than a button with
+ * a fetch behind it: the browser's own download manager streams it to disk,
+ * shows progress and can resume, and the session cookie goes with it because
+ * the route is same-origin. The server names the file (show title and episode
+ * number, from its own database), so `download` carries no value of its own.
+ *
+ * Rendered only when the server sent a URL — which it does exactly for a
+ * `ready` episode — and never for the demo account, which the route would
+ * refuse anyway. The accessible name carries the episode number, so a screen
+ * reader listing links can tell twelve "Download"s apart.
+ */
+function DownloadControl({ episode }: { episode: EpisodeOut }) {
+  const href = episode.download_url ?? null
+  if (episode.state !== 'ready' || href === null) return null
+  return (
+    <a
+      href={href}
+      download
+      aria-label={`Save episode ${String(episode.number)} as a file`}
+      title="Save the MP4 to your files"
+      className={buttonClass('chip', 'px-4 text-[13px]')}
+    >
+      Save file
+    </a>
+  )
+}
+
+/** A whole percentage for a download's bar; 0 until the size is known. */
+function downloadPercent(bytes: number, total: number): number {
+  return total > 0 ? Math.min(100, Math.floor((bytes / total) * 100)) : 0
+}
+
+/**
+ * Keep an episode inside Arc, to watch with no connection (FR-S9).
+ *
+ * Beside the file link, and deliberately named apart from it: "Save file"
+ * hands the MP4 to the browser's downloads (it lands in Files), while "Keep
+ * offline" writes it into Arc's own storage on this device, where the player
+ * finds it. Hidden, with no error, on a browser that cannot do the second
+ * (no OPFS or no workers) — the file link is still there.
+ *
+ * One chip that is the whole state: offer, queued, a percentage (press to
+ * pause), paused or failed (press to resume — the reason is the tooltip and a
+ * line under it), and "On this device", which leads to the Downloads page.
+ */
+function KeepOfflineControl({ episode }: { episode: EpisodeOut }) {
+  const record = useDownloads()[episode.id]
+  const [startFailed, setStartFailed] = useState(false)
+  const href = episode.download_url ?? null
+  if (episode.state !== 'ready' || href === null || !canDownloadInApp()) return null
+  const label = `episode ${String(episode.number)}`
+  const chip = buttonClass('chip', 'px-4 text-[13px]')
+
+  if (record === undefined) {
+    return (
+      <span className="flex flex-col items-end gap-1.5">
+        <button
+          type="button"
+          aria-label={`Keep ${label} offline`}
+          title="Download into Arc to watch without a connection"
+          className={chip}
+          onClick={() => {
+            setStartFailed(false)
+            downloads()
+              .start({ episodeId: episode.id, url: href })
+              .catch(() => {
+                setStartFailed(true)
+              })
+          }}
+        >
+          Keep offline
+        </button>
+        {startFailed ? (
+          <span role="alert" className="text-[13px] text-[var(--arc-error)]">
+            Could not start the download.
+          </span>
+        ) : null}
+      </span>
+    )
+  }
+
+  if (record.state === 'downloaded') {
+    return (
+      <Link
+        to="/downloads"
+        aria-label={`${label} is on this device`}
+        className={cx(chip, BUTTON_PRESSED)}
+      >
+        <CheckGlyph />
+        On this device
+      </Link>
+    )
+  }
+
+  const percent = downloadPercent(record.bytes, record.total)
+  if (record.state === 'downloading' || record.state === 'queued') {
+    const queued = record.state === 'queued'
+    return (
+      <button
+        type="button"
+        aria-label={`Pause the download of ${label}`}
+        title={queued ? 'Waiting for the download ahead of it' : SCREEN_NOTE}
+        className={chip}
+        onClick={() => {
+          downloads().pause(episode.id)
+        }}
+      >
+        {queued ? 'Queued' : `${String(percent)}%`}
+        <span
+          role="progressbar"
+          aria-label={`Downloading ${label}`}
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          className="block h-[2px] w-8 overflow-hidden rounded-full bg-[rgba(255,255,255,0.16)]"
+        >
+          <span
+            className="block h-full bg-[var(--arc-text-muted)]"
+            style={{ width: `${String(percent)}%` }}
+          />
+        </span>
+      </button>
+    )
+  }
+
+  const failed = record.state === 'failed'
+  return (
+    <span className="flex max-w-[16rem] flex-col items-end gap-1.5">
+      <button
+        type="button"
+        aria-label={`${failed ? 'Try again to download' : 'Resume the download of'} ${label}`}
+        title={record.message ?? undefined}
+        className={chip}
+        onClick={() => {
+          downloads().resume(episode.id)
+        }}
+      >
+        {failed ? 'Try again' : `Resume · ${String(percent)}%`}
+      </button>
+      {record.message === null ? null : (
+        <span
+          role={failed ? 'alert' : undefined}
+          className={cx(
+            'text-right text-[13px]',
+            failed ? 'text-[var(--arc-error)]' : 'text-[var(--arc-text-muted)]',
+          )}
+        >
+          {record.message}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/**
  * One episode (spec §6).
  *
  * The whole row is the target when the episode is playable — an overlay on the
@@ -913,11 +1097,13 @@ function EpisodeRow({
   anime,
   episode,
   isAdmin,
+  canDownload,
   timezone,
 }: {
   anime: AnimeDetail
   episode: EpisodeOut
   isAdmin: boolean
+  canDownload: boolean
   timezone?: string
 }) {
   const playable = episode.state === 'ready'
@@ -985,7 +1171,9 @@ function EpisodeRow({
         ) : null}
       </div>
 
-      <div className="relative z-10 shrink-0">
+      <div className="relative z-10 flex shrink-0 items-start gap-2.5">
+        {canDownload ? <KeepOfflineControl episode={episode} /> : null}
+        {canDownload ? <DownloadControl episode={episode} /> : null}
         <WatchedControl animeId={anime.id} episode={episode} />
       </div>
     </div>
@@ -1184,10 +1372,12 @@ function OverrideControl({ anime }: { anime: AnimeDetail }) {
 function Episodes({
   anime,
   isAdmin,
+  canDownload,
   timezone,
 }: {
   anime: AnimeDetail
   isAdmin: boolean
+  canDownload: boolean
   timezone?: string
 }) {
   // No "no episode pictures" caption any more (owner, 2026-09-17): a row with
@@ -1213,6 +1403,7 @@ function Episodes({
               anime={anime}
               episode={episode}
               isAdmin={isAdmin}
+              canDownload={canDownload}
               timezone={timezone}
             />
           ))}
@@ -1540,7 +1731,14 @@ export function Show() {
   return (
     <div>
       <Hero anime={anime} timezone={timezone} />
-      <Episodes anime={anime} isAdmin={me?.role === 'admin'} timezone={timezone} />
+      <Episodes
+        anime={anime}
+        isAdmin={me?.role === 'admin'}
+        // Off for the demo account (FR-S7, owner 2026-10-04), and off until
+        // `me` has loaded rather than flashing on and then away.
+        canDownload={me?.is_demo === false}
+        timezone={timezone}
+      />
       <Franchise anime={anime} />
       <MadeBy anime={anime} />
     </div>

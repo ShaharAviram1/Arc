@@ -38,6 +38,14 @@ type Loading = 'loading' | 'native' | 'hls' | 'unsupported'
 export interface HlsVideoProps {
   /** The playlist URL the server handed us; never built from a route param. */
   src: string
+  /**
+   * `file` for an episode kept on this device (FR-S9): `src` is a blob URL of
+   * one fragmented MP4, which goes onto the element as it is — no hls.js, no
+   * playlist. `hls` (the default) is the stream.
+   */
+  kind?: 'hls' | 'file'
+  /** The element refused a `file` source (the file is gone or unreadable). */
+  onSourceError?: () => void
   /** The caller owns the element: it seeks, mutes and reads position from it. */
   videoRef: RefObject<HTMLVideoElement | null>
   /**
@@ -74,6 +82,8 @@ export interface HlsVideoProps {
 
 export function HlsVideo({
   src,
+  kind = 'hls',
+  onSourceError,
   videoRef,
   label,
   className = '',
@@ -98,6 +108,17 @@ export function HlsVideo({
     if (video === null || src === '') return
 
     setFatal(null)
+
+    // A file on this device (FR-S9) plays natively everywhere. No `stalled`
+    // listener on this path, ever: a blob never stalls for want of a network,
+    // and treating its idle moments as a stall is what broke playback in the
+    // project this design comes from.
+    if (kind === 'file') {
+      video.src = src
+      return () => {
+        video.removeAttribute('src')
+      }
+    }
 
     // Prefer hls.js whenever Media Source Extensions exist: Chrome answers
     // "maybe" to the HLS mime check yet cannot play a playlist natively, so
@@ -147,7 +168,7 @@ export function HlsVideo({
       hlsRef.current?.destroy()
       hlsRef.current = null
     }
-  }, [src, attempt, videoRef])
+  }, [src, kind, attempt, videoRef])
 
   const positionOf = useCallback((): [number, number] => {
     const video = videoRef.current
@@ -179,6 +200,9 @@ export function HlsVideo({
         aria-label={label}
         className="h-full w-full bg-black object-contain"
         onClick={onVideoClick}
+        onError={() => {
+          if (kind === 'file') onSourceError?.()
+        }}
         onLoadedMetadata={() => {
           onReady?.(videoRef.current?.duration ?? Number.NaN)
         }}

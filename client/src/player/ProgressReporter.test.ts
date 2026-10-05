@@ -257,4 +257,86 @@ describe('ProgressReporter', () => {
 
     instance.destroy()
   })
+
+  describe('when the report cannot go out (FR-S8)', () => {
+    type Queue = (position: number, duration: number, allowCompletion: boolean) => void
+
+    function queued(offline: boolean, completed = false) {
+      const report = vi.fn<(position: number, duration: number) => void>()
+      const queue = vi.fn<Queue>()
+      const instance = new ProgressReporter({
+        episodeId: EPISODE_ID,
+        report,
+        queue,
+        offline: () => offline,
+        completed: () => completed,
+      })
+      return { instance, queue }
+    }
+
+    it('puts the final sample in the outbox instead of a beacon when offline', () => {
+      const beacon = stubBeacon()
+      const { instance, queue } = queued(true)
+
+      instance.update(300, DURATION)
+      window.dispatchEvent(new Event('pagehide'))
+
+      expect(beacon).not.toHaveBeenCalled()
+      // It failed for certain, so past the mark it could mint a completion.
+      expect(queue).toHaveBeenCalledExactlyOnceWith(300, DURATION, true)
+      instance.destroy()
+    })
+
+    it('falls into the outbox when the keepalive fetch throws', async () => {
+      vi.stubGlobal('navigator', {})
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>(() => Promise.reject(new TypeError('Failed to fetch'))),
+      )
+      const { instance, queue } = queued(false)
+
+      instance.update(300, DURATION)
+      instance.destroy()
+      await vi.waitFor(() => {
+        expect(queue).toHaveBeenCalledExactlyOnceWith(300, DURATION, true)
+      })
+    })
+
+    it('a crossing beacon while online queues nothing replayable as a completion (B1)', () => {
+      const beacon = stubBeacon()
+      const { instance, queue } = queued(false)
+
+      instance.update(DURATION * 0.93, DURATION)
+      instance.destroy()
+
+      expect(beacon).toHaveBeenCalledTimes(1)
+      // A position only: the server judges it against an un-mark made since.
+      expect(queue).toHaveBeenCalledExactlyOnceWith(DURATION * 0.93, DURATION, false)
+    })
+
+    it('queues nothing at all once the server has answered completed (B1)', () => {
+      const beacon = stubBeacon()
+      const online = queued(false, true)
+      online.instance.update(DURATION * 0.93, DURATION)
+      online.instance.destroy()
+      expect(beacon).toHaveBeenCalledTimes(1)
+      expect(online.queue).not.toHaveBeenCalled()
+
+      const offline = queued(true, true)
+      offline.instance.update(DURATION * 0.93, DURATION)
+      offline.instance.destroy()
+      expect(offline.queue).not.toHaveBeenCalled()
+    })
+
+    it('queues nothing for an ordinary beacon that went out', () => {
+      stubBeacon()
+      const { instance, queue } = queued(false)
+
+      instance.update(300, DURATION)
+      window.dispatchEvent(new Event('pagehide'))
+
+      expect(queue).not.toHaveBeenCalled()
+      instance.destroy()
+    })
+  })
 })

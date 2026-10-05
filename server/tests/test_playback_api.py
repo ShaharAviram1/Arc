@@ -919,8 +919,13 @@ async def test_un_marking_an_episode_the_list_alone_vouches_for_still_lowers_it(
     entry = await entry_of(api_factory, user, anime_id)
     assert entry is not None
     assert entry.progress == 8
-    # Nothing was fabricated on the way: there is still no row for episode 9.
-    assert await progress_rows(api_factory, user, ids[9]) == []
+    # Nothing was fabricated on the way: no completion for episode 9. The one
+    # row there is records the un-mark itself (``unmarked_at``, owner
+    # 2026-10-05), so an older offline completion replayed later cannot undo it.
+    rows = await progress_rows(api_factory, user, ids[9])
+    assert len(rows) == 1
+    assert rows[0].completed is False and rows[0].completed_at is None
+    assert rows[0].position_s == 0.0 and rows[0].unmarked_at == NOW
     # The window moved back onto it, so the reconciliation is queued (FR-T3).
     assert len(await wants_jobs(api_factory)) == 1
 

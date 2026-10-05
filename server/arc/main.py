@@ -31,6 +31,7 @@ from arc.api import (
     retention,
     review,
     schedule,
+    sync,
     users,
 )
 from arc.api import list as list_api
@@ -212,6 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(retention.router)
     app.include_router(media.router)
     app.include_router(playback.router)
+    app.include_router(sync.router)
     app.include_router(mal.router)
     app.include_router(recs.router)
     # Not under ``/api``: the streaming routes are proxied as their own prefix

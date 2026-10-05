@@ -52,7 +52,13 @@ function genresIn(results: readonly AnimeSummary[]): string[] {
 function seasonResults(schedule: SchedulePage): AnimeSummary[] {
   const results: AnimeSummary[] = []
   const seen = new Set<number>()
-  for (const entry of [...schedule.days.flatMap((day) => day.entries), ...schedule.unscheduled]) {
+  // `ended` too: the season's finished shows are on no date of the current
+  // week, and still shows of the season (owner, 2026-10-04).
+  for (const entry of [
+    ...schedule.days.flatMap((day) => day.entries),
+    ...schedule.unscheduled,
+    ...schedule.ended,
+  ]) {
     if (seen.has(entry.anime.id)) continue
     seen.add(entry.anime.id)
     results.push(entry.anime)

@@ -16,6 +16,8 @@
  */
 
 import { PROGRESS_PATH } from '@/lib/playback'
+import { offlineNow } from '@/offline/network'
+import { crossesCompletion, outbox } from '@/offline/outbox'
 
 /** While playing (FR-S3). */
 export const REPORT_INTERVAL_MS = 10_000
@@ -35,6 +37,39 @@ export interface ProgressReporterOptions {
   report: (position: number, duration: number) => void
   /** Where the unload beacon goes. Overridable for tests. */
   path?: string
+  /**
+   * Where a final report goes when it cannot be beaconed, or when its fate is
+   * unknown (FR-S8): the on-device outbox. `allowCompletion` says whether a
+   * sample past the mark may mint a completion record — true only for a report
+   * that is known not to have arrived. Injected in tests; the default records
+   * under the signed-in account.
+   */
+  queue?: (position: number, duration: number, allowCompletion: boolean) => void
+  /** Whether the app currently has no connection. Injected in tests. */
+  offline?: () => boolean
+  /**
+   * Whether the server has already answered `completed: true` for this
+   * episode on this page. Injected in tests; the default asks the outbox,
+   * which `sendProgress` / `sendWatched` keep told.
+   */
+  completed?: () => boolean
+}
+
+function queueInOutbox(episodeId: number) {
+  return (position: number, duration: number, allowCompletion: boolean): void => {
+    const box = outbox()
+    const owner = box.recordingAs
+    if (owner === null) return
+    void box.recordPosition(owner, episodeId, position, duration, { completion: allowCompletion })
+  }
+}
+
+function knownCompleted(episodeId: number) {
+  return (): boolean => {
+    const box = outbox()
+    const owner = box.recordingAs
+    return owner !== null && box.knownCompleted(owner, episodeId)
+  }
 }
 
 interface Sample {
@@ -61,6 +96,9 @@ export class ProgressReporter {
   private readonly episodeId: number
   private readonly report: (position: number, duration: number) => void
   private readonly path: string
+  private readonly queue: (position: number, duration: number, allowCompletion: boolean) => void
+  private readonly offline: () => boolean
+  private readonly completed: () => boolean
 
   /** The most recent position/duration the player told us about. */
   private sample: Sample | null = null
@@ -80,6 +118,9 @@ export class ProgressReporter {
     this.episodeId = options.episodeId
     this.report = options.report
     this.path = options.path ?? PROGRESS_PATH
+    this.queue = options.queue ?? queueInOutbox(options.episodeId)
+    this.offline = options.offline ?? offlineNow
+    this.completed = options.completed ?? knownCompleted(options.episodeId)
     if (typeof window !== 'undefined') {
       window.addEventListener('pagehide', this.onPageHide)
     }
@@ -211,6 +252,25 @@ export class ProgressReporter {
     })
     this.mark(Date.now(), sample.position)
 
+    // Past the mark on an episode the server has already said is completed,
+    // there is nothing the outbox could add: queue nothing at all (B1).
+    const crossing = crossesCompletion(sample.position, sample.duration)
+    const settled = crossing && this.completed()
+
+    // Known to be offline: a beacon would be accepted by the browser and lost
+    // on the wire, so the sample goes to the outbox instead (FR-S8). It failed
+    // for certain, so past the mark it may mint a completion.
+    if (this.offline()) {
+      if (!settled) this.queue(sample.position, sample.duration, true)
+      return
+    }
+    // A beacon is fire-and-forget: nobody learns whether it landed. Past the
+    // mark that is not good enough — but its fate is unknown, so it is kept as
+    // a *position* only, never as a completion. The server judges a position
+    // against anything newer (an un-mark made since, say) and still completes
+    // the episode if the beacon really was lost and nothing newer exists.
+    if (crossing && !settled) this.queue(sample.position, sample.duration, false)
+
     // `sendBeacon` answers false when the browser refuses to queue the request
     // (over the per-page byte budget, say); a keepalive fetch is the fallback,
     // and is also what a browser without `sendBeacon` at all gets.
@@ -230,9 +290,12 @@ export class ProgressReporter {
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         keepalive: true,
-      }).catch(() => undefined)
+      }).catch(() => {
+        if (!settled) this.queue(sample.position, sample.duration, true)
+      })
     } catch {
-      // Nothing left to try; a lost final report costs at most ten seconds.
+      // Nothing left to try on the wire; the outbox keeps it (FR-S8).
+      if (!settled) this.queue(sample.position, sample.duration, true)
     }
   }
 }

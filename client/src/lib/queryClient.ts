@@ -1,6 +1,7 @@
 import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/lib/api'
 import { authMeQueryKey } from '@/lib/auth'
+import { forgetSession } from '@/offline/cache'
 
 /**
  * A 401 from anything other than `/api/auth/me` means the session died under
@@ -16,17 +17,27 @@ function isSessionLoss(error: unknown, queryKey?: readonly unknown[]): boolean {
   return true
 }
 
+/**
+ * The session died under us. Signed out in memory, and the copies kept for an
+ * offline launch go too (FR-S9): otherwise the next launch with no network
+ * would recall the user and sign them back in after a real session loss.
+ */
+function endSession(client: QueryClient): void {
+  client.setQueryData(authMeQueryKey, null)
+  void forgetSession()
+}
+
 export function createQueryClient(): QueryClient {
   const client: QueryClient = new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) => {
         // `client` is captured, not read, at construction time.
-        if (isSessionLoss(error, query.queryKey)) client.setQueryData(authMeQueryKey, null)
+        if (isSessionLoss(error, query.queryKey)) endSession(client)
       },
     }),
     mutationCache: new MutationCache({
       onError: (error) => {
-        if (isSessionLoss(error)) client.setQueryData(authMeQueryKey, null)
+        if (isSessionLoss(error)) endSession(client)
       },
     }),
     defaultOptions: {

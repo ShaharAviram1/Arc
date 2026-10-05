@@ -11,6 +11,7 @@ import {
   FRIEREN,
   FRIEREN_SPECIAL,
   SCHEDULE_PAGE,
+  scheduleEntry,
   SEARCH_PAGE_1,
 } from '@/test/animeFixtures'
 import { mockApi, requestsMade } from '@/test/apiMock'
@@ -58,6 +59,26 @@ describe('Browse', () => {
     expect(screen.getByRole('link', { name: FRIEREN.title.preferred })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'The Apothecary Diaries' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: FRIEREN_SPECIAL.title.preferred })).toBeInTheDocument()
+  })
+
+  it('still lists the season’s finished shows, which are on no date (owner, 2026-10-04)', async () => {
+    mockApi({
+      'GET /api/schedule': {
+        body: {
+          ...EMPTY_SCHEDULE,
+          ended: [
+            scheduleEntry({
+              ...FRIEREN,
+              id: 4242,
+              title: { ...FRIEREN.title, preferred: 'Over Already' },
+            }),
+          ],
+        },
+      },
+    })
+    renderSearch()
+
+    expect(await screen.findByRole('link', { name: 'Over Already' })).toBeInTheDocument()
   })
 
   it('renders results for a query that arrives in the URL, and counts them', async () => {

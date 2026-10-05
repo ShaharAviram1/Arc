@@ -130,4 +130,9 @@ class WatchProgress(Base):
     #: the player scrubs back through an already-finished episode, which would
     #: keep pushing the deletion date away for as long as anyone rewatches.
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: When the user last took the watched mark back (FR-S4's explicit un-mark),
+    #: never moving backwards. Kept as history once a later completion lands:
+    #: it is what lets an offline completion replayed later (FR-S8) be judged
+    #: against an un-mark made after it, elsewhere (owner, 2026-10-05).
+    unmarked_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     updated_at: Mapped[datetime] = updated_at()

@@ -17,8 +17,18 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { ApiError, apiFetch } from '@/lib/api'
+import { ApiError, apiFetch, isUnreachable } from '@/lib/api'
 import { HOME_QUERY_KEY, SCHEDULE_QUERY_KEY } from '@/lib/schedule'
+import {
+  clearLogoutPending,
+  forgetSession,
+  isLogoutPending,
+  markLogoutPending,
+  recallUser,
+  rememberUser,
+} from '@/offline/cache'
+import { downloads } from '@/offline/downloads'
+import { offlineNow, subscribeNetwork } from '@/offline/network'
 
 export type Role = 'admin' | 'user'
 
@@ -174,18 +184,88 @@ export function timezoneOptions(current: string): string[] {
   return current !== '' && !zones.includes(current) ? [current, ...zones] : zones
 }
 
+/**
+ * The `GET /api/auth/me` answer, with the offline launch folded in (FR-S9).
+ *
+ * **A connection failure is not a sign-out.** Opening the installed app on a
+ * plane used to end at "Can't reach Arc" with episodes sitting on the iPad. So
+ * the two failures are told apart: a real **401** signs out and forgets the
+ * remembered user; a request that never reached the server (or reached only
+ * the proxy in front of a server that is down) answers with the user this
+ * device last saw signed in. With no remembered user the error stands.
+ */
+export async function loadMe(
+  fetchMe: () => Promise<User> = () => apiFetch<User>('/api/auth/me'),
+  flush: () => Promise<boolean> = () => flushPendingLogout(),
+): Promise<User | null> {
+  // A sign-out the server has not heard of yet comes first: until it has, the
+  // cookie may still be good, and trusting `/me` would sign the person back in.
+  if (!(await flush())) return null
+  try {
+    const user: unknown = await fetchMe()
+    if (!isUser(user)) throw new Error('the server answered /api/auth/me with something else')
+    void rememberUser(user)
+    return user
+  } catch (error) {
+    if (isStatus(error, 401)) {
+      // A real session loss: the user *and* the pages they were shown.
+      void forgetSession()
+      return null
+    }
+    if (isUnreachable(error)) {
+      const remembered = await recallUser()
+      if (remembered !== null) return remembered
+    }
+    throw error
+  }
+}
+
+/** Whether a value is shaped like the `User` the server sends. Checked before it is remembered. */
+export function isUser(value: unknown): value is User {
+  if (typeof value !== 'object' || value === null) return false
+  const user = value as Record<string, unknown>
+  return (
+    typeof user.id === 'number' &&
+    Number.isInteger(user.id) &&
+    typeof user.email === 'string' &&
+    (user.role === 'admin' || user.role === 'user') &&
+    typeof user.timezone === 'string' &&
+    typeof user.is_demo === 'boolean'
+  )
+}
+
+/**
+ * Tell the server about a sign-out made offline (FR-S9). Answers whether
+ * nothing is pending any more: `true` when there was nothing to send, when the
+ * server took it, or when it says the session is already gone (401); `false`
+ * while it cannot be told, during which the app stays signed out.
+ */
+export async function flushPendingLogout(
+  post: () => Promise<unknown> = () => apiFetch<null>('/api/auth/logout', { method: 'POST' }),
+): Promise<boolean> {
+  if (!(await isLogoutPending())) return true
+  try {
+    await post()
+  } catch (error) {
+    if (!isStatus(error, 401)) return false
+  }
+  await clearLogoutPending()
+  return true
+}
+
+/** At launch and on every reconnect, send a pending sign-out. Returns an unsubscribe. */
+export function watchPendingLogout(): () => void {
+  void flushPendingLogout()
+  return subscribeNetwork(() => {
+    if (!offlineNow()) void flushPendingLogout()
+  })
+}
+
 /** `undefined` while loading, `null` when logged out, the user when logged in. */
 export function useMe(): UseQueryResult<User | null, Error> {
   return useQuery<User | null, Error>({
     queryKey: authMeQueryKey,
-    queryFn: async () => {
-      try {
-        return await apiFetch<User>('/api/auth/me')
-      } catch (error) {
-        if (isStatus(error, 401)) return null
-        throw error
-      }
-    },
+    queryFn: () => loadMe(),
     retry: false,
   })
 }
@@ -197,6 +277,11 @@ export function useLogin(): UseMutationResult<User, Error, LoginInput> {
     mutationFn: (input) =>
       apiFetch<User>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
     onSuccess: (user) => {
+      // Remembered now, not at the next `/me`: a sign-in followed by a flight
+      // must still open offline (FR-S9). A sign-out still waiting for the
+      // network concerned the session this one has just replaced.
+      void clearLogoutPending()
+      void rememberUser(user)
       queryClient.setQueryData(authMeQueryKey, user)
     },
   })
@@ -239,8 +324,17 @@ export function useLogout(): UseMutationResult<null, Error, void> {
    * The cookie may or may not be gone; the next request will find out.
    */
   function endSession() {
+    // Stop anything in flight first, so no answer lands after the clear and
+    // is remembered for the next person (FR-S9).
+    void queryClient.cancelQueries()
     // Drop every cached response: none of it belongs to the next user.
     queryClient.clear()
+    // And the copies kept for an offline launch (FR-S9): the user and the
+    // remembered pages. Queued progress and downloaded files stay — both are
+    // scoped to this account and are only ever shown to it again — but the
+    // downloads are detached at once: nothing of theirs plays or runs now.
+    void forgetSession()
+    downloads().setOwner(null)
     queryClient.setQueryData(authMeQueryKey, null)
     void navigate('/login', { replace: true })
   }
@@ -252,6 +346,12 @@ export function useLogout(): UseMutationResult<null, Error, void> {
       } catch (error) {
         // 401 is not a failure here: the session was already gone.
         if (isStatus(error, 401)) return null
+        // No network: signed out here at once, and the server is told on the
+        // next launch or reconnect, before `/me` is trusted again (FR-S9).
+        if (isUnreachable(error)) {
+          await markLogoutPending()
+          return null
+        }
         throw error
       }
     },
@@ -282,6 +382,8 @@ export function useAcceptInvite(token: string): UseMutationResult<User, Error, A
         body: JSON.stringify(input),
       }),
     onSuccess: (user) => {
+      void clearLogoutPending()
+      void rememberUser(user)
       queryClient.setQueryData(authMeQueryKey, user)
     },
   })

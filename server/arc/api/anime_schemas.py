@@ -23,6 +23,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.episode_extras import EpisodeRelease
+from arc.api.media_stream import download_url
 from arc.api.schemas import OverrideOut
 from arc.core.text import trim_middle
 from arc.models import (
@@ -613,6 +614,13 @@ class EpisodeOut(BaseModel):
     failure_reason: str | None = None
     #: The prepared output, once the episode is ``ready`` (FR-P1).
     rendition: RenditionOut | None = None
+    #: Where the ready episode downloads as one MP4 file (FR-S7), sent exactly
+    #: when :attr:`rendition` is. Built by :func:`~arc.api.media_stream.
+    #: download_url` beside the route that answers it, like the player's
+    #: ``playlist_url``, so the client never assembles a media path itself. The
+    #: demo account is sent it too and refused by the route; the show page
+    #: hides the control for it.
+    download_url: str | None = None
 
     @classmethod
     def from_episode(
@@ -647,6 +655,11 @@ class EpisodeOut(BaseModel):
         is made of.
         """
         prepare = PrepareState.from_job(transcode_job, episode.state)
+        rendition_out = (
+            RenditionOut.from_rendition(rendition, notes=prepare.notes)
+            if rendition is not None and episode.state is EpisodeState.READY
+            else None
+        )
         source = watched_source(episode.number, completed=completed, list_progress=list_progress)
         return cls(
             id=episode.id,
@@ -669,11 +682,8 @@ class EpisodeOut(BaseModel):
             release=ReleaseOut.from_release(release) if release is not None else None,
             prepare_progress=prepare.progress,
             failure_reason=prepare.failure_reason,
-            rendition=(
-                RenditionOut.from_rendition(rendition, notes=prepare.notes)
-                if rendition is not None and episode.state is EpisodeState.READY
-                else None
-            ),
+            rendition=rendition_out,
+            download_url=download_url(episode.id) if rendition_out is not None else None,
         )
 
 

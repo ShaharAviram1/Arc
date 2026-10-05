@@ -2,12 +2,13 @@
  * Seasonal schedule and home dashboard data layer (spec §4.1 FR-C3/FR-C4,
  * §4.6 FR-W1, roadmap M4).
  *
- * Both endpoints are server-side aggregates: the weekday grouping, the air
- * times and the "behind by N" arithmetic all happen there, in the viewer's own
- * timezone, so the client renders what it is given rather than re-deriving it.
- * The one thing the client still has to work out for itself is which column is
- * *today* — that depends on the moment the page is looked at, not on the
- * response — hence `weekdayInTimezone`.
+ * Both endpoints are server-side aggregates: the grouping into dated days (or,
+ * on a browsed season, weekdays), the air times and the "behind by N"
+ * arithmetic all happen there, in the viewer's own timezone, so the client
+ * renders what it is given rather than re-deriving it. The one thing the
+ * client still has to work out for itself is which column is *today* — that
+ * depends on the moment the page is looked at, not on the response — hence
+ * `todayInTimezone` and `weekdayInTimezone`.
  *
  * `anime.ts` imports the query-key constants and `isFollowing` from here to
  * patch and then invalidate both caches after a list write: putting a show on
@@ -17,6 +18,7 @@
 
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
+import { HOME_PAYLOAD, withRemembered } from '@/offline/cache'
 import type { AnimeSummary, EpisodeOut, ListEntry, ListStatus } from '@/lib/anime'
 
 /** AniList's four seasons, as the server spells them. */
@@ -105,11 +107,29 @@ export interface ScheduleEntry {
    * the card (owner, 2026-09-17).
    */
   watched: boolean | null
+  /**
+   * "2026-10-14": the local date a show that has not started premieres on, or
+   * null. Only on the current season's unscheduled entries — an upcoming show
+   * is on no day until its premiere date is on screen, and stays reachable
+   * beside the grid as "Starts 14 Oct" (owner, 2026-10-04).
+   */
+  starts_on: string | null
+  /**
+   * The highest episode airing on the same date as `next_episode` when a dated
+   * day holds more than one ("Ep 3–4"); null otherwise.
+   */
+  last_episode: number | null
 }
 
 export interface ScheduleDay {
   /** 0 = Monday … 6 = Sunday, already in the viewer's timezone. */
   weekday: number
+  /**
+   * "2026-10-14": the local calendar date this column stands for, on the
+   * current season — whose columns list exactly what airs that date (owner,
+   * 2026-10-04). Null on a browsed season, whose columns are weekdays.
+   */
+  date: string | null
   /** Sorted by air time; the client keeps the server's order. */
   entries: ScheduleEntry[]
 }
@@ -122,10 +142,24 @@ export interface SchedulePage {
   next: SeasonRef
   /** The IANA zone every time on this page is expressed in. */
   timezone: string
-  /** Always seven, Monday first. */
+  /**
+   * A browse: always seven undated weekdays, Monday first. The current
+   * season: one dated day from Monday of this week to six days past today —
+   * seven to thirteen, so on a Sunday everything after today is next week's.
+   */
   days: ScheduleDay[]
-  /** Movies, OVAs and anything with no weekday slot. */
+  /**
+   * Movies, OVAs and anything with no slot; on the current season also the
+   * season's shows with nothing airing on the dates sent.
+   */
   unscheduled: ScheduleEntry[]
+  /**
+   * The current season's own finished shows with nothing on the dates sent:
+   * on no day of the calendar, but still shows of the season, so Search's and
+   * Home's season listings include them (owner, 2026-10-04). Empty on a
+   * browse, which puts finished shows on their weekday.
+   */
+  ended: ScheduleEntry[]
 }
 
 /** One followed show with aired episodes the viewer has not watched (FR-C4). */
@@ -255,32 +289,6 @@ export function parseYear(value: string | null): number | undefined {
 }
 
 /**
- * The season Arc is in, by the same arithmetic the server uses
- * (`services/catalog/seasons.py`): three calendar months each, Jan–Mar
- * `WINTER` … Oct–Dec `FALL`, measured in **UTC** rather than the viewer's zone
- * so that both ends agree about which grid is the live one.
- *
- * The response does not say whether the season on screen is the current one —
- * it says which season it *is* — and the page has to know, because only the
- * current grid is a real week: it is the one the server fills with every show
- * on air, and the only one whose columns have dates and a today (owner,
- * 2026-09-17). A prev/next view is a catalogue browse, and printing this
- * week's dates over Spring 2026's shows would be a claim about when they air.
- */
-export function currentSeason(at: Date = new Date()): SeasonRef {
-  return {
-    year: at.getUTCFullYear(),
-    season: SEASONS[Math.floor(at.getUTCMonth() / 3)] ?? 'WINTER',
-  }
-}
-
-/** Whether the grid on screen is the live week rather than a browse. */
-export function isCurrentSeason(page: SeasonRef, at: Date = new Date()): boolean {
-  const now = currentSeason(at)
-  return page.year === now.year && page.season === now.season
-}
-
-/**
  * Which column is today, as a `ScheduleDay.weekday` (0 = Monday).
  *
  * The grid is in the viewer's timezone, so "today" has to be read in that same
@@ -305,44 +313,42 @@ function shortWeekday(timezone: string | undefined, at: Date): string {
   }
 }
 
-const DAY_MS = 86_400_000
-
 /**
  * The month of "17 Sep" — day and month, never the year, because the grid is
- * one week long. Composed rather than formatted whole: a locale decides both
- * the order ("Sep 17") and the abbreviation, and `en-GB` spells this month
- * "Sept", which is a character wider than every other month in a heading that
- * has to line up three times across.
+ * at most nine days long. Composed rather than formatted whole: a locale
+ * decides both the order ("Sep 17") and the abbreviation, and `en-GB` spells
+ * this month "Sept", which is a character wider than every other month in a
+ * heading that has to line up three times across.
  */
 const MONTH_SHORT = new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' })
 
 /**
- * The dates of the Monday–Sunday week that `at` falls in, as "17 Sep" labels
- * indexed the way `ScheduleDay.weekday` is (0 = Monday).
- *
- * The three-day window (owner, 2026-09-17) names its columns "Wed 17 Sep", and
- * a weekday alone cannot say which Wednesday. The server groups the week in
- * the viewer's timezone, so the dates have to be read in that zone too — at
- * 23:00 UTC on a Sunday the Tokyo viewer is already in the *next* week, and
- * his Monday column is tomorrow rather than six days ago.
- *
- * Arithmetic happens at noon UTC: adding 24h to a local midnight lands on the
- * same day again in a zone that put its clocks back that night, and no zone
- * shifts a noon across a date boundary.
- *
- * Returns an empty array when the zone cannot be read at all — the bar then
- * shows weekday names alone, which is what it showed before there were dates.
+ * "17 Sep" for a `ScheduleDay.date` / `starts_on` ("2026-09-17"), or
+ * undefined for anything that is not one. The string is a civil date, so it
+ * is read as one — at noon UTC, formatted in UTC — and no zone can move it.
  */
-export function weekDates(timezone: string, at: Date = new Date()): string[] {
-  const weekday = weekdayInTimezone(timezone, at)
-  const today = dateInTimezone(timezone === '' ? undefined : timezone, at)
-  if (weekday < 0 || today === null) return []
+export function dayLabel(isoDate: string): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate)
+  if (match === null) return undefined
+  const day = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12))
+  if (Number.isNaN(day.getTime())) return undefined
+  return `${String(day.getUTCDate())} ${MONTH_SHORT.format(day)}`
+}
 
-  const monday = Date.UTC(today.year, today.month - 1, today.day - weekday, 12)
-  return WEEKDAY_CODES.map((_, index) => {
-    const day = new Date(monday + index * DAY_MS)
-    return `${String(day.getUTCDate())} ${MONTH_SHORT.format(day)}`
-  })
+/**
+ * Today's date in `timezone`, as "2026-09-17" — the form `ScheduleDay.date`
+ * takes, so finding today's column is a string comparison.
+ *
+ * The server dates the current view in the viewer's zone, so today has to be
+ * read in that zone too: at 23:00 UTC on a Sunday the Tokyo viewer is already
+ * on Monday. Null when `Intl` cannot say what day it is; the page then marks
+ * no column today rather than guessing.
+ */
+export function todayInTimezone(timezone: string, at: Date = new Date()): string | null {
+  const today = dateInTimezone(timezone === '' ? undefined : timezone, at)
+  if (today === null) return null
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${String(today.year)}-${pad(today.month)}-${pad(today.day)}`
 }
 
 interface CalendarDate {
@@ -403,7 +409,8 @@ export function useSchedule(year?: number, season?: Season): UseQueryResult<Sche
 export function useHome(): UseQueryResult<HomePage, Error> {
   return useQuery<HomePage, Error>({
     queryKey: homeQueryKey,
-    queryFn: () => apiFetch<HomePage>('/api/home'),
+    // The last good Watch Now is kept for a launch with no network (FR-S9).
+    queryFn: () => withRemembered(HOME_PAYLOAD, () => apiFetch<HomePage>('/api/home')),
     retry: false,
   })
 }

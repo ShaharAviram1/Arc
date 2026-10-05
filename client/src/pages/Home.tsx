@@ -32,6 +32,8 @@ import {
   type MyListItem,
 } from '@/lib/anime'
 import { useMe } from '@/lib/auth'
+import { OutboxProblemRows } from '@/offline/OutboxProblems'
+import { outboxRowCount, useOutboxProblems } from '@/offline/useOutbox'
 import { useHealth } from '@/lib/health'
 import { usePrefersReducedMotion } from '@/lib/media'
 import { useRecs, type RecsPage } from '@/lib/recs'
@@ -39,6 +41,7 @@ import {
   seasonLabel,
   SEASONS,
   useHome,
+  todayInTimezone,
   useSchedule,
   weekdayInTimezone,
   WEEKDAY_LABELS,
@@ -46,6 +49,7 @@ import {
   type FailureEntry,
   type HomePage,
   type Season,
+  type ScheduleDay,
   type SchedulePage,
   type SeasonRef,
 } from '@/lib/schedule'
@@ -207,7 +211,9 @@ function seasonShows(schedule: SchedulePage): AnimeSummary[] {
       shows.push(entry.anime)
     }
   }
-  for (const entry of schedule.unscheduled) {
+  // `ended` is the season's finished shows, on no date of the current week
+  // but still shows of the season (owner, 2026-10-04).
+  for (const entry of [...schedule.unscheduled, ...schedule.ended]) {
     if (seen.has(entry.anime.id)) continue
     seen.add(entry.anime.id)
     shows.push(entry.anime)
@@ -796,9 +802,10 @@ interface Appointment {
 }
 
 /**
- * The week ahead, starting today and wrapping round to yesterday: the shelf is
- * read left to right as "tonight, then tomorrow", so a Thursday viewer should
- * not have to scroll past Monday to find it.
+ * The week ahead — today and the six dates after it, from the schedule's
+ * dated days: the shelf is read left to right as "tonight, then tomorrow", so
+ * a Thursday viewer should not have to scroll past Monday to find it, and a
+ * day already gone this week is not an appointment.
  *
  * **This shelf carries no acquisition state** (owner, 2026-09-13). It used to
  * label every tile with the episode's state, which meant most of a following
@@ -817,25 +824,42 @@ interface Appointment {
  * 2026-09-17, from production). Nobody has watched a broadcast that has not
  * happened.
  */
-function appointments(schedule: SchedulePage, today: number): Appointment[] {
-  // -1 means the viewer's timezone did not resolve to a weekday; the week then
-  // starts on Monday and nothing is "tonight", which is the honest fallback.
-  const start = today < 0 ? 0 : today
-  const order = WEEKDAY_LABELS.map((_, index) => (start + index) % 7)
+function appointments(schedule: SchedulePage, timezone: string): Appointment[] {
+  const today = weekdayInTimezone(timezone)
+  const todayDate = todayInTimezone(timezone)
+  const dated = schedule.days.length > 0 && schedule.days.every((day) => day.date !== null)
+
+  // The current season's days are dated, Monday of this week to six days past
+  // today (owner, 2026-10-04). The shelf is appointments, so it takes today
+  // and the six dates after it, in date order — never this week's days that
+  // have already gone, whose slots name episodes that aired.
+  let days: ScheduleDay[]
+  if (dated && todayDate !== null) {
+    days = schedule.days
+      .filter((day) => day.date !== null && day.date >= todayDate)
+      .sort((left, right) => (left.date ?? '').localeCompare(right.date ?? ''))
+  } else {
+    // An undated week (or a zone Intl cannot read): by weekday from today,
+    // wrapping. -1 means the weekday did not resolve; the week then starts on
+    // Monday and nothing is "tonight", which is the honest fallback.
+    const start = today < 0 ? 0 : today
+    days = WEEKDAY_LABELS.map((_, index) => (start + index) % 7).flatMap((weekday) =>
+      schedule.days.filter((day) => day.weekday === weekday).slice(0, 1),
+    )
+  }
 
   const cards: Appointment[] = []
-  for (const weekday of order) {
-    const day = schedule.days.find((candidate) => candidate.weekday === weekday)
-    if (day === undefined) continue
+  for (const day of days) {
+    const tonight = dated && todayDate !== null ? day.date === todayDate : day.weekday === today
     for (const entry of day.entries) {
       if (!entry.following) continue
       cards.push({
         anime: entry.anime,
-        weekday,
+        weekday: day.weekday,
         time: entry.air_time_local ?? '—',
         episode:
           entry.next_episode === null ? 'Next episode' : `Episode ${String(entry.next_episode)}`,
-        tonight: weekday === today,
+        tonight,
         watched: entry.watched === true,
       })
     }
@@ -1187,9 +1211,12 @@ function FailureBanner({ userId, failures }: { userId: number; failures: Failure
     ),
   )
   const [expanded, setExpanded] = useState(false)
+  // Offline progress the server would not take, or that is waiting for
+  // another account (FR-S8): kept on the device, so shown here until dismissed.
+  const offline = useOutboxProblems()
 
   const rows = failures.filter((failure) => !dismissed.has(failure.key))
-  if (rows.length === 0) return null
+  if (rows.length === 0 && outboxRowCount(offline) === 0) return null
 
   const shown = expanded ? rows : rows.slice(0, FAILURES_SHOWN)
   const folded = rows.length - shown.length
@@ -1210,6 +1237,7 @@ function FailureBanner({ userId, failures }: { userId: number; failures: Failure
             }}
           />
         ))}
+        <OutboxProblemRows problems={offline} />
       </ul>
       {folded > 0 ? (
         <button
@@ -1287,8 +1315,7 @@ export function Home() {
 
   const started = continueWatching(data)
   const ready = readyToWatch(data)
-  const week =
-    schedule.data === undefined ? [] : appointments(schedule.data, weekdayInTimezone(timezone))
+  const week = schedule.data === undefined ? [] : appointments(schedule.data, timezone)
   const picks = recs.data?.run?.picks ?? []
 
   // Built as a list rather than five conditionals in the tree, so the 72px

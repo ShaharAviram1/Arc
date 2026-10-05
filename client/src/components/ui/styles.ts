@@ -28,9 +28,12 @@ export const FOCUS_RING =
  * one"), so they wear the same clothes: the strong hairline, the raised
  * surface, the glass blur, and a glyph that inherits `currentColor` rather
  * than arriving as an icon asset. Add `FOCUS_RING` at the call site.
+ *
+ * 44px under a finger (M18): 36 is a mouse-sized target, and an iPad is a
+ * desktop width with a coarse pointer.
  */
 export const GLASS_CIRCLE =
-  'flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-surface-raised)] text-[18px] leading-none text-[var(--arc-text)] backdrop-blur-glass transition-colors duration-200 hover:bg-[rgba(255,255,255,0.13)]'
+  'flex h-9 w-9 pointer-coarse:h-11 pointer-coarse:w-11 shrink-0 items-center justify-center rounded-full border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-surface-raised)] text-[18px] leading-none text-[var(--arc-text)] backdrop-blur-glass transition-colors duration-200 hover:bg-[rgba(255,255,255,0.13)]'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'chip' | 'danger'
 

@@ -83,12 +83,25 @@ that the course professor can log in at any time, and the owner uses it daily.
 - FR-C2 Add an anime to the user's list in any status. Adding creates or
   refreshes the local Anime record.
 - FR-C3 Seasonal schedule: for the current season (and prev/next), list shows
-  grouped by weekday with air time in the user's timezone. Shows the user
-  follows are highlighted. "Add to planned / watching" from the schedule.
-  The **current** week's grid includes every airing show with a known air
-  time, whatever season it started in — a two-cour show or a long-runner
-  belongs to the week it airs in — and names that season on the card; the
-  prev/next views stay the shows of the season being browsed.
+  with air time in the user's timezone. Shows the user follows are
+  highlighted. "Add to planned / watching" from the schedule. The **current**
+  view is a calendar of concrete dates in the user's timezone (Monday of this
+  week through six days after today): each day lists exactly the shows with
+  an episode airing on that date — by the cached next-airing slot, an episode
+  dated that day, or, for an airing show with no dated episodes, the weekly
+  slot one week before its next one once that time has passed — and nothing
+  else. A show that has ended is on no day except the dates its episodes
+  really aired (a finale this week is on its date); it stays a show of the
+  season for Browse and Watch Now's season listings. A show that has not
+  started is on no day until its premiere date, and until then sits beside
+  the grid with "Starts 14 Oct" when its date is known; an airing show with
+  nothing in the dates on screen reads "Next 13 Oct". Shows count whatever
+  season they are tagged with — a two-cour show, a long-runner, or next
+  season's premiere in the week the season turns over — and the card names
+  that season. Two episodes of one show on one date are both named ("Ep
+  3–4"). Watch Now's "This week" shelf lists the followed shows airing today
+  and on the six dates after it. The prev/next views stay the shows of the
+  season being browsed, grouped by weekday.
 - FR-C4 Per followed show, know which episodes have aired and how many the
   user has not watched ("behind by N"). Published air dates that the rest of
   the list contradicts are not believed: a finished show has no future
@@ -421,6 +434,129 @@ that the course professor can log in at any time, and the owner uses it daily.
      shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
      toast and the overlay render inside the fullscreen element.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
+- FR-S7 **Download a prepared episode as a file** (owner, 2026-10-04). Any
+  signed-in user except the demo account can save a `ready` episode as one
+  MP4 file from its row on the show page ("Save file", relabelled from
+  "Download" by FR-S9). The file is exactly
+  what the player streams — the prepared rendition with subtitles burned in —
+  joined into one file on the fly, so nothing is re-encoded and nothing extra
+  is stored. It is named after the show and the episode number
+  (`Frieren - 12.mp4`), from Arc's own data, never from the request. The
+  download is resumable (byte ranges, a validator that changes when the
+  episode is re-prepared) so a later in-app offline mode can fetch it in
+  pieces. An episode that is not ready, or whose prepared files are not all
+  present and intact, cannot be downloaded (404, never a partial file). The
+  demo account is refused (403) and does not see the control.
+- FR-S8 **Progress made offline is kept and synced later** (owner,
+  2026-10-04: "we gotta make sure we hold on to the records to sync them in
+  later when ipad is back online"; revised 2026-10-05). When a progress
+  report, the mark-watched control or its undo cannot reach the server (no
+  response, a server error, an expired session), the client keeps the record
+  on the device and replays it when the connection is back (on reconnect,
+  every 15 s, when the page is hidden or closed). Online, FR-S3 is unchanged.
+  The rules:
+  1. A **completion is its own record**, made the moment a sample that failed
+     to send reaches FR-S4's 90 % (or the user presses mark watched offline),
+     and is never overwritten by a later, lower sample; an explicit
+     **un-mark** is its own record too. Position samples for one episode keep
+     only the newest. Records replay in the order the device made them (its
+     own sequence, never its clock). The player's last report when a page
+     closes, whose arrival is never confirmed, is kept as a position only —
+     never as a completion — and not at all once the server has said the
+     episode is completed.
+  2. A replayed completion **is the user's watch completion**: it takes the
+     same path as FR-W3's mark, so it raises list progress only upwards, logs
+     one MAL progress write with the previous value, and is idempotent — a
+     second replay, or one the server already had, changes nothing. It is
+     ignored if the user un-marked that episode at or after the moment it
+     was made (the un-mark time is recorded; owner, 2026-10-05). A replayed
+     un-mark follows FR-S4's un-mark rule unchanged, and is ignored if the
+     episode was completed again after it or the list entry was changed after
+     it. A replayed position is ignored if the server already holds a newer
+     one.
+  3. **Time**: each record's time is the device's, corrected by the
+     device's clock skew (the batch says when it was sent) and held within
+     the last 30 days and no later than now.
+  4. **Nothing is dropped silently.** A record the server can never use (the
+     episode no longer exists, an invalid record) stays on the device and is
+     shown in Watch Now's own-failure banner (FR-W6) with its reason until
+     the user dismisses it. A record the server could not apply just then is
+     kept and sent again; records still failing after ten minutes and three
+     attempts are shown in the banner as "not yet synced" with the last
+     error, and are never deleted automatically.
+  5. Records **belong to the account** they were made under: signing in as
+     someone else neither deletes nor sends them; the banner says they are
+     waiting for their account.
+  6. Where the browser cannot store data (a private window) the records are
+     kept in memory, and the banner says they will not survive a reload.
+  7. An episode with a queued mark or un-mark shows a quiet "pending sync"
+     state on the show page instead of the control, so it is not pressed
+     again; the pages refresh once the server has taken the records.
+- FR-S9 **Episodes kept inside Arc, to watch with no network** (owner,
+  2026-10-04: "so i can use arc when traveling"; the design is Audiosey's).
+  On a ready episode's row, beside FR-S7's file link (now labelled **"Save
+  file"**: it hands the MP4 to the browser's downloads), a second control,
+  **"Keep offline"**, downloads the same file into Arc's own storage on this
+  device, where Arc's player finds it. Not for the demo account; hidden, with
+  no error, where the browser cannot keep files this way (no origin-private
+  file system or no workers).
+  1. **States**: not downloaded → queued → downloading (a percentage) →
+     downloaded ("On this device"), or paused (by the user; when the app was
+     closed; waiting for a connection, which carries on by itself) or failed
+     (out of space, signed out / not allowed, gone from the server, a file
+     that did not add up, a file the player would not play, removed by the
+     device to free space, any other error), each with its reason in words and
+     Resume / Try again. One download runs at a time, in the order asked.
+     A full device surfaces as a failed state that says so, never as a stall.
+     A downloaded episode whose file the device later removed is shown as
+     "Removed by the device to free space — Keep offline again", with Try
+     again and Delete, never silently dropped; downloads waiting when the app
+     closed come back paused. Two Arc windows never download one episode at
+     once: the second says "Downloading in another Arc window".
+  2. **Resume and change**: the download is fetched in 8 MB pieces and
+     resumes from what is on the device after a pause, a lost connection or
+     the app being closed. An episode re-prepared on the server meanwhile
+     (its validator changed) starts again from zero, never spliced. Arc asks
+     the browser for persistent storage on the first download. A deleted
+     download's file is removed only once nothing is writing it, a new
+     download of an episode never resumes from bytes no download vouches for,
+     and any such leftover file is removed at launch. An episode another
+     account on the device already keeps is confirmed with the server (this
+     account may have it, and it is the current encode) before it counts.
+  3. **Playback**: a downloaded episode plays from the device in Arc's own
+     player, online or not; one that is not downloaded streams as before.
+     Autoplay, resume, the end-of-episode moments and progress reporting are
+     FR-S1–S5 unchanged; progress made with no network goes through FR-S8's
+     queue and reaches Arc and MyAnimeList on reconnect by FR-S8's rules.
+     Offline, resume uses the last position watched on this device, and
+     previous / next lead to the nearest downloaded episodes of the show.
+     When neither the file nor the download knows the episode's length, the
+     player does not seek to a stored position.
+  4. **The app opens with no network.** A failed request is not a sign-out
+     (a real "not signed in" answer is): the device remembers the signed-in
+     user, Watch Now and every show page opened, and per downloaded episode
+     the show title, episode number and title, duration and poster. Downloads
+     and the player for downloaded episodes work in full offline; Watch Now
+     and a visited show page show their remembered copy; every page carries
+     a "You're offline — your downloads are here" line linking to Downloads.
+  5. **Belongs to the account**: downloads, remembered pages and posters are
+     recorded per user and only that user sees or plays them on that device.
+     Signing out — or the server ending the session — forgets the remembered
+     user and pages, and stops and hides the account's downloads at once;
+     queued progress (FR-S8) and downloaded files stay until the user deletes
+     them, and a download stopped for want of a session carries on when the
+     same account signs in again. **A sign-out made with no network** takes
+     effect on the device at once and is sent to the server at the next
+     launch or reconnect; until the server has it, the app stays signed out
+     (so a shared iPad cannot be signed back in by the old cookie).
+  6. **Lifecycle**: a downloaded episode is the user's copy and keeps playing
+     on the device after retention (FR-T*) removes the server's rendition.
+     Removing the installed app from the Home Screen deletes its downloads
+     (iOS); the Downloads page says so. iPad and iPhone stop downloads while
+     Arc is not on screen; the page says that too, and a download carries on
+     when Arc is back on screen or back online. A downloaded episode the
+     server later re-prepares keeps playing the device's older copy; nothing
+     says so yet (deleting and downloading again fetches the new one).
 
 ### 4.6 Watch tracking and list states
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
@@ -628,7 +764,10 @@ that the course professor can log in at any time, and the owner uses it daily.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
   the demo one (`users.is_demo`), from the admin Users tab or by
-  `arc.cli demo-list --demo`. The flag gates **presentation and nothing else**:
+  `arc.cli demo-list --demo`. The flag gates **presentation** — and, since
+  2026-10-04, one capability: the demo account **cannot download an episode
+  as a file** (FR-S7: the route answers 403 and the Download control is not
+  shown); it streams like anybody else. Otherwise nothing:
   a fourth top-nav entry, **How Arc works** (and the same entry at the top of
   the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
   hero pointing at it — dismissal is remembered per account in that browser.
@@ -651,14 +790,15 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player, autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode a quiet "Save file" (FR-S7) and "Keep offline" with its download state (FR-S9) — neither for the demo account. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
 | Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk, review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
 | How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
+| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode, pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). Reached from the account menu (not for the demo account) and from the offline line on every page |
 
 Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
 sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
@@ -681,6 +821,21 @@ usable for the home page and player. Every horizontal shelf must be scrollable
 with a mouse as well as a trackpad or a thumb: it can be dragged, and hovering
 it raises an arrow at each end that still has somewhere to go (owner,
 2026-09-13).
+
+- FR-U1 **Installable web app** (M18, owner 2026-10-04). On an iPad or an
+  iPhone, Arc can be added to the Home Screen from Safari or Chrome and then
+  opens full screen, without the browser's chrome, as "Arc" with an opaque
+  icon. It turns with the device (no orientation lock), keeps its controls
+  clear of the screen's rounded corners and home indicator, and its controls
+  are usable by touch at tablet widths (44 px targets where they were
+  smaller; the player's controls come back on a tap). Safari and Chrome users
+  on iOS who have not installed it see one dismissable line above Watch Now
+  saying how (Share → Add to Home Screen); nobody else sees it, and it never
+  shows inside the installed app. A service worker keeps the app's own shell
+  so a launch with no connection still opens, but it never caches or answers
+  API data or video. A deploy never reloads a page in use: an online launch
+  shows the new build, and the installed shell catches up on the following
+  launch.
 
 ## 6. Episode lifecycle
 
@@ -722,8 +877,11 @@ is and the grace period decides.
 
 ## 8. Out of scope (for now)
 
-- Native mobile apps, Chromecast/AirPlay.
-- Downloading whole seasons or a general "download anything" UI.
+- Native mobile apps (App Store / Play Store), Chromecast/AirPlay. An
+  installable web app is in scope (FR-U1, owner 2026-10-04).
+- Downloading whole seasons or a general "download anything" UI. (FR-S7 is
+  not that: it is a per-episode download of a file Arc has already prepared
+  for streaming, and fetches nothing new.)
 - Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
   at play time.
 - Per-user private libraries.
@@ -1476,3 +1634,75 @@ is and the grace period decides.
   M14 nor M16 made — the queue is global, as FR-D4 says. §8's out-of-scope list
   and §9's open decisions are unchanged: nothing in them has been decided since
   they were last dated.
+- 2026-10-04 — **The current schedule is date-exact** (FR-C3, owner: "the
+  schedule should only show whats really playing that date. a show ended
+  already or starting in the next weeks should not appear today"). The
+  current view placed every show of the season on a *weekday* — a finished
+  show on the weekday it used to air, an announced one on its premiere's
+  weekday — so the first week of Fall 2026 was full of both. Each day of the
+  current view is now one local date and lists only the shows with an episode
+  airing on it; a finished show is only on the dates its episodes really
+  aired (a finale this week stays on its date) and otherwise on none, while
+  still listed as a show of the season for Browse and Watch Now; a show that
+  has not started is listed beside the grid with its premiere date until that
+  date is on screen. The API sends a `date` per day there (Monday of this
+  week through six days after today, so on a Sunday "tomorrow" is next
+  Monday, with next Monday's airings), `starts_on` on an upcoming show, and
+  the season's finished shows in a separate `ended` list. Shows of any season
+  airing on those dates are included, so next season's premiere in the
+  turnover week is on its date. Watch Now's "This week" shelf takes today and
+  the six dates after it. The prev/next season views are unchanged.
+- 2026-10-04 (owner) — **Download a ready episode as a file** (FR-S7, M18
+  step 1 of "download to device"). One MP4 per episode, built on the fly from
+  the prepared HLS files (no re-encode, no extra storage), named from the show
+  title and episode number, resumable via byte ranges and an ETag so the later
+  in-app offline downloader can use the same route. Off for the demo account.
+  §8's "download anything" exclusion stands; this downloads only what Arc has
+  already prepared.
+- 2026-10-04 — **Installable web app** (FR-U1, M18, owner). Native apps stay
+  out of scope (§8), but the web client becomes installable: Add to Home
+  Screen on an iPad or iPhone opens Arc full screen, with an install hint
+  above Watch Now for iOS Safari and Chrome users who have not done it yet,
+  touch-sized controls at tablet widths, and an app-shell-only service worker
+  that never touches API data or video.
+- 2026-10-04 (owner) — **Offline progress is kept and replayed** (FR-S8,
+  M18 "in-app offline"). An on-device queue plus a batch sync endpoint;
+  approved by the owner. The MAL non-negotiable holds because a replayed
+  completion is the user's own watch completion and goes through the same
+  user-originated path as the online report and the manual mark (one logged
+  write carrying the previous value, never lowering); a replayed un-mark is
+  the user's explicit un-mark through FR-S4's own rule. No second code path
+  writes to MyAnimeList, and nothing automatic lowers progress.
+- 2026-10-04 (owner) — **Downloads are off for the demo account** (FR-S7,
+  FR-D5). The demo flag, until now presentation only, also refuses the
+  episode download with a 403 and hides its control; streaming is unchanged.
+  FR-D5 and architecture §4/§5b now say so.
+- 2026-10-05 (owner) — **FR-S8 tightened after review; `watch_progress.
+  unmarked_at` added.** The un-mark now records when it happened (a nullable
+  timestamp, never moving backwards), and a replayed completion made at or
+  before it is ignored: an offline rewatch, or a retried sync, can no longer
+  re-complete an episode the user un-marked later. The player's exit report
+  is never turned into a completion on the device. Transient server failures
+  are retried rather than shown as permanent, long-failing records are shown,
+  the device's clock skew is corrected and its timestamps held to the last
+  30 days, the queue is ordered by the device's own sequence, and a queued
+  mark shows "pending sync" on the show page. The MAL rule is unchanged:
+  every replay still goes through the same user-originated path.
+- 2026-10-05 (owner decisions of 2026-10-04) — **FR-S9, in-app offline
+  episodes**, ported from Audiosey: "Keep offline" writes FR-S7's file into
+  the browser's origin-private file system through a worker, 8 MB ranged
+  pieces resumed from the file's own size, restarted from zero when the
+  server's validator changes; the player plays a downloaded episode from the
+  device, online or not; the app opens with no network on a remembered user
+  and remembered pages; downloads are per account; a **Downloads** page joins
+  §5. FR-S7's control is relabelled "Save file" so the two read apart. The
+  service worker still never touches `/api` or `/media`.
+- 2026-10-05 — **FR-S9 hardened after review.** A delete waits for the
+  downloader to let go of the file, a new download never resumes from an
+  unvouched file, leftovers are swept at launch; an evicted download is shown
+  ("Removed by the device to free space") instead of vanishing; one window
+  per episode download; a sign-out made offline is held and sent on the next
+  launch or reconnect, and the app stays signed out until then; any session
+  loss forgets the offline copies; remembered pages and posters are per
+  account; no resume seek when no length is known. A device copy keeps
+  playing after a server re-encode, with no hint yet.

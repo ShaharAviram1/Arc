@@ -1,6 +1,8 @@
 import '@testing-library/jest-dom/vitest'
 import { beforeEach } from 'vitest'
 import { clearAspectCache } from '@/components/ui/aspect'
+import { setDownloads } from '@/offline/downloads'
+import { openStore } from '@/offline/store'
 
 /**
  * Measured image shapes live in a module-level store for the life of the tab
@@ -11,4 +13,19 @@ import { clearAspectCache } from '@/components/ui/aspect'
  */
 beforeEach(() => {
   clearAspectCache()
+})
+
+/**
+ * The offline caches (FR-S9) are module-level memory stores under jsdom (no
+ * IndexedDB): a remembered user or page from one test would otherwise answer
+ * for a network failure in the next. The outbox's own store is left to the
+ * outbox suites, which manage it themselves.
+ */
+beforeEach(async () => {
+  setDownloads(null)
+  await Promise.all(
+    (['downloads', 'player', 'payloads', 'covers', 'session'] as const).map((name) =>
+      openStore(name).clear(),
+    ),
+  )
 })

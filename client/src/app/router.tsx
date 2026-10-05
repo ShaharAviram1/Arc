@@ -4,6 +4,7 @@ import { RequireAdmin } from '@/components/RequireAdmin'
 import { RequireAuth } from '@/components/RequireAuth'
 import { RouteError } from '@/components/RouteError'
 import { Admin } from '@/pages/Admin'
+import { Downloads } from '@/pages/Downloads'
 import { Home } from '@/pages/Home'
 import { HowArcWorks } from '@/pages/HowArcWorks'
 import { Invite } from '@/pages/Invite'
@@ -49,6 +50,9 @@ export const routes = [
           // should open, and the page says nothing an account may not read.
           { path: '/how-arc-works', element: <HowArcWorks /> },
           { path: '/recs', element: <Recs /> },
+          // Episodes kept on this device (FR-S9). Everything on it is read from
+          // the device, so it is where an offline launch points.
+          { path: '/downloads', element: <Downloads /> },
           // Review is per-user in phase 1 (spec §2: users resolve review items
           // for their own shows); only /admin is role-gated.
           { path: '/review', element: <Review /> },

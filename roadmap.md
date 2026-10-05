@@ -1534,6 +1534,96 @@ the finish work (bugs found that way are fixed inside M16).
   explicitly marked out of scope; owner has used it daily for two weeks
   without manual intervention.
 
+### M18 — Travel: downloads, the iPad app, a date-exact schedule
+Asked for by the owner on 2026-10-04, ahead of M17 ("so I can use Arc when
+travelling"). Built and verified on dev; deployed only on the owner's word,
+because the professor may be grading on production and Tribunal, SectorWatch
+and Audiosey share the host.
+- [x] **Schedule shows only what airs on that date** (FR-C3, owner
+      2026-10-04): a show that has ended, or one that starts in a later week,
+      is in no day column of the current view; every column is one calendar
+      date in the user's timezone. The view runs from Monday of this week to
+      six days ahead; a finale is on the date it aired; the season's finished
+      shows stay in Browse and the hero pool (`ended`); shows not yet started
+      are listed beside the grid with "Starts 14 Oct". Verified 2026-10-05
+      (orchestrator): Writer → Validator (9 criteria pass, 6 defects found) →
+      fix loop; in Chrome on a fresh database holding the real Fall 2026
+      catalogue the page opened on Sun 4 Oct / Mon 5 / Tue 6 with that week's
+      premieres on their dates and 13 dated days in the response; server suite
+      3906, lint clean.
+- [x] **Download an episode as an MP4 file** (FR-S7, step 1 of "download to
+      device"): a Download control on a ready episode saves the prepared
+      rendition — subtitles already burned in — as one file, with no
+      re-encode. Session required, path derived from the episode id, off for
+      the demo account. `GET /media/{id}/episode.mp4` is the rendition's own
+      init segment and segments joined in playlist order, with Range, a strong
+      ETag and If-Range, so the in-app downloader uses the same route.
+      Verified 2026-10-05 (orchestrator): Writer → Reviewer (no blockers; a
+      500 on an over-long Range number and path re-resolution during a long
+      stream fixed) → with curl against a real 476 MB rendition: body
+      byte-identical to the file Apple's `avmediainfo` reads, 206/416/400,
+      401 anonymous, 403 demo on GET and HEAD; Download chip seen on the Show
+      page. Still the owner's to check: the saved file playing on an iPad.
+- [x] **Installable iPad web app** (FR-U1): `vite-plugin-pwa`, standalone
+      display, opaque icons, install hint, safe-area and touch pass at iPad
+      sizes. Not a native app (spec §8). The service worker serves the app
+      shell only and never `/api` or `/media`. Verified 2026-10-05
+      (orchestrator): production build emits `sw.js` and the manifest at the
+      root; in Chrome on a preview of that build the worker registered,
+      precached the shell, controlled the second load, served the shell with
+      the server stopped and let `/api` fail through to the network. Still the
+      owner's to check on an iPad: the hint, Add to Home Screen, touch sizes,
+      the 820 px toolbar.
+- [ ] **In-app offline** (step 2): the installed app keeps chosen episodes on
+      the device, plays them in Arc's own player with no connection, and sends
+      progress (and so MAL) when it is back online. Design ported from
+      Audiosey (owner, 2026-10-04).
+  - [x] Offline progress queue and `POST /api/sync` (FR-S8): records are kept
+        on the device and replayed on reconnect; a completion is never
+        coalesced away, a rejected record is kept and shown, records belong to
+        their user; `watch_progress.unmarked_at` (owner 2026-10-05, revision
+        4e76a09e547c — **must run on the host at deploy**) keeps an old
+        offline completion from undoing a later un-mark. Verified 2026-10-05
+        (orchestrator): Writer → Reviewer (2 blockers, 8 should-fix) → fix
+        loop; in Chrome with the API stopped four reports queued as one
+        completion plus the latest position, survived a reload and synced on
+        reconnect; live against the API a completion older than an un-mark
+        answered `stale`, a newer one `applied`, another account's batch 409.
+  - [x] Episodes kept on the device (FR-S9): "Keep offline" on a ready
+        episode downloads it in ranged chunks into the browser's private file
+        system, the Downloads page (account menu) lists, pauses, resumes and
+        deletes them, the player plays the device copy with or without a
+        connection, and the app opens signed in with no network. Each account
+        sees only its own downloads; a session loss forgets the remembered
+        user; a sign-out made offline is completed on reconnect. Verified
+        2026-10-05 (orchestrator): Writer → Reviewer (1 blocker, 11
+        should-fix) → fix loop; client suite 964, lint clean, build with the
+        worker chunk precached; in Chrome a real 476 MB episode was kept
+        byte-identical (SHA-256 matched the server's file), pause-then-delete
+        mid-download left no file behind, and with the server stopped the app
+        stayed signed in, Downloads rendered and the player opened the device
+        copy. Then the whole flow in Playwright's WebKit 26.6 with an iPad Pro
+        profile and a persistent profile: install hint shown, episode kept
+        (worker and OPFS under WebKit), the device copy played with a finite
+        duration (1420.1 s) and sought to 20:00 in 231 ms, 1:00 in 59 ms and
+        23:00 in 51 ms; with the server stopped the app opened signed in,
+        played to the completion mark and queued one completion plus the
+        latest position, the Show row read "Watched · pending sync", and on
+        reconnect the queue emptied and the server held the episode completed
+        with the list at 1. A private (non-persistent) WebKit profile has no
+        OPFS: "Keep offline" fails there with a visible "Try again" state.
+        **Still the owner's to check on a real iPad:** the same flow in Safari
+        from the Home Screen, persistent storage, and the MAL log.
+- [x] **Measurement: what not burning subtitles in would buy** (owner
+      2026-10-04, after trying webtor.io). Measured 2026-10-04 on a 1080p
+      SubsPlease episode, 2 threads: burn-in is about 2 % of the encode
+      (48.9 s against 47.7 s for a 2-minute excerpt); copying the H.264 video
+      and re-encoding only the audio takes 17.5 s for a whole episode but keeps
+      the source's 8.2 Mbit/s (1.4 GB against about 455 MB). Burn-in stays; a
+      copy-video "play now" path is the owner's decision and is open.
+- **DoD:** each item verified by the orchestrator on dev and on a real iPad
+  by the owner; spec/architecture current; suites green; deployed.
+
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
 from the "possible later" list (the owner may strike any). Starts after

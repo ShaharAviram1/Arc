@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiFetch } from '@/lib/api'
+import { ApiError, apiFetch, isOffline } from '@/lib/api'
+import { offlineNow, resetNetwork } from '@/offline/network'
 import { mockApi } from '@/test/apiMock'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -69,5 +70,41 @@ describe('apiFetch', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(apiFetch('/api/logout', { method: 'POST' })).resolves.toBeNull()
+  })
+})
+
+describe('offline detection (M18)', () => {
+  afterEach(() => {
+    resetNetwork()
+  })
+
+  it('a request with no response at all marks the app offline; the next answer clears it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    const error: unknown = await apiFetch('/api/home').catch((caught: unknown) => caught)
+    expect(isOffline(error)).toBe(true)
+    expect(offlineNow()).toBe(true)
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ detail: 'no' }, 500)))
+    const answered: unknown = await apiFetch('/api/home').catch((caught: unknown) => caught)
+    expect(isOffline(answered)).toBe(false)
+    expect(offlineNow()).toBe(false)
+  })
+
+  it.each([502, 503, 504])(
+    'a %i from the gateway is offline too, so the strip agrees with isUnreachable (FR-S9)',
+    async (status) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ detail: 'down' }, status)))
+      await apiFetch('/api/home').catch(() => undefined)
+      expect(offlineNow()).toBe(true)
+    },
+  )
+
+  it('an aborted request is not a network failure', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('aborted', 'AbortError')))
+
+    await expect(apiFetch('/api/search', { signal: controller.signal })).rejects.toThrow()
+    expect(offlineNow()).toBe(false)
   })
 })

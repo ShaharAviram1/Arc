@@ -9,6 +9,7 @@ import { scheduleQueryKey, type SchedulePage } from '@/lib/schedule'
 import { Schedule } from '@/pages/Schedule'
 import {
   APOTHECARY,
+  browsed,
   EMPTY_SCHEDULE,
   FRIEREN,
   FRIEREN_SPECIAL,
@@ -339,7 +340,7 @@ describe('Schedule', () => {
     // and there is no "today" in a season that is over (owner, 2026-09-17).
     mockApi({
       'GET /api/schedule?year=2026&season=SUMMER': {
-        body: { ...SCHEDULE_PAGE, year: 2026, season: 'SUMMER' },
+        body: browsed(SCHEDULE_PAGE, { year: 2026, season: 'SUMMER' }),
       },
     })
 
@@ -361,9 +362,7 @@ describe('Schedule', () => {
     mockApi({
       'GET /api/schedule?year=2026&season=SUMMER': {
         body: {
-          ...SCHEDULE_PAGE,
-          year: 2026,
-          season: 'SUMMER',
+          ...browsed(SCHEDULE_PAGE, { year: 2026, season: 'SUMMER' }),
           next: { year: 2026, season: 'FALL' },
         },
       },
@@ -374,8 +373,8 @@ describe('Schedule', () => {
     await screen.findByText('Summer 2026')
     expect(daysShown()).toEqual(['Monday', 'Tuesday', 'Wednesday'])
 
-    // Fall 2026 is the season the clock is in, however it was arrived at: the
-    // page compares the grid's season with the live one, not the URL.
+    // Fall 2026 is the live season, however it was arrived at: the server
+    // dates its days, and the page reads the dates rather than the URL.
     await userEvent.click(screen.getByRole('button', { name: 'Next season' }))
 
     expect(await screen.findByText('Fall 2026')).toBeInTheDocument()
@@ -397,6 +396,150 @@ describe('Schedule', () => {
     expect(daysShown()).toEqual(['Wed 7 OctToday', 'Thu 8 Oct', 'Fri 9 Oct'])
     expect(dayColumn('Wednesday')).toHaveAttribute('data-today', 'true')
     expect(screen.queryByRole('region', { name: 'Tuesday' })).not.toBeInTheDocument()
+  })
+
+  it('on a Sunday, shows next Monday and Tuesday as tomorrow and the day after', async () => {
+    // Berlin, Sunday 11 Oct at noon: the server sends Mon 5 to Tue 13, nine
+    // dated days, and the two after today are next week's (owner, 2026-10-04).
+    vi.setSystemTime(new Date('2026-10-11T10:00:00Z'))
+    const dated = (date: string, weekday: number, title: string) => ({
+      weekday,
+      date,
+      entries: [
+        scheduleEntry(
+          {
+            ...FRIEREN,
+            id: 7000 + Number(date.slice(-2)),
+            title: { ...FRIEREN.title, preferred: title },
+          },
+          { air_time_local: '18:30' },
+        ),
+      ],
+    })
+    const page: SchedulePage = {
+      ...EMPTY_SCHEDULE,
+      days: [
+        dated('2026-10-05', 0, 'This Monday Show'),
+        ...EMPTY_SCHEDULE.days.slice(1),
+        dated('2026-10-12', 0, 'Next Monday Show'),
+        dated('2026-10-13', 1, 'Next Tuesday Show'),
+      ],
+    }
+    mockApi({ 'GET /api/schedule': { body: page } })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    expect(daysShown()).toEqual(['Sun 11 OctToday', 'Mon 12 Oct', 'Tue 13 Oct'])
+    const monday = within(dayColumn('Monday'))
+    expect(monday.getByText('Next Monday Show')).toBeInTheDocument()
+    expect(monday.queryByText('This Monday Show')).not.toBeInTheDocument()
+    expect(within(dayColumn('Tuesday')).getByText('Next Tuesday Show')).toBeInTheDocument()
+    // The end of what the server sent: no fourth column of nothing.
+    expect(nextDay()).toBeDisabled()
+
+    // And this week's Monday is still six steps back, under its own date.
+    for (let step = 0; step < 6; step += 1) {
+      await userEvent.click(previousDay())
+    }
+    expect(daysShown()).toEqual(['Mon 5 Oct', 'Tue 6 Oct', 'Wed 7 Oct'])
+    expect(within(dayColumn('Monday')).getByText('This Monday Show')).toBeInTheDocument()
+    expect(previousDay()).toBeDisabled()
+  })
+
+  it('names the premiere date of a show that has not started yet', async () => {
+    mockApi({
+      'GET /api/schedule': {
+        body: {
+          ...SCHEDULE_PAGE,
+          unscheduled: [
+            scheduleEntry(APOTHECARY, { air_time_local: null, starts_on: '2026-10-14' }),
+            scheduleEntry(FRIEREN_SPECIAL, { air_time_local: null }),
+          ],
+        },
+      },
+    })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+    await userEvent.click(screen.getByRole('button', { name: /Show Movies, OVAs and unscheduled/ }))
+
+    expect(screen.getByText('Starts 14 Oct')).toBeInTheDocument()
+    expect(screen.getByText('Time unknown')).toBeInTheDocument()
+  })
+
+  it('names the next date of an airing show with nothing on screen', async () => {
+    mockApi({
+      'GET /api/schedule': {
+        body: {
+          ...SCHEDULE_PAGE,
+          unscheduled: [
+            scheduleEntry(
+              { ...APOTHECARY, status: 'RELEASING' },
+              // 22:30 UTC on the 12th is already the 13th in Berlin.
+              { air_time_local: null, next_at: '2026-10-12T22:30:00Z', next_episode: 9 },
+            ),
+          ],
+        },
+      },
+    })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+    await userEvent.click(screen.getByRole('button', { name: /Show Movies, OVAs and unscheduled/ }))
+
+    expect(screen.getByText(/^Next 13 Oct/)).toBeInTheDocument()
+  })
+
+  it('names both episodes when one date carries two', async () => {
+    mockApi({
+      'GET /api/schedule': {
+        body: {
+          ...SCHEDULE_PAGE,
+          days: SCHEDULE_PAGE.days.map((day) =>
+            day.weekday === 1
+              ? {
+                  ...day,
+                  entries: [
+                    scheduleEntry(FRIEREN, {
+                      air_time_local: '18:30',
+                      next_episode: 3,
+                      last_episode: 4,
+                    }),
+                  ],
+                }
+              : day,
+          ),
+        },
+      },
+    })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    expect(within(dayColumn('Tuesday')).getByText('18:30 · Ep 3–4')).toBeInTheDocument()
+  })
+
+  it('draws the season’s finished shows on no day', async () => {
+    mockApi({
+      'GET /api/schedule': {
+        body: {
+          ...SCHEDULE_PAGE,
+          ended: [
+            scheduleEntry({
+              ...FRIEREN,
+              id: 4242,
+              title: { ...FRIEREN.title, preferred: 'Over Already' },
+            }),
+          ],
+        },
+      },
+    })
+
+    renderSchedule()
+    await screen.findByText('Fall 2026')
+
+    expect(screen.queryByText('Over Already')).not.toBeInTheDocument()
   })
 
   it('marks followed shows and leaves the rest plain', async () => {

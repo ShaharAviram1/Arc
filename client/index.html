@@ -2,14 +2,36 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: the installed app draws edge to edge on an iPad,
+         and the safe-area insets in index.css keep the shell and the player
+         clear of the rounded corners and the home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <title>Arc</title>
+    <meta name="description" content="Your anime, ready to watch." />
     <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
     <link rel="icon" type="image/png" sizes="64x64" href="/icon-64.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
     <meta name="theme-color" content="#080b11" />
+
+    <!-- iOS and iPadOS. Safari still reads these rather than the manifest for
+         an app added to the Home Screen (the manifest link itself is injected
+         by vite-plugin-pwa at build time): `capable` is what opens it without
+         Safari's chrome, and the touch icon — opaque, because iOS paints
+         transparency black — is the one the Home Screen actually shows. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- `default`, not `black-translucent`. The translucent style slides the
+         web view up under the status bar without making it any taller, so the
+         page is laid out against a height one status bar short and iOS does
+         not paint below that line: bottom-anchored chrome floats or is cut in
+         half (the sibling project Audiosey hit both). With the default bar the
+         view starts below the clock and ends at the bottom of the screen.
+         iOS reads this at install time: changing it means adding the app to
+         the Home Screen again. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Arc" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon-180x180.png" />
   </head>
   <body>
     <div id="root"></div>

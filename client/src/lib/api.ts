@@ -6,7 +6,31 @@
  * an `ApiError` carrying the status and the parsed (or raw) response body.
  */
 
+import { reportOffline, reportOnline } from '@/offline/network'
+
 export type ApiErrorBody = unknown
+
+/**
+ * Whether a failure was "no response at all" rather than a response saying no.
+ *
+ * The whole of the offline story rests on this distinction (M18): a transport
+ * failure is what the progress outbox catches and keeps for later, while an
+ * `ApiError` is the server having an opinion, which a retry will not change.
+ */
+export function isOffline(error: unknown): boolean {
+  return !(error instanceof ApiError)
+}
+
+/**
+ * Whether the server could not be reached at all — no response, or the proxy
+ * in front of it answering for a server that is down (502 / 503 / 504). This
+ * is what the offline launch falls back on (FR-S9): a remembered user, a
+ * remembered page. A 500 is the server having a bug and is never papered over.
+ */
+export function isUnreachable(error: unknown): boolean {
+  if (isOffline(error)) return true
+  return error instanceof ApiError && [502, 503, 504].includes(error.status)
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -69,11 +93,30 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     headers.set('Content-Type', 'application/json')
   }
 
-  const response = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers,
-  })
+  let response: Response
+  try {
+    response = await fetch(path, {
+      ...init,
+      credentials: 'include',
+      headers,
+    })
+  } catch (error) {
+    // An abort is not a network failure: a cancelled search keystroke must not
+    // put the app into its offline mode. Checked on the signal, because
+    // `AbortError` is a `DOMException` in one runtime and an `Error` in another.
+    if (init?.signal?.aborted === true) throw error
+    // No response at all: no network, a dead tunnel, a server that is not
+    // there. Recorded so the outbox and the shell know (`@/offline/network`).
+    reportOffline()
+    throw error
+  }
+  // A gateway answering for a server that is down is not "connected": the
+  // offline strip agrees with `isUnreachable` (FR-S9).
+  if (response.status === 502 || response.status === 503 || response.status === 504) {
+    reportOffline()
+  } else {
+    reportOnline()
+  }
 
   const body = await readBody(response)
 

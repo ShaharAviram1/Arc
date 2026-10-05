@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -457,3 +458,416 @@ async def test_a_head_request_reports_the_length_without_the_body(
     assert response.status_code == 200
     assert response.headers["content-length"] == str(len(SEGMENT_BYTES))
     assert response.content == b""
+
+
+# --- The whole episode as one file (FR-S7) --------------------------------------
+#
+# ``episode.mp4`` is the init segment and every media segment, in playlist
+# order, byte for byte. The fixture's parts are distinguishable (the init is
+# ASCII, the segments are a byte ramp), so a part out of order or an offset off
+# by one shows up as a byte mismatch rather than as a length that happens to
+# agree.
+
+DEMO_EMAIL = "demo@arc.test"
+DEMO_PASSWORD = "demo-password"
+
+
+def whole_file(settings: Settings, episode_id: int) -> bytes:
+    """What the download must equal: init, then the segments in playlist order."""
+    directory = output_dir_for(settings, episode_id)
+    names = ["init.mp4", "seg_00000.m4s", "seg_00001.m4s"]
+    return b"".join((directory / name).read_bytes() for name in names)
+
+
+def download_path(episode_id: int) -> str:
+    return f"/media/{episode_id}/episode.mp4"
+
+
+async def test_the_download_is_init_then_every_segment_in_order(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    # Make the two segments differ, so a swapped order cannot pass.
+    directory = output_dir_for(settings, episode_id)
+    (directory / "seg_00001.m4s").write_bytes(SEGMENT_BYTES[::-1])
+    expected = whole_file(settings, episode_id)
+
+    response = await client.get(download_path(episode_id))
+
+    assert response.status_code == 200
+    assert response.content == expected
+    assert response.headers["content-length"] == str(len(expected))
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["etag"].startswith('"')
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert "content-range" not in response.headers
+
+
+@pytest.mark.parametrize(
+    ("header", "first", "last"),
+    [
+        ("bytes=0-99", 0, 99),
+        # Across the init/segment boundary (the init is 88 bytes).
+        ("bytes=80-1199", 80, 1199),
+        # Across the boundary between the two segments.
+        ("bytes=1100-1120", 1100, 1120),
+        # Open-ended: from N to the end.
+        ("bytes=2000-", 2000, None),
+        # Suffix: the last N bytes.
+        ("bytes=-50", None, None),
+        # An end past the file is clamped, not refused.
+        ("bytes=10-999999", 10, None),
+    ],
+)
+async def test_a_range_of_the_download_is_exactly_that_range(
+    client: AsyncClient,
+    episode_id: int,
+    settings: Settings,
+    header: str,
+    first: int | None,
+    last: int | None,
+) -> None:
+    expected = whole_file(settings, episode_id)
+    total = len(expected)
+    if first is None:
+        first = total - 50
+    end = total - 1 if last is None else last
+
+    response = await client.get(download_path(episode_id), headers={"Range": header})
+
+    assert response.status_code == 206
+    assert response.headers["content-range"] == f"bytes {first}-{end}/{total}"
+    assert response.headers["content-length"] == str(end - first + 1)
+    assert response.content == expected[first : end + 1]
+
+
+async def test_a_multi_range_request_gets_the_whole_file(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    """RFC 9110 allows a 200 for it, and multipart is machinery nobody uses."""
+    response = await client.get(download_path(episode_id), headers={"Range": "bytes=0-9,20-29"})
+
+    assert response.status_code == 200
+    assert response.content == whole_file(settings, episode_id)
+
+
+async def test_an_unsatisfiable_download_range_is_a_json_416(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    total = len(whole_file(settings, episode_id))
+
+    response = await client.get(download_path(episode_id), headers={"Range": f"bytes={total}-"})
+
+    assert response.status_code == 416
+    assert response.headers["content-range"] == f"bytes */{total}"
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "that range is not inside the file"}
+    assert response.headers["etag"]
+
+
+@pytest.mark.parametrize("header", ["kilograms=0-9", "bytes=9-0", "bytes=a-b", "bytes=-"])
+async def test_a_malformed_download_range_is_a_json_400(
+    client: AsyncClient, episode_id: int, header: str
+) -> None:
+    response = await client.get(download_path(episode_id), headers={"Range": header})
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "range header is malformed"}
+
+
+async def test_a_matching_if_none_match_on_the_download_is_304(
+    client: AsyncClient, episode_id: int
+) -> None:
+    etag = (await client.head(download_path(episode_id))).headers["etag"]
+
+    response = await client.get(download_path(episode_id), headers={"If-None-Match": etag})
+
+    assert response.status_code == 304
+    assert response.content == b""
+    assert response.headers["etag"] == etag
+    assert response.headers["cache-control"] == "private, no-cache"
+
+
+async def test_if_range_with_the_current_etag_honours_the_range(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    """How the offline downloader resumes: its first ETag, the next chunk."""
+    etag = (await client.head(download_path(episode_id))).headers["etag"]
+
+    response = await client.get(
+        download_path(episode_id), headers={"Range": "bytes=100-199", "If-Range": etag}
+    )
+
+    assert response.status_code == 206
+    assert response.content == whole_file(settings, episode_id)[100:200]
+
+
+@pytest.mark.parametrize("validator", ['"deadbeef-1"', "W/{etag}", "Sat, 01 Jan 2000 00:00:00 GMT"])
+async def test_if_range_with_any_other_validator_gets_the_whole_file(
+    client: AsyncClient, episode_id: int, settings: Settings, validator: str
+) -> None:
+    """A stale, weak or date validator: "my copy is old", so all of the new one."""
+    etag = (await client.head(download_path(episode_id))).headers["etag"]
+
+    response = await client.get(
+        download_path(episode_id),
+        headers={"Range": "bytes=100-199", "If-Range": validator.format(etag=etag)},
+    )
+
+    assert response.status_code == 200
+    assert response.content == whole_file(settings, episode_id)
+    assert "content-range" not in response.headers
+
+
+async def test_the_download_etag_changes_when_a_re_encode_rewrites_a_segment(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    """``force`` reuses every name (FR-P5); a resume must notice and restart."""
+    first = (await client.head(download_path(episode_id))).headers["etag"]
+    segment = output_dir_for(settings, episode_id) / "seg_00001.m4s"
+    segment.write_bytes(SEGMENT_BYTES + b"re-encoded")
+
+    response = await client.get(download_path(episode_id), headers={"If-None-Match": first})
+
+    assert response.status_code == 200
+    assert response.headers["etag"] != first
+    # And unchanged files keep their validator: it is not a clock.
+    again = await client.head(download_path(episode_id))
+    assert again.headers["etag"] == response.headers["etag"]
+
+
+async def test_a_head_of_the_download_reports_its_length_without_a_body(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    response = await client.head(download_path(episode_id))
+
+    assert response.status_code == 200
+    assert response.headers["content-length"] == str(len(whole_file(settings, episode_id)))
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.content == b""
+
+
+async def test_an_anonymous_download_is_401(anon: AsyncClient, episode_id: int) -> None:
+    response = await anon.get(download_path(episode_id))
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "not authenticated"}
+
+
+async def test_the_demo_account_cannot_download(
+    api_app: FastAPI, api_factory: SessionFactory, episode_id: int
+) -> None:
+    """Owner, 2026-10-04: the demo account watches, it does not take files away."""
+    demo = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
+    async with api_factory() as session:
+        row = await session.get(User, demo.id)
+        assert row is not None
+        row.is_demo = True
+        await session.commit()
+
+    async with api_transport(api_app) as http:
+        await login(http, DEMO_EMAIL, DEMO_PASSWORD)
+        response = await http.get(download_path(episode_id))
+        head = await http.head(download_path(episode_id))
+        # Streaming is unaffected: only the file download is off.
+        playlist = await http.get(f"/media/{episode_id}/index.m3u8")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "downloads are turned off for the demo account"}
+    assert head.status_code == 403
+    assert playlist.status_code == 200
+
+
+async def test_a_download_of_an_episode_that_is_not_ready_is_404(
+    client: AsyncClient, api_factory: SessionFactory, settings: Settings
+) -> None:
+    preparing = await add_episode(api_factory, anilist_id=940010, state=EpisodeState.PREPARING)
+    write_rendition(settings, preparing)
+
+    response = await client.get(download_path(preparing))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "not found"}
+
+
+async def test_a_download_with_a_symlinked_part_is_404(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    directory = output_dir_for(settings, episode_id)
+    outside = settings.data_dir.parent / "outside-download.txt"
+    outside.write_text("root:x:0:0:root:/root:/bin/sh\n")
+    segment = directory / "seg_00001.m4s"
+    segment.unlink()
+    segment.symlink_to(outside)
+
+    response = await client.get(download_path(episode_id))
+
+    assert response.status_code == 404
+    assert "root:x:0:0" not in response.text
+
+
+async def test_a_download_whose_playlist_is_a_symlink_is_404(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    directory = output_dir_for(settings, episode_id)
+    elsewhere = settings.data_dir / "other.m3u8"
+    elsewhere.write_text(PLAYLIST)
+    (directory / "index.m3u8").unlink()
+    (directory / "index.m3u8").symlink_to(elsewhere)
+
+    assert (await client.get(download_path(episode_id))).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    ["../../secret.txt", "/etc/hosts", "notes.txt", "https://example.com/seg_00000.m4s"],
+)
+async def test_a_playlist_naming_a_foreign_file_is_404(
+    client: AsyncClient, episode_id: int, settings: Settings, foreign: str
+) -> None:
+    """A playlist is not trusted to name files: every name must be the encoder's."""
+    (settings.data_dir / "secret.txt").write_text("password")
+    directory = output_dir_for(settings, episode_id)
+    (directory / "notes.txt").write_text("password")
+    (directory / "index.m3u8").write_text(PLAYLIST.replace("seg_00001.m4s", foreign))
+
+    response = await client.get(download_path(episode_id))
+
+    assert response.status_code == 404
+    assert "password" not in response.text
+
+
+async def test_a_download_with_a_missing_segment_is_404_not_a_short_file(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    (output_dir_for(settings, episode_id) / "seg_00001.m4s").unlink()
+
+    response = await client.get(download_path(episode_id))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "not found"}
+
+
+async def test_the_download_filename_comes_from_the_database_and_is_sanitised(
+    client: AsyncClient, api_factory: SessionFactory, settings: Settings
+) -> None:
+    """Non-ASCII, quotes and slashes: none of them reach a path or break the header."""
+    async with api_factory() as session:
+        anime = Anime(
+            anilist_id=940020,
+            summary_source="anilist",
+            detail_source="anilist",
+            title_english='Frieren: "Beyond" Journey/End — 葬送',
+            format="TV",
+            status="FINISHED",
+            episodes=12,
+        )
+        session.add(anime)
+        await session.flush()
+        episode = Episode(anime_id=anime.id, number=7, state=EpisodeState.READY)
+        session.add(episode)
+        await session.commit()
+        found = episode.id
+    write_rendition(settings, found)
+
+    response = await client.head(download_path(found))
+
+    disposition = response.headers["content-disposition"]
+    assert disposition == (
+        'attachment; filename="Frieren - Beyond - Journey - End - 07.mp4"; '
+        "filename*=UTF-8''Frieren%20-%20Beyond%20-%20Journey%20-%20End%20%E2%80%94%20"
+        "%E8%91%AC%E9%80%81%20-%2007.mp4"
+    )
+
+
+async def test_a_download_range_with_a_huge_number_is_a_400_not_a_500(
+    client: AsyncClient, episode_id: int
+) -> None:
+    """Past Python's 4300-digit ``int`` limit, which raises a plain ValueError."""
+    response = await client.get(
+        download_path(episode_id), headers={"Range": "bytes=0-" + "9" * 5000}
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "range header is malformed"}
+
+
+async def test_a_download_from_a_symlinked_rendition_directory_is_404(
+    client: AsyncClient, api_factory: SessionFactory, settings: Settings, tmp_path: Path
+) -> None:
+    linked = await add_episode(api_factory, anilist_id=940030)
+    elsewhere = tmp_path / "elsewhere-download"
+    elsewhere.mkdir()
+    (elsewhere / "index.m3u8").write_text(PLAYLIST)
+    (elsewhere / "init.mp4").write_bytes(b"initsegment")
+    for index in range(2):
+        (elsewhere / f"seg_{index:05d}.m4s").write_bytes(SEGMENT_BYTES)
+    directory = output_dir_for(settings, linked)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    directory.symlink_to(elsewhere, target_is_directory=True)
+
+    response = await client.get(download_path(linked))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "not found"}
+
+
+async def test_an_anonymous_download_head_is_401(anon: AsyncClient, episode_id: int) -> None:
+    assert (await anon.head(download_path(episode_id))).status_code == 401
+
+
+async def test_a_head_with_a_range_reports_the_span(
+    client: AsyncClient, episode_id: int, settings: Settings
+) -> None:
+    total = len(whole_file(settings, episode_id))
+
+    response = await client.head(download_path(episode_id), headers={"Range": "bytes=100-299"})
+
+    assert response.status_code == 206
+    assert response.headers["content-range"] == f"bytes 100-299/{total}"
+    assert response.headers["content-length"] == "200"
+    assert response.content == b""
+
+
+async def test_a_part_changed_mid_download_ends_short_through_the_whole_stack(
+    api_app: FastAPI,
+    user: User,
+    episode_id: int,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The abort reaches the client as a short body, never as two renditions spliced.
+
+    Through every middleware (session refresh, origin check, CORS): the second
+    segment is rewritten after the headers have gone out, so the response is
+    cut off where it stood rather than finished with the new bytes.
+    """
+    from httpx import ASGITransport
+
+    from arc.api import media_stream
+    from tests.conftest import ORIGIN
+
+    expected = whole_file(settings, episode_id)
+    real_open = media_stream._open_part
+
+    def rewrite_then_open(dir_fd: int, part: Any) -> Any:
+        if part.name == "seg_00001.m4s":
+            (output_dir_for(settings, episode_id) / part.name).write_bytes(b"Z" * 2000)
+        return real_open(dir_fd, part)
+
+    monkeypatch.setattr(media_stream, "_open_part", rewrite_then_open)
+
+    transport = ASGITransport(app=api_app, raise_app_exceptions=False)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"Origin": ORIGIN}
+    ) as http:
+        await login(http, USER_EMAIL, USER_PASSWORD)
+        response = await http.get(download_path(episode_id))
+
+    assert response.status_code == 200
+    assert response.headers["content-length"] == str(len(expected))
+    assert len(response.content) < len(expected)
+    # A prefix of the promised file, so not one byte of the rewrite got in.
+    assert expected.startswith(response.content)

@@ -202,6 +202,7 @@ export const FRIEREN_DETAIL: AnimeDetail = {
       unavailable_reason: null,
       release: null,
       rendition: READY_RENDITION,
+      download_url: '/media/9001/episode.mp4',
     },
     {
       id: 9002,
@@ -472,13 +473,33 @@ export function scheduleEntry(
     // Null, not false: "nothing to say about a tick", which is what an
     // upcoming slot and a slot naming no episode both send (FR-W5).
     watched: null,
+    starts_on: null,
+    last_episode: null,
     ...overrides,
   }
 }
 
-/** Seven empty Monday-first columns, the shape the server always sends. */
+/**
+ * Seven empty Monday-first columns dated Mon 5 Oct to Sun 11 Oct 2026: the
+ * current season's dated week, which is what `SCHEDULE_PAGE` stands for.
+ */
 function emptyDays(): ScheduleDay[] {
-  return [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, entries: [] }))
+  return [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+    weekday,
+    date: `2026-10-${String(5 + weekday).padStart(2, '0')}`,
+    entries: [],
+  }))
+}
+
+/**
+ * The same page as a browsed season sends it: weekday columns with no dates
+ * (only the current season's days are dated, owner 2026-10-04).
+ */
+export function browsed(
+  page: SchedulePage,
+  ref: Pick<SchedulePage, 'year' | 'season'>,
+): SchedulePage {
+  return { ...page, ...ref, days: page.days.map((day) => ({ ...day, date: null })) }
 }
 
 /**
@@ -523,6 +544,7 @@ export const SCHEDULE_PAGE: SchedulePage = {
     return day
   }),
   unscheduled: [scheduleEntry(FRIEREN_SPECIAL, { air_time_local: null, list_status: 'planned' })],
+  ended: [],
 }
 
 /** A season the daily sweep has not filled yet. */

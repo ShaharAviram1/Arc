@@ -9,7 +9,7 @@ import {
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
-import { isStatus } from '@/lib/auth'
+import { isStatus, useMe } from '@/lib/auth'
 import {
   formatClock,
   resumeLabel,
@@ -22,8 +22,11 @@ import {
   type EpisodeRef,
   type PlayInfo,
 } from '@/lib/playback'
+import { rememberPosition } from '@/offline/cache'
+import { useOffline } from '@/offline/network'
 import { HlsVideo } from '@/player/HlsVideo'
 import { ProgressReporter } from '@/player/ProgressReporter'
+import { chooseSource, useLocalCopy } from '@/player/source'
 
 /**
  * The player (spec §4.5 FR-S1–FR-S6, roadmap M8; chrome redesigned in M15).
@@ -151,6 +154,22 @@ const NOT_READY_BODY =
 const LOAD_FAILED_TITLE = 'Could not load this episode'
 const LOAD_FAILED_BODY = 'Could not load this episode. Try again shortly.'
 
+/** Offline, and this episode is not on the device (FR-S9). */
+const OFFLINE_TITLE = 'You’re offline'
+const OFFLINE_BODY =
+  'This episode isn’t downloaded to this device. Episodes you have downloaded play without a connection.'
+
+/** A download whose file the browser would not open (evicted, or damaged). */
+const FILE_UNREADABLE =
+  'The downloaded copy of this episode could not be read. Delete it on the Downloads page and download it again.'
+
+/**
+ * How often, at most, the position is written to the device while playing
+ * (FR-S9). It is what an offline resume seeks to; pause, seek and the end write
+ * it at once.
+ */
+const LOCAL_POSITION_EVERY_MS = 5000
+
 /**
  * The shortcuts. They used to be a line of text under the controls; the owner's
  * second pass took that line off the screen, because the bar is sitting on the
@@ -184,10 +203,13 @@ const PROGRESS_UNSAVED = 'Progress isn’t being saved — check your connection
  * that this row holds three groups on a phone as well as a desktop. 40 still
  * clears WCAG's target-size minimum by a wide margin, and the one control a
  * thumb reaches for in the dark — play/pause — keeps its 44.
+ *
+ * A tablet is the third case (M18): desktop widths, but a finger. On a coarse
+ * pointer at `md` and up there is room for the full 44, so it gets it.
  */
 const PLAYER_ICON = cx(
   'inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-[0.5px]',
-  'md:h-9 md:w-9',
+  'md:h-9 md:w-9 pointer-coarse:md:h-11 pointer-coarse:md:w-11',
   'border-[rgba(255,255,255,0.18)] bg-[rgba(255,255,255,0.12)] text-white',
   'transition-colors duration-200 hover:bg-[rgba(255,255,255,0.2)]',
   'disabled:cursor-not-allowed disabled:opacity-40',
@@ -616,7 +638,7 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
         role="group"
         aria-label="End of episode"
         className={cx(
-          'pointer-events-auto mb-[96px] w-full max-w-[26rem] rounded-card border-[0.5px]',
+          'pointer-events-auto mb-[calc(96px+env(safe-area-inset-bottom))] w-full max-w-[26rem] rounded-card border-[0.5px]',
           'border-[rgba(255,255,255,0.16)] bg-[rgba(18,23,34,0.72)] p-5 shadow-bar backdrop-blur-bar',
         )}
       >
@@ -657,6 +679,16 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
  */
 function PlayerView({ id }: { id: number }) {
   const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id)
+  /**
+   * This account's download of the episode, if any (FR-S9). Resolved before
+   * the video mounts, so no tap ever waits on it: every `play()` below is
+   * called synchronously from the event that asked for it.
+   */
+  const local = useLocalCopy(id)
+  const offline = useOffline()
+  const { data: me } = useMe()
+  const userId = me?.id ?? null
+  const lastLocalSaveRef = useRef(0)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -802,6 +834,19 @@ function PlayerView({ id }: { id: number }) {
       video.muted = false
     }
   }, [])
+
+  /**
+   * The last position on this device, per (user, episode) — what an offline
+   * resume uses, since the server's is out of reach (FR-S9). Fire and forget.
+   */
+  const keepPosition = useCallback(
+    (nextPosition: number, duration: number) => {
+      if (userId === null) return
+      lastLocalSaveRef.current = Date.now()
+      void rememberPosition(userId, id, nextPosition, duration)
+    },
+    [id, userId],
+  )
 
   /** The pill's press, and the one place the flag is cleared by hand. */
   const unmute = useCallback(() => {
@@ -1144,7 +1189,7 @@ function PlayerView({ id }: { id: number }) {
     }
   }, [markedToast])
 
-  if (isPending) {
+  if (isPending || !local.checked) {
     return (
       <div className="fixed inset-0 flex items-center justify-center bg-black">
         <p role="status" className="text-[14px] text-[var(--arc-text-muted)]">
@@ -1160,6 +1205,22 @@ function PlayerView({ id }: { id: number }) {
     // about their library that this client has no basis for. Only the second
     // is worth a retry: a missing rendition is not made by asking again.
     if (isStatus(error, 404)) return <NotReady message={NOT_READY_BODY} />
+
+    if (offline) {
+      return (
+        <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+          <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
+            {OFFLINE_TITLE}
+          </h1>
+          <p className="mt-3 text-[16px] leading-[1.55] text-[var(--arc-text-muted)]">
+            {OFFLINE_BODY}
+          </p>
+          <Link to="/downloads" className={buttonClass('primary', 'mt-7')}>
+            Go to Downloads
+          </Link>
+        </div>
+      )
+    }
 
     return (
       <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
@@ -1182,6 +1243,22 @@ function PlayerView({ id }: { id: number }) {
   }
 
   const info: PlayInfo = data
+  const source = chooseSource(info, local.url)
+  if (source.kind === 'none') {
+    return (
+      <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+        <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
+          {LOAD_FAILED_TITLE}
+        </h1>
+        <p className="mt-3 text-[16px] leading-[1.55] text-[var(--arc-text-muted)]">
+          {FILE_UNREADABLE}
+        </p>
+        <Link to="/downloads" className={buttonClass('secondary', 'mt-7')}>
+          Go to Downloads
+        </Link>
+      </div>
+    )
+  }
   const { anime, episode, previous, next } = info
   const episodeLabel = `Episode ${String(episode.number)}`
 
@@ -1291,7 +1368,11 @@ function PlayerView({ id }: { id: number }) {
   return (
     <div ref={containerRef} className="fixed inset-0 overflow-hidden bg-black">
       <HlsVideo
-        src={info.playlist_url}
+        src={source.url}
+        kind={source.kind === 'file' ? 'file' : 'hls'}
+        // The file would not open: forget it and stream, when there is a
+        // stream to fall back to (`chooseSource` says so otherwise).
+        onSourceError={local.fail}
         videoRef={videoRef}
         label={`${anime.title.preferred} — ${episodeLabel}`}
         // The cursor goes wherever the chrome goes: a pointer arrow parked
@@ -1301,6 +1382,9 @@ function PlayerView({ id }: { id: number }) {
         onReady={onReady}
         onTimeUpdate={(nextPosition, duration) => {
           reporterRef.current?.update(nextPosition, resolveDuration(duration, serverDuration))
+          if (Date.now() - lastLocalSaveRef.current >= LOCAL_POSITION_EVERY_MS) {
+            keepPosition(nextPosition, resolveDuration(duration, serverDuration))
+          }
           setPosition(nextPosition)
           setMediaDuration(resolveDuration(duration, 0))
           setBuffered(bufferedFraction(videoRef.current, resolveDuration(duration, serverDuration)))
@@ -1311,6 +1395,7 @@ function PlayerView({ id }: { id: number }) {
         }}
         onPause={(nextPosition, duration) => {
           reporterRef.current?.pause(nextPosition, resolveDuration(duration, serverDuration))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
           setPlaying(false)
           // A pause is a sign of a person, so the bar comes back — but it no
           // longer *stays*: the idle timer runs while paused too, and takes it
@@ -1325,10 +1410,12 @@ function PlayerView({ id }: { id: number }) {
         }}
         onSeeked={(nextPosition, duration) => {
           reporterRef.current?.seek(nextPosition, resolveDuration(duration, serverDuration))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
           setPosition(nextPosition)
         }}
         onEnded={(nextPosition, duration) => {
           reporterRef.current?.end(nextPosition, resolveDuration(duration, serverDuration))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
           setPlaying(false)
           setChrome(true)
           setEnded(true)
@@ -1368,13 +1455,19 @@ function PlayerView({ id }: { id: number }) {
           chromeShown ? 'opacity-100' : 'pointer-events-none opacity-0',
         )}
       >
-        {/* Same wash as before, a quarter opaque at its darkest; the rest is blur. */}
-        <div className="absolute inset-x-0 top-0 flex items-center gap-3 bg-gradient-to-b from-[rgba(0,0,0,0.25)] to-transparent px-6 py-5">
+        {/*
+          Same wash as before, a quarter opaque at its darkest; the rest is
+          blur. Padded by the safe-area insets as well (M18): the installed
+          app draws edge to edge (`viewport-fit=cover`), and on a notched
+          phone held sideways the back button would sit under the notch.
+        */}
+        <div className="absolute inset-x-0 top-0 flex items-center gap-3 bg-gradient-to-b from-[rgba(0,0,0,0.25)] to-transparent pt-[calc(20px+env(safe-area-inset-top))] pr-[max(24px,env(safe-area-inset-right))] pb-5 pl-[max(24px,env(safe-area-inset-left))]">
           <Link
             to={`/anime/${String(anime.id)}`}
             aria-label="Back to show"
             className={cx(
               'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full md:h-9 md:w-9',
+              'pointer-coarse:md:h-11 pointer-coarse:md:w-11',
               'border-[0.5px] border-[rgba(255,255,255,0.2)] bg-[rgba(18,23,34,0.6)] backdrop-blur-glass',
               'text-[17px] leading-none text-white',
               FOCUS_RING,
@@ -1390,6 +1483,7 @@ function PlayerView({ id }: { id: number }) {
               <span>{episodeLabel}</span>
               {episodeTitle === null ? null : ` · ${episodeTitle}`}
               {languages === '' ? null : ` · ${languages}`}
+              {source.kind === 'file' ? ' · on this device' : null}
             </p>
           </div>
         </div>
@@ -1401,7 +1495,10 @@ function PlayerView({ id }: { id: number }) {
           className={cx(
             // 12px off the bottom edge, not 28: the burned-in subtitles sit
             // just above that edge, and the bar was parked on top of them.
-            'absolute right-3 bottom-3 left-3 md:right-6 md:left-6',
+            // Plus the safe-area insets (M18), which are zero in a browser
+            // tab and keep the bar off the home indicator once installed.
+            'absolute right-[max(12px,env(safe-area-inset-right))] bottom-[calc(12px+env(safe-area-inset-bottom))] left-[max(12px,env(safe-area-inset-left))]',
+            'md:right-[max(24px,env(safe-area-inset-right))] md:left-[max(24px,env(safe-area-inset-left))]',
             // The hairline keeps its 0.16: at this fill it is the only thing
             // telling the eye where the bar ends and the picture starts.
             'rounded-card border-[0.5px] border-[rgba(255,255,255,0.16)]',
@@ -1515,7 +1612,7 @@ function PlayerView({ id }: { id: number }) {
                 onClick={togglePlay}
                 className={cx(
                   'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white',
-                  'md:h-10 md:w-10',
+                  'md:h-10 md:w-10 pointer-coarse:md:h-11 pointer-coarse:md:w-11',
                   'text-black transition-transform duration-200 ease-arc hover:scale-[1.04]',
                   FOCUS_RING,
                 )}

@@ -23,6 +23,7 @@
 | Client data | TanStack Query + fetch | Cache/invalidation for API data. |
 | Live updates | Postgres `LISTEN`/`NOTIFY` → server-sent events (`GET /api/events`) → `EventSource` | The write is in the worker and the tab is on the api, so the event has to cross a process boundary; the database is the one thing both already hold a connection to. No broker, no dependency. Polling stays as the fallback (§5.9). |
 | Player | hls.js (native HLS on Safari) | HLS playback in browser. |
+| Installable app | `vite-plugin-pwa` (Workbox `generateSW`) + a web app manifest (M18, owner 2026-10-04) | Add to Home Screen on an iPad or iPhone opens Arc full screen. The service worker holds the app shell only; it never touches `/api` or `/media` (§3, "Installable web app"). |
 | Styling | Tailwind CSS | Fast, consistent, dark-first UI. |
 | Auth | Session cookies (HTTP-only, Secure, SameSite=Lax), Argon2 password hashes | Simple, robust for a small user base. |
 | Deploy | Docker Compose: `api`, `worker`, `db`, `qbittorrent`, `caddy` | One-box deploy on any VPS that permits torrent traffic. Caddy terminates TLS and serves the built client. |
@@ -193,7 +194,7 @@ arc/
       app/                       the route table (router.tsx)
       pages/                     Home, Schedule, Search, List, Show, Player,
                                  Mal, Recs, Review, Admin, HowArcWorks,
-                                 Login, Invite, NotFound
+                                 Downloads (FR-S9), Login, Invite, NotFound
       components/                Layout (the app shell), route guards, shared
                                  pieces (CoverThumb, ListStatusControl, …)
         admin/                   the five admin tabs (Users, Rules, Jobs,
@@ -203,10 +204,24 @@ arc/
                                  HeroFrame, PosterWash, AspectProbe, Skeleton,
                                  EmptyState + styles.ts, aspect.ts (the
                                  remembered shape of every picture measured)
-      player/                    hls.js wrapper, progress reporter
+      player/                    hls.js wrapper (also plays a device file),
+                                 progress reporter, source.ts (file vs
+                                 stream, FR-S9)
+      offline/                   M18: store.ts (IndexedDB key/value, DB `arc`,
+                                 memory fallback), network.ts (observed
+                                 online/offline), outbox.ts (FR-S8 progress
+                                 queue + flush triggers), useOutbox.ts,
+                                 OutboxProblems.tsx (§5.4c); FR-S9 (§5.4d):
+                                 opfs.ts (episode files), download.ts (the
+                                 pure chunk downloader), downloadWorker.ts,
+                                 downloads.ts (DownloadManager),
+                                 useDownloads.ts, cache.ts (remembered user,
+                                 pages, positions, posters)
       lib/                       the typed API layer (hand-written fetch +
                                  TanStack Query hooks, one module per area),
-                                 auth context, the event stream, media queries
+                                 auth context, the event stream, media queries,
+                                 pwa.ts (service-worker + manifest options, M18)
+                                 and install.ts (Home Screen detection)
   deploy/
     docker-compose.yml         production stack
     docker-compose.dev.yml     override: db + qbittorrent on localhost for local dev
@@ -216,6 +231,7 @@ arc/
   scripts/
     dev.sh                     make dev: compose db+qbit, then api + worker + vite
     capture_*.py               fixture recorders (AniList, MAL, TMDB, offline, matching)
+    make-pwa-icons.sh          opaque Home Screen icons from icon-512.png (ffmpeg, M18)
   .github/workflows/ci.yml     server / client / lint, on push and PR (§10)
   Makefile                     dev / dev-db / test / lint / fmt / migrate / revision /
                                up / down / logs / ps / backup / backups / restore / clean
@@ -263,29 +279,34 @@ accessibility tree on every page. The player renders outside the shell and has
 no chrome at all.
 
 **Schedule shows a three-day window** (`pages/Schedule.tsx`, owner
-2026-09-17). The API is unchanged — it still answers with the whole
-Monday–Sunday week grouped by weekday in the viewer's zone — and the page
-renders three of those days at a time, starting on today: `DayWindow` holds
+2026-09-17; dated 2026-10-04). On the current season the API answers with
+**dated days** — Monday of this week through six days past today, seven to
+thirteen `ScheduleDay`s each carrying its local `date` — and on a browse
+with the seven undated weekdays; the page renders three of those days at a
+time, starting on today: `DayWindow` holds
 the chevrons and the three `DayColumn`s, and the row of column headings, with
 an arrow at each end, *is* the day-and-date bar (a `role="group"` labelled
 "Days shown"). The state it keeps is an **offset from today**, not a start
 index: the zone arrives with the response, so today is unknown on the first
 render, and an offset lets the window land on today the moment the answer does
-and follow it across midnight with the existing one-minute tick (`useClock`,
-which now returns the weekday *and* the week's dates from that one interval).
-The offset is clamped so the window never runs off either end of the week the
-server sent. Dates come from `weekDates` in `lib/schedule.ts` — pure, read in
-the schedule's own zone, arithmetic at noon UTC so a clock change cannot move
-a day, and composed as "17 Sep" rather than formatted whole because `en-GB`
+and follow it across midnight with the existing one-minute tick (`useToday`,
+which reads today's date in the schedule's zone via `todayInTimezone`). Today
+is the index of the day whose `date` equals that string — a date, never a
+weekday, so on a Sunday the columns after today are next week's, from the
+server's own range. The offset is clamped so the window never runs
+off either end of the days the server sent. Headings come from `dayLabel` in
+`lib/schedule.ts`, which reads the server's `YYYY-MM-DD` as a civil date at
+noon UTC and composes "17 Sep" rather than formatting whole because `en-GB`
 spells this month "Sept". Season prev/next is a different axis and is
-untouched — but **only the live season's grid gets dates and a today**: the
-response says which season it is, not whether that is the current one, so
-`currentSeason` / `isCurrentSeason` (also in `lib/schedule.ts`) repeat the
-server's quarter arithmetic from `services/catalog/seasons.py`, in UTC as it
-does, and the page compares that with `data.year`/`data.season` rather than
-with the URL — a pinned `?year=2026&season=FALL` in Fall 2026 is the live week
-however it was arrived at. A browse shows weekday names alone and opens on
-Monday, because there is no today in a season that is over. The room three columns buy (~350px against 158px) goes into the
+untouched — and **only the live season's grid gets dates and a today**,
+because only the current view's days carry a `date`; the client no longer
+repeats the server's season arithmetic. A browse shows weekday names alone and
+opens on Monday, because there is no today in a season that is over. Home's
+"This week" shelf (`appointments`) reads the same response and takes the days
+dated today or later, in date order — today plus six, so each weekday once
+and never one that has already gone. Search's and Home's season listings
+(`seasonResults`, `seasonShows`) read `days`, `unscheduled` and `ended`. The
+room three columns buy (~350px against 158px) goes into the
 rows: the whole title, never clamped, a 15px air time, a 56px key visual, and
 for a followed show a quiet ember left rule with an `sr-only` "On your list".
 
@@ -391,11 +412,82 @@ and only under `@media (hover: hover)`, never on a phone. An arrow moves 90 %
 of the visible width, smoothly. Both arrows are `position: absolute` over the
 strip, so nothing on the page moves when they appear.
 
+### Installable web app (M18)
+
+Arc installs to an iPad's or iPhone's Home Screen and opens full screen,
+without Safari's chrome (spec FR-U1, owner 2026-10-04). Client only; the
+server is unchanged. `vite-plugin-pwa` generates the manifest and a Workbox
+service worker at build time; the options live in `client/src/lib/pwa.ts`
+(not inline in `vite.config.ts`) so `pwa.test.ts` can hold them to their rule.
+
+- **The worker is the app shell and nothing else.** It precaches the build
+  (`**/*.{js,css,html,svg,png,woff2}`: `index.html`, the hashed `/assets/*`
+  bundles including the hls.js chunk, the icons and the logo,
+  `manifest.webmanifest`, `registerSW.js`; about 1.6 MB) and has exactly one
+  runtime route: page navigations whose path is not under `/api` or `/media`.
+  **It never answers or caches `/api/*` (the event stream and the MAL OAuth
+  callback included) or `/media/*`.** Those fetches pass straight through to
+  the network as if there were no worker: API data held by a worker is a
+  second, disagreeing copy of the server's state; media is per-user
+  authorised (`Cache-Control: private`) and a ranged request answered by a
+  worker is slower than one answered by the network. Offline data, if it ever
+  comes, lives in IndexedDB, not in the worker.
+- **Navigations are network-first with a 3 s timeout**, falling back to the
+  precached `index.html` only when the network cannot answer (offline, a
+  captive portal). The response is never stored (`cacheableResponse:
+  {statuses: [599]}`): a runtime copy of a newer `index.html` would name
+  hashed assets the active worker has not precached. `navigateFallback` is
+  `null` and `directoryIndex` is `null`, so neither the precache nor a
+  catch-all navigation route can answer `/` from the old build. A plain
+  `navigateFallback` serves the previous build on the first load after every
+  deploy; the sibling project this configuration is ported from (Audiosey)
+  hit that three times, as stale install meta tags, an update that needed two
+  launches, and a link opened by a build that lacked its route.
+- **Updates never reload the page.** `registerType: 'prompt'` with no prompt
+  UI: a new worker installs in the background and waits; it takes over on the
+  next launch. Because navigations go to the network, an online launch shows
+  the new build at once. What lands on the second launch is the new worker,
+  i.e. the new offline shell. `autoUpdate` would reload mid-episode.
+- **Not under `vite dev`** (`devOptions.enabled: false`); `make dev` is
+  unchanged. The build emits `dist/sw.js`, `dist/workbox-<hash>.js`,
+  `dist/manifest.webmanifest` and `dist/registerSW.js` at the root, not under
+  `/assets/`. Caddy's catch-all serves them with `Cache-Control: no-cache`, so
+  a browser revalidates `sw.js` and discovers an update; no Caddyfile change.
+- **Manifest:** name and short name "Arc", `display: standalone`, `start_url`
+  and `scope` `/`, theme and background `#080b11`, and **no `orientation`**:
+  episodes are watched in landscape. Icons 192, 512 and a maskable 512, plus
+  the 180 px `apple-touch-icon`, all **opaque** on `#080b11` (iOS paints
+  transparency black and adds its own corner mask). `scripts/make-pwa-icons.sh`
+  makes them from `client/public/icon-512.png` with ffmpeg; the browser-tab
+  favicons keep their alpha.
+- **iOS notes** (`client/index.html`): `viewport-fit=cover`, so the app draws
+  edge to edge and the shell and the Player pad themselves with
+  `env(safe-area-inset-*)` (zero in a browser tab); the toolbar and main
+  column take `max(gutter, inset)` on each side, the Player's top bar, control
+  bar and end-of-episode card clear the home indicator.
+  `apple-mobile-web-app-status-bar-style` is `default`, **not**
+  `black-translucent`: the translucent style lays the page out one status bar
+  short and bottom-anchored chrome floats or is cut off. iOS reads these at
+  install time, so changing them means adding the app to the Home Screen
+  again.
+- **Install hint** (`components/InstallHint.tsx`, `lib/install.ts`): one quiet
+  line above Watch Now for Safari or Chrome on an iPad or iPhone that is not
+  yet running standalone, with that browser's own Share → Add to Home Screen
+  steps (iPadOS reports itself as a Mac; `maxTouchPoints > 1` gives it away).
+  A ✕ dismisses it for that browser (`localStorage`
+  `arc:install-hint-dismissed`, wrapped in try/catch). Never on a desktop, in
+  another iOS browser, or in the installed app.
+- **Touch at desktop widths.** An iPad is `md` and up with a coarse pointer, so
+  the 36 px glass circles (hero and Schedule chevrons), the avatar and the
+  Player's icon buttons grow to 44 px under `pointer-coarse`. The Player's
+  control bar already comes back on a tap (§5.4a); shelf arrows stay hover-only
+  because a finger swipes the strip.
+
 ## 4. Data model (tables)
 
 | Table | Key columns |
 |---|---|
-| `users` | id, email (unique on lower(email)), password_hash, role, is_active, is_demo (M16's demo-account flag, NOT NULL DEFAULT false, spec FR-D5: it gates the "How Arc works" nav entry and the Watch Now strip and is read by nothing else — no acquisition, matching, media or MAL path looks at it; written by `PATCH /api/users/{id}` and by `arc.cli demo-list --demo`, and published on `UserOut` so the account itself is told), timezone, created_at |
+| `users` | id, email (unique on lower(email)), password_hash, role, is_active, is_demo (M16's demo-account flag, NOT NULL DEFAULT false, spec FR-D5: it gates the "How Arc works" nav entry and the Watch Now strip, and refuses one media route — `GET /media/{id}/episode.mp4` answers it 403 (FR-S7, owner 2026-10-04); no acquisition, matching, streaming or MAL path looks at it; written by `PATCH /api/users/{id}` and by `arc.cli demo-list --demo`, and published on `UserOut` so the account itself is told), timezone, created_at |
 | `invites` | id, token_hash, email (optional), created_by (SET NULL), created_at, expires_at, used_at |
 | `sessions` | id (opaque token hash), user_id, expires_at, user_agent |
 | `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url (AniList's 4.75:1 strip), backdrop_url (TMDB's 16:9 backdrop — **only** the TMDB enrichment ever writes it, §5.8, and it is what the 21:9 heroes and 16:9 cards prefer; null until the enrichment reaches the row), genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
@@ -403,7 +495,7 @@ strip, so nothing on the page moves when they appear.
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
-| `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), updated_at |
+| `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
 | `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list) |
@@ -1279,6 +1371,8 @@ and gradients.
   URLs stay under `/media/…`. Caddy proxies `/media` to the API (no direct
   static exposure). Range requests supported on segments.
 - Client uses hls.js with `xhrSetup` sending credentials.
+- `GET /media/{episode_id}/episode.mp4` downloads a ready episode as one MP4
+  file (FR-S7): the same files, concatenated on the fly. See §5.4a.
 
 ### 5.4a Streaming and playback as built (M8)
 - No playlist rewriting: ffmpeg writes bare relative URIs, so
@@ -1394,6 +1488,56 @@ and gradients.
   The query no longer matches migration 3's `completed = false` predicate, so
   it is served by the full `(user_id, updated_at)` index instead.
 
+- **Download a ready episode as one file (FR-S7, owner 2026-10-04).**
+  `GET`/`HEAD /media/{id}/episode.mp4`, in `arc/api/media_stream.py` beside
+  the HLS routes and under the same router-level session dependency; the pure
+  half (playlist → parts, range arithmetic, ETag, filename) is
+  `arc/services/media/download.py`. fMP4's `init.mp4` followed by every
+  segment in playlist order, byte-concatenated, is a valid MP4 (ffprobe reads
+  its duration and decodes it cleanly), so the response is a **virtual
+  concatenation** of files already on disk: no ffmpeg, no temp file, nothing
+  buffered beyond one 1 MiB read. The part list comes from `index.m3u8`, not a
+  directory listing, and is strict: one `#EXT-X-MAP` naming `init.mp4` before
+  any segment, every segment a `seg_NNNNN.m4s` name (the router's own
+  `SEGMENT_PATTERN`, now defined once as `PART_NAME_PATTERN`), no duplicates,
+  an `#EXT-X-ENDLIST`, no byte-range/key/discontinuity tags. The playlist and
+  every part get the segment route's no-symlink + regular-file checks, and
+  confinement by construction (separator-free names under a directory
+  descriptor): the directory is opened once (`O_DIRECTORY|O_NOFOLLOW`) and held
+  for the life of the response, and the playlist (capped at 1 MiB) and every
+  part are looked up and opened relative to that descriptor (`dir_fd=`,
+  `O_NOFOLLOW`), so no path is re-resolved mid-stream; each part's
+  `(st_dev, st_ino, size, mtime_ns)` is recorded and compared again when it
+  is opened. Any miss — not `ready`, a foreign name,
+  a link, a missing part — is the router's one 404 plus a warning, never a
+  partial file. Headers: `Content-Type: video/mp4`, `Content-Length` = sum of
+  parts, `Accept-Ranges: bytes`, `Cache-Control: private, no-cache`, a strong
+  `ETag` = total size + SHA-256 over every part's (name, size, mtime_ns) so a
+  `force` re-encode moves it, and `Content-Disposition: attachment` with
+  `filename="<ascii>"` + `filename*=UTF-8''<pct>` built from the database
+  (`preferred_title` + `" - NN.mp4"`, unsafe characters replaced, 80-char
+  cap). Single ranges (`N-M`, `N-`, `-N`) → 206 with `Content-Range`;
+  multi-range → the whole file as 200; unsatisfiable → JSON 416 with
+  `bytes */<total>`; malformed → JSON 400. `If-None-Match` → 304; `If-Range`
+  is a strong exact comparison and anything else (stale, weak, a date) gets the
+  full 200. This is the contract the later in-app offline downloader is built
+  on (8 MB ranges, keep the first ETag, restart if it changes, check the
+  `Content-Range` total). For that client: a 200 (not 206) answer to a ranged
+  request, or a changed ETag or `Content-Range` total, means abort that body
+  and restart from zero — never append it to what is already stored. The body streams through a `StreamingResponse`
+  subclass that `aclose`s its generator so a disconnect closes the open part at
+  once; each part is re-`fstat`ed on open and a part that changed since the
+  headers were computed aborts the connection rather than splicing two
+  renditions. The handler closes its DB session before the body starts
+  (FastAPI ends `yield` dependencies only after a response is fully sent). The
+  demo account (`users.is_demo`) gets a 403 before any lookup. The show page
+  sends `EpisodeOut.download_url` (built by `download_url()` next to
+  `playlist_url()`, set exactly when `rendition` is) and renders a quiet
+  "Save file" chip (labelled "Download" until FR-S9 added "Keep offline"
+  beside it, §5.4d) — an `<a download>` — on ready rows, hidden for the demo
+  account. Caddy needs no change: `video/mp4` is outside its encode list and
+  `reverse_proxy` streams and forwards `Range` as is.
+
 ### 5.4b Watch Now's own failures (M16, FR-W6)
 
 The banner above the hero, and the fifth thing `GET /api/home` answers. **No
@@ -1452,6 +1596,279 @@ nothing is written, not even a dismissal.
   what keeps a store that mints a key a day bounded. No endpoint, no column,
   no job: the server is told nothing about a dismissal, because one reader's
   attention is not a property of the failure.
+
+### 5.4c Offline progress (M18, FR-S8)
+
+Progress made while the device has no connection is kept on the device and
+replayed later (owner, 2026-10-04; tightened after review 2026-10-05). One
+schema change (`watch_progress.unmarked_at`, owner-approved 2026-10-05,
+revision `4e76a09e547c`), no new dependency, no second road to MyAnimeList.
+
+- **Client store** (`client/src/offline/store.ts`): a hand-written key/value
+  layer over IndexedDB (database `arc`, version 1, one object store per
+  concern in `STORE_NAMES` — today only `outbox`; `downloads`, `payloads`,
+  `covers` and `session` are added later by appending and bumping
+  `DB_VERSION`, the upgrade only ever creating missing stores). Every consumer
+  takes a `KeyStore`: `get`/`put`/`delete`/`clear`, `entries` (one cursor, one
+  transaction), and two atomic operations done inside one readwrite
+  transaction — `update(key, decide)` (read, decide synchronously, write or
+  delete) and `deleteIf(key, expectedId)`. Never rejects; falls back to memory
+  wholesale when IndexedDB cannot be opened (a private window) and per value
+  when one write fails (quota), flipping `isPersistent()` false. Another tab's
+  upgrade closes this tab's connection (`onversionchange`).
+- **Network** (`offline/network.ts`): offline is what requests *do* —
+  `apiFetch` calls `reportOffline()` when `fetch` throws (not on an abort) and
+  `reportOnline()` on any response; the browser's events are a hint.
+  `isOffline(error)` in `lib/api.ts` is "no response at all".
+- **The online path is unchanged.** `ProgressReporter` still posts
+  `/api/progress` every 10 s and on pause/seek, and beacons on `pagehide`.
+  `lib/playback.ts`'s `sendProgress` / `sendWatched` fall into the outbox only
+  on a "not now" failure (no response, 5xx, 401, 408, 429; 404/422 throw as
+  before) and resolve `{queued: true}`. On success they tell the outbox the
+  server's `completed` answer (`noteCompleted`; an un-mark clears it).
+- **The exit report** (B1): the reporter's beacon on `pagehide`/unmount is
+  fire-and-forget. Offline, the sample is queued instead (it failed for
+  certain, so past 90 % it may mint a completion). Online past 90 % it is
+  queued as a **position only** (`recordPosition(…, {completion: false})`) —
+  its fate is unknown, and the server judges a position against anything
+  newer, such as an un-mark on the show page, while still completing the
+  episode if the beacon really was lost. Nothing at all is queued past 90 %
+  once the server has answered `completed: true` for the episode on this page.
+- **Outbox** (`offline/outbox.ts`). Records `{id, kind: position | completion
+  | unmark, user_id, episode_id, at (device ISO time, for the server only),
+  seq (this device's order), position_s?, duration_s?, first_at, attempts,
+  last_error?, problem?}`. **Order is `seq`**, never the clock; `nextSeq()`
+  reads the stored maximum once behind one shared promise and chains every
+  call after. Pending positions are keyed per (user, episode) and coalesce
+  through `update` (higher `seq` wins, `first_at`/`attempts` carried over); a
+  completion is created **as its own record** when a sample that failed to
+  send reaches 90 % (unless the server already said completed, or one is
+  queued since the last un-mark); completions and un-marks are keyed by id. A
+  flush sends the **current owner's** non-problem records in chunks of 200 to
+  `POST /api/sync` with the device's `sent_at`; one flush at a time in a tab
+  (`inFlight`) and across tabs (`navigator.locks.request('arc-outbox')` where
+  available). Results: `applied`/`stale` → `deleteIf(key, sent id)`, so a
+  sample coalesced in mid-flight survives; `rejected` → copied to
+  `rejected:<id>` with the reason, then taken off its pending key — never
+  resent, never coalesced over, shown until dismissed; `retry`, a failed
+  request, or no answer → stays pending with `attempts + 1` and `last_error`.
+  Records waiting ≥ 10 min with ≥ 3 attempts are summarised as `stuck`. Never
+  deleted automatically. Owner = the signed-in account (`useOutboxSession` in
+  `RequireAuth`, which also wires the triggers — 15 s tick,
+  `visibilitychange`→hidden and `pagehide` with `keepalive`, `online`, the
+  observed network flipping back — and invalidates `['anime']` and `['home']`
+  after a flush that removed records). Another account's records are never
+  sent and never deleted, only counted. `refresh()` notifies only when the
+  snapshot changed.
+- **UI**: `useOutboxProblems()` → `{problems, pending, waiting, stuck,
+  foreign, persistent, dismiss}`. Watch Now's `FailureBanner` (§5.4b) renders
+  `OutboxProblemRows`: one "Not synced" row per rejected record (✕ deletes
+  it), "N offline records not yet synced — <last error>" for stuck records,
+  a count for another account's records, and a warning when the queue is
+  memory-only and something is waiting. `usePendingWatched()` maps episode →
+  the state a queued mark/un-mark will set; the show page's watched control
+  renders it as a disabled "Watched · pending sync" / "Unwatched · pending
+  sync" chip instead of the button.
+- **Server** (`arc/api/sync.py`, `arc/services/playback/sync.py`).
+  `POST /api/sync` `{user_id, sent_at, items[≤200]}` → `{results: [{client_id,
+  status: applied | stale | rejected | retry, reason}]}`, one per item in
+  order. 409 when `user_id` is not the caller; 422 over 200 items; each item
+  (even a non-object) validated on its own, a bad one `rejected`. Every `at`
+  is **adjusted** (`adjust_timestamp`): shifted by the skew `now − sent_at`,
+  then clamped into `[max(now − 30 days, 2024-01-01), now]`. The list entries'
+  `updated_at` for the batch's un-marks are read once before anything is
+  applied. Items apply in order, each in a savepoint; an exception rolls back
+  that item alone and answers `retry` ("the server could not apply it just
+  now") — `rejected` is only "episode no longer exists" / "not a valid
+  record". Each item's `watch_progress` row is read `FOR UPDATE` first.
+  - *position*: `stale` when `updated_at >= at`; else
+    `record_progress(..., reported_at=at)`.
+  - *completion*: `stale` when `unmarked_at >= at`; else
+    `record_progress(..., force_complete=True, reported_at=at)` —
+    `mark_watched`'s own path, so the list only goes up, one `progress` row
+    (cause `watch`) with the previous value via `_advance_list` →
+    `record_pending` → `enqueue_mal_push`, and `RETURNING old.completed` makes
+    a repeat a no-op. The row's position is kept when it is newer; a
+    number-less completion writes the rendition length. A newer completion
+    leaves `unmarked_at` as history. Online completions are never judged
+    against it: their `at` is now, which no recorded un-mark can be after.
+  - *unmark*: `stale` when the row is completed with `completed_at > at`, or
+    the list entry's pre-batch `updated_at > at` (the user changed the list
+    after the un-mark); else `unmark_watched(..., reported_at=at)`.
+  `reported_at` (keyword on `record_progress` and `unmark_watched`, `None`
+  for every online caller) sets the row's `updated_at` — and `completed_at`
+  when it completes — to the device's adjusted moment, via `greatest(…)` so it
+  never moves backwards; list entry, activation and MAL log stay on server
+  time. **`unmark_watched` records `unmarked_at`** (the adjusted moment or
+  now, `greatest(coalesce(unmarked_at, t), t)`), and when it lowered a
+  list-vouched episode with no row it writes one — not completed, position 0,
+  only the un-mark — since that is the un-mark an old offline completion could
+  undo; every other un-mark without a row still writes nothing. `_retreat_list`
+  locks the list entry (`FOR UPDATE`, re-read) so two concurrent identical
+  un-marks lower and log once.
+  Known edge: the skew correction assumes the request's own latency is small
+  next to the gaps being compared.
+
+### 5.4d In-app offline episodes (M18, FR-S9)
+
+Owner, 2026-10-04: "so i can use arc when traveling". Ported from Audiosey
+(its spec §6 D1 and M0 spike, which ran on an iPhone), hardened after review
+(2026-10-05). Client-only: the server side is §5.4a's `GET|HEAD
+/media/{id}/episode.mp4` (FR-S7) and §5.4c's outbox, unchanged. **The service
+worker still never touches `/api` or `/media`**: offline media is not served
+through it.
+
+**Bytes: OPFS, one file per episode** (`offline/opfs.ts`). The file is
+`episode-<id>.mp4` in the origin-private file system, named from the numeric
+id only. Written only by a **sync access handle inside a dedicated module
+worker** (`offline/downloadWorker.ts`) and read on the main thread as
+`URL.createObjectURL(file.slice(0, size, 'video/mp4'))`: disk-backed, one live
+URL at a time (minting revokes the last; `setOwner` and an unplayable file
+revoke it too). The in-app control is shown only where
+`navigator.storage.getDirectory` and `Worker` exist; elsewhere it is hidden
+and FR-S7's "Save file" link remains. `navigator.storage.persist()` is asked
+on the first download. `listEpisodeFiles()` enumerates `episode-*.mp4` for the
+launch sweep.
+
+**The downloader** (`offline/download.ts`, pure, every dependency injected).
+8 MB `Range` requests with `credentials: 'include'`, an `AbortController` per
+request, and `If-Range` once an ETag is known. The resume offset is the file's
+own size; a `fresh` command truncates the file first. Per §5.4a's contract: a
+**200** to a ranged request, a **changed ETag**, a **changed `Content-Range`
+total**, or a 206 whose span does not start at the offset, **ends past the
+requested end**, or whose `Content-Length` disagrees with it → the request is
+aborted and the body cancelled **unread**, and the file is truncated to zero
+and fetched again; a body longer than its span after reading counts the same.
+Three restarts with no chunk between them fail the download. Transport
+failures, a body that dies mid-read and other statuses back off 1 s, 3 s,
+10 s, then a steady 30 s, forever; a 429 waits at least its `Retry-After`;
+400 / 401 / 403 / 404 are terminal. A file that is already whole when the
+run starts (another account's copy) is confirmed with one `If-Range` request
+for its last byte before it is `done` — the server authorises this account
+and confirms the encode. A write that throws `QuotaExceededError` truncates
+back to the chunk boundary and fails with `quota`. Done only when the file's
+size equals the `Content-Range` total (`size` otherwise). **Every terminal
+message (`done`, `paused`, `failed`, `busy`) is posted only after the handle
+is closed**, from the `finally`.
+
+**The worker.** One file at a time; a `download` for the running file is a
+nudge (ends a backoff) unless a pause for it is under way, in which case it
+runs again after the file is closed; one for another file stops the current at
+its next chunk and runs after it. Each run holds the Web Lock
+`arc-download:<file>` (`ifAvailable`); a second Arc window gets `busy`. Every
+message carries the manager's `run` id. Vite builds it as an ES worker
+(`worker.format: 'es'`) into `assets/downloadWorker-*.js`, which the precache
+glob includes.
+
+**The manager** (`offline/downloads.ts`, a `useSyncExternalStore` store,
+`useDownloads()`). One record per **(user, episode)** in IndexedDB
+`downloads` (key `"<user>:<episode>"`): state, bytes, total, ETag, `fresh`,
+reason, message, the `download_url`, and a **snapshot** of the player payload
+from `GET /api/episodes/{id}/play` at start (`anime`, `episode`, `duration`).
+States `queued → downloading → downloaded`, or `paused` (`by-hand` |
+`interrupted` | `network` — a message only, the worker keeps retrying |
+`elsewhere`, another window holds the lock, retried on the next nudge) or
+`failed` (`quota` | `auth` | `gone` | `size` | `error` from the worker;
+`evicted` | `unreadable` decided here), each with a sentence. FIFO queue, one
+active download with a run id; a message whose `run` is not the active one
+is stale and may only update bytes. Screen Wake Lock held while one runs,
+re-requested on return to the screen.
+
+- **Never touching a held file.** `halt()` (pause, delete, owner change) puts
+  the file name in *releasing* until the worker's terminal message for it; a
+  delete while releasing is deferred to that message (`doomed`). `start()`
+  clears `doomed` for its file. A start with no other record naming the file
+  is `fresh` (bytes 0, no ETag, the worker truncates), so an orphan is never
+  resumed into; `markUnplayable` sets `fresh` too.
+- **`hydrate()` at launch** (`RequireAuth` → `useDownloadsSession`): a file
+  whose size equals the total is `downloaded`; a `downloaded` record whose
+  file is short or gone becomes `failed` / `evicted` (Try again, Delete); a
+  failed record stays failed; everything else comes back `paused`
+  (`interrupted`, or `by-hand`). Then every `episode-*.mp4` no record names is
+  removed. Auth failures of the signed-in account resume.
+- **Worker errors** (`error`, `messageerror`): the running record fails with
+  a sentence, the worker is terminated and dropped (the next send boots a new
+  one), held files count as released, and the queue moves on.
+- `nudge()` on `visibilitychange` → visible and on `online`.
+
+**Per-user isolation.** `setOwner(user)` follows the signed-in account and is
+set to `null` by logout and by the session-loss path: the running download of
+another account is halted, its queued ones become `paused` / `interrupted`,
+the live blob URL is revoked, and the snapshot holds only the owner's records
+(`loadPlayInfo` and `playableUrl` read the snapshot). When an account comes
+back, its `failed` / `auth` records resume. Two accounts keeping the same
+episode share the file, removed only with the last record naming it.
+
+**Player source selection** (`player/source.ts`). `useLocalCopy(id)` waits
+for hydration, then resolves this account's blob URL **before the video
+mounts**; `chooseSource(info, url)` is pure: a URL → `file`, else the
+playlist → `stream`, else `none`. `HlsVideo kind="file"` puts the blob URL on
+`<video src>` directly — hls.js is skipped — and never listens to `stalled`.
+A `file` the element errors on is marked `failed` / `unreadable` (Try again
+re-downloads it fresh) and the page streams when there is a stream, or says
+the copy could not be read. **No `await` between a tap and `play()`**: every
+play path calls `play()` synchronously on an element whose `src` is already
+set. Moving to the next episode unmounts the old video before the new URL is
+minted (and the old one revoked). A fragmented MP4 may report a non-finite
+duration: the page then uses the recorded duration for the scrubber, the
+reporter, the completion mark and the end card, and `shouldResume` refuses to
+seek when no finite length is known at all.
+
+**Offline payload** (`lib/playback.ts` `loadPlayInfo`). The server's `/play`
+first; when it is unreachable (no response, or 502/503/504 —
+`isUnreachable`) or answers 404 (retention removed the rendition), and the
+episode is this account's `downloaded` record, the payload is rebuilt by
+`offlinePlayInfo`: the snapshot, `playlist_url: ''`, `from_device: true`,
+resume from the device's own last position (IndexedDB `player`, key
+`pos:<user>:<episode>`, written every 5 s while playing and on pause, seek
+and end), previous / next = the nearest downloaded episodes, and `watched`
+overridden by a queued outbox mark. A 500 or any other error fails as before.
+
+**What is remembered where:**
+
+| Where | Key | What | Cleared |
+|---|---|---|---|
+| OPFS | `episode-<id>.mp4` | the episode file | on delete (last record naming it, after the worker lets go); orphans at launch |
+| IndexedDB `downloads` | `<user>:<episode>` | the download record + snapshot | on delete |
+| IndexedDB `player` | `pos:<user>:<episode>` | last position on this device | never (per user) |
+| IndexedDB `payloads` | `home`, `anime:<id>` | last good Watch Now / show page, stamped with the owner whose request it was | sign-out, session loss, any account signing in that does not own them |
+| IndexedDB `covers` | `u<user>:anime:<id>` | poster blob (cross-origin `fetch`, best effort) | with that user's last download of the show |
+| IndexedDB `session` | `user`, `data_owner`, `logout_pending` | the signed-in user, whose payloads these are, a sign-out not yet sent | `user`/`data_owner` on sign-out or session loss; `logout_pending` once the server has it or on a new sign-in |
+| IndexedDB `outbox` | (§5.4c) | queued progress | only by §5.4c's rules |
+
+DB `arc` is version 2 (the five stores appended; `createMissingStores` never
+touches an existing store). **A blocked upgrade** (another tab holds v1)
+leaves the tab in memory only for now, but the open request stays alive:
+when it succeeds the database is adopted, every store's memory overlay,
+deletes and clears are written into it, and persistence is restored. Every
+connection closes on `versionchange`. No `localStorage` is used for any of it.
+
+**Offline boot and sign-out.** `useMe` (`loadMe`): first a pending sign-out
+is sent (`flushPendingLogout`); while it cannot be, the answer is `null`.
+Then `/me`; an answer that is not shaped like a user is refused; a 401 is
+`null` and `forgetSession()`; an unreachable server answers with the
+remembered user — **a failed request is not a sign-out**. A 401 on any other
+query or mutation also calls `forgetSession()` (`lib/queryClient.ts`), so a
+real session loss is not undone by the next offline launch. `apiFetch`
+reports a 502/503/504 as offline, so the strip agrees with `isUnreachable`.
+Login and invite acceptance remember the user and clear `logout_pending`.
+**Logout**: queries are cancelled before the cache is cleared, the user and
+payloads are forgotten, downloads are detached (`setOwner(null)`); if the
+`POST /api/auth/logout` could not reach the server, `logout_pending` is set
+and `watchPendingLogout()` (from `main.tsx`) sends it at launch and on every
+reconnect. `withRemembered` reads the owner *before* its request and stamps
+the payload with it; `recallPayload` ignores a payload of another owner.
+`useHome` and `useAnime` fall back to the remembered payload; every page in
+the shell shows "You're offline — your downloads are here" (the demo account:
+"You're offline") while `useOffline()` is true.
+
+**iOS caveats** (stated on the Downloads page): downloads run only while Arc
+is on screen (the manager nudges and re-takes the wake lock on return);
+removing the Home Screen app deletes its storage, downloads included;
+persistence is requested but is the browser's call, and the page shows
+whether it was granted. A downloaded episode keeps playing after retention
+(§5.7) removed the server's rendition, and after a server re-encode (the
+older copy plays; no hint yet).
 
 ### 5.5 Progress and MAL writes
 1. `POST /progress` {episode_id, position, duration} every 10 s and on
@@ -1944,7 +2361,9 @@ bounded by what one un-finished file had fetched).
   whose summary or detail came from AniList, and never replaces a published
   one; AniList blobs always replace MAL ones. The schedule exposes
   `next_at_estimated` so the UI can mark synthesised times.
-- **Season grid membership (2026-09-13).** `catalog/schedule.py` builds two
+- **Season grid membership (2026-09-13; the current view's carry-in source
+  is `airing_between` since 2026-10-04, see "Dated current view" below —
+  `on_air_this_week` remains the hero pool's rule).** `catalog/schedule.py` builds two
   statements and the router runs them. `season_members(year, season)` is the
   catalogue's own answer — the rows tagged with that season — and is the whole
   rule for a prev/next view, which is a catalogue browse. The **current**
@@ -1974,7 +2393,41 @@ bounded by what one un-finished file had fetched).
   `catalog_pre_air` were already season-blind — `status = RELEASING` and a
   `next_airing` in the hour — so the carried-in rows stay as fresh as any
   other; tests pin that too.
-- Schedule placement: a `next_airing` older than 7 days is ignored (hiatus)
+- **Dated current view (2026-10-04, owner).** The current season's layout is
+  `place_dated(rows, tz, now, dates)` over `displayed_dates(now, tz)` — Monday
+  of the user's local week through `today + DAYS_AHEAD` with `DAYS_AHEAD = 6`,
+  so 7–13 dates. Carry-in candidates are `airing_between(start, end)` over
+  `range_bounds(dates)`: every weekly-format show of any season and any
+  status with a `next_airing` slot or a dated episode inside the range — which
+  also brings next season's premiere in the turnover week and a finished
+  show's finale. The hero pool's `on_air_this_week` is not used here and did
+  not change. The router adds one query for
+  the episodes dated inside `range_bounds(dates)` (local midnight to local
+  midnight) and one for the first dated episode of the season's
+  `NOT_YET_RELEASED` rows. A weekly-format show is placed on each displayed
+  date with evidence, the first to name a date placing the show and a later
+  episode on the same date widening it to `last_episode` ("Ep 3–4"): the
+  fresh `next_airing` slot; an `Episode` row dated that day with a number
+  below the slot's episode (rows at or past it are the slot's to place); and,
+  for a `RELEASING` show with **no dated episode rows at all**, the slot minus
+  7 days, only when that instant is `<= now` — as episode − 1 for a slot
+  naming episode > 1, or with no number for a MAL slot naming none, the
+  latter only when the show's season tag ended before that date (Arc keeps no
+  start date; an untagged long-runner gets no inference). A `FINISHED` show is
+  placed by its dated rows alone (never its slot, never an inference); the
+  season's own finished shows with nothing in range go to `ended`, which the
+  page draws on no date and Search/Home list. The entry's
+  `next_episode`/`next_at` name the episode of *that* day, so `watched_marks`
+  — now keyed `(anime_id, number)` — ticks aired days. A season row with
+  no evidence goes to `unscheduled`, carrying `starts_on` (local date of the
+  slot, else the first dated episode) when `NOT_YET_RELEASED`; a carried-in
+  row with none is dropped. Films/OVAs/specials are unscheduled exactly as
+  before. Wire: `ScheduleDay.date`, `ScheduleEntry.starts_on` and
+  `ScheduleEntry.last_episode` (nullable, null on a browse) and
+  `SchedulePage.ended` (empty on a browse). An unscheduled `RELEASING` row
+  with a `next_at` past the range reads "Next 13 Oct" client-side. The browse
+  layout (`place_entries`) is unchanged.
+- Schedule placement (browse): a `next_airing` older than 7 days is ignored (hiatus)
   and the row falls back to its last real episode air time (the *highest-
   numbered* episode with one, not `max(air_at)`). The aired rule
   (`air_at <= now`, estimated dates count, RELEASING boundary, FINISHED
@@ -2360,7 +2813,7 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | public / any | session. `login` and `me` answer `UserOut`: id, email, role, timezone, created_at and `is_demo` — the last so the client knows whether to draw M16's "How Arc works" entry and Watch Now strip (spec FR-D5) |
 | `POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/{id}` | admin | invite management |
 | `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
-| `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard). The PATCH body takes `is_active`, `role` and `is_demo`; the first two carry the self-lockout and last-admin guards, `is_demo` carries none — it takes nothing away from anybody and there is no last demo account to protect, so an admin may set it on any row including their own (spec FR-D5) |
+| `GET /api/users`, `PATCH /api/users/{id}` | admin | user management (zero-admin guard). The PATCH body takes `is_active`, `role` and `is_demo`; the first two carry the self-lockout and last-admin guards, `is_demo` carries none — it locks nobody out (it costs the flagged account only the episode download, FR-S7) and there is no last demo account to protect, so an admin may set it on any row including their own (spec FR-D5) |
 | `PATCH /api/users/me` | any | change own timezone (IANA, validated) |
 | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}` | admin | job queue; the listing takes `status=`, `type=`, `limit=` (≤ 200), `offset=`, newest id first |
 | `GET /api/jobs/summary` | admin | `{by_status: {pending, running, done, failed, cancelled}, by_type_pending: {type: count}, worker: {heartbeat_at, alive}}` — `alive` is the heartbeat file younger than 90 s, the same decision the container healthcheck makes |
@@ -2377,16 +2830,18 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
-| `GET /api/schedule?year=&season=` | any | cache-only season grid: 7 days (0 = Monday in the user's timezone), entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every `RELEASING` weekly-format show with an air time inside 7 days, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
+| `GET /api/schedule?year=&season=` | any | cache-only season grid: on a browse 7 undated days (0 = Monday in the user's timezone); on the current season 7–13 days each with a local `date` (Monday of this week to today + 6) holding only the shows airing that date (any season, via `airing_between`; `last_episode` when two of a show's air that date), finished shows only on dates an episode of theirs aired and otherwise in `ended`, not-yet-started ones in `unscheduled` with `starts_on` (2026-10-04); entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every weekly-format show with an air time on its dates, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
 | `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `ready_to_watch` (episodes in state `ready` on a watching/planned/**on-hold** list, with no `watch_progress` row past `RESUME_MIN_S` = 10 s and none completed, and a number above the entry's progress — FR-W5 read backwards; ordered by `renditions.ready_at DESC NULLS LAST, episodes.id DESC`, max `READY_LIMIT` = 20; **any air date**, which is the point: it was the client filtering `new_this_week` until 2026-09-17, so a ready episode of a show that stopped airing a fortnight ago could not reach the page), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8). Since M16 it also answers `failures` (FR-W6, §5.4b): the caller's **own** stopped episodes (a live want on an episode that is `failed` or `unavailable`) and their own failed `mal_write_log` rows, newest first across both, capped at 20 — two queries plus the transcode-job lookup only where something is `failed`, each row a `key` + `AnimeSummary` + one trimmed sentence rather than an `EpisodeOut`. Here rather than on a route of its own so §5.9's invalidation of this query carries it |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
+| `GET`/`HEAD /media/{id}/episode.mp4` | any but the demo account (403) | The whole ready episode as one MP4 (FR-S7): `init.mp4` + segments in playlist order, concatenated on the fly; parts checked like segments; 404 unless `ready` and every part is present and plain; `private, no-cache` + strong ETag over all parts/304; single Range → 206, multi-range → 200, JSON 400/416; `If-Range` honoured; `Content-Disposition: attachment` named from the database (§5.4a) |
 | `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
+| `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released" |
 | `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, total}, episodes_retained}` — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
@@ -4456,3 +4911,81 @@ asked*, so `make test` is exactly as fast as it was.
   its query. `core/logging.py` now filters both out of access lines, and the
   Caddy log filter also covers the invite *page* URL `/invite/<token>`, which it
   had been writing in clear. No such line was present in the retained logs.
+- 2026-10-04 — The current schedule is dated (FR-C3, owner). `GET /api/schedule`
+  on the current season returns 7–13 `ScheduleDay`s (Monday to today + 6)
+  with a local `date`, each holding only shows with an episode airing that
+  date (`place_dated`, §5 "Dated current view"), candidates from
+  `airing_between`; `ScheduleEntry.starts_on` names an upcoming show's
+  premiere, `last_episode` a second episode the same date, and `ended` keeps
+  the season's finished shows for Search/Home. Browse views, `place_entries`
+  and `on_air_this_week` (hero pool) are unchanged; `watched_marks` is keyed
+  by `(anime_id, number)`. The client finds today by date (`todayInTimezone`),
+  Home's shelf takes today + 6, and `weekDates`/`currentSeason`/
+  `isCurrentSeason` are gone. No schema change.
+- 2026-10-04 — Download a ready episode as one MP4 (FR-S7, owner):
+  `GET /media/{id}/episode.mp4` is a virtual concatenation of `init.mp4` and
+  the playlist's segments — no ffmpeg, no temp file — with its own range,
+  `If-Range` and ETag handling over all parts, the segment route's filesystem
+  checks on every part, a database-built `Content-Disposition`, and a 403 for
+  the demo account. `EpisodeOut.download_url` carries the URL to the show
+  page. No new dependency, no schema change, no Caddy change (§5.4a).
+- 2026-10-04 — **Installable web app** (M18, owner). The client becomes a
+  Home Screen app for iPad and iPhone through `vite-plugin-pwa` (new dev
+  dependency, owner-approved) and a generated manifest; the hand-written
+  placeholder manifest is gone. The service worker is the app shell only and
+  never answers or caches `/api/*` or `/media/*`; navigations are network-first
+  (3 s) with the precached shell as the offline fallback, never stored, with
+  `navigateFallback` and `directoryIndex` both off; updates install in the
+  background and take over on the next launch. Opaque icons, `viewport-fit=cover`
+  with safe-area padding in the shell and the Player, 44 px touch targets under
+  `pointer-coarse`, and an install hint above Watch Now. No server or Caddyfile
+  change. (§1, §3 "Installable web app".)
+- 2026-10-04 — **Offline progress outbox and `POST /api/sync`** (M18, FR-S8,
+  owner-approved design). Client: `client/src/offline/` (`store.ts` over
+  IndexedDB `arc` with a memory fallback, `network.ts`, `outbox.ts`), wired
+  in `RequireAuth`, problems shown in Watch Now's failure banner. Server: a
+  batch endpoint whose items replay through `record_progress` /
+  `unmark_watched`, which gain a `reported_at` keyword (device time for
+  `updated_at`/`completed_at`, never moving backwards; online callers pass
+  nothing and are unchanged). The MAL rule holds by construction: a replayed
+  completion is the user's watch completion on `mark_watched`'s path, an
+  un-mark is FR-S4's. No schema change, no new dependency (§5.4c, §5b).
+- 2026-10-04 — FR-S7 hardening after review: the download holds the rendition
+  directory open and reads every part through that descriptor, part identity
+  includes device and inode, the open is shielded from cancellation, the
+  playlist read is capped at 1 MiB, and over-long `Range` numbers are a 400.
+  `users.is_demo` is no longer presentation-only: it refuses the download
+  (owner, 2026-10-04); §4 and §5b say so.
+- 2026-10-05 — **FR-S8 review fixes; `watch_progress.unmarked_at`** (owner
+  approved the column; revision `4e76a09e547c`, one nullable timestamptz, no
+  backfill). `unmark_watched` records it and a replayed completion at or
+  before it is `stale`; a lowering un-mark of a list-vouched episode with no
+  row now writes a not-completed row to carry it. The exit beacon never
+  mints a completion on the device. New `retry` item status for transient
+  failures; `sent_at` skew correction and a 30-day clamp; un-marks stale
+  against a later list change; the list entry is locked in `_retreat_list`.
+  Client: atomic `KeyStore.update`/`deleteIf`, `seq` ordering, attempt
+  tracking and a "not yet synced" banner row, `navigator.locks` around a
+  flush, "pending sync" on the show page, query invalidation after a flush
+  (§4, §5.4c, §5b).
+- 2026-10-05 (owner decisions of 2026-10-04) — **In-app offline episodes
+  (FR-S9, §5.4d)**, ported from Audiosey: OPFS file per episode written by a
+  sync access handle in an ES module worker; the pure chunk downloader with
+  §5.4a's restart-from-zero contract (200, ETag, total); a per-user
+  `DownloadManager` with a one-at-a-time queue and `hydrate()` at launch;
+  blob-URL playback straight on `<video>`; an offline `/play` rebuilt from the
+  download with a device-local resume position; a remembered user, pages and
+  posters for an offline launch. IndexedDB `arc` → v2 (`downloads`, `player`,
+  `payloads`, `covers`, `session`). No new dependency; no server change; the
+  service worker's refusal of `/api` and `/media` is unchanged.
+- 2026-10-05 — **§5.4d hardened after review.** Terminal worker messages
+  after the handle closes; a *releasing* set defers deletes; `fresh` starts
+  for unvouched files and a launch sweep of orphans; run ids for stale
+  messages; Web Lock per file (`busy` / `elsewhere`); worker error handling;
+  `evicted` and `unreadable` states; owner changes pause queued downloads and
+  resume auth failures; owner-stamped payloads and per-user covers;
+  `forgetSession()` on every session loss; a durable `logout_pending` flag
+  sent before `/me` is trusted; 502/503/504 report offline; a blocked
+  IndexedDB upgrade is adopted when it succeeds; verify-before-done for a
+  shared file; 400 terminal, `Retry-After` on 429, oversized spans never
+  read; no resume seek without a finite duration.
