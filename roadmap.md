@@ -1623,6 +1623,12 @@ and Audiosey share the host.
       copy-video "play now" path is the owner's decision and is open.
 - **DoD:** each item verified by the orchestrator on dev and on a real iPad
   by the owner; spec/architecture current; suites green; deployed.
+- Deployed 2026-10-05 17:53 UTC as 6c4a48e (owner: "then we deploy and test on
+  my ipad"); database backed up first, migration 4e76a09e547c applied, head
+  confirmed; `/api/health` clean, the service worker and manifest served
+  `no-cache`, the new routes answer 401 without a session; Tribunal, Audiosey
+  and SectorWatch answered 200 after Caddy was recreated. The owner's iPad
+  check is what remains.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
