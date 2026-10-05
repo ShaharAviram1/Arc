@@ -2,10 +2,10 @@ import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
+import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
 import {
   Artwork,
   Button,
-  BUTTON_PRESSED,
   buttonClass,
   cx,
   EmptyState,
@@ -59,9 +59,6 @@ import {
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
-import { downloads, SCREEN_NOTE } from '@/offline/downloads'
-import { canDownloadInApp } from '@/offline/opfs'
-import { useDownloads } from '@/offline/useDownloads'
 import { usePendingWatched } from '@/offline/useOutbox'
 
 /**
@@ -161,7 +158,7 @@ function altTitles(anime: AnimeDetail): string {
 }
 
 /** The row's 16:9 frame, whichever of the three pictures it ends up holding. */
-const ROW_ART = 'w-[152px] shrink-0'
+const ROW_ART = 'w-[96px] shrink-0 sm:w-[152px]'
 
 /**
  * The picture beside one episode row, in the order it is worth showing:
@@ -929,163 +926,6 @@ function WatchedControl({ animeId, episode }: { animeId: number; episode: Episod
 }
 
 /**
- * Save a ready episode as one MP4 file (FR-S7).
- *
- * A plain `<a download>` to the URL the server sent rather than a button with
- * a fetch behind it: the browser's own download manager streams it to disk,
- * shows progress and can resume, and the session cookie goes with it because
- * the route is same-origin. The server names the file (show title and episode
- * number, from its own database), so `download` carries no value of its own.
- *
- * Rendered only when the server sent a URL — which it does exactly for a
- * `ready` episode — and never for the demo account, which the route would
- * refuse anyway. The accessible name carries the episode number, so a screen
- * reader listing links can tell twelve "Download"s apart.
- */
-function DownloadControl({ episode }: { episode: EpisodeOut }) {
-  const href = episode.download_url ?? null
-  if (episode.state !== 'ready' || href === null) return null
-  return (
-    <a
-      href={href}
-      download
-      aria-label={`Save episode ${String(episode.number)} as a file`}
-      title="Save the MP4 to your files"
-      className={buttonClass('chip', 'px-4 text-[13px]')}
-    >
-      Save file
-    </a>
-  )
-}
-
-/** A whole percentage for a download's bar; 0 until the size is known. */
-function downloadPercent(bytes: number, total: number): number {
-  return total > 0 ? Math.min(100, Math.floor((bytes / total) * 100)) : 0
-}
-
-/**
- * Keep an episode inside Arc, to watch with no connection (FR-S9).
- *
- * Beside the file link, and deliberately named apart from it: "Save file"
- * hands the MP4 to the browser's downloads (it lands in Files), while "Keep
- * offline" writes it into Arc's own storage on this device, where the player
- * finds it. Hidden, with no error, on a browser that cannot do the second
- * (no OPFS or no workers) — the file link is still there.
- *
- * One chip that is the whole state: offer, queued, a percentage (press to
- * pause), paused or failed (press to resume — the reason is the tooltip and a
- * line under it), and "On this device", which leads to the Downloads page.
- */
-function KeepOfflineControl({ episode }: { episode: EpisodeOut }) {
-  const record = useDownloads()[episode.id]
-  const [startFailed, setStartFailed] = useState(false)
-  const href = episode.download_url ?? null
-  if (episode.state !== 'ready' || href === null || !canDownloadInApp()) return null
-  const label = `episode ${String(episode.number)}`
-  const chip = buttonClass('chip', 'px-4 text-[13px]')
-
-  if (record === undefined) {
-    return (
-      <span className="flex flex-col items-end gap-1.5">
-        <button
-          type="button"
-          aria-label={`Keep ${label} offline`}
-          title="Download into Arc to watch without a connection"
-          className={chip}
-          onClick={() => {
-            setStartFailed(false)
-            downloads()
-              .start({ episodeId: episode.id, url: href })
-              .catch(() => {
-                setStartFailed(true)
-              })
-          }}
-        >
-          Keep offline
-        </button>
-        {startFailed ? (
-          <span role="alert" className="text-[13px] text-[var(--arc-error)]">
-            Could not start the download.
-          </span>
-        ) : null}
-      </span>
-    )
-  }
-
-  if (record.state === 'downloaded') {
-    return (
-      <Link
-        to="/downloads"
-        aria-label={`${label} is on this device`}
-        className={cx(chip, BUTTON_PRESSED)}
-      >
-        <CheckGlyph />
-        On this device
-      </Link>
-    )
-  }
-
-  const percent = downloadPercent(record.bytes, record.total)
-  if (record.state === 'downloading' || record.state === 'queued') {
-    const queued = record.state === 'queued'
-    return (
-      <button
-        type="button"
-        aria-label={`Pause the download of ${label}`}
-        title={queued ? 'Waiting for the download ahead of it' : SCREEN_NOTE}
-        className={chip}
-        onClick={() => {
-          downloads().pause(episode.id)
-        }}
-      >
-        {queued ? 'Queued' : `${String(percent)}%`}
-        <span
-          role="progressbar"
-          aria-label={`Downloading ${label}`}
-          aria-valuenow={percent}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          className="block h-[2px] w-8 overflow-hidden rounded-full bg-[rgba(255,255,255,0.16)]"
-        >
-          <span
-            className="block h-full bg-[var(--arc-text-muted)]"
-            style={{ width: `${String(percent)}%` }}
-          />
-        </span>
-      </button>
-    )
-  }
-
-  const failed = record.state === 'failed'
-  return (
-    <span className="flex max-w-[16rem] flex-col items-end gap-1.5">
-      <button
-        type="button"
-        aria-label={`${failed ? 'Try again to download' : 'Resume the download of'} ${label}`}
-        title={record.message ?? undefined}
-        className={chip}
-        onClick={() => {
-          downloads().resume(episode.id)
-        }}
-      >
-        {failed ? 'Try again' : `Resume · ${String(percent)}%`}
-      </button>
-      {record.message === null ? null : (
-        <span
-          role={failed ? 'alert' : undefined}
-          className={cx(
-            'text-right text-[13px]',
-            failed ? 'text-[var(--arc-error)]' : 'text-[var(--arc-text-muted)]',
-          )}
-        >
-          {record.message}
-        </span>
-      )}
-    </span>
-  )
-}
-
-/**
  * One episode (spec §6).
  *
  * The whole row is the target when the episode is playable — an overlay on the
@@ -1114,7 +954,10 @@ function EpisodeRow({
   return (
     <div
       className={cx(
-        'relative flex w-full items-center gap-5 rounded-row p-3.5 transition-colors duration-200',
+        // On a phone the right-hand group drops to a line of its own under the
+        // title, state at the left and the actions at the right; from `sm` up
+        // it is one row, everything level.
+        'relative flex w-full flex-wrap items-center gap-x-4 gap-y-3 rounded-row p-3.5 transition-colors duration-200 sm:flex-nowrap sm:gap-x-5',
         playable ? 'hover:bg-[var(--arc-surface-hover)]' : '',
       )}
     >
@@ -1141,40 +984,51 @@ function EpisodeRow({
             </span>
           ) : null}
         </p>
-      </div>
-
-      <div className="flex w-[132px] shrink-0 flex-col items-end gap-1.5 text-right text-[14px]">
-        <span className={TONE_CLASS[state.tone]} title={state.label}>
-          <span>{state.label}</span>
-          {problem === null ? null : <ProblemHint label={problem.label} reason={problem.reason} />}
-        </span>
-        {state.percent === null ? null : (
-          <span
-            role="progressbar"
-            aria-label={state.progressLabel}
-            aria-valuenow={state.percent}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuetext={`${String(state.percent)}%`}
-            className="block h-[2px] w-11 overflow-hidden rounded-full bg-[rgba(255,255,255,0.16)]"
-          >
-            <span
-              className="block h-full bg-[var(--arc-text-muted)]"
-              style={{ width: `${String(state.percent)}%` }}
-            />
-          </span>
-        )}
-        {episode.state === 'failed' && isAdmin ? (
-          <span className="relative z-10 flex flex-col items-end gap-1.5">
-            <RetryTranscode animeId={anime.id} episodeId={episode.id} />
-          </span>
+        {canDownload ? (
+          <OfflineReason episodeId={episode.id} className="mt-1 block text-[13px]" />
         ) : null}
       </div>
 
-      <div className="relative z-10 flex shrink-0 items-start gap-2.5">
-        {canDownload ? <KeepOfflineControl episode={episode} /> : null}
-        {canDownload ? <DownloadControl episode={episode} /> : null}
-        <WatchedControl animeId={anime.id} episode={episode} />
+      <div className="flex w-full items-center gap-4 sm:w-auto sm:shrink-0 sm:gap-5">
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-1.5 text-left text-[14px] sm:w-[132px] sm:flex-none sm:items-end sm:text-right">
+          <span className={TONE_CLASS[state.tone]} title={state.label}>
+            <span>{state.label}</span>
+            {problem === null ? null : (
+              <ProblemHint label={problem.label} reason={problem.reason} />
+            )}
+          </span>
+          {state.percent === null ? null : (
+            <span
+              role="progressbar"
+              aria-label={state.progressLabel}
+              aria-valuenow={state.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuetext={`${String(state.percent)}%`}
+              className="block h-[2px] w-11 overflow-hidden rounded-full bg-[rgba(255,255,255,0.16)]"
+            >
+              <span
+                className="block h-full bg-[var(--arc-text-muted)]"
+                style={{ width: `${String(state.percent)}%` }}
+              />
+            </span>
+          )}
+          {episode.state === 'failed' && isAdmin ? (
+            <span className="relative z-10 flex flex-col items-end gap-1.5">
+              <RetryTranscode animeId={anime.id} episodeId={episode.id} />
+            </span>
+          ) : null}
+        </div>
+
+        {/*
+          The row's actions, level with each other: keep offline (FR-S9), then
+          watched. Raised over the row's link overlay, and above the rows after
+          it while the offline menu is open, so the menu is not drawn under them.
+        */}
+        <div className="relative z-10 flex shrink-0 items-center gap-2.5 has-[[data-offline-menu]]:z-30">
+          {canDownload ? <OfflineButton episode={episode} /> : null}
+          <WatchedControl animeId={anime.id} episode={episode} />
+        </div>
       </div>
     </div>
   )

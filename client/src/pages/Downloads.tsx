@@ -29,10 +29,10 @@ import { useDownloads } from '@/offline/useDownloads'
 const LEDE = 'Episodes kept inside Arc on this device. They play with no connection.'
 
 const EMPTY_MESSAGE =
-  'Nothing is downloaded to this device yet. On a show page, choose “Keep offline” beside a ready episode.'
+  'Nothing is downloaded to this device yet. Tap the download button beside a ready episode on a show page, or in the player.'
 
 const UNSUPPORTED =
-  'This browser can’t keep episodes inside Arc. “Save file” on a show page still saves the MP4.'
+  'This browser can’t keep episodes inside Arc. They still stream whenever Arc is reachable.'
 
 /** The notes at the bottom: each is something that has surprised somebody. */
 const NOTES = [

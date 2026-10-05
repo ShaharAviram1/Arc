@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useSyncExternalStore } from 'react'
-import { downloads, type Downloads } from '@/offline/downloads'
+import { downloads, type DownloadRecord, type Downloads } from '@/offline/downloads'
 
 export function useDownloadsSession(userId: number | null): void {
   useEffect(() => {
@@ -24,4 +24,9 @@ export function useDownloadsSession(userId: number | null): void {
 export function useDownloads(): Downloads {
   const manager = downloads()
   return useSyncExternalStore(manager.subscribe, manager.getSnapshot, manager.getSnapshot)
+}
+
+/** One episode's record for the signed-in account, or `undefined`. */
+export function useDownload(episodeId: number): DownloadRecord | undefined {
+  return useDownloads()[episodeId]
 }

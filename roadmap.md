@@ -1629,6 +1629,15 @@ and Audiosey share the host.
   `no-cache`, the new routes answer 401 without a session; Tribunal, Audiosey
   and SectorWatch answered 200 after Caddy was recreated. The owner's iPad
   check is what remains.
+- [x] **One offline button, no "Save file"** (owner, 2026-10-05, during the
+      iPad check): the file link is gone from the UI (the MP4 route stays as
+      what Keep offline downloads through); a shared icon button — arrow,
+      progress ring, check, with a menu to remove the copy — sits on the Show
+      row and in the player's top bar. A download that finishes while the
+      episode streams does not swap the source; the copy being played cannot
+      be removed from the player. Verified 2026-10-05 (orchestrator): client
+      suite 982, lint clean, build ok; the Writer's WebKit screenshots of the
+      row and the player at iPad landscape and portrait read.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator

@@ -654,52 +654,17 @@ describe('Show', () => {
     expect(screen.queryByText(/from a batch/)).not.toBeInTheDocument()
   })
 
-  /* --- Download a ready episode as a file (FR-S7) --------------------- */
+  /* --- No file link (FR-S7, owner 2026-10-05) ------------------------- */
 
-  it('offers a ready episode as a download, at the URL the server sent', async () => {
+  it('offers no "Save file" link: the MP4 route only feeds Keep offline', async () => {
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
 
     renderShow()
 
-    // Named "Save file" since FR-S9, so it reads apart from "Keep offline".
-    const link = await screen.findByRole('link', { name: 'Save episode 1 as a file' })
-    expect(link).toHaveAttribute('href', '/media/9001/episode.mp4')
-    expect(link).toHaveAttribute('download')
-    expect(link).toHaveTextContent('Save file')
-    // One ready episode in the fixture, so one download.
-    expect(screen.getAllByRole('link', { name: /^Save episode/ })).toHaveLength(1)
-  })
-
-  it('offers no download for an episode that is not ready', async () => {
-    // Even a payload that carries a URL for a row that is not ready: the
-    // state is what decides, and the route would 404 it anyway.
-    const preparing: AnimeDetail = {
-      ...FRIEREN_DETAIL,
-      episodes: FRIEREN_DETAIL.episodes.map((episode) =>
-        episode.id === 9002 ? { ...episode, download_url: '/media/9002/episode.mp4' } : episode,
-      ),
-    }
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: preparing } })
-
-    renderShow()
-
-    await screen.findByRole('link', { name: 'Save episode 1 as a file' })
-    expect(screen.queryByRole('link', { name: 'Save episode 2 as a file' })).not.toBeInTheDocument()
-  })
-
-  it('offers no download to the demo account', async () => {
-    mockApi({
-      'GET /api/auth/me': { body: TEST_DEMO_USER },
-      [DETAIL_PATH]: { body: FRIEREN_DETAIL },
-    })
-
-    renderShow()
-
-    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
-    // The row is still playable; only the file is off.
-    expect(await screen.findByRole('link', { name: /^1\. / })).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /^Save episode/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /offline$/ })).not.toBeInTheDocument()
+    await screen.findByRole('link', { name: /^1\. / })
+    expect(screen.queryByText('Save file')).not.toBeInTheDocument()
+    expect(document.querySelector('a[download]')).toBeNull()
+    expect(document.querySelector('a[href$="episode.mp4"]')).toBeNull()
   })
 
   it('shows how far a transcode has got, on the same bar (FR-P4)', async () => {
@@ -1791,16 +1756,66 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
     setDownloads(null)
   })
 
-  it('is hidden, with the file link still there, where the browser cannot', async () => {
+  it('is hidden where the browser cannot', async () => {
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
 
     renderShow()
 
-    await screen.findByRole('link', { name: 'Save episode 1 as a file' })
+    await screen.findByRole('link', { name: /^1\. / })
     expect(screen.queryByRole('button', { name: 'Keep episode 1 offline' })).not.toBeInTheDocument()
   })
 
-  it('starts a download beside the file link and shows how far it has got', async () => {
+  it('is offered for a ready episode only', async () => {
+    pretendOpfs()
+    const { manager } = managerHarness()
+    manager.setOwner(TEST_USER.id)
+    setDownloads(manager)
+    // Even a payload that carries a URL for a row that is not ready: the
+    // state is what decides, and the route would 404 it anyway.
+    const preparing: AnimeDetail = {
+      ...FRIEREN_DETAIL,
+      episodes: FRIEREN_DETAIL.episodes.map((episode) =>
+        episode.id === 9002 ? { ...episode, download_url: '/media/9002/episode.mp4' } : episode,
+      ),
+    }
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: preparing } })
+
+    renderShow()
+
+    await screen.findByRole('button', { name: 'Keep episode 1 offline' })
+    expect(screen.getAllByRole('button', { name: /^Keep episode/ })).toHaveLength(1)
+  })
+
+  it('is not offered to the demo account', async () => {
+    pretendOpfs()
+    mockApi({
+      'GET /api/auth/me': { body: TEST_DEMO_USER },
+      [DETAIL_PATH]: { body: FRIEREN_DETAIL },
+    })
+
+    renderShow()
+
+    // The row is still playable; only the download is off.
+    expect(await screen.findByRole('link', { name: /^1\. / })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /offline/ })).not.toBeInTheDocument()
+  })
+
+  it('sits beside the Watched control, in the same group', async () => {
+    pretendOpfs()
+    const { manager } = managerHarness()
+    manager.setOwner(TEST_USER.id)
+    setDownloads(manager)
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const keep = await screen.findByRole('button', { name: 'Keep episode 1 offline' })
+    const group = keep.closest('div') as HTMLElement
+    // Episode 1 is the fixture's watched one.
+    expect(within(group).getByRole('button', { name: 'Unwatch' })).toBeInTheDocument()
+  })
+
+  it('starts a download and shows how far it has got', async () => {
     pretendOpfs()
     const { manager, worker } = managerHarness()
     manager.setOwner(TEST_USER.id)
@@ -1812,8 +1827,8 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
     await user.click(await screen.findByRole('button', { name: 'Keep episode 1 offline' }))
 
     expect(
-      await screen.findByRole('button', { name: 'Pause the download of episode 1' }),
-    ).toHaveTextContent('0%')
+      await screen.findByRole('button', { name: 'Downloading episode 1, 0% — pause' }),
+    ).toBeInTheDocument()
     expect(worker.lastCommand()).toMatchObject({ cmd: 'download', url: '/media/9001/episode.mp4' })
     act(() => {
       worker.emit({
@@ -1825,8 +1840,12 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
       })
     })
     expect(
-      screen.getByRole('button', { name: 'Pause the download of episode 1' }),
-    ).toHaveTextContent('25%')
+      screen.getByRole('button', { name: 'Downloading episode 1, 25% — pause' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Download of episode 1' })).toHaveAttribute(
+      'aria-valuenow',
+      '25',
+    )
   })
 
   it('says a full disk plainly and offers to try again', async () => {
@@ -1841,12 +1860,12 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
     renderShow()
 
     expect(
-      await screen.findByRole('button', { name: 'Try again to download episode 1' }),
+      await screen.findByRole('button', { name: 'Download of episode 1 stopped — try again' }),
     ).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(/out of space/)
   })
 
-  it('links a downloaded episode to the Downloads page', async () => {
+  it('opens the on-device menu for a downloaded episode, with Downloads in it', async () => {
     pretendOpfs()
     const { manager, files } = managerHarness({
       initial: [recordEntry(downloadedRecord(TEST_USER.id))],
@@ -1859,8 +1878,12 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
 
     renderShow()
 
-    expect(
-      await screen.findByRole('link', { name: 'episode 1 is on this device' }),
-    ).toHaveAttribute('href', '/downloads')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Episode 1 is on this device' }))
+    expect(screen.getByRole('link', { name: 'Go to Downloads' })).toHaveAttribute(
+      'href',
+      '/downloads',
+    )
+    expect(screen.getByRole('button', { name: 'Remove from this device' })).toBeEnabled()
   })
 })

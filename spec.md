@@ -434,10 +434,13 @@ that the course professor can log in at any time, and the owner uses it daily.
      shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
      toast and the overlay render inside the fullscreen element.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
-- FR-S7 **Download a prepared episode as a file** (owner, 2026-10-04). Any
-  signed-in user except the demo account can save a `ready` episode as one
-  MP4 file from its row on the show page ("Save file", relabelled from
-  "Download" by FR-S9). The file is exactly
+- FR-S7 **A prepared episode as one MP4 file** (owner, 2026-10-04; revised
+  2026-10-05). The route that feeds Keep offline (FR-S9): any signed-in user
+  except the demo account can fetch a `ready` episode as one MP4 file. **There
+  is no file link in the UI** (owner, 2026-10-05: "i dont want a save file
+  option, not needed") — the "Save file" control is gone; the route and the
+  payload's `download_url` stay because the in-app downloader uses them. The
+  file is exactly
   what the player streams — the prepared rendition with subtitles burned in —
   joined into one file on the fly, so nothing is re-encoded and nothing extra
   is stored. It is named after the show and the episode number
@@ -446,7 +449,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode is re-prepared) so a later in-app offline mode can fetch it in
   pieces. An episode that is not ready, or whose prepared files are not all
   present and intact, cannot be downloaded (404, never a partial file). The
-  demo account is refused (403) and does not see the control.
+  demo account is refused (403) and sees no offline control.
 - FR-S8 **Progress made offline is kept and synced later** (owner,
   2026-10-04: "we gotta make sure we hold on to the records to sync them in
   later when ipad is back online"; revised 2026-10-05). When a progress
@@ -494,12 +497,25 @@ that the course professor can log in at any time, and the owner uses it daily.
      again; the pages refresh once the server has taken the records.
 - FR-S9 **Episodes kept inside Arc, to watch with no network** (owner,
   2026-10-04: "so i can use arc when traveling"; the design is Audiosey's).
-  On a ready episode's row, beside FR-S7's file link (now labelled **"Save
-  file"**: it hands the MP4 to the browser's downloads), a second control,
-  **"Keep offline"**, downloads the same file into Arc's own storage on this
-  device, where Arc's player finds it. Not for the demo account; hidden, with
-  no error, where the browser cannot keep files this way (no origin-private
-  file system or no workers).
+  **Keep offline** downloads FR-S7's file into Arc's own storage on this
+  device, where Arc's player finds it. It is **one icon button, the same in
+  two places** (owner, 2026-10-05): on a ready episode's row on the show page,
+  beside the Watched control, and in the **player's top bar**, opposite the
+  back button. A download glyph when not kept; a ring that fills while
+  downloading (tap to pause); a quiet dotted ring while queued (tap to take it
+  out of the queue); the ring held where it stopped while paused (tap
+  resumes); a small warning mark when it failed (tap tries again); a filled
+  check when it is on the device, where a tap opens a small menu in the page —
+  "On this device · size", **Remove from this device**, and a link to
+  Downloads — never a browser `confirm()`. A paused or failed download's
+  reason is a short line beside it (the row's secondary text; under the
+  episode line in the player). Downloading the episode being streamed does
+  not interrupt it, and the player does not switch to the device copy
+  mid-playback: it is used the next time the episode is opened. While the
+  player is playing *from* the device copy, Remove is disabled and says why
+  (remove it after leaving the player). Not for the demo account; hidden,
+  with no error, where the browser cannot keep files this way (no
+  origin-private file system or no workers).
   1. **States**: not downloaded → queued → downloading (a percentage) →
      downloaded ("On this device"), or paused (by the user; when the app was
      closed; waiting for a connection, which carries on by itself) or failed
@@ -766,7 +782,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   the demo one (`users.is_demo`), from the admin Users tab or by
   `arc.cli demo-list --demo`. The flag gates **presentation** — and, since
   2026-10-04, one capability: the demo account **cannot download an episode
-  as a file** (FR-S7: the route answers 403 and the Download control is not
+  as a file** (FR-S7: the route answers 403 and no offline control is
   shown); it streams like anybody else. Otherwise nothing:
   a fourth top-nav entry, **How Arc works** (and the same entry at the top of
   the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
@@ -790,8 +806,8 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode a quiet "Save file" (FR-S7) and "Keep offline" with its download state (FR-S9) — neither for the demo account. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). On a phone the state and the two controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%") — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -879,9 +895,10 @@ is and the grace period decides.
 
 - Native mobile apps (App Store / Play Store), Chromecast/AirPlay. An
   installable web app is in scope (FR-U1, owner 2026-10-04).
-- Downloading whole seasons or a general "download anything" UI. (FR-S7 is
-  not that: it is a per-episode download of a file Arc has already prepared
-  for streaming, and fetches nothing new.)
+- Downloading whole seasons or a general "download anything" UI. (FR-S9 is
+  not that: it is a per-episode copy of a file Arc has already prepared for
+  streaming, and fetches nothing new.) A "save the MP4 to Files" link is out
+  too (owner, 2026-10-05).
 - Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
   at play time.
 - Per-user private libraries.
@@ -1706,3 +1723,12 @@ is and the grace period decides.
   loss forgets the offline copies; remembered pages and posters are per
   account; no resume seek when no length is known. A device copy keeps
   playing after a server re-encode, with no hint yet.
+- 2026-10-05 (owner) — **No "Save file" option; the offline button is on the
+  player too.** "i dont want a save file option, not needed": the file link
+  is removed from the show page (FR-S7's route and `download_url` stay — they
+  feed Keep offline). Keep offline becomes one icon button (download glyph,
+  progress ring, paused / failed / on-this-device states, an in-page menu with
+  the size, Remove and Downloads) shared by the show page's episode rows and
+  the player's top bar (FR-S9, §5). A download finishing mid-playback never
+  swaps the player's source; the copy being played cannot be removed from the
+  player.

@@ -196,7 +196,9 @@ arc/
                                  Mal, Recs, Review, Admin, HowArcWorks,
                                  Downloads (FR-S9), Login, Invite, NotFound
       components/                Layout (the app shell), route guards, shared
-                                 pieces (CoverThumb, ListStatusControl, …)
+                                 pieces (CoverThumb, ListStatusControl,
+                                 OfflineButton — the Keep offline icon button
+                                 of the show rows and the player, §5.4d, …)
         admin/                   the five admin tabs (Users, Rules, Jobs,
                                  Storage, Acquisition)
         ui/                      design primitives (M15): Artwork, Button,
@@ -1532,10 +1534,10 @@ and gradients.
   (FastAPI ends `yield` dependencies only after a response is fully sent). The
   demo account (`users.is_demo`) gets a 403 before any lookup. The show page
   sends `EpisodeOut.download_url` (built by `download_url()` next to
-  `playlist_url()`, set exactly when `rendition` is) and renders a quiet
-  "Save file" chip (labelled "Download" until FR-S9 added "Keep offline"
-  beside it, §5.4d) — an `<a download>` — on ready rows, hidden for the demo
-  account. Caddy needs no change: `video/mp4` is outside its encode list and
+  `playlist_url()`, set exactly when `rendition` is), and the player's `/play`
+  payload carries the same field on its episode. **No UI links to the file**
+  (owner, 2026-10-05: the "Save file" `<a download>` chip is removed): the
+  route and the field exist for the in-app downloader (§5.4d). Caddy needs no change: `video/mp4` is outside its encode list and
   `reverse_proxy` streams and forwards `Range` as is.
 
 ### 5.4b Watch Now's own failures (M16, FR-W6)
@@ -1726,7 +1728,7 @@ worker** (`offline/downloadWorker.ts`) and read on the main thread as
 URL at a time (minting revokes the last; `setOwner` and an unplayable file
 revoke it too). The in-app control is shown only where
 `navigator.storage.getDirectory` and `Worker` exist; elsewhere it is hidden
-and FR-S7's "Save file" link remains. `navigator.storage.persist()` is asked
+and the episode simply streams (there is no file link — FR-S7, 2026-10-05). `navigator.storage.persist()` is asked
 on the first download. `listEpisodeFiles()` enumerates `episode-*.mp4` for the
 launch sweep.
 
@@ -1813,6 +1815,37 @@ minted (and the old one revoked). A fragmented MP4 may report a non-finite
 duration: the page then uses the recorded duration for the scrubber, the
 reporter, the completion mark and the end card, and `shouldResume` refuses to
 seek when no finite length is known at all.
+
+`useLocalCopy` resolves **once per episode id** and does not subscribe to the
+manager, so a download that completes while the episode is streaming never
+swaps the player's source: the device copy is used from the next time the
+episode is opened (`Player.offline.test.tsx` holds this).
+
+**The control** (`components/OfflineButton.tsx`, owner 2026-10-05). One icon
+button used by the show page's episode rows (beside Watched, as a 44 px
+circle in the chip clothes) and the player's top bar (opposite the back
+button, in its dark glass; at `lg` a pill with a short word: "Download",
+"42%", "Queued", "Paused", "Retry", "On this device"). It reads its record
+through `useDownload(id)` (`useDownloads.ts`) and calls the manager's
+existing `start` / `pause` / `resume` / `remove` — no change to
+`offline/*` behaviour. States → glyph → tap: none → download arrow → `start`
+(a rejected start shows the warning mark, tap retries); `queued` → dotted
+ring → `pause`; `downloading` → determinate ring (an SVG `role=progressbar`
+beside the button, from `bytes / total`) with pause bars → `pause`; `paused`
+→ ring held, dimmed → `resume`; `failed` → arrow + warning mark → `resume`;
+`downloaded` → filled check → opens an in-page disclosure (`aria-expanded`;
+Escape or a tap elsewhere closes it): "On this device · size", **Remove from
+this device** (`remove`), Go to Downloads. The accessible name carries the
+state, episode and percentage; a polite live region speaks once per *state*,
+never per percent. The player passes `playingFromDevice` when its source is
+the file: Remove is then **disabled with the reason** ("Playing from this
+copy…") — removing the bytes under a live blob URL would break playback, and
+falling back to the stream would need a mid-playback source swap. The menu
+being open holds the player chrome (`chromeHeld`). `OfflineReason` renders a
+paused / failed record's message as a short line: the row's secondary text,
+and under the episode line in the player's top bar. The Downloads page keeps
+its own text chips (Play / Pause / Resume / Delete) — a management list, not
+a per-episode control.
 
 **Offline payload** (`lib/playback.ts` `loadPlayInfo`). The server's `/play`
 first; when it is unreachable (no response, or 502/503/504 —
@@ -4989,3 +5022,11 @@ asked*, so `make test` is exactly as fast as it was.
   IndexedDB upgrade is adopted when it succeeds; verify-before-done for a
   shared file; 400 terminal, `Retry-After` on 429, oversized spans never
   read; no resume seek without a finite duration.
+- 2026-10-05 (owner) — **No "Save file" link; one offline control on the show
+  rows and in the player** (§5.4a, §5.4d). The `<a download>` chip is gone;
+  `GET /media/{id}/episode.mp4` and `download_url` stay for the in-app
+  downloader. `components/OfflineButton.tsx` replaces the show page's
+  `KeepOfflineControl` and joins the player's top bar; `useDownload(id)` added
+  to `useDownloads.ts`. A completed download never swaps the player's source;
+  removing the copy being played is disabled in the player. Client only, no
+  new dependency.

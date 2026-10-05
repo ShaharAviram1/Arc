@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
+import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
 import { isStatus, useMe } from '@/lib/auth'
 import {
@@ -774,6 +775,8 @@ function PlayerView({ id }: { id: number }) {
   const [activity, setActivity] = useState(0)
   /** `null` until the viewer moves the mark themselves; then it wins. */
   const [watchedOverride, setWatchedOverride] = useState<boolean | null>(null)
+  /** The offline control's menu is open: the chrome stays while it is. */
+  const [offlineMenuOpen, setOfflineMenuOpen] = useState(false)
 
   const serverDuration = data?.duration ?? 0
   const total = mediaDuration > 0 ? mediaDuration : serverDuration
@@ -1114,7 +1117,7 @@ function PlayerView({ id }: { id: number }) {
    * are up.
    */
   const progressWarning = progressFailures >= PROGRESS_FAILURE_LIMIT && !progressWarningDismissed
-  const chromeHeld = scrubbing || endOverlayShown || progressWarning
+  const chromeHeld = scrubbing || endOverlayShown || progressWarning || offlineMenuOpen
 
   /**
    * The chrome hides itself after a second and a half of an idle pointer, and
@@ -1261,6 +1264,8 @@ function PlayerView({ id }: { id: number }) {
   }
   const { anime, episode, previous, next } = info
   const episodeLabel = `Episode ${String(episode.number)}`
+  /** The demo account never downloads; `OfflineButton` rules out the rest. */
+  const canKeepOffline = me?.is_demo === false
 
   const watched = watchedOverride ?? episode.watched
   /**
@@ -1461,21 +1466,27 @@ function PlayerView({ id }: { id: number }) {
           app draws edge to edge (`viewport-fit=cover`), and on a notched
           phone held sideways the back button would sit under the notch.
         */}
-        <div className="absolute inset-x-0 top-0 flex items-center gap-3 bg-gradient-to-b from-[rgba(0,0,0,0.25)] to-transparent pt-[calc(20px+env(safe-area-inset-top))] pr-[max(24px,env(safe-area-inset-right))] pb-5 pl-[max(24px,env(safe-area-inset-left))]">
+        <div className="absolute inset-x-0 top-0 flex items-center gap-3 bg-gradient-to-b from-[rgba(0,0,0,0.25)] to-transparent pt-[calc(20px+env(safe-area-inset-top))] pr-[max(24px,env(safe-area-inset-right))] pb-5 pl-[max(24px,env(safe-area-inset-left))] md:gap-3.5">
           <Link
             to={`/anime/${String(anime.id)}`}
             aria-label="Back to show"
+            title="Back to show"
             className={cx(
               'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full md:h-9 md:w-9',
               'pointer-coarse:md:h-11 pointer-coarse:md:w-11',
               'border-[0.5px] border-[rgba(255,255,255,0.2)] bg-[rgba(18,23,34,0.6)] backdrop-blur-glass',
-              'text-[17px] leading-none text-white',
+              'text-[17px] leading-none text-white transition-colors duration-200 hover:bg-[rgba(18,23,34,0.78)]',
               FOCUS_RING,
             )}
           >
             ‹
           </Link>
-          <div className="min-w-0">
+          {/*
+            `flex-1` so the title takes what is left between the two buttons
+            and truncates there, rather than pushing the offline control off
+            the edge on a phone.
+          */}
+          <div className="min-w-0 flex-1">
             <h1 className="truncate text-[15px] font-semibold text-white">
               {anime.title.preferred}
             </h1>
@@ -1483,9 +1494,28 @@ function PlayerView({ id }: { id: number }) {
               <span>{episodeLabel}</span>
               {episodeTitle === null ? null : ` · ${episodeTitle}`}
               {languages === '' ? null : ` · ${languages}`}
-              {source.kind === 'file' ? ' · on this device' : null}
             </p>
+            {canKeepOffline ? (
+              <OfflineReason
+                episodeId={episode.id}
+                className="mt-0.5 block truncate text-[12px] [text-shadow:0_1px_6px_rgba(0,0,0,0.6)]"
+              />
+            ) : null}
           </div>
+          {/*
+            Keep offline (FR-S9), opposite the way back. Downloading the
+            episode being streamed does not touch playback: the source was
+            chosen when the page opened (`useLocalCopy` resolves once per
+            episode) and the device copy is used the next time it is opened.
+          */}
+          {canKeepOffline ? (
+            <OfflineButton
+              episode={episode}
+              variant="player"
+              playingFromDevice={source.kind === 'file'}
+              onMenuOpenChange={setOfflineMenuOpen}
+            />
+          ) : null}
         </div>
 
         <div
