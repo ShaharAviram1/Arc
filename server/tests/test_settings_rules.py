@@ -272,6 +272,18 @@ def test_a_bad_slot_cap_is_refused(value: Any) -> None:
     assert "slot_cap_k" in refused({"slot_cap_k": value})
 
 
+@pytest.mark.parametrize("value", [1, 10, 500])
+def test_the_trip_pack_seeder_floor_takes_1_to_500(value: int) -> None:
+    """Owner incident 2026-10-06: fewest seeders a pack needs to be preferred for a trip."""
+    assert DEFAULT_SETTINGS["trip_pack_min_seeders"] == 10
+    assert validate({"trip_pack_min_seeders": value}) == {"trip_pack_min_seeders": value}
+
+
+@pytest.mark.parametrize("value", [0, -1, 501, "10", 10.5, None, True])
+def test_a_bad_trip_pack_seeder_floor_is_refused(value: Any) -> None:
+    assert "trip_pack_min_seeders" in refused({"trip_pack_min_seeders": value})
+
+
 # --- storage_hold(), pure ---------------------------------------------------
 
 

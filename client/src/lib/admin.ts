@@ -141,6 +141,8 @@ export interface SettingsValues {
   trip_max_episodes: number
   /** Days a trip's copies wait on the server for the device (FR-A12, FR-T7, M19). */
   trip_copy_days: number
+  /** Fewest Nyaa seeders a pack needs before a trip prefers it to singles (FR-A12): 1..500. */
+  trip_pack_min_seeders: number
 }
 
 export type SettingsKey = keyof SettingsValues
@@ -177,7 +179,8 @@ export const NUMBER_BOUNDS: Record<
   | 'min_free_gb'
   | 'offline_idle_days'
   | 'trip_max_episodes'
-  | 'trip_copy_days',
+  | 'trip_copy_days'
+  | 'trip_pack_min_seeders',
   {
     min: number
     max: number
@@ -196,6 +199,8 @@ export const NUMBER_BOUNDS: Record<
   offline_idle_days: { min: 1, max: 365 },
   trip_max_episodes: { min: 1, max: 50 },
   trip_copy_days: { min: 1, max: 365 },
+  // Owner incident 2026-10-06: `TRIP_PACK_MIN_SEEDERS_CEILING` = 500.
+  trip_pack_min_seeders: { min: 1, max: 500 },
 }
 
 /** "0–365", for a hint under the field that carries the same numbers. */

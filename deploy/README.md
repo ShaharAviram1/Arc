@@ -249,6 +249,12 @@ $R python -m arc.cli warm-catalogue
 # either source failed.
 $R python -m arc.cli import-catalogue
 
+# Remove review-queue rows an older scan made for files a torrent was still
+# downloading (owner incident 2026-10-06). Lists what it removes; --dry-run
+# writes nothing. Safe to repeat: the second run finds nothing.
+$R python -m arc.cli prune-unfinished-media --dry-run
+$R python -m arc.cli prune-unfinished-media
+
 # Put shows on somebody's list, looked up by title. One status group and one
 # progress per invocation, so a plausible list is a few runs.
 $R python -m arc.cli demo-list --user-email prof@example.edu \

@@ -516,7 +516,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
-| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for, and offline_idle_days — FR-T7's idle rule for a ready episode's small offline copy, default 7, 1..365, read with a floor of 1, and trip_max_episodes — FR-A12's cap on one trip, default 50, 1..50 — and trip_copy_days — how long a trip's copy waits for the device, default 14, 1..365; both read by `services/trips/rules.py`, clamped), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
+| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for, and offline_idle_days — FR-T7's idle rule for a ready episode's small offline copy, default 7, 1..365, read with a floor of 1, and trip_max_episodes — FR-A12's cap on one trip, default 50, 1..50 — and trip_copy_days — how long a trip's copy waits for the device, default 14, 1..365 — and trip_pack_min_seeders — the fewest listed Nyaa seeders a pack needs before a trip prefers it, default 10, 1..500, seeded by revision `e4b7c2a91f05` (owner incident 2026-10-06); all three read by `services/trips/rules.py`, clamped), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 | `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
 | `offline_ids` | id (surrogate PK), anidb_id, anilist_id (indexed), mal_id (indexed), kitsu_id, tmdb_tv_id, tmdb_movie_id, tmdb_season, tvdb_id, tvdb_season, imdb_id (the first when the entry carries several), type. Fribb's `anime-lists`, and the only route from an Arc show to a **TMDB** id — AniList publishes none. An entry with neither an AniList nor a MAL id is dropped on import: nothing could ever reach it |
 | `offline_imports` | source (PK: `manami` \| `fribb`), version (manami's release tag out of the header's `$schema`; Fribb's `ETag`/`Last-Modified`/download date), imported_at, rows, checksum (sha256 of the downloaded file — an unchanged file skips the parse and the replace entirely) |
@@ -1073,6 +1073,37 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   `WantsResult.untripped` (trip-only before the run, not after). With
   `prefer=None` — an airing show, a non-trip search, the switch off, too few
   — `search_for_episode` is byte-for-byte what it was.
+  **Well-seeded packs only (owner incident 2026-10-06).** `PackPreference`
+  carries `min_seeders`, read from the `trip_pack_min_seeders` setting
+  (`trips.rules.trip_pack_min_seeders`, default 10, clamped 1..500). After
+  the pack forms, packs whose listed seeders are below it are dropped; if any
+  pack is left, the title forms (`queries`) are asked **then** — once; the
+  later loop is skipped — and the singles ranked by FR-A3, and a pack is
+  offered only if `nyaa.pack_worth_preferring(pack_seeders, best_single,
+  min_seeders)`: ≥ `min_seeders` and the top-ranked single (`ranked[0]`, none
+  → no limit) has fewer than `SINGLE_SEEDER_RATIO` (3) × its seeders.
+  Resolution is not compared. `Search.forms` for a taken pack counts the pack
+  and title forms asked. Nothing offered → the ordinary path continues on
+  the same pool (singles; FR-A11's batch fallback only when no single is
+  acceptable). **A stalled trip pack**: `_poll_batch`'s stall branch, when
+  the pack has handed nothing off (so it is deleted with its files), calls
+  `_retry_trip_episodes`: each pending row's episode that is trip-only and
+  now `unavailable` (after `_give_up_on` released its claim) is moved to
+  `wanted` through `wants.start_search(retry_now=True,
+  priority=TRIP_SEARCH_PRIORITY)`. The pack's `torrents` row stays `stalled`
+  (later `missing` once the client no longer lists it): both are in
+  `batch.UNATTACHABLE_STATES`, so `claim_existing` never re-attaches, and
+  `_add_stopped` skips any hash with a row, so the retry takes singles. A
+  pack that has handed something off keeps the old ending (stopped, episodes
+  `unavailable`). **No thin pack by any route for a trip-only search**:
+  `search_release` reads `trip_only` and `min_seeders` once;
+  `batch.claim_existing(…, trip_min_seeders=)` then also requires
+  `coalesce(torrents.seeders, 0) ≥ min_seeders` (seeders recorded at pick)
+  and refuses `STOPPED_UNFINISHED_STATES` (`stoppedDL`, `pausedDL` — what a
+  cancelled trip's pack becomes under `disposition` STOP); and FR-A11's
+  fallback drops batches listed below the floor — none left → `_schedule_retry`
+  with `batch.THIN_PACK` ("only a thinly seeded pack"). Non-trip searches call
+  both exactly as before.
 - **Stalls, errors and missing files.** `stall_reason` also treats the client's
   own `error` and `missingFiles` states as a stall (2026-09-18), with no
   threshold — they say the client has stopped, not that it is making slow
@@ -1267,6 +1298,23 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   (`.part`, `.!qB`), hidden files, and files modified within
   `LIBRARY_SETTLE_SECONDS`; new files get a `media_files` row with the parse
   and (when `ffprobe` exists) probe summary, then a `match_file` job.
+  **It also skips every file a tracked torrent is still downloading**
+  (owner incident 2026-10-06; `ingest.in_flight` → `InFlight.holds`), decided
+  from the rows, never the file (qBittorrent creates a selected file at full
+  size, sparse, at start; a torrent stalled at 0 % never touches its mtime, so
+  the settle window passed it). Fenced: `<downloads>/<episode_id>/` of every
+  `single` with `completed_at` null, progress < `COMPLETE_PROGRESS` and a
+  live `qbit_state` (not a decided state or `missing`); and
+  `<downloads>/batch/<hash>/` of **every** batch except the files whose
+  `torrent_files` row has `completed_at` or progress ≥ `COMPLETE_PROGRESS`.
+  Those files land through the poll's hand-off (`_complete` /
+  `_complete_file`, which call `ingest_file` directly, with the prior).
+  `ingest.prune_unfinished` deletes the `media_files` rows (and so their
+  `llm_suggestion`) that are `pending`, have no `episode_id` and lie under
+  the fence; the scan runs it each pass (`ScanResult.pruned`,
+  `skipped_unfinished`), and `python -m arc.cli prune-unfinished-media
+  [--dry-run]` runs it once by hand. Queued `match_file` /
+  `llm_suggest_match` jobs for a deleted row no-op.
   Relative `DATA_DIR` is made absolute by `make`/`scripts/dev.sh` before the
   processes start from `server/`.
 
@@ -3598,7 +3646,7 @@ Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
 heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
 `caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
 `api` container → up. Ops runbook: `deploy/README.md`; CLI:
-`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs}`.
+`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media}`.
 `demo-list` takes `--user-email`, one or more `--add TITLE`, `--status`
 (any `ListStatus` value, default `watching`), `--progress N` and `--demo`
 (sets `users.is_demo`): **one status group and one progress per invocation**,
@@ -5805,3 +5853,23 @@ asked*, so `make test` is exactly as fast as it was.
   `TRIP_TOUCH_ENABLED`, `SETTLE_WAITS_FOR_FETCH` and `FINISH_ON_LAST_CONFIRM`
   default on. `TripEpisodeOut.url` (the copy's `offline_url` while ready and
   available/delivered, else null) and `AnimeDetail.trip_limits.max_episodes`.
+- 2026-10-06 (owner incident: the first real trip stalled) — §5.1a trip
+  packs: `PackPreference.min_seeders` from the new `trip_pack_min_seeders`
+  setting (revision `e4b7c2a91f05`, default 10, 1..500) and
+  `nyaa.pack_worth_preferring` (≥ the floor, and the top-ranked single has
+  < 3× the pack's seeders); the title forms are asked before the offer when a
+  pack survives the floor. A trip pack stalled with nothing handed off puts
+  its trip-only episodes straight back to `wanted` (trip priority); its
+  `stalled` row bars the hash. §5.2 ingest: `library_scan` skips files under
+  a tracked torrent not yet complete (`ingest.in_flight`, from `torrents` /
+  `torrent_files`, never from file size or mtime) and prunes pending,
+  unlinked rows an earlier pass wrote for them (`ingest.prune_unfinished`;
+  also `arc.cli prune-unfinished-media`). Root cause: the scan had no
+  knowledge of torrents at all; the settle window was the only thing keeping
+  in-flight files out, and a pre-allocated file of a torrent stalled at 0 %
+  is never written, so its mtime ages past the window.
+- 2026-10-06 (owner incident, follow-up) — §5.1a: `claim_existing` gains
+  `trip_min_seeders` (trip-only searches refuse a held pack whose recorded
+  seeders are below `trip_pack_min_seeders`, or `stoppedDL`/`pausedDL`), and a
+  trip-only search's FR-A11 fallback refuses packs below the floor, retrying
+  with `batch.THIN_PACK`.

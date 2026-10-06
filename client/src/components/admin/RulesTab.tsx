@@ -127,6 +127,14 @@ const NUMBER_FIELDS: {
       'How long a trip’s copies wait on the server for the device to download them before ' +
       'they expire (FR-A12, FR-T7).',
   },
+  {
+    key: 'trip_pack_min_seeders',
+    label: 'Trip pack seeders (minimum)',
+    help:
+      'A trip prefers one season pack to separate episodes only when Nyaa lists at least this ' +
+      'many seeders for it, and the best single episode does not have three times as many ' +
+      '(FR-A12).',
+  },
 ]
 
 /**

@@ -300,6 +300,31 @@ that the course professor can log in at any time, and the owner uses it daily.
   own searches attach to the pack with no request at all. An airing show, a
   search for an episode somebody wants for streaming, and the switch off
   search exactly as before.
+  **Only a well-seeded pack is preferred** (owner incident 2026-10-06: the
+  first real trip took a 16 GB pack Nyaa listed with 4 seeders and sat at 0 %
+  while well-seeded singles existed). A pack is offered to the trip only if
+  Nyaa lists at least `trip_pack_min_seeders` seeders for it (FR-D2, default
+  10) **and** the best acceptable single by FR-A3's ranking does not have 3×
+  its seeders or more; to know that single, the title forms are asked right
+  after the pack forms (once — they are not asked again). Resolution is not
+  compared: a 720p pack is fine for a trip. Otherwise the search continues
+  exactly as if no pack had covered enough — singles by FR-A3, and FR-A11's
+  ordinary batch fallback only when no acceptable single exists at all.
+  FR-A3's own seeder floor is unchanged. **A trip pack that stalls** (FR-A6)
+  having handed nothing to the library is deleted with its files like any
+  other, its claims are released, and its **trip-only** episodes go straight
+  back to `wanted` with a search at the trip's priority instead of waiting for
+  the daily retry; the pack's `torrents` row stays as the `stalled` record, so
+  that hash is neither attached to nor taken again and the retry takes
+  singles. Episodes also wanted for streaming keep FR-A6's ordinary ending.
+  **A trip-only episode takes no thin pack by any route**: it does not attach
+  to a pack Arc already holds whose recorded seeders are below the floor (or
+  unknown) or that is stopped before finishing (so a trip cancelled and asked
+  for again takes singles rather than the same dead pack), and FR-A11's
+  fallback refuses such a pack too — with no acceptable single and only thin
+  packs, the episode takes FR-A6's retry and, at the fortnight, is flagged
+  `unavailable` with "only a thinly seeded pack". Searches for streaming keep
+  FR-A11 unchanged.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -439,6 +464,15 @@ that the course professor can log in at any time, and the owner uses it daily.
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
   drop" directory; new video files create a MediaFile and a match job.
+  **A file a tracked torrent is still downloading is never indexed** (owner
+  incident 2026-10-06): anything under a single's episode directory while
+  that download is live and incomplete, and anything under a pack's
+  directory except the files Arc has recorded as complete. This is decided
+  from Arc's own torrent records, not from the file — the client creates a
+  selected file at full size before a byte has arrived. Such files reach the
+  library through the download's own hand-off when they finish; a review
+  item an earlier scan made for one (pending, linked to nothing) is removed,
+  with its model suggestion, when the scan meets it again.
 - FR-L2 Filename parsing extracts group, title, season, episode, resolution,
   source, codec, and version (v2 etc.). Parser is deterministic
   (anitopy-style).
@@ -1016,7 +1050,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   was taken for. **Idle small copies** (`offline_idle_days`, default 7, M19)
   are edited here too (FR-T7), and so are the two trip rules (FR-A12, M19):
   `trip_max_episodes` (default 50, 1..50) and `trip_copy_days` (default 14,
-  at least 1). The small copy's encode settings (FR-P6:
+  at least 1), and `trip_pack_min_seeders` (default 10, 1..500 — the fewest
+  Nyaa seeders a pack needs before a trip prefers it to singles; FR-A4,
+  owner incident 2026-10-06). The small copy's encode settings (FR-P6:
   `OFFLINE_CODEC`, `OFFLINE_HEIGHT`, `OFFLINE_CRF`, `OFFLINE_PRESET`,
   `OFFLINE_AUDIO_BITRATE`) are the operator's, in the environment, like the
   transcode's.
@@ -2107,3 +2143,21 @@ through the same edge, without the grace period.
   hours after the last confirmation). The show page sends the trip cap
   (`trip_limits.max_episodes`) to every caller, and each trip episode carries
   its copy's `url`.
+- 2026-10-06 (owner incident: the first real trip stalled) — **FR-A4/FR-A12:
+  trip packs must be well seeded; FR-L1: never index a file still
+  downloading; FR-D2 gains `trip_pack_min_seeders`.** A trip prefers a pack
+  only when Nyaa lists ≥ `trip_pack_min_seeders` (default 10, 1..500) seeders
+  for it and the best acceptable single by FR-A3's ranking has fewer than 3×
+  as many; otherwise the ordinary search runs. A trip pack that stalls having
+  handed nothing off is deleted, its claims released, and its trip-only
+  episodes go straight back to `wanted` with the pack's hash barred by its
+  `stalled` row. The library scan no longer indexes files under a tracked
+  torrent that has not finished them (decided from the torrent rows, since
+  the client pre-allocates selected files at full size), and removes the
+  pending, unlinked review rows an earlier scan made for such files; the
+  operator command `prune-unfinished-media` does the same once by hand.
+- 2026-10-06 (owner incident, follow-up) — **FR-A12: no thin pack for a trip
+  by any route.** A trip-only search neither attaches to a held pack listed
+  below `trip_pack_min_seeders` (or stopped before finishing) nor takes one as
+  FR-A11's fallback; with only thin packs on offer it retries per FR-A6 and
+  gives up with "only a thinly seeded pack".

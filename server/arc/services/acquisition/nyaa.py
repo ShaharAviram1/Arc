@@ -285,6 +285,34 @@ class PackPreference:
     take: PackTaker
     numbers: tuple[int, ...]
     need: int
+    #: Fewest listed seeders a pack may have and still be preferred
+    #: (``trip_pack_min_seeders``, owner incident 2026-10-06). Below it the
+    #: pack is not offered and the search runs as if no pack covered enough.
+    min_seeders: int = 1
+
+
+#: How many times the best single's seeders may exceed a pack's before the
+#: trip takes singles instead (owner incident 2026-10-06): a pack with 12
+#: seeders is not preferred to a single with 36. Resolution is deliberately not
+#: compared — a 720p pack is fine for a trip.
+SINGLE_SEEDER_RATIO: Final[int] = 3
+
+
+def pack_worth_preferring(pack_seeders: int, best_single: int | None, *, min_seeders: int) -> bool:
+    """Whether a trip should prefer a pack with ``pack_seeders`` (FR-A12).
+
+    Two rules, both on Nyaa's listed seeders and nothing else. The pack needs
+    at least ``min_seeders`` of its own — the production trip that stalled at
+    0 % for forty minutes had taken a 16 GB pack listed with four. And the best
+    acceptable single by FR-A3's ranking (``best_single``, ``None`` when there
+    is none) must not have :data:`SINGLE_SEEDER_RATIO` times as many: a pack
+    that is far worse seeded than what the single path would take is not worth
+    the convenience. FR-A3's own floor (:data:`MIN_SEEDERS`) is untouched; this
+    only decides the order a trip tries things in.
+    """
+    if pack_seeders < min_seeders:
+        return False
+    return best_single is None or best_single < SINGLE_SEEDER_RATIO * pack_seeders
 
 
 #: Punctuation a release group drops and a catalogue keeps. Every one of these
@@ -1459,6 +1487,17 @@ def _rejected(item: NyaaItem, reason: str) -> None:
     log.debug("nyaa rejected", extra={"title": item.title, "reason": reason})
 
 
+def _rejected_into(why: list[str] | None, item: NyaaItem, reason: str) -> None:
+    """:func:`_rejected`, and the reason kept for a caller that asked (FR-A13).
+
+    The manual release list shows every result of the show beside the sentence
+    Arc would not take it for, so the reason is handed back as well as logged.
+    """
+    if why is not None:
+        why.append(reason)
+    _rejected(item, reason)
+
+
 def _acceptable_batch(
     item: NyaaItem,
     parsed: ParsedName,
@@ -1469,6 +1508,7 @@ def _acceptable_batch(
     threshold: float,
     offset: int | None,
     covered: str,
+    why: list[str] | None = None,
 ) -> Candidate | None:
     """The batch half of :func:`acceptable` (FR-A11), reached only with ``batches=True``.
 
@@ -1494,14 +1534,18 @@ def _acceptable_batch(
     absolute = running is not None and parsed.season is None and running in span
     if span and number not in span and not absolute:
         wanted = f"{number} or {running}" if running is not None else f"{number}"
-        _rejected(item, f"batch release{covered}, and this is episode {wanted}")
+        _rejected_into(why, item, f"batch release{covered}, and this is episode {wanted}")
         return None
     if not absolute and (parsed.season or 1) != (season or 1):
-        _rejected(item, f"batch release of season {parsed.season or 1}, not {season or 1}")
+        _rejected_into(
+            why, item, f"batch release of season {parsed.season or 1}, not {season or 1}"
+        )
         return None
     similarity = title_score(parsed.title_key, titles)
     if similarity < threshold:
-        _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+        _rejected_into(
+            why, item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}"
+        )
         return None
     return Candidate(
         item=item,
@@ -1523,6 +1567,7 @@ def acceptable(
     year: int | None = None,
     offset: int | None = None,
     batches: bool = False,
+    why: list[str] | None = None,
 ) -> Candidate | None:
     """``item`` as a :class:`Candidate`, or ``None`` with a reason logged.
 
@@ -1622,9 +1667,12 @@ def acceptable(
     a time, lives in :func:`filter_items`: an absolute match is dropped
     outright when a season-marked release for the same episode came back in the
     same search. An explicit answer beats an inferred one every time.
+
+    ``why``, when given, collects the sentence a rejected item was rejected
+    for (FR-A13's manual release list); it changes nothing about the answer.
     """
     if item.remake:
-        _rejected(item, "nyaa flagged it a remake")
+        _rejected_into(why, item, "nyaa flagged it a remake")
         return None
     if item.seeders < MIN_SEEDERS:
         # Rejected, not ranked last. Seeders are the third of FR-A3's rules and
@@ -1635,7 +1683,7 @@ def acceptable(
         # uploaded, then held one of the client's download slots on them for as
         # long as nobody looked. Nyaa's own RSS carries the count
         # (``nyaa:seeders``), so this costs nothing but an ``if``.
-        _rejected(item, "no seeders")
+        _rejected_into(why, item, "no seeders")
         return None
     # ``path=False``: this is a Nyaa title, so a slash in it is part of the
     # name (``Fate/Zero``) and never a directory separator.
@@ -1659,17 +1707,18 @@ def acceptable(
                 threshold=threshold,
                 offset=offset,
                 covered=covered,
+                why=why,
             )
         if batches and single:
             # A film is one file: there is no episode for a file plan to
             # identify, and a franchise's three films in one torrent is
             # exactly the download FR-A4 forbids.
-            _rejected(item, f"batch release{covered}, and this entry is one release")
+            _rejected_into(why, item, f"batch release{covered}, and this entry is one release")
             return None
         # Not asked for, or a range inside something that is not episodes at
         # all — a creditless opening outranks the range in the parser, so
         # ``kind`` is ``nc`` and there is no batch of episodes here.
-        _rejected(item, f"batch release{covered}, not a single episode")
+        _rejected_into(why, item, f"batch release{covered}, not a single episode")
         return None
     if single and number == 1:
         if parsed.kind not in SINGLE_KINDS:
@@ -1677,13 +1726,13 @@ def acceptable(
             # "No episode number" is not the same claim: a whole-series Blu-ray
             # pack says nothing at all, and three of them were accepted as
             # films before 2026-09-14.
-            _rejected(item, f"parsed as {parsed.kind}, not a film or a one-off")
+            _rejected_into(why, item, f"parsed as {parsed.kind}, not a film or a one-off")
             return None
         if parsed.kind != "movie" and parsed.episode not in (None, number):
-            _rejected(item, f"episode {parsed.episode}, and this entry is one release")
+            _rejected_into(why, item, f"episode {parsed.episode}, and this entry is one release")
             return None
         if year is not None and parsed.year is not None and abs(parsed.year - year) > YEAR_SLACK:
-            _rejected(item, f"year {parsed.year}, not {year}")
+            _rejected_into(why, item, f"year {parsed.year}, not {year}")
             return None
         # ``strict``: a release that names *less* of this film's title than the
         # catalogue does is another film of the franchise, not an abbreviation
@@ -1692,11 +1741,13 @@ def acceptable(
         # evidence rather than agreement.
         similarity = title_score(parsed.title_key, titles, strict=True)
         if similarity < threshold:
-            _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+            _rejected_into(
+                why, item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}"
+            )
             return None
         return Candidate(item=item, parsed=parsed, title_similarity=similarity)
     if parsed.kind != "episode":
-        _rejected(item, f"parsed as {parsed.kind}, not a single episode")
+        _rejected_into(why, item, f"parsed as {parsed.kind}, not a single episode")
         return None
     # The absolute reading, and only where the release itself offers no season:
     # one that names a season has said which episode it is, and the ordinary
@@ -1705,12 +1756,14 @@ def acceptable(
     absolute = running is not None and parsed.season is None and parsed.episode == running
     if parsed.episode != number and not absolute:
         wanted = f"{number} or {running}" if running is not None else f"{number}"
-        _rejected(item, f"episode {parsed.episode}, not {wanted}")
+        _rejected_into(why, item, f"episode {parsed.episode}, not {wanted}")
         return None
     if absolute:
         similarity = title_score(parsed.title_key, titles)
         if similarity < threshold:
-            _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+            _rejected_into(
+                why, item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}"
+            )
             return None
         return Candidate(item=item, parsed=parsed, title_similarity=similarity, offset=offset or 0)
     # Season 1 is what *both* sides mean when neither says otherwise, and the
@@ -1726,11 +1779,13 @@ def acceptable(
     # is visible and fixable; the wrong season on disk is linked by the
     # matcher's own prior and plays as if it were right.
     if (parsed.season or 1) != (season or 1):
-        _rejected(item, f"season {parsed.season or 1}, not {season or 1}")
+        _rejected_into(why, item, f"season {parsed.season or 1}, not {season or 1}")
         return None
     similarity = title_score(parsed.title_key, titles)
     if similarity < threshold:
-        _rejected(item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}")
+        _rejected_into(
+            why, item, f"title {parsed.title_key!r} scored {similarity:.2f} < {threshold}"
+        )
         return None
     return Candidate(item=item, parsed=parsed, title_similarity=similarity)
 
@@ -2289,6 +2344,14 @@ async def search_for_episode(
     three forms are inside :data:`MAX_REQUESTS` like every other, they are not
     asked a second time at the end, and the narrowing no longer reserves room
     for them. ``prefer=None`` — every search but a trip's — changes nothing.
+
+    **Only a well-seeded pack is preferred** (owner incident 2026-10-06): one
+    listed with fewer than ``prefer.min_seeders`` is not offered, and when any
+    pack is left the title forms are asked *before* the offer so the best
+    single by FR-A3's ranking is known — a pack whose seeders that single
+    outnumbers :data:`SINGLE_SEEDER_RATIO` times is not offered either
+    (:func:`pack_worth_preferring`). Either way the search then carries on as
+    if no pack had covered enough, without asking the title forms twice.
     """
     titles = anime_titles(anime)
     season = anime_season(anime)
@@ -2299,6 +2362,7 @@ async def search_for_episode(
     asked: set[str] = set()
     requests = 0
     preferred_forms = 0
+    titles_asked = False
 
     def enough() -> bool:
         """Whether the pool already holds enough to compare (FR-A3)."""
@@ -2366,10 +2430,44 @@ async def search_for_episode(
             )
             await ask(query)
             preferred_forms += 1
-        offered = [
+        covering = [
             entry
             for entry in packs(prefer.numbers)
             if not entry.candidate.covers or entry.covered_wanted >= prefer.need
+        ]
+        # Well seeded, or not preferred at all (owner incident 2026-10-06).
+        seeded = [entry for entry in covering if entry.item.seeders >= prefer.min_seeders]
+        best_single: int | None = None
+        if seeded:
+            # The title forms now rather than after: a pack is only preferred
+            # when it is not far worse seeded than the single the ordinary path
+            # would take, so that single has to be known first. They are the
+            # same forms the fallthrough below would ask, asked once.
+            for query in queries(anime, number, offset=offset):
+                if requests >= MAX_REQUESTS:
+                    break
+                counts.append(await ask(query))
+            titles_asked = True
+            singles = rank(
+                filter_items(
+                    merged.values(),
+                    titles=titles,
+                    number=number,
+                    season=season,
+                    threshold=threshold,
+                    single=single,
+                    year=anime.season_year,
+                    offset=offset,
+                ),
+                rules,
+            )
+            best_single = singles[0].item.seeders if singles else None
+        offered = [
+            entry
+            for entry in seeded
+            if pack_worth_preferring(
+                entry.item.seeders, best_single, min_seeders=prefer.min_seeders
+            )
         ]
         log.info(
             "nyaa preferred packs",
@@ -2378,6 +2476,10 @@ async def search_for_episode(
                 "number": number,
                 "requests": requests,
                 "need": prefer.need,
+                "covering": len(covering),
+                "seeded": len(seeded),
+                "min_seeders": prefer.min_seeders,
+                "best_single_seeders": best_single,
                 "offered": len(offered),
                 "top_batch": offered[0].item.title if offered else None,
             },
@@ -2387,13 +2489,13 @@ async def search_for_episode(
                 ranked=[],
                 # The forms this search actually asked, so FR-A7's row reads
                 # "3 forms" rather than claiming nothing was asked.
-                forms=preferred_forms,
+                forms=preferred_forms + len(counts),
                 results=len(merged),
                 requests=requests,
                 pack_taken=True,
             )
 
-    for query in queries(anime, number, offset=offset):
+    for query in () if titles_asked else queries(anime, number, offset=offset):
         if requests >= MAX_REQUESTS:
             log.warning(
                 "nyaa request ceiling reached, forms left unasked",
@@ -2541,6 +2643,7 @@ __all__ = [
     "NYAA_NS",
     "ROMAN_SEASONS",
     "SINGLE_FORMATS",
+    "SINGLE_SEEDER_RATIO",
     "SYMBOLS",
     "TITLE_THRESHOLD",
     "TRACKERS",
@@ -2571,6 +2674,7 @@ __all__ = [
     "has_prequel",
     "head_of",
     "is_single",
+    "pack_worth_preferring",
     "pad",
     "parse_feed",
     "queries",

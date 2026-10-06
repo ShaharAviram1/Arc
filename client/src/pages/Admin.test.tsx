@@ -560,6 +560,23 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ min_free_gb: 25 })
   })
 
+  it('saves the trip pack seeder floor like any other rule (FR-A12)', async () => {
+    const { fetchMock } = await openRules()
+
+    const field = screen.getByLabelText('Trip pack seeders (minimum)')
+    expect(field).toHaveValue(10)
+    // TRIP_PACK_MIN_SEEDERS_CEILING; at least FR-A3's own floor of one.
+    expect(field).toHaveAttribute('min', '1')
+    expect(field).toHaveAttribute('max', '500')
+    fireEvent.change(field, { target: { value: '20' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ trip_pack_min_seeders: 20 })
+  })
+
   it('saves the per-user slot cap like any other rule (FR-A10)', async () => {
     const { fetchMock } = await openRules()
 

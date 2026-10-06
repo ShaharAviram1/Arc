@@ -21,6 +21,11 @@ TRIP_MAX_EPISODES_KEY: Final[str] = "trip_max_episodes"
 TRIP_COPY_DAYS_KEY: Final[str] = "trip_copy_days"
 TRIP_MAX_EPISODES_CEILING: Final[int] = 50
 
+#: The third (owner incident 2026-10-06): fewest listed seeders a pack must
+#: have for a trip to prefer it to singles, and the most it may be set to.
+TRIP_PACK_MIN_SEEDERS_KEY: Final[str] = "trip_pack_min_seeders"
+TRIP_PACK_MIN_SEEDERS_CEILING: Final[int] = 500
+
 #: A trip's searches sort just behind the window's own (150): a trip is for
 #: later, and somebody waiting to stream tonight is not.
 TRIP_SEARCH_PRIORITY: Final[int] = 160
@@ -145,6 +150,8 @@ __all__ = [
     "TRIP_COPY_DAYS_KEY",
     "TRIP_MAX_EPISODES_CEILING",
     "TRIP_MAX_EPISODES_KEY",
+    "TRIP_PACK_MIN_SEEDERS_CEILING",
+    "TRIP_PACK_MIN_SEEDERS_KEY",
     "TRIP_RELEASE",
     "TRIP_RELEASE_DELAY",
     "TRIP_RELEASE_PRIORITY",

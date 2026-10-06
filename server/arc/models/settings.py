@@ -82,6 +82,11 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # is deleted; a trip that reaches this many days with an episode never
         # made gives up on it. Fourteen: a fortnight away is a long trip.
         "trip_copy_days": 14,
+        # Fewest seeders Nyaa must list for a pack before a trip prefers it to
+        # singles (FR-A12, owner incident 2026-10-06): the first real trip took
+        # a 16 GB pack listed with four seeders and sat at 0 % while well
+        # seeded singles existed. Ten: a pack that many people hold finishes.
+        "trip_pack_min_seeders": 10,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

@@ -40,6 +40,8 @@ from arc.services.trips.names import (
     TRIP_COPY_DAYS_KEY,
     TRIP_MAX_EPISODES_CEILING,
     TRIP_MAX_EPISODES_KEY,
+    TRIP_PACK_MIN_SEEDERS_CEILING,
+    TRIP_PACK_MIN_SEEDERS_KEY,
     copy_priority,
 )
 
@@ -73,6 +75,13 @@ async def trip_max_episodes(session: AsyncSession) -> int:
 async def trip_copy_days(session: AsyncSession) -> int:
     """Days a trip's copy waits for the device, at least one (FR-D2)."""
     return await _int_setting(session, TRIP_COPY_DAYS_KEY, low=1, high=MAX_COPY_DAYS)
+
+
+async def trip_pack_min_seeders(session: AsyncSession) -> int:
+    """Fewest listed seeders a pack needs to be preferred for a trip, 1..500 (FR-D2)."""
+    return await _int_setting(
+        session, TRIP_PACK_MIN_SEEDERS_KEY, low=1, high=TRIP_PACK_MIN_SEEDERS_CEILING
+    )
 
 
 async def trip_only_episode_ids(
@@ -250,4 +259,5 @@ __all__ = [
     "trip_copy_priority",
     "trip_max_episodes",
     "trip_only_episode_ids",
+    "trip_pack_min_seeders",
 ]

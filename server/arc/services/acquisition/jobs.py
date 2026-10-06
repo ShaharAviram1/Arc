@@ -165,14 +165,18 @@ from arc.services.acquisition.rules import (
     load_rules,
 )
 from arc.services.acquisition.states import transition
-from arc.services.acquisition.wants import NOBODY_WANTS, QBIT_CANCELLED
+from arc.services.acquisition.wants import NOBODY_WANTS, QBIT_CANCELLED, start_search
 from arc.services.acquisition.wants import compute_wants as reconcile_wants
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest
 from arc.services.library.names import MATCH_FILE, match_dedupe_key
-from arc.services.trips.names import TRIP_BATCH_MIN
-from arc.services.trips.rules import needs_rendition, trip_only_episode_ids
+from arc.services.trips.names import TRIP_BATCH_MIN, TRIP_SEARCH_PRIORITY
+from arc.services.trips.rules import (
+    needs_rendition,
+    trip_only_episode_ids,
+    trip_pack_min_seeders,
+)
 
 log = logging.getLogger(__name__)
 
@@ -752,6 +756,12 @@ class BatchAttempt:
 
     started: bool
     refused: int
+    #: The last reason a candidate was refused or taken away, for a caller that
+    #: has to say it in a sentence (FR-A13's manual choice answers 422 with
+    #: it). ``None`` when nothing was refused.
+    reason: str | None = None
+    #: The reserved ``torrents`` row of the pack that was started.
+    torrent: Torrent | None = None
 
 
 #: First half of the advisory lock a trip-only search of a finished show holds
@@ -1067,8 +1077,14 @@ async def _take_batch(
     Every take also re-reads and locks its free riders before the selection is
     written (:func:`_lock_targets`), so two searches of one show running at
     once cannot both claim an episode.
+
+    A manual choice (FR-A13, :mod:`arc.services.acquisition.manual`) comes in
+    through here too, with its pack already added stopped and read and handed
+    over as ``trip.held`` — so it is selected, verified and started by exactly
+    this sequence, and never by a second copy of it.
     """
     refused = 0
+    last_reason: str | None = None
     async with QbitClient.from_settings(ctx.settings) as qbit:
         for chosen in batches:
             info_hash = chosen.item.info_hash
@@ -1096,6 +1112,7 @@ async def _take_batch(
             if trip is not None:
                 _remember_contents(anime.id, info_hash, plan.episodes)
             if plan.refused_reason is not None:
+                last_reason = plan.refused_reason
                 if trip is not None and not chosen.candidate.covers:
                     # A pack naming no range never claimed this episode, and
                     # may be exactly right for the next one (FR-A12).
@@ -1116,7 +1133,8 @@ async def _take_batch(
 
             kept = await _lock_targets(ctx.session, episode, plan.wanted, attachable)
             if kept is None:
-                await _abandon(ctx, qbit, torrent, "the searched episode moved on", permanent=False)
+                last_reason = "the episode episode moved on"
+                await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
                 continue
             if kept != set(plan.wanted):
                 plan = batch.plan_files(
@@ -1137,10 +1155,12 @@ async def _take_batch(
                 # The selection is written and the torrent is still stopped, so
                 # a read-back Arc cannot read is the same answer as one it
                 # disagrees with: take the pack away rather than start it.
-                await _abandon(ctx, qbit, torrent, str(exc), permanent=False)
+                last_reason = str(exc)
+                await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
                 continue
             disagreement = batch.verify_selection(listed, written, plan.wanted_indices)
             if disagreement is not None:
+                last_reason = disagreement
                 await _abandon(ctx, qbit, torrent, disagreement, permanent=False)
                 continue
 
@@ -1185,8 +1205,8 @@ async def _take_batch(
                     **nyaa_module.as_dict(chosen),
                 },
             )
-            return BatchAttempt(started=True, refused=refused)
-    return BatchAttempt(started=False, refused=refused)
+            return BatchAttempt(started=True, refused=refused, torrent=torrent)
+    return BatchAttempt(started=False, refused=refused, reason=last_reason)
 
 
 async def _to_the_back(ctx: JobContext, qbit: QbitClient, info_hash: str) -> None:
@@ -1422,11 +1442,15 @@ async def search_release(ctx: JobContext) -> None:
     # has claims for — those bytes are in flight and stranding them is not what
     # a kill switch is for.
     fallback = await batch_fallback(ctx.session)
+    trip_only = episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
+    # A trip-only search takes no thinly seeded pack, by any route (owner
+    # incident 2026-10-06): not preferred, not attached to, not as fallback.
+    min_seeders = await trip_pack_min_seeders(ctx.session) if trip_only else None
     if (
         fallback
         and nyaa_module.deep_search(anime)
         and not nyaa_module.is_single(anime)
-        and episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
+        and trip_only
     ):
         # A trip queues its searches all at once (FR-A12), and two of them
         # choosing, adding and claiming one pack together is a race: held until
@@ -1438,7 +1462,7 @@ async def search_release(ctx: JobContext) -> None:
         # whole of what this search would otherwise spend a dozen paced
         # requests finding out. Episode 11 of a pack taken for episode 10 costs
         # nothing.
-        claimed = await batch.claim_existing(ctx.session, episode)
+        claimed = await batch.claim_existing(ctx.session, episode, trip_min_seeders=min_seeders)
         if claimed is not None:
             ctx.log.info(
                 "episode attached to a batch already in the client",
@@ -1516,7 +1540,13 @@ async def search_release(ctx: JobContext) -> None:
             trip_pass.refused += attempt.refused
             return attempt.started
 
-        prefer = PackPreference(take=take_pack, numbers=trip_pass.cover, need=trip_pass.need)
+        prefer = PackPreference(
+            take=take_pack,
+            numbers=trip_pass.cover,
+            need=trip_pass.need,
+            # Only a well-seeded pack is preferred (owner incident 2026-10-06).
+            min_seeders=min_seeders if min_seeders is not None else 1,
+        )
     found = await search_for_episode(
         nyaa,
         anime,
@@ -1566,9 +1596,35 @@ async def search_release(ctx: JobContext) -> None:
         # ``Search.batches`` is empty for every airing show, every film and
         # every search that found a single, so this branch is unreachable for
         # any of them and the ordinary retry below is what they take.
-        if found.batches and fallback:
+        offered_batches = found.batches
+        if min_seeders is not None and offered_batches:
+            # FR-A11's fallback, for a trip-only episode, refuses a thin pack
+            # too (owner incident 2026-10-06): better FR-A6's retry than a
+            # 16 GB pack sitting at 0 %.
+            offered_batches = [
+                entry for entry in offered_batches if entry.item.seeders >= min_seeders
+            ]
+            if not offered_batches and fallback:
+                await _drop_held(ctx, trip)
+                ctx.log.info(
+                    "only thinly seeded packs for a trip episode; not taken",
+                    extra={
+                        "episode_id": episode.id,
+                        "batches": len(found.batches),
+                        "min_seeders": min_seeders,
+                    },
+                )
+                await _schedule_retry(ctx, episode, now=now, reason=batch.THIN_PACK)
+                return
+        if offered_batches and fallback:
             attempt = await _take_batch(
-                ctx, episode, anime, found.batches, attachable=attachable, offset=offset, trip=trip
+                ctx,
+                episode,
+                anime,
+                offered_batches,
+                attachable=attachable,
+                offset=offset,
+                trip=trip,
             )
             await _drop_held(ctx, trip)
             if attempt.started:
@@ -1718,6 +1774,17 @@ def stall_reason(
     if info.progress <= 0.0:
         return NO_BYTES.format(age=hours)
     return None
+
+
+#: What an episode is told when the release a person chose for it stalled
+#: (FR-A13): the stall rule applies to a manual choice like any other, and the
+#: person who chose it is the one who most needs to know it was theirs.
+MANUAL_STALL = "the release you chose stalled: {reason}"
+
+
+def manual_stall(torrent: Torrent, reason: str) -> str:
+    """``reason``, prefixed when ``torrent`` was chosen by hand (FR-A13)."""
+    return MANUAL_STALL.format(reason=reason) if torrent.manual else reason
 
 
 def largest_video(root: Path, extensions: frozenset[str]) -> Path | None:
@@ -2038,6 +2105,42 @@ def _give_up_on(
     return given_up
 
 
+async def _retry_trip_episodes(
+    ctx: JobContext,
+    rows: Sequence[TorrentFile],
+    episodes: Mapping[int, Episode],
+    *,
+    now: datetime,
+) -> int:
+    """Put a dead trip pack's trip-only episodes straight back to searching (FR-A12).
+
+    Owner incident 2026-10-06: a trip's pack that stalls with nothing handed
+    off is deleted with its files like any other, but its trip-only episodes
+    do not wait out :data:`~arc.services.acquisition.wants.UNAVAILABLE_RETRY`
+    — a trip has a deadline. :func:`_give_up_on` has already released their
+    claims and moved them to ``unavailable`` with the stall's reason; this
+    takes them on to ``wanted`` with a search at the trip's priority, through
+    the reconciler's own :func:`~arc.services.acquisition.wants.start_search`.
+
+    The pack's hash is **excluded** from that search by its ``torrents`` row,
+    which stays as the ``stalled`` tombstone: the batch path skips any hash that
+    already has a row (``_add_stopped``), and ``batch.claim_existing`` never
+    attaches to a decided pack. So the next search falls through to singles.
+    """
+    ids = {row.episode_id for row in rows if row.episode_id is not None}
+    trip_only = await trip_only_episode_ids(ctx.session, ids)
+    retried = 0
+    for episode_id in sorted(trip_only):
+        episode = episodes.get(episode_id)
+        if episode is None or episode.state is not EpisodeState.UNAVAILABLE:
+            continue
+        started, _ = await start_search(
+            ctx.session, episode, now=now, retry_now=True, priority=TRIP_SEARCH_PRIORITY
+        )
+        retried += int(started)
+    return retried
+
+
 def _sync_batch_files(
     ctx: JobContext,
     torrent: Torrent,
@@ -2262,11 +2365,12 @@ async def _poll_batch(
         return BatchPoll(synced=synced, finished=finished, reselect=reselect)
 
     torrent.qbit_state = QBIT_STALLED
-    given_up = _give_up_on(ctx, pending, episodes, reason=reason)
+    given_up = _give_up_on(ctx, pending, episodes, reason=manual_stall(torrent, reason))
     # ``handed_off`` is re-read: a file may have completed on this very poll,
     # and a pack that has just given the library a file is one whose files must
     # not be deleted with it.
     holds_files = any(row.completed_at is not None for row in rows)
+    retried = 0 if holds_files else await _retry_trip_episodes(ctx, pending, episodes, now=now)
     ctx.log.warning(
         "a batch is going nowhere and has been given up on",
         extra={
@@ -2278,6 +2382,7 @@ async def _poll_batch(
             "swarm_seeds": info.swarm_seeds,
             "swarm_peers": info.swarm_peers,
             "episodes": given_up,
+            "trip_episodes_retried": retried,
             "reason": reason,
             # The one thing a reader needs to know about the bytes.
             "kept_files": holds_files,
@@ -2447,7 +2552,7 @@ async def poll_qbit(ctx: JobContext) -> None:
             # files go with the torrent because a partial download of a release
             # Arc will never choose again is worth nothing to anybody.
             torrent.qbit_state = QBIT_STALLED
-            transition(episode, EpisodeState.UNAVAILABLE, reason=reason)
+            transition(episode, EpisodeState.UNAVAILABLE, reason=manual_stall(torrent, reason))
             stalled.append(info.hash)
             ctx.log.warning(
                 "a torrent is going nowhere and has been given up on",
@@ -2806,6 +2911,7 @@ __all__ = [
     "GIVE_UP_AFTER",
     "HELD_LOG",
     "LATER_RETRY",
+    "MANUAL_STALL",
     "METADATA_STATES",
     "NO_BYTES",
     "NO_METADATA",
@@ -2825,6 +2931,7 @@ __all__ = [
     "STARTED_KEY",
     "compute_wants",
     "largest_video",
+    "manual_stall",
     "poll_qbit",
     "qbit_apply_policy",
     "qbit_cancel",

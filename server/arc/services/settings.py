@@ -69,7 +69,7 @@ from arc.services.acquisition.rules import (
     set_paused,
 )
 from arc.services.catalog import preferred_title
-from arc.services.trips.names import TRIP_MAX_EPISODES_CEILING
+from arc.services.trips.names import TRIP_MAX_EPISODES_CEILING, TRIP_PACK_MIN_SEEDERS_CEILING
 
 log = logging.getLogger(__name__)
 
@@ -242,6 +242,12 @@ _VALIDATORS: Final[dict[str, Any]] = {
     # Days a trip's copy waits for the device. At least one, for the same
     # reason as the idle rule above.
     "trip_copy_days": lambda value: _bounded_int(value, low=1, high=MAX_DAYS),
+    # Fewest listed seeders a pack needs to be preferred for a trip (owner
+    # incident 2026-10-06). At least one, which is FR-A3's own floor; 500 is
+    # the ceiling the reader clamps at.
+    "trip_pack_min_seeders": lambda value: _bounded_int(
+        value, low=1, high=TRIP_PACK_MIN_SEEDERS_CEILING
+    ),
     "sub_lang": _language,
     "audio_lang": _language,
 }

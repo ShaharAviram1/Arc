@@ -1,7 +1,7 @@
 """Operator commands: ``python -m arc.cli <command>`` (roadmap M11, M16).
 
-Five things an operator has to do on a host with no browser session yet, and
-one thing they always want to know:
+Five things an operator has to do on a host with no browser session yet, one
+thing they always want to know, and one repair:
 
 * ``invite``            — issue an invite link and print it.
 * ``warm-catalogue``    — queue the work that gives a fresh deployment a
@@ -14,11 +14,15 @@ one thing they always want to know:
                           its Recommendations page and Home's "Picked for you"
                           shelf have something on them (M16).
 * ``status``            — a one-screen summary of the deployment.
+* ``prune-unfinished-media`` — delete the review-queue rows an earlier scan
+                          wrote for files a torrent is still downloading
+                          (owner incident 2026-10-06). ``--dry-run`` lists them.
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
 and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
 type, ``import-catalogue`` replaces what it imported last time (and skips the
-work entirely when the files have not changed), and ``status`` writes nothing.
+work entirely when the files have not changed), ``status`` writes nothing, and
+``prune-unfinished-media`` finds nothing the second time.
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -40,6 +44,7 @@ Run it from ``server/``::
     uv run python -m arc.cli recs --user-email prof@example.edu
     uv run python -m arc.cli warm-catalogue
     uv run python -m arc.cli import-catalogue
+    uv run python -m arc.cli prune-unfinished-media --dry-run
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -89,6 +94,7 @@ from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import CATALOG_PRIORITY, REFRESH_ALL, SEASON_SWEEP
 from arc.services.catalog.offline.jobs import import_all
 from arc.services.jobs import enqueue
+from arc.services.library.ingest import in_flight, prune_unfinished
 from arc.services.recs import (
     DAILY_LIMIT,
     RecsEmptyPool,
@@ -511,6 +517,36 @@ async def cmd_status(session: AsyncSession, settings: Settings, args: argparse.N
     return 0
 
 
+# --- prune-unfinished-media -------------------------------------------------
+
+
+async def cmd_prune_unfinished_media(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Remove the ``media_files`` rows a scan wrote for files still downloading.
+
+    Before 2026-10-06 the library scan had no idea which files a torrent was
+    still writing, and a pack that stalled at 0 % had all of its pre-allocated
+    (sparse, full-size) files indexed into the review queue. The scan now skips
+    such files and deletes those rows itself when it meets them; this is the
+    same rule (:func:`~arc.services.library.ingest.prune_unfinished`) run once,
+    by hand: only ``pending`` rows linked to no episode whose path lies under a
+    tracked torrent that has not finished that file. Idempotent — a second run
+    finds nothing. ``--dry-run`` prints what would go and writes nothing.
+    """
+    fence = await in_flight(session, settings)
+    doomed = await prune_unfinished(session, settings, fence)
+    for row in doomed:
+        print(f"{row.id}\t{row.path}")
+    if args.dry_run:
+        await session.rollback()
+        print(f"{len(doomed)} row(s) would be removed (dry run, nothing written).", file=sys.stderr)
+        return 0
+    await session.commit()
+    print(f"{len(doomed)} row(s) removed.", file=sys.stderr)
+    return 0
+
+
 # --- wiring -----------------------------------------------------------------
 
 type Command = Callable[[AsyncSession, Settings, argparse.Namespace], Awaitable[int]]
@@ -590,6 +626,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="print a summary of the deployment")
     status.set_defaults(handler=cmd_status)
+
+    prune = sub.add_parser(
+        "prune-unfinished-media",
+        help="delete review-queue rows for files a torrent is still downloading",
+    )
+    prune.add_argument(
+        "--dry-run", action="store_true", help="list the rows that would go and write nothing"
+    )
+    prune.set_defaults(handler=cmd_prune_unfinished_media)
 
     return parser
 

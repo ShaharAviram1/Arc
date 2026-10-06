@@ -110,6 +110,7 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   offline_idle_days: 7,
   trip_max_episodes: 50,
   trip_copy_days: 14,
+  trip_pack_min_seeders: 10,
 }
 
 /** What this server actually holds: three of them moved off the default. */

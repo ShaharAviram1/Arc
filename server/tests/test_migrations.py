@@ -146,7 +146,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 15
+    assert len(seeded) == 16
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -174,6 +174,9 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     # and a fortnight for a copy to be claimed.
     assert seeded["trip_max_episodes"] == 50
     assert seeded["trip_copy_days"] == 14
+    # And the trip pack's seeder floor (owner incident 2026-10-06): a pack Nyaa
+    # lists with fewer than ten seeders is not preferred to singles.
+    assert seeded["trip_pack_min_seeders"] == 10
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:

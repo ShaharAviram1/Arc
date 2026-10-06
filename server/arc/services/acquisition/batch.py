@@ -79,7 +79,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Final
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
@@ -120,6 +120,17 @@ log = logging.getLogger(__name__)
 #: read. A missing file is visible and fixable; the wrong episode plays as
 #: though it were right.
 UNREADABLE_BATCH: Final[str] = "only batch releases, and their files could not be identified"
+
+#: The sentence a trip-only episode is shown when the only release on offer
+#: was a pack listed below ``trip_pack_min_seeders`` (FR-A12, owner incident
+#: 2026-10-06): such a pack is not taken for a trip even as FR-A11's fallback.
+THIN_PACK: Final[str] = "only a thinly seeded pack"
+
+#: qBittorrent states of a pack that is stopped before it finished. A trip-only
+#: search does not attach to one (owner incident 2026-10-06): a trip pack that
+#: was cancelled at 0 % is kept stopped by :func:`disposition`, and re-asking
+#: for the trip must not land on the same dead swarm.
+STOPPED_UNFINISHED_STATES: Final[frozenset[str]] = frozenset({"stoppedDL", "pausedDL"})
 
 #: What a batch's ``torrent_files`` row says when a later want attaches to it
 #: (:func:`claim_existing`). Written on the *episode*, so the show page's row
@@ -530,7 +541,9 @@ def listing_mismatch(rows: Sequence[TorrentFile], listed: Sequence[FileInfo]) ->
 # --- Writing and attaching --------------------------------------------------
 
 
-async def claim_existing(session: AsyncSession, episode: Episode) -> TorrentFile | None:
+async def claim_existing(
+    session: AsyncSession, episode: Episode, *, trip_min_seeders: int | None = None
+) -> TorrentFile | None:
     """Attach this episode to a batch already in the client, if one holds it.
 
     Checked **before Nyaa is asked at all**, which is the whole point: a batch
@@ -571,6 +584,12 @@ async def claim_existing(session: AsyncSession, episode: Episode) -> TorrentFile
     able to fail the decision — which is already in the database by the time the
     job runs.
 
+    ``trip_min_seeders`` is set for a **trip-only** search (FR-A12, owner
+    incident 2026-10-06). Then a pack is also refused when the seeders recorded
+    on its ``torrents`` row at pick time are below it (or unknown), or when it
+    is stopped before finishing (:data:`STOPPED_UNFINISHED_STATES`) — so a trip
+    cancelled and asked for again takes singles rather than the same thin pack.
+
     The pack is locked before the claim is written (``FOR UPDATE``), against the
     one race that could lose it: ``qbit_reselect`` deciding DELETE on the very
     pack this is attaching to. The lock orders the two, and whichever runs
@@ -578,22 +597,29 @@ async def claim_existing(session: AsyncSession, episode: Episode) -> TorrentFile
     torrent to find, and an attach that got there first is a wanted row the
     disposition reads as KEEP.
     """
-    row = await session.scalar(
+    refused = UNATTACHABLE_STATES
+    statement = (
         select(TorrentFile)
         .join(Torrent, Torrent.id == TorrentFile.torrent_id)
         .where(
             TorrentFile.episode_id == episode.id,
             TorrentFile.wanted.is_(False),
             Torrent.kind == TorrentKind.BATCH,
-            or_(Torrent.qbit_state.is_(None), Torrent.qbit_state.not_in(UNATTACHABLE_STATES)),
         )
         .order_by(TorrentFile.id)
         .limit(1)
     )
+    if trip_min_seeders is not None:
+        refused = refused | STOPPED_UNFINISHED_STATES
+        statement = statement.where(func.coalesce(Torrent.seeders, 0) >= trip_min_seeders)
+    statement = statement.where(
+        or_(Torrent.qbit_state.is_(None), Torrent.qbit_state.not_in(sorted(refused)))
+    )
+    row = await session.scalar(statement)
     if row is None:
         return None
     torrent = await session.get(Torrent, row.torrent_id, with_for_update=True)
-    if torrent is None or torrent.qbit_state in UNATTACHABLE_STATES:
+    if torrent is None or torrent.qbit_state in refused:
         # Decided about, or deleted outright, between the two statements.
         return None
 
@@ -867,6 +893,8 @@ __all__ = [
     "EPISODE_KINDS",
     "LIVE_STATUSES",
     "UNATTACHABLE_STATES",
+    "STOPPED_UNFINISHED_STATES",
+    "THIN_PACK",
     "UNREADABLE_BATCH",
     "BatchTaken",
     "Disposition",

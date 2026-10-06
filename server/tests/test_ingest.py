@@ -9,6 +9,7 @@ the machine running the suite is not what these tests are about, and
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Job, JobStatus, MediaFile, ReviewState
+from arc.models import (
+    Anime,
+    Episode,
+    Job,
+    JobStatus,
+    MediaFile,
+    ReviewState,
+    Torrent,
+    TorrentFile,
+    TorrentKind,
+)
 from arc.services.library import ingest
 from arc.services.library.names import MATCH_FILE
 
@@ -409,3 +420,273 @@ class TestScanJob:
             )
         )
         assert len(await rows(db_session)) == 1
+
+
+# --- Files a torrent is still downloading (owner incident, 2026-10-06) -------
+
+PACK_HASH = "ab" * 20
+SINGLE_HASH = "cd" * 20
+IRUMA = "[SubsPlease] Mairimashita! Iruma-kun S2 - {:02d} (720p) [0F0F0F0F].mkv"
+
+
+def sparse(path: Path, *, size: int = 760 * 1024 * 1024, age: float = SETTLE * 10) -> Path:
+    """What qBittorrent leaves for a selected file at start: full size, no bytes, old mtime."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(size)
+    stamp = time.time() - age
+    import os
+
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+async def _episode(session: AsyncSession, number: int = 1) -> Episode:
+    anime = await session.scalar(select(Anime).where(Anime.anilist_id == 109_000))
+    if anime is None:
+        anime = Anime(anilist_id=109_000, title_romaji="Mairimashita! Iruma-kun 2", episodes=21)
+        session.add(anime)
+        await session.flush()
+    episode = Episode(anime_id=anime.id, number=number)
+    session.add(episode)
+    await session.flush()
+    return episode
+
+
+async def _pack(
+    session: AsyncSession, files: int, *, complete: frozenset[int] = frozenset()
+) -> Torrent:
+    """A batch with ``files`` wanted files, of which the indices in ``complete`` are in."""
+    torrent = Torrent(
+        info_hash=PACK_HASH,
+        kind=TorrentKind.BATCH,
+        title="[SubsPlease] Mairimashita! Iruma-kun S2 (01-21) (720p) [Batch]",
+        save_path=f"/data/downloads/batch/{PACK_HASH}",
+        qbit_state="stalledDL",
+        progress=0.0,
+    )
+    session.add(torrent)
+    await session.flush()
+    for index in range(files):
+        episode = await _episode(session, index + 1)
+        done = index in complete
+        session.add(
+            TorrentFile(
+                torrent_id=torrent.id,
+                file_index=index,
+                path=f"Iruma S2/{IRUMA.format(index + 1)}",
+                size=760 * 1024 * 1024,
+                episode_id=episode.id,
+                wanted=True,
+                progress=1.0 if done else 0.0,
+                completed_at=datetime.now(UTC) if done else None,
+            )
+        )
+    await session.flush()
+    return torrent
+
+
+def _pack_file(data_dir: Path, index: int) -> Path:
+    return data_dir / "downloads" / "batch" / PACK_HASH / "Iruma S2" / IRUMA.format(index + 1)
+
+
+class TestInFlight:
+    async def test_a_sparse_file_under_a_downloading_pack_is_not_indexed(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 3)
+        for index in range(3):
+            sparse(_pack_file(data_dir, index))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 0
+        assert result.skipped_unfinished == 3
+        assert await rows(db_session) == []
+        assert await match_jobs(db_session) == []
+
+    async def test_the_same_file_is_indexed_once_it_is_complete(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 3, complete=frozenset({1}))
+        for index in range(3):
+            sparse(_pack_file(data_dir, index))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 1
+        assert result.skipped_unfinished == 2
+        assert [row.path for row in await rows(db_session)] == [
+            str(_pack_file(data_dir, 1).resolve())
+        ]
+
+    async def test_a_file_under_a_pack_dir_with_no_row_for_it_is_not_indexed(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        """Only a file the rows say is complete leaves a pack's directory."""
+        await _pack(db_session, 1, complete=frozenset({0}))
+        make(data_dir / "downloads" / "batch" / PACK_HASH / "extra" / FRIEREN)
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.skipped_unfinished == 1
+        assert {Path(row.path).name for row in await rows(db_session)} == set()
+
+    async def test_a_singles_preallocated_file_is_not_indexed(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        episode = await _episode(db_session, 7)
+        db_session.add(
+            Torrent(
+                episode_id=episode.id,
+                info_hash=SINGLE_HASH,
+                qbit_state="stalledDL",
+                progress=0.0,
+            )
+        )
+        await db_session.flush()
+        directory = data_dir / "downloads" / str(episode.id)
+        sparse(directory / IRUMA.format(7))
+        make(directory / (IRUMA.format(8) + ".!qB"))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 0
+        assert result.skipped_unfinished == 1
+        assert result.skipped_partial == 1
+        assert await rows(db_session) == []
+
+    async def test_a_finished_single_flows_through(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        episode = await _episode(db_session, 7)
+        db_session.add(
+            Torrent(
+                episode_id=episode.id,
+                info_hash=SINGLE_HASH,
+                qbit_state="stoppedUP",
+                progress=1.0,
+                completed_at=datetime.now(UTC),
+            )
+        )
+        await db_session.flush()
+        make(data_dir / "downloads" / str(episode.id) / IRUMA.format(7))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 1
+        assert result.skipped_unfinished == 0
+
+    async def test_a_stalled_singles_directory_is_the_librarys_again(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        """A decided single is not downloading; its directory is not fenced."""
+        episode = await _episode(db_session, 7)
+        db_session.add(Torrent(episode_id=episode.id, info_hash=SINGLE_HASH, qbit_state="stalled"))
+        await db_session.flush()
+        make(data_dir / "downloads" / str(episode.id) / IRUMA.format(7))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.skipped_unfinished == 0
+        assert result.added == 1
+
+    async def test_files_outside_any_torrent_are_unaffected(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 1)
+        make(data_dir / "manual" / MUSHISHI)
+        make(data_dir / "downloads" / FRIEREN)
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 2
+        assert result.skipped_unfinished == 0
+
+
+class TestPruneUnfinished:
+    async def _bogus(self, session: AsyncSession, path: Path, **fields: object) -> MediaFile:
+        row = MediaFile(
+            path=str(path.resolve()),
+            size=760 * 1024 * 1024,
+            parsed={"title": "Iruma"},
+            review_state=fields.pop("review_state", ReviewState.PENDING),
+            llm_suggestion={"anime_id": 1, "episode": 1, "dismissed": True},
+            **fields,
+        )
+        session.add(row)
+        await session.flush()
+        return row
+
+    async def test_only_pending_unlinked_rows_under_unfinished_files_go(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 4, complete=frozenset({3}))
+        linked_episode = await _episode(db_session, 20)
+        bogus = [await self._bogus(db_session, sparse(_pack_file(data_dir, i))) for i in (0, 1)]
+        # Under an unfinished file, but a person already decided about it.
+        ignored = await self._bogus(
+            db_session, sparse(_pack_file(data_dir, 2)), review_state=ReviewState.IGNORED
+        )
+        # Complete file: its row is the landing path's and stays.
+        landed = await self._bogus(
+            db_session, make(_pack_file(data_dir, 3)), episode_id=linked_episode.id
+        )
+        # Unrelated review item.
+        elsewhere = await self._bogus(db_session, make(data_dir / "manual" / MUSHISHI))
+
+        doomed = await ingest.prune_unfinished(db_session, library_settings)
+
+        assert {row.id for row in doomed} == {row.id for row in bogus}
+        left = {row.id for row in await rows(db_session)}
+        assert left == {ignored.id, landed.id, elsewhere.id}
+
+    async def test_a_linked_row_is_never_pruned(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 1)
+        episode = await _episode(db_session, 9)
+        kept = await self._bogus(db_session, sparse(_pack_file(data_dir, 0)), episode_id=episode.id)
+        assert await ingest.prune_unfinished(db_session, library_settings) == []
+        assert [row.id for row in await rows(db_session)] == [kept.id]
+
+    async def test_the_scan_prunes_what_it_meets_and_says_so(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 2)
+        for index in range(2):
+            await self._bogus(db_session, sparse(_pack_file(data_dir, index)))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.pruned == 2
+        assert result.added == 0
+        assert await rows(db_session) == []
+
+    async def test_the_cli_step_is_idempotent_and_has_a_dry_run(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        data_dir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from arc.cli import build_parser, cmd_prune_unfinished_media
+
+        await _pack(db_session, 2)
+        for index in range(2):
+            await self._bogus(db_session, sparse(_pack_file(data_dir, index)))
+        await db_session.commit()
+
+        dry = build_parser().parse_args(["prune-unfinished-media", "--dry-run"])
+        assert await cmd_prune_unfinished_media(db_session, library_settings, dry) == 0
+        captured = capsys.readouterr()
+        assert "2 row(s) would be removed" in captured.err
+        assert len(captured.out.splitlines()) == 2
+        assert len(await rows(db_session)) == 2
+
+        real = build_parser().parse_args(["prune-unfinished-media"])
+        assert await cmd_prune_unfinished_media(db_session, library_settings, real) == 0
+        assert "2 row(s) removed" in capsys.readouterr().err
+        assert await cmd_prune_unfinished_media(db_session, library_settings, real) == 0
+        assert "0 row(s) removed" in capsys.readouterr().err
+        assert await rows(db_session) == []
