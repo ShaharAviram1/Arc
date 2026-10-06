@@ -101,6 +101,8 @@ from arc.models import (
     Job,
     JobStatus,
     MediaFile,
+    OfflineCopy,
+    OfflineCopyState,
     Rendition,
     Setting,
 )
@@ -111,8 +113,11 @@ from arc.services.media.names import (
     EPISODE_KEY as KEY_EPISODE,
 )
 from arc.services.media.names import (
+    OFFLINE_WHY_TRIP,
     TRANSCODE,
+    enqueue_offline_encode,
     enqueue_transcode,
+    latest_offline_jobs,
     latest_transcode_jobs,
     output_dir_for,
     transcode_dedupe_key,
@@ -134,6 +139,7 @@ from arc.services.media.transcode import (
     transcode_semaphore,
     validate_output,
 )
+from arc.services.trips.rules import trip_copy_priority, trip_only_episode_ids
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +182,7 @@ MAX_ERROR_TAIL = 4000
 TRANSCODE_LOCK_KEY: Final[int] = (zlib.crc32(TRANSCODE.encode()) + (1 << 31)) % (1 << 32) - (
     1 << 31
 )
+# (``lock_key`` below is the same arithmetic, for the other job types.)
 
 #: Suffix of the directory an encode is built in before it is renamed into
 #: place. The job id is in it so that two claims cannot even collide by
@@ -393,9 +400,21 @@ def _engine_of(session: AsyncSession) -> AsyncEngine | None:
     return bind if isinstance(bind, AsyncEngine) else None
 
 
+def lock_key(job_type: str) -> int:
+    """The first half of an advisory lock key for ``job_type`` (see below)."""
+    return (zlib.crc32(job_type.encode()) + (1 << 31)) % (1 << 32) - (1 << 31)
+
+
 @asynccontextmanager
-async def episode_lock(session: AsyncSession, episode_id: int) -> AsyncIterator[bool]:
+async def episode_lock(
+    session: AsyncSession, episode_id: int, *, key: int | None = None
+) -> AsyncIterator[bool]:
     """Hold ``('transcode', episode_id)`` for the length of the block.
+
+    ``key`` names another job type's half instead — the offline encode holds
+    ``('offline_encode', episode_id)`` (:data:`~arc.services.media.offline.
+    OFFLINE_LOCK_KEY`), so a copy and a rendition of one episode may be made
+    side by side, but never two copies.
 
     Yields whether the lock was taken. ``False`` means another claim of this
     episode is running *right now* — on this worker or another — and the caller
@@ -416,7 +435,11 @@ async def episode_lock(session: AsyncSession, episode_id: int) -> AsyncIterator[
     async with AsyncSession(engine) as guard:
         held = bool(
             await guard.scalar(
-                select(func.pg_try_advisory_xact_lock(TRANSCODE_LOCK_KEY, episode_id))
+                select(
+                    func.pg_try_advisory_xact_lock(
+                        TRANSCODE_LOCK_KEY if key is None else key, episode_id
+                    )
+                )
             )
         )
         try:
@@ -715,6 +738,11 @@ async def sweep_transcodes(session: AsyncSession) -> int:
     An episode whose transcode has genuinely run out of attempts is **not**
     requeued: that is a job for a person (FR-P4's "with retry"), and a sweep
     that revived it every restart would hide the failure instead of showing it.
+
+    A **trip-only** ``matched`` or ``failed`` episode (FR-A12,
+    :func:`~arc.services.trips.rules.needs_rendition`) is never transcoded:
+    its missing offline encode is queued instead
+    (:func:`_requeue_trip_copies`), and it does not count here.
     """
     episodes = (
         await session.scalars(
@@ -726,6 +754,18 @@ async def sweep_transcodes(session: AsyncSession) -> int:
     ).all()
     if not episodes:
         return 0
+
+    trip_only = await trip_only_episode_ids(
+        session,
+        [
+            episode.id
+            for episode in episodes
+            if episode.state in (EpisodeState.MATCHED, EpisodeState.FAILED)
+        ],
+    )
+    if trip_only:
+        await _requeue_trip_copies(session, sorted(trip_only))
+        episodes = [episode for episode in episodes if episode.id not in trip_only]
 
     jobs = await latest_transcode_jobs(session, [episode.id for episode in episodes])
     queued = 0
@@ -745,6 +785,44 @@ async def sweep_transcodes(session: AsyncSession) -> int:
     if queued:
         await session.commit()
         log.info("transcodes queued at startup", extra={"count": queued})
+    return queued
+
+
+async def _requeue_trip_copies(session: AsyncSession, episode_ids: list[int]) -> int:
+    """Queue the offline encodes trip-only ``matched`` episodes are missing (FR-A12).
+
+    One per episode with no copy, or a ``queued``/``preparing`` copy with no
+    live job behind it (a worker that died). A ``ready`` copy needs nothing
+    from here, and a ``failed`` one with no live job has used up its attempts:
+    like a transcode that has, it is left for a person. Committed here, as the
+    transcodes above are.
+    """
+    copies = {
+        copy.episode_id: copy
+        for copy in (
+            await session.scalars(
+                select(OfflineCopy).where(OfflineCopy.episode_id.in_(episode_ids))
+            )
+        ).all()
+    }
+    live = await latest_offline_jobs(session, episode_ids)
+    queued = 0
+    for episode_id in episode_ids:
+        if episode_id in live:
+            continue
+        copy = copies.get(episode_id)
+        if copy is not None and copy.state in (OfflineCopyState.READY, OfflineCopyState.FAILED):
+            continue
+        await enqueue_offline_encode(
+            session,
+            episode_id,
+            why=OFFLINE_WHY_TRIP,
+            priority=await trip_copy_priority(session, episode_id),
+        )
+        queued += 1
+    if queued:
+        await session.commit()
+        log.info("trip copies queued at startup", extra={"count": queued})
     return queued
 
 
@@ -772,6 +850,7 @@ __all__ = [
     "enqueue_transcode",
     "episode_lock",
     "language_rules",
+    "lock_key",
     "output_dir_for",
     "sweep_transcodes",
     "transcode_dedupe_key",

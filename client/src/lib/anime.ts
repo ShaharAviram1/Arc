@@ -27,6 +27,7 @@ import { animePayloadKey, withRemembered } from '@/offline/cache'
 // Type-only, and erased under `verbatimModuleSyntax`: `mal.ts` imports values
 // from here, so this must never become a runtime import.
 import type { MalSync } from '@/lib/mal'
+import type { Trip } from '@/lib/trips'
 // `recs.ts` only imports types from here, so this direction is the runtime one.
 import { RECS_QUERY_KEY, type RecsPage } from '@/lib/recs'
 import {
@@ -297,6 +298,42 @@ export interface EpisodeOut {
    * before 2026-10-04 still parses.
    */
   download_url?: string | null
+  /**
+   * The episode's smaller copy for devices (FR-P6, FR-S9, M19), or null.
+   * Optional on the wire so a cached payload from before 2026-10-05 parses.
+   */
+  offline?: OfflineCopyOut | null
+  /**
+   * True when the episode is wanted only by somebody's trip (FR-A12) and is
+   * not ready: it is being made into a small copy for a device, and is not
+   * prepared for streaming unless somebody's look-ahead comes to want it. The
+   * same for every viewer; the show page says "Not prepared for streaming"
+   * to anyone whose trip does not hold it.
+   * Optional on the wire so a cached payload from before M19 parses.
+   */
+  trip_only?: boolean
+}
+
+/**
+ * Where the server's small copy of an episode stands (FR-P6, FR-S9) — what
+ * `POST`/`GET /api/episodes/{id}/offline` answer and the Show payload carries.
+ *
+ * `unavailable`: the source is gone and no copy exists, so the device takes
+ * the full-size file (`download_url`) instead.
+ */
+export type OfflineCopyState =
+  'none' | 'queued' | 'preparing' | 'available' | 'failed' | 'unavailable'
+
+export interface OfflineCopyOut {
+  state: OfflineCopyState
+  /** 0–1 while the server is making it; null when it has not said. */
+  progress: number | null
+  /** Bytes, once the copy exists. */
+  size: number | null
+  /** Where the copy downloads from (`/media/{id}/offline.mp4`), once `available`. */
+  url: string | null
+  /** RFC 6381, e.g. `avc1.640028` or `hvc1.1.6.L93.B0`; for the device's codec check. */
+  codecs: string | null
 }
 
 /**
@@ -468,6 +505,16 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
    * answer without it is an answer with no override.
    */
   override?: RuleOverride | null
+  /**
+   * The viewer's active trip on this show (FR-A12, M19), or null. Optional on
+   * the wire so a cached payload from before M19 parses.
+   */
+  trip?: Trip | null
+  /**
+   * The server's trip rules the client needs (M19): `max_episodes` is the
+   * admin's `trip_max_episodes`. Optional on the wire for an older payload.
+   */
+  trip_limits?: { max_episodes: number } | null
 }
 
 /**
@@ -488,6 +535,14 @@ export interface SetListEntryInput {
   progress?: number
   score?: number | null
 }
+
+/** Trip phases the server has finished with (the rest are still moving on the server). */
+const TRIP_RESTING: ReadonlySet<string> = new Set([
+  'available',
+  'delivered',
+  'expired',
+  'unavailable',
+])
 
 export const ANIME_QUERY_KEY = 'anime'
 export const LIST_QUERY_KEY = 'list'
@@ -1046,6 +1101,14 @@ export function useAnime(id: number): UseQueryResult<AnimeDetail, Error> {
     refetchInterval: (query) => {
       const intervals: number[] = []
       if (hasActiveEpisode(query.state.data)) intervals.push(ACQUISITION_POLL_MS)
+      // A trip on this show whose episodes the server is still fetching or
+      // making into copies (FR-A12): its panel follows them the same way.
+      if (
+        query.state.data?.trip?.episodes.some((episode) => !TRIP_RESTING.has(episode.phase)) ===
+        true
+      ) {
+        intervals.push(ACQUISITION_POLL_MS)
+      }
       if (
         awaitingStills(query.state.data) &&
         openedAt.current !== null &&

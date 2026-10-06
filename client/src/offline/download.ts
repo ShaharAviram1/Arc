@@ -56,7 +56,7 @@ export interface StartCommand {
   cmd: 'download'
   /** The OPFS file name, derived from the episode id by the manager. */
   name: string
-  /** The server's `download_url` for the episode. */
+  /** Where the copy downloads from (the episode's `download_url`, or its small copy's `url`). */
   url: string
   /** The ETag a previous run saw, when resuming one. */
   etag: string | null

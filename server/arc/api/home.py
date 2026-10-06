@@ -104,7 +104,9 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # of this page. Per show rather than per episode, so it is one query for
     # every shelf at once.
     progress = await list_progress_for(session, user_id=user.id, anime_ids=anime_ids)
-    extras = await episode_extras(session, episode_ids)
+    extras = await episode_extras(
+        session, episode_ids, offline_codec=settings.offline_codec, offline_demo=user.is_demo
+    )
     # Only "new this week" needs this: a continue-watching row carries its own
     # ``completed`` out of the query that found it (a rewatch left half-way is
     # on that shelf and is watched), so asking again would be a second query
@@ -155,6 +157,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
+                offline=extras.offline.out(row.episode),
+                trip_only=row.episode.id in extras.trip_only,
             )
             for row in started
         ],
@@ -172,6 +176,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
+                offline=extras.offline.out(row.episode),
+                trip_only=row.episode.id in extras.trip_only,
             )
             for row in ready
         ],
@@ -192,6 +198,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
+                offline=extras.offline.out(row.episode),
+                trip_only=row.episode.id in extras.trip_only,
             )
             for row in fresh
         ],

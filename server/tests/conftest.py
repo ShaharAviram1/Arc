@@ -263,6 +263,10 @@ CLEANUP_TABLES = (
     # Both cascade from ``episodes``; listed for the same reason as the two
     # below, and because a want is keyed by a user as well as an episode.
     "wants",
+    # Trips (M19 T3): both cascade from users/anime/episodes; listed so the
+    # cleanup reads as complete.
+    "trip_episodes",
+    "trips",
     "torrents",
     # Both reference ``episodes``: ``media_files.episode_id`` nulls out and
     # ``renditions`` cascades, but deleting them first keeps the order the

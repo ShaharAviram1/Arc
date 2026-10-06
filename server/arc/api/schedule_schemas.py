@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut, ListEntryOut
 from arc.api.episode_extras import EpisodeRelease
+from arc.api.offline_schemas import OfflineOut
 from arc.models import EpisodeState, Job, ListStatus, Rendition
 from arc.services.catalog.failures import FailureKind, FailureRow
 from arc.services.catalog.progress import BehindRow, NewEpisodeRow
@@ -298,6 +299,8 @@ class NewEpisodeEntry(BaseModel):
         release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
+        offline: OfflineOut | None = None,
+        trip_only: bool = False,
     ) -> NewEpisodeEntry:
         return cls(
             anime=AnimeSummary.from_anime(row.anime, list_status),
@@ -314,6 +317,8 @@ class NewEpisodeEntry(BaseModel):
                 release=release,
                 rendition=rendition,
                 transcode_job=transcode_job,
+                offline=offline,
+                trip_only=trip_only,
             ),
         )
 
@@ -350,6 +355,8 @@ class ContinueWatchingEntry(BaseModel):
         release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
+        offline: OfflineOut | None = None,
+        trip_only: bool = False,
     ) -> ContinueWatchingEntry:
         return cls(
             anime=AnimeSummary.from_anime(row.anime, list_status),
@@ -369,6 +376,8 @@ class ContinueWatchingEntry(BaseModel):
                 release=release,
                 rendition=rendition,
                 transcode_job=transcode_job,
+                offline=offline,
+                trip_only=trip_only,
             ),
             position_s=row.position_s,
             duration_s=row.duration_s,

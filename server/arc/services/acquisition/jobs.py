@@ -97,13 +97,15 @@ stays ``searching`` — which is what the show page then says (FR-A7).
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import time
+import zlib
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -116,6 +118,7 @@ from arc.models import (
     Torrent,
     TorrentFile,
     TorrentKind,
+    TripEpisode,
     Want,
 )
 from arc.services.acquisition import batch, claims
@@ -126,11 +129,17 @@ from arc.services.acquisition.names import (
     QBIT_CANCEL,
     QBIT_POLICY,
     QBIT_RESELECT,
+    QBIT_TOP,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
     search_dedupe_key,
 )
-from arc.services.acquisition.nyaa import NyaaUnavailable, Ranked, search_for_episode
+from arc.services.acquisition.nyaa import (
+    NyaaUnavailable,
+    PackPreference,
+    Ranked,
+    search_for_episode,
+)
 from arc.services.acquisition.qbit import (
     DECIDED_STATES,
     DELETE_ON_SIGHT,
@@ -162,6 +171,8 @@ from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest
 from arc.services.library.names import MATCH_FILE, match_dedupe_key
+from arc.services.trips.names import TRIP_BATCH_MIN
+from arc.services.trips.rules import needs_rendition, trip_only_episode_ids
 
 log = logging.getLogger(__name__)
 
@@ -743,6 +754,229 @@ class BatchAttempt:
     refused: int
 
 
+#: First half of the advisory lock a trip-only search of a finished show holds
+#: on ``('trip_pack', anime_id)`` (FR-A12): a trip queues its searches all at
+#: once, and two of them choosing, adding and claiming the same pack at the
+#: same moment is the race this orders. Folded into ``int4`` like
+#: ``media.jobs.lock_key``.
+TRIP_PACK_LOCK_KEY: int = (zlib.crc32(b"trip_pack") + (1 << 31)) % (1 << 32) - (1 << 31)
+
+#: How long what a pack was found to hold is remembered for a show's trip
+#: searches. A torrent's contents never change under its hash; the bound is
+#: only there so the memo cannot grow for ever.
+PACK_MEMO_TTL: float = 6 * 3600.0
+
+#: ``(anime id, info hash) → (expiry, the episode numbers its files hold)``.
+#: Read only by a trip's preferred pass, so that the twelve sibling searches of
+#: one trip do not each fetch, add, read and delete the same pack that one of
+#: them already found holds too little (FR-A12). Process-local and lossy by
+#: design: forgetting costs one more add, never a wrong decision.
+_PACK_MEMO: dict[tuple[int, str], tuple[float, frozenset[int]]] = {}
+
+
+def _remember_contents(anime_id: int, info_hash: str, numbers: Collection[int]) -> None:
+    now = time.monotonic()
+    for key in [key for key, (expiry, _) in _PACK_MEMO.items() if expiry <= now]:
+        del _PACK_MEMO[key]
+    _PACK_MEMO[(anime_id, info_hash.lower())] = (now + PACK_MEMO_TTL, frozenset(numbers))
+
+
+def _known_contents(anime_id: int, info_hash: str) -> frozenset[int] | None:
+    found = _PACK_MEMO.get((anime_id, info_hash.lower()))
+    if found is None or found[0] <= time.monotonic():
+        return None
+    return found[1]
+
+
+@dataclass(slots=True)
+class _Held:
+    """A pack the preferred pass read and declined, still stopped in the client.
+
+    Its ``torrents`` row is reserved and its listing read, so the ordinary
+    fallback of the same search can take it without a second fetch or add —
+    and a pack the search does not take is deleted once, at the end.
+    """
+
+    torrent: Torrent
+    listed: list[FileInfo]
+
+
+@dataclass(slots=True)
+class TripPass:
+    """One trip search's pack preference (FR-A12): what it is measured against.
+
+    ``cover`` are the trip's attachable episode numbers and ``need`` how many of
+    them a pack must hold (:func:`trip_pack_need`). ``held`` are the packs read
+    and declined so far, ``refused`` the packs read and unusable.
+    """
+
+    cover: tuple[int, ...]
+    need: int
+    held: dict[str, _Held] = field(default_factory=dict)
+    refused: int = 0
+
+    def worth(self, chosen: Ranked, holds: Collection[int], number: int) -> bool:
+        """Whether a pack holding ``holds`` is worth adding for episode ``number``."""
+        if number not in holds:
+            return False
+        if chosen.candidate.covers:
+            return True
+        return len(set(holds) & set(self.cover)) >= self.need
+
+
+async def _lock_targets(
+    session: AsyncSession,
+    episode: Episode,
+    numbers: Collection[int],
+    attachable: Mapping[int, Episode],
+) -> set[int] | None:
+    """The targets still free to take, locked; ``None`` if the searched one is not.
+
+    ``_attachable`` read the free riders at the start of a search that may
+    have taken a minute, and another search's ``searching`` is invisible until
+    it commits — but its row lock is not. So the rows are taken ``FOR UPDATE
+    SKIP LOCKED`` and re-read (``populate_existing``): a row another job holds
+    is skipped, a row no longer ``wanted`` is dropped, and the episodes that
+    survive are locked until this job commits, so nobody can claim them in
+    between. The episode the search is for must still be ``searching``.
+    """
+    ids = {target.id for number in numbers if (target := attachable.get(number)) is not None}
+    ids.add(episode.id)
+    rows = (
+        await session.scalars(
+            select(Episode)
+            .where(Episode.id.in_(ids))
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    by_id = {row.id: row for row in rows}
+    me = by_id.get(episode.id)
+    if me is None or me.state is not EpisodeState.SEARCHING:
+        return None
+    kept = {episode.number}
+    for number in numbers:
+        target = attachable.get(number)
+        if target is None or target.id == episode.id:
+            continue
+        row = by_id.get(target.id)
+        if row is not None and row.state is EpisodeState.WANTED:
+            kept.add(number)
+    return kept
+
+
+async def _add_stopped(
+    ctx: JobContext,
+    qbit: QbitClient,
+    episode: Episode,
+    anime: Anime,
+    chosen: Ranked,
+    trip: TripPass | None,
+    prefer: bool,
+) -> tuple[Torrent, list[FileInfo], str] | int:
+    """Steps 1–5 of :func:`_take_batch` for one candidate: fetch, add stopped, read.
+
+    Answers the reserved row, the client's listing and the save path, or — for
+    a candidate skipped or refused on the way — how many to add to
+    ``refused`` (0 or 1).
+    """
+    info_hash = chosen.item.info_hash
+    owner = await ctx.session.scalar(select(Torrent.id).where(Torrent.info_hash == info_hash))
+    if owner is not None:
+        ctx.log.info(
+            "skipping a batch arc has already tried",
+            extra={
+                "episode_id": episode.id,
+                "hash": info_hash,
+                "title": chosen.item.title,
+            },
+        )
+        return 0
+    if prefer and trip is not None:
+        known = _known_contents(anime.id, info_hash)
+        if known is not None and not trip.worth(chosen, known, episode.number):
+            # Read by an earlier search of this show (FR-A12): adding it again
+            # to learn the same thing would be one more add and delete.
+            ctx.log.info(
+                "skipping a pack already known not to serve this trip",
+                extra={"episode_id": episode.id, "hash": info_hash},
+            )
+            return 0
+
+    # The process-wide client, as the search itself uses: the ``.torrent``
+    # fetch is one more paced request and has to queue behind the searches.
+    nyaa = nyaa_module.shared_client(ctx.settings.nyaa_url)
+    try:
+        blob = await nyaa.torrent_file(chosen.torrent_url)
+    except NyaaUnavailable as exc:
+        # Not an error for the episode, and nothing to remember: it is
+        # one candidate Arc could not fetch *today*, and the next one
+        # down is usually the same pack from another group.
+        ctx.log.warning(
+            "could not fetch a batch's .torrent",
+            extra={
+                "episode_id": episode.id,
+                "url": chosen.torrent_url,
+                "error": str(exc),
+            },
+        )
+        return 0
+
+    save_path = batch_save_path_for(info_hash, downloads_path=ctx.settings.qbit_downloads_path)
+    try:
+        await qbit.add_file(
+            blob,
+            save_path=save_path,
+            info_hash=info_hash,
+            tags=BATCH_TAGS,
+            stopped=True,
+        )
+    except QbitUnavailable:
+        raise
+    except QbitError as exc:
+        # The client did not end up holding the hash the feed
+        # advertised, which is a fact about this feed item and will not
+        # be different tomorrow.
+        await batch.mark_unreadable(
+            ctx.session, ranked=chosen, info_hash=info_hash, reason=str(exc)
+        )
+        return 1
+
+    torrent = await batch.reserve_batch(
+        ctx.session, ranked=chosen, save_path=save_path, info_hash=info_hash
+    )
+    await qbit.stop([info_hash])
+
+    try:
+        listed = await qbit.files(info_hash)
+    except QbitUnavailable:
+        raise
+    except QbitError as exc:
+        # A listing the client could not describe in full (a file with
+        # no usable name). A pack Arc cannot enumerate is a pack Arc
+        # cannot turn every file of *off*, so it is never started — and
+        # that is a fact about this torrent's contents, not about
+        # today, so it is remembered.
+        await _abandon(ctx, qbit, torrent, str(exc), permanent=True)
+        return 1
+    if not listed:
+        # A client that has the metadata and lists no files has not
+        # told Arc anything to act on. Transient, so no tombstone: the
+        # next attempt may well get the list.
+        await _abandon(ctx, qbit, torrent, "the client listed no files", permanent=False)
+        return 0
+    if len(listed) > MAX_TORRENT_FILES:
+        await _abandon(
+            ctx,
+            qbit,
+            torrent,
+            f"{len(listed)} files, over {MAX_TORRENT_FILES}",
+            permanent=True,
+        )
+        return 1
+    return torrent, list(listed), save_path
+
+
 async def _take_batch(
     ctx: JobContext,
     episode: Episode,
@@ -751,6 +985,8 @@ async def _take_batch(
     *,
     attachable: Mapping[int, Episode],
     offset: int | None,
+    trip: TripPass | None = None,
+    prefer: bool = False,
 ) -> BatchAttempt:
     """Take the best batch whose files Arc can read (FR-A4's exception, FR-A11).
 
@@ -812,103 +1048,44 @@ async def _take_batch(
     through here at all but through
     :func:`~arc.services.acquisition.batch.claim_existing`, before Nyaa is
     asked.
+
+    ``trip`` is a trip search's pass (FR-A12), and ``prefer`` says this is its
+    **preferred** pass, before any single was looked for. Then:
+
+    * a pack whose contents an earlier search of the show already read
+      (:func:`_known_contents`) and found not worth it is skipped unfetched;
+    * a pack whose name gives **no** range must hold, by its file list, at
+      least ``trip.need`` of ``trip.cover``; one that holds fewer is **held**
+      (still stopped, row reserved, :class:`_Held`) for this search's own
+      fallback rather than deleted, so a pack the fallback then wants is added
+      once. A ranged pack already passed that test on its name;
+    * and for any trip search, a no-range pack that does not hold *this*
+      episode is deleted **without** a tombstone and not counted as refused:
+      its name never claimed the episode, and it may be exactly right for the
+      next one.
+
+    Every take also re-reads and locks its free riders before the selection is
+    written (:func:`_lock_targets`), so two searches of one show running at
+    once cannot both claim an episode.
     """
-    # The process-wide client, as the search itself uses: the ``.torrent``
-    # fetch is one more paced request and has to queue behind the searches.
-    nyaa = nyaa_module.shared_client(ctx.settings.nyaa_url)
     refused = 0
     async with QbitClient.from_settings(ctx.settings) as qbit:
         for chosen in batches:
             info_hash = chosen.item.info_hash
-            owner = await ctx.session.scalar(
-                select(Torrent.id).where(Torrent.info_hash == info_hash)
-            )
-            if owner is not None:
-                ctx.log.info(
-                    "skipping a batch arc has already tried",
-                    extra={
-                        "episode_id": episode.id,
-                        "hash": info_hash,
-                        "title": chosen.item.title,
-                    },
+            held = trip.held.pop(info_hash, None) if trip is not None else None
+            if held is not None:
+                torrent, listed = held.torrent, held.listed
+                save_path = torrent.save_path or batch_save_path_for(
+                    info_hash, downloads_path=ctx.settings.qbit_downloads_path
                 )
-                continue
+            else:
+                taken = await _add_stopped(ctx, qbit, episode, anime, chosen, trip, prefer)
+                if isinstance(taken, int):
+                    refused += taken
+                    continue
+                torrent, listed, save_path = taken
 
             wanted_for = batch.targets(chosen, episode.number, attachable)
-            try:
-                blob = await nyaa.torrent_file(chosen.torrent_url)
-            except NyaaUnavailable as exc:
-                # Not an error for the episode, and nothing to remember: it is
-                # one candidate Arc could not fetch *today*, and the next one
-                # down is usually the same pack from another group.
-                ctx.log.warning(
-                    "could not fetch a batch's .torrent",
-                    extra={
-                        "episode_id": episode.id,
-                        "url": chosen.torrent_url,
-                        "error": str(exc),
-                    },
-                )
-                continue
-
-            save_path = batch_save_path_for(
-                info_hash, downloads_path=ctx.settings.qbit_downloads_path
-            )
-            try:
-                await qbit.add_file(
-                    blob,
-                    save_path=save_path,
-                    info_hash=info_hash,
-                    tags=BATCH_TAGS,
-                    stopped=True,
-                )
-            except QbitUnavailable:
-                raise
-            except QbitError as exc:
-                # The client did not end up holding the hash the feed
-                # advertised, which is a fact about this feed item and will not
-                # be different tomorrow.
-                await batch.mark_unreadable(
-                    ctx.session, ranked=chosen, info_hash=info_hash, reason=str(exc)
-                )
-                refused += 1
-                continue
-
-            torrent = await batch.reserve_batch(
-                ctx.session, ranked=chosen, save_path=save_path, info_hash=info_hash
-            )
-            await qbit.stop([info_hash])
-
-            try:
-                listed = await qbit.files(info_hash)
-            except QbitUnavailable:
-                raise
-            except QbitError as exc:
-                # A listing the client could not describe in full (a file with
-                # no usable name). A pack Arc cannot enumerate is a pack Arc
-                # cannot turn every file of *off*, so it is never started — and
-                # that is a fact about this torrent's contents, not about
-                # today, so it is remembered.
-                await _abandon(ctx, qbit, torrent, str(exc), permanent=True)
-                refused += 1
-                continue
-            if not listed:
-                # A client that has the metadata and lists no files has not
-                # told Arc anything to act on. Transient, so no tombstone: the
-                # next attempt may well get the list.
-                await _abandon(ctx, qbit, torrent, "the client listed no files", permanent=False)
-                continue
-            if len(listed) > MAX_TORRENT_FILES:
-                await _abandon(
-                    ctx,
-                    qbit,
-                    torrent,
-                    f"{len(listed)} files, over {MAX_TORRENT_FILES}",
-                    permanent=True,
-                )
-                refused += 1
-                continue
-
             plan = batch.plan_files(
                 anime,
                 wanted_for,
@@ -916,10 +1093,39 @@ async def _take_batch(
                 required=episode.number,
                 offset=batch.plan_offset(chosen, offset),
             )
+            if trip is not None:
+                _remember_contents(anime.id, info_hash, plan.episodes)
             if plan.refused_reason is not None:
+                if trip is not None and not chosen.candidate.covers:
+                    # A pack naming no range never claimed this episode, and
+                    # may be exactly right for the next one (FR-A12).
+                    await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=False)
+                    continue
                 await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=True)
                 refused += 1
                 continue
+            if prefer and trip is not None and not chosen.candidate.covers:
+                covered = len(set(plan.wanted) & set(trip.cover))
+                if covered < trip.need:
+                    trip.held[info_hash] = _Held(torrent=torrent, listed=listed)
+                    ctx.log.info(
+                        "a pack holds too few of the trip's episodes; held for the fallback",
+                        extra={"hash": info_hash, "covered": covered, "need": trip.need},
+                    )
+                    continue
+
+            kept = await _lock_targets(ctx.session, episode, plan.wanted, attachable)
+            if kept is None:
+                await _abandon(ctx, qbit, torrent, "the searched episode moved on", permanent=False)
+                continue
+            if kept != set(plan.wanted):
+                plan = batch.plan_files(
+                    anime,
+                    sorted(kept),
+                    listed,
+                    required=episode.number,
+                    offset=batch.plan_offset(chosen, offset),
+                )
 
             await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
             await qbit.file_priority(info_hash, plan.wanted_indices, FILE_ON)
@@ -939,6 +1145,14 @@ async def _take_batch(
                 continue
 
             await qbit.start([info_hash])
+            taken_for = [
+                target.id
+                for number in plan.wanted
+                if (target := attachable.get(number)) is not None
+            ]
+            if taken_for and await trip_only_episode_ids(ctx.session, taken_for) == set(taken_for):
+                # Every episode this pack was taken for is a trip's (FR-A12).
+                await _to_the_back(ctx, qbit, info_hash)
 
             await batch.record_files(ctx.session, torrent, plan)
             for number in plan.wanted:
@@ -973,6 +1187,166 @@ async def _take_batch(
             )
             return BatchAttempt(started=True, refused=refused)
     return BatchAttempt(started=False, refused=refused)
+
+
+async def _to_the_back(ctx: JobContext, qbit: QbitClient, info_hash: str) -> None:
+    """``torrents/bottomPrio`` for a torrent taken only for a trip (FR-A12).
+
+    A nicety, never a failure: the torrent is added and will download either
+    way, so a client that refuses or cannot be reached for this one call is
+    logged and the search carries on. Raising here would retry a search whose
+    add already happened.
+    """
+    try:
+        await qbit.bottom_prio(info_hash)
+    except QbitError as exc:
+        ctx.log.warning(
+            "could not move a trip torrent to the bottom of the queue",
+            extra={"hash": info_hash, "error": str(exc)},
+        )
+
+
+async def _to_the_top(ctx: JobContext, qbit: QbitClient, info_hash: str) -> None:
+    """``torrents/topPrio``: :func:`_to_the_back` undone. Never a failure either."""
+    try:
+        await qbit.top_prio(info_hash)
+    except QbitError as exc:
+        ctx.log.warning(
+            "could not move a torrent back to the top of the queue",
+            extra={"hash": info_hash, "error": str(exc)},
+        )
+
+
+async def _streams_from_trip_pack(session: AsyncSession, rows: Sequence[TorrentFile]) -> bool:
+    """Whether a pack a trip was served from now has a file somebody streams.
+
+    True when an in-flight wanted file is for an episode that is not
+    trip-only, and some file of the pack is for an episode a trip has asked
+    for (a ``trip_episodes`` row, or a trip want) — the packs
+    :func:`_take_batch` may have sent to the back. A pack no trip ever touched
+    keeps its place.
+    """
+    in_flight = {
+        row.episode_id
+        for row in rows
+        if row.wanted and row.completed_at is None and row.episode_id is not None
+    }
+    if not in_flight or in_flight <= await trip_only_episode_ids(session, in_flight):
+        return False
+    every = {row.episode_id for row in rows if row.episode_id is not None}
+    touched = await session.scalar(
+        select(TripEpisode.episode_id).where(TripEpisode.episode_id.in_(every)).limit(1)
+    )
+    if touched is None:
+        touched = await session.scalar(
+            select(Want.episode_id).where(Want.episode_id.in_(every), Want.trip.is_(True)).limit(1)
+        )
+    return touched is not None
+
+
+@register(QBIT_TOP)
+async def qbit_top(ctx: JobContext) -> None:
+    """Move an episode's torrent back to the top once it is not trip-only (FR-A12).
+
+    Queued by the reconciler for a ``downloading`` episode that stopped being
+    trip-only. The torrent it is downloading from — its single, or the pack
+    holding its wanted file — may have been sent to the back for the trip;
+    somebody wants it for streaming now. Idempotent: a second move to the top
+    is the same place.
+    """
+    episode_id = int(ctx.payload["episode_id"])
+    episode = await ctx.session.get(Episode, episode_id)
+    if episode is None or episode.state is not EpisodeState.DOWNLOADING:
+        return
+    if episode_id in await trip_only_episode_ids(ctx.session, [episode_id]):
+        return
+    live = or_(Torrent.qbit_state.is_(None), Torrent.qbit_state.not_in(DECIDED_STATES))
+    hashes = set(
+        (
+            await ctx.session.scalars(
+                select(Torrent.info_hash).where(Torrent.episode_id == episode_id, live)
+            )
+        ).all()
+    )
+    hashes.update(
+        (
+            await ctx.session.scalars(
+                select(Torrent.info_hash)
+                .join(TorrentFile, TorrentFile.torrent_id == Torrent.id)
+                .where(
+                    TorrentFile.episode_id == episode_id,
+                    TorrentFile.wanted.is_(True),
+                    live,
+                )
+            )
+        ).all()
+    )
+    if not hashes:
+        return
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        for info_hash in sorted(hashes):
+            await _to_the_top(ctx, qbit, info_hash)
+    ctx.log.info(
+        "a torrent no longer only for a trip was moved up",
+        extra={"episode_id": episode_id, "hashes": sorted(hashes)},
+    )
+
+
+async def _drop_held(ctx: JobContext, trip: TripPass | None) -> None:
+    """Delete the packs a trip's search held and did not take (FR-A12).
+
+    Still stopped, so they have fetched nothing; their reserved rows go with
+    them, so a later search may consider them afresh.
+    """
+    if trip is None or not trip.held:
+        return
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        for held in list(trip.held.values()):
+            await _abandon(
+                ctx, qbit, held.torrent, "held for a trip and not taken", permanent=False
+            )
+    trip.held.clear()
+
+
+def trip_pack_need(wanted: int, attachable: int) -> int | None:
+    """How many trip episodes a preferred pack must hold, or ``None`` (FR-A12).
+
+    ``wanted`` is the show's trip-only episodes still to be fetched (``wanted``
+    or ``searching``); ``attachable`` is how many of them this search may take
+    a pack for. Below :data:`~arc.services.trips.names.TRIP_BATCH_MIN` wanted
+    there is no preference and the ordinary search runs; at or above it a pack
+    must cover ``min(TRIP_BATCH_MIN, attachable)``. With fewer than two
+    attachable there is no preference either: one file is a single's job.
+    """
+    if wanted < TRIP_BATCH_MIN or attachable < 2:
+        return None
+    return min(TRIP_BATCH_MIN, attachable)
+
+
+async def _trip_pack_cover(
+    session: AsyncSession,
+    episode: Episode,
+    anime: Anime,
+    wanted: Sequence[Episode],
+    attachable: Mapping[int, Episode],
+) -> tuple[tuple[int, ...], int] | None:
+    """The trip episodes a preferred pack is measured against, and the need.
+
+    ``None`` — the ordinary search, unchanged — unless this episode is
+    trip-only, the show is finished (:func:`~arc.services.acquisition.nyaa.deep_search`),
+    it is not a film, and :func:`trip_pack_need` says enough trip episodes are
+    still wanted. The caller has already checked ``batch_fallback``.
+    """
+    if not nyaa_module.deep_search(anime) or nyaa_module.is_single(anime):
+        return None
+    pending = [row for row in wanted if row.state in SEARCHABLE]
+    pending_ids = {row.id for row in pending} | {episode.id}
+    trip_only = await trip_only_episode_ids(session, pending_ids)
+    if episode.id not in trip_only:
+        return None
+    cover = tuple(sorted(number for number, row in attachable.items() if row.id in trip_only))
+    need = trip_pack_need(len(trip_only), len(cover))
+    return None if need is None else (cover, need)
 
 
 @register(SEARCH_RELEASE)
@@ -1048,6 +1422,16 @@ async def search_release(ctx: JobContext) -> None:
     # has claims for — those bytes are in flight and stranding them is not what
     # a kill switch is for.
     fallback = await batch_fallback(ctx.session)
+    if (
+        fallback
+        and nyaa_module.deep_search(anime)
+        and not nyaa_module.is_single(anime)
+        and episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
+    ):
+        # A trip queues its searches all at once (FR-A12), and two of them
+        # choosing, adding and claiming one pack together is a race: held until
+        # this job commits, so the next sibling's attach below sees the pack.
+        await ctx.session.execute(select(func.pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime.id)))
     if fallback:
         # Before Nyaa is asked anything at all (FR-A11): a batch Arc already
         # has may hold this episode's file, and turning that file on is the
@@ -1100,11 +1484,39 @@ async def search_release(ctx: JobContext) -> None:
     # that is already downloading, or that has a search of its own in flight,
     # would be preferring it for something it will never be asked to do. Empty
     # is neutral, so nothing about a single's search changes.
-    attachable = dict(await _attachable(ctx.session, await _wanted_episodes(ctx.session, anime.id)))
+    wanted = await _wanted_episodes(ctx.session, anime.id)
+    attachable = dict(await _attachable(ctx.session, wanted))
     # The episode this job is *for* is always one of them, whatever the query
     # above made of it: it is ``searching`` by now and its want was checked at
     # the top.
     attachable.setdefault(episode.number, episode)
+    # A trip on a finished show prefers one pack to a dozen singles (FR-A12,
+    # owner 2026-10-05): the batch forms are asked first and a pack whose file
+    # list holds enough of the trip's episodes is taken there and then. Gated
+    # by the same kill switch as every other pack; ``None`` for everything
+    # else, which then searches exactly as it always did.
+    trip_pack = await _trip_pack_cover(ctx.session, episode, anime, wanted, attachable)
+    prefer: PackPreference | None = None
+    trip: TripPass | None = None
+    if fallback and trip_pack is not None:
+        trip = TripPass(cover=trip_pack[0], need=trip_pack[1])
+        trip_pass = trip
+
+        async def take_pack(packs: list[Ranked]) -> bool:
+            attempt = await _take_batch(
+                ctx,
+                episode,
+                anime,
+                packs,
+                attachable=attachable,
+                offset=offset,
+                trip=trip_pass,
+                prefer=True,
+            )
+            trip_pass.refused += attempt.refused
+            return attempt.started
+
+        prefer = PackPreference(take=take_pack, numbers=trip_pass.cover, need=trip_pass.need)
     found = await search_for_episode(
         nyaa,
         anime,
@@ -1112,6 +1524,7 @@ async def search_release(ctx: JobContext) -> None:
         rules,
         offset=offset,
         wanted_numbers=tuple(sorted(attachable)),
+        prefer=prefer,
     )
     ranked = found.ranked
     # Every attempt, before anything is decided about it: the pair of numbers
@@ -1141,7 +1554,11 @@ async def search_release(ctx: JobContext) -> None:
             "kept": found.kept,
         },
     )
+    if found.pack_taken:
+        await _drop_held(ctx, trip)
+        return
 
+    preferred_refused = trip.refused if trip is not None else 0
     chosen = await _pick(ctx, episode, ranked) if ranked else None
     if chosen is None:
         # No single, and nothing left to try. A **finished** show may still
@@ -1151,8 +1568,9 @@ async def search_release(ctx: JobContext) -> None:
         # any of them and the ordinary retry below is what they take.
         if found.batches and fallback:
             attempt = await _take_batch(
-                ctx, episode, anime, found.batches, attachable=attachable, offset=offset
+                ctx, episode, anime, found.batches, attachable=attachable, offset=offset, trip=trip
             )
+            await _drop_held(ctx, trip)
             if attempt.started:
                 return
             # Packs were offered and at least one was read and refused: a
@@ -1164,23 +1582,35 @@ async def search_release(ctx: JobContext) -> None:
                 ctx,
                 episode,
                 now=now,
-                reason=batch.UNREADABLE_BATCH if attempt.refused else NO_RELEASE,
+                reason=(
+                    batch.UNREADABLE_BATCH if attempt.refused or preferred_refused else NO_RELEASE
+                ),
             )
             return
+        await _drop_held(ctx, trip)
         if found.batches:
             ctx.log.info(
                 "batch fallback is off; the batches on offer were not considered",
                 extra={"episode_id": episode.id, "batches": len(found.batches)},
             )
-        await _schedule_retry(ctx, episode, now=now)
+        await _schedule_retry(
+            ctx,
+            episode,
+            now=now,
+            reason=batch.UNREADABLE_BATCH if preferred_refused else NO_RELEASE,
+        )
         return
 
+    await _drop_held(ctx, trip)
     torrent = await _record_torrent(ctx.session, episode, chosen)
 
     async with QbitClient.from_settings(ctx.settings) as qbit:
         save_path = await qbit.add(
             chosen.item.magnet, episode_id=episode.id, info_hash=chosen.item.info_hash
         )
+        if not await needs_rendition(ctx.session, episode.id):
+            # Taken only for a trip (FR-A12): behind everything else.
+            await _to_the_back(ctx, qbit, chosen.item.info_hash)
 
     torrent.qbit_state = "added"
     torrent.progress = 0.0
@@ -2308,6 +2738,10 @@ async def qbit_reselect(ctx: JobContext) -> None:
             await qbit.stop([info_hash])
         elif any(row.completed_at is None for row in wanted):
             await qbit.start([info_hash])
+            if await _streams_from_trip_pack(ctx.session, rows):
+                # A trip's pack sent to the back, and somebody now streams from
+                # it (FR-A12): back to the top.
+                await _to_the_top(ctx, qbit, info_hash)
         else:
             # Kept, and there is nothing left to fetch: every file somebody is
             # waiting for is already on the disk. Stopped rather than started,

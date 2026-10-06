@@ -150,6 +150,8 @@ class RetainedOut(BaseModel):
     sources: int
     #: HLS output, measured on disk.
     renditions: int
+    #: The small offline copies (FR-P6), from ``offline_copies.size``.
+    offline_bytes: int = 0
     total: int
 
 
@@ -199,7 +201,12 @@ async def disk(session: SessionDep, settings: SettingsDep) -> DiskOut:
     data_dir = await asyncio.to_thread(_disk_usage, settings.data_dir)
     return DiskOut(
         data_dir=data_dir,
-        retained=RetainedOut(sources=usage.sources, renditions=usage.renditions, total=usage.total),
+        retained=RetainedOut(
+            sources=usage.sources,
+            renditions=usage.renditions,
+            offline_bytes=usage.offline_bytes,
+            total=usage.total,
+        ),
         episodes_retained=usage.episodes,
     )
 

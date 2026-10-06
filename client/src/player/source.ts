@@ -22,11 +22,23 @@ export type PlaySource =
   /** Rebuilt from a download whose file then could not be read: nothing to play. */
   | { kind: 'none' }
 
-/** Pure: the file when there is one, else the stream when there is one. */
+/**
+ * Pure: the file when there is one, else the stream when there is one. An
+ * `offline_only` episode (M19) and a payload rebuilt from a download have no
+ * stream; a null or empty `playlist_url` never becomes a source.
+ */
 export function chooseSource(info: PlayInfo, localUrl: string | null): PlaySource {
   if (localUrl !== null) return { kind: 'file', url: localUrl }
-  if (info.from_device === true || info.playlist_url === '') return { kind: 'none' }
-  return { kind: 'stream', url: info.playlist_url }
+  const playlist = info.playlist_url
+  if (
+    info.from_device === true ||
+    info.offline_only === true ||
+    playlist === null ||
+    playlist === ''
+  ) {
+    return { kind: 'none' }
+  }
+  return { kind: 'stream', url: playlist }
 }
 
 export interface LocalCopy {

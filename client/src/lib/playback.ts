@@ -59,10 +59,20 @@ export interface EpisodeRef {
 export interface PlayInfo {
   episode: EpisodeOut
   anime: AnimeSummary
-  /** Always under `/media/…`, behind the session cookie (spec §5.4). */
-  playlist_url: string
+  /**
+   * Always under `/media/…`, behind the session cookie (spec §5.4). **Null**
+   * for an `offline_only` episode (M19): there is nothing to stream, and it
+   * must never reach a `<video>` as a source.
+   */
+  playlist_url: string | null
   /** Seconds, from the rendition — the fallback when the media has none yet. */
   duration: number
+  /**
+   * A trip episode that lives only on this account's devices (FR-A12, M19):
+   * not ready, no rendition, `playlist_url` null. The player plays the
+   * device's copy, or says to keep it offline first. Optional on the wire.
+   */
+  offline_only?: boolean
   /** Seconds to resume from, or null when there is nothing to resume. */
   resume_position: number | null
   previous: EpisodeRef | null
@@ -70,7 +80,7 @@ export interface PlayInfo {
   /**
    * Client-side only: this payload was rebuilt on the device from a download
    * (FR-S9) because the server could not be reached, or no longer has the
-   * rendition. `playlist_url` is then empty and the episode plays from its file.
+   * rendition. `playlist_url` is then null and the episode plays from its file.
    */
   from_device?: boolean
 }
@@ -195,13 +205,44 @@ export function offlinePlayInfo(
   return {
     episode,
     anime: record.snapshot.anime,
-    playlist_url: '',
+    playlist_url: null,
     duration: record.snapshot.duration,
     resume_position: local === null ? null : local.position_s,
     previous: refOf(previous),
     next: refOf(next),
     from_device: true,
   }
+}
+
+/**
+ * Previous / next, preferring the device (FR-S9, M19): where the server's
+ * neighbour cannot be played — not ready (a trip-only episode is never
+ * ready), or none — the nearest downloaded episode of the show that way is
+ * offered instead. A ready server neighbour is kept: it is the adjacent one.
+ */
+export function withDeviceNeighbours(info: PlayInfo, records: Downloads): PlayInfo {
+  if (info.from_device === true) return info
+  const anime = info.anime.id
+  const number = info.episode.number
+  const kept = Object.values(records)
+    .filter((record) => record.animeId === anime && record.state === 'downloaded')
+    .sort((a, b) => a.snapshot.episode.number - b.snapshot.episode.number)
+  if (kept.length === 0) return info
+  const onDevice = (episodeId: number | undefined) =>
+    kept.find((record) => record.episodeId === episodeId) ?? null
+  let previous = info.previous
+  let next = info.next
+  if (previous === null || !previous.ready) {
+    const exact = onDevice(previous?.id)
+    const nearest = [...kept].reverse().find((record) => record.snapshot.episode.number < number)
+    previous = refOf(exact ?? nearest ?? null) ?? previous
+  }
+  if (next === null || !next.ready) {
+    const exact = onDevice(next?.id)
+    const nearest = kept.find((record) => record.snapshot.episode.number > number)
+    next = refOf(exact ?? nearest ?? null) ?? next
+  }
+  return previous === info.previous && next === info.next ? info : { ...info, previous, next }
 }
 
 export interface PlayInfoDeps {
@@ -230,8 +271,9 @@ export async function loadPlayInfo(
   episodeId: number,
   deps: PlayInfoDeps = defaultPlayInfoDeps(),
 ): Promise<PlayInfo> {
+  let answer: PlayInfo
   try {
-    return await deps.fetch(episodeId)
+    answer = await deps.fetch(episodeId)
   } catch (error) {
     if (!isUnreachable(error) && !isStatus404(error)) throw error
     await deps.manager.whenHydrated()
@@ -241,6 +283,11 @@ export async function loadPlayInfo(
     const local = await deps.recall(owner, episodeId)
     return offlinePlayInfo(record, deps.manager.getSnapshot(), local, deps.pending())
   }
+  const neighbourMissing =
+    answer.previous === null || !answer.previous.ready || answer.next === null || !answer.next.ready
+  if (!neighbourMissing) return answer
+  await deps.manager.whenHydrated()
+  return withDeviceNeighbours(answer, deps.manager.getSnapshot())
 }
 
 function isStatus404(error: unknown): boolean {

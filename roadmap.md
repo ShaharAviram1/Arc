@@ -1574,7 +1574,7 @@ and Audiosey share the host.
       the server stopped and let `/api` fail through to the network. Still the
       owner's to check on an iPad: the hint, Add to Home Screen, touch sizes,
       the 820 px toolbar.
-- [ ] **In-app offline** (step 2): the installed app keeps chosen episodes on
+- [x] **In-app offline** (step 2): the installed app keeps chosen episodes on
       the device, plays them in Arc's own player with no connection, and sends
       progress (and so MAL) when it is back online. Design ported from
       Audiosey (owner, 2026-10-04).
@@ -1638,6 +1638,49 @@ and Audiosey share the host.
       be removed from the player. Verified 2026-10-05 (orchestrator): client
       suite 982, lint clean, build ok; the Writer's WebKit screenshots of the
       row and the player at iPad landscape and portrait read.
+
+### M19 — Trips and small offline copies
+Asked for by the owner on 2026-10-05 after the iPad check of M18: "if i want
+to download the whole season for a flight, i should have the ability", and a
+700 MB episode is too big to keep. Plan: `notes/design/m19-trips-offline-copies-plan.md`
+(Plan agent, owner decisions applied). This relaxes "never fetch whole
+seasons" for a bounded, explicitly requested trip (FR-A12).
+- [x] Small offline copy on the server: `offline_encode`, `offline.mp4`
+      (FR-P6). 720p H.264 CRF 26 by default — measured 2026-10-05 at about a
+      quarter of the rendition (97 MB against 369 MB on the sample, VMAF 90.4).
+- [x] Small copy on the device: Keep offline uses it, "Preparing on the
+      server", full-size fallback, codec check (FR-S9).
+- [x] Trips on the server: request, cancel, acquisition, trip-only episodes
+      that never become streamable, source deleted once the copy is made
+      (FR-A12).
+- [x] Trip packs for finished shows (FR-A4, FR-A11).
+- [x] Delivery and deletion: confirm, settle, expiry (FR-T7).
+- [x] Trips on the device: Show control, auto-keep, Downloads group.
+- **DoD:** a 12-episode trip of a finished show takes one pack with 12 files
+  selected; trip-only episodes never show as ready or play from the server;
+  the iPad keeps them with Arc open, plays them offline and syncs progress and
+  MAL on reconnect; the server holds no trip bytes after confirmation; the demo
+  account is refused; the copy is about a quarter of the rendition, measured;
+  suites green, lint clean, docs current; verified on dev and on a real iPad by
+  the owner; deployed.
+- Verified 2026-10-06 (orchestrator). Each of the six tasks went Writer →
+  Reviewer → fix loop (T1: 7 should-fix; T3: 1 blocker — a trip could flip and
+  delete a held show's own want — plus 7; T4: 6; T5: 4; T2/T6: validated by
+  the orchestrator). Owner decisions during the build: H.264 default; a
+  trip-only episode's source goes as soon as its copy is made; cap 50; the
+  look-ahead does NOT skip delivered trip episodes ("what if I … wanna watch
+  it on my Mac?"); a copy is held while a device is still fetching it and a
+  trip ends at its last confirmation. Final pass on the finished tree: server
+  4213, client 1103, lint clean, build ok. Live in WebKit (iPad profile) on
+  the isolated check environment: Keep offline on a ready episode → the
+  server made a 114.9 MB 720p copy (against a 455 MB rendition), the device
+  took it byte-identical and played it offline with subtitles intact; a
+  2-episode trip → "preparing" 0→97 % → available → auto-kept and confirmed
+  by the device within 3 s → settle kept the copy of the ready episode as
+  designed → cancel left the delivered row and cancelled the pending one.
+  Not exercised live (tests only, Reviewer-probed): fetching trip episodes
+  from torrents, the pack selection, and the deletion of a trip-only source.
+  Deploy carries migrations 2abfab654407 and 811a128415cc.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator

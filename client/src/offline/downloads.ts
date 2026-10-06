@@ -8,11 +8,25 @@
  * | state | what the viewer sees |
  * |---|---|
  * | (no record) | "Keep offline" |
+ * | `preparing` | "Preparing on the server", with the server's percent when known |
  * | `queued` | waiting for the download ahead of it |
  * | `downloading` | a bar and `n %` |
  * | `paused` | why (`by-hand`, `interrupted`, `network`, `elsewhere`), and Resume |
  * | `downloaded` | the size, and a way to delete it |
- * | `failed` | why (`quota`, `auth`, `gone`, `size`, `error`, `evicted`, `unreadable`), and Try again |
+ * | `failed` | why (`quota`, `auth`, `gone`, `size`, `error`, `evicted`, `unreadable`, `unprepared`), and Try again |
+ *
+ * **Which copy** (M19, owner 2026-10-05). Keep offline asks the server for its
+ * *small copy* first (`POST /api/episodes/{id}/offline`): `available` → the
+ * copy's `url` is downloaded (`variant: 'small'`); `queued` / `preparing` →
+ * the record is `preparing` and the manager polls `GET …/offline` every
+ * {@link POLL_MS} while the page is visible (and on every nudge) until it is
+ * `available`; `failed` → a failed record whose Try again asks again; `409
+ * source_gone` or `unavailable` → the full-size `download_url` (`variant:
+ * 'full'`). A device whose `<video>` says it cannot play the copy's codecs
+ * takes the full-size file too. A request with no response is `paused` /
+ * `network` and asked again by the same ticker — never dropped. A record that
+ * has not been given a URL yet (`url: null`) names no bytes on disk. Each copy
+ * has its own file name (`opfs.ts`), so the two never touch each other.
  *
  * `paused` / `network` is a message, not a stop: the worker keeps retrying and
  * the next chunk that lands puts the record back to `downloading`.
@@ -22,8 +36,8 @@
  * **Records belong to a user.** Each is keyed by (user, episode) and only the
  * signed-in owner's are in the snapshot; another account on the same iPad sees
  * none of them and cannot play them. The file is named by episode, so two
- * accounts that keep the same episode share its bytes, and it is deleted only
- * when the last record naming it goes.
+ * accounts that keep the same copy of an episode share its bytes, and it is
+ * deleted only when the last record naming it goes.
  *
  * **A file is never touched while the worker may hold it.** From the moment a
  * pause is sent until the worker's terminal message for that file (which the
@@ -33,7 +47,8 @@
  * orphan is never resumed into, and the launch sweep removes any orphan left.
  */
 
-import { apiFetch } from '@/lib/api'
+import { apiFetch, ApiError, isUnreachable } from '@/lib/api'
+import type { OfflineCopyOut } from '@/lib/anime'
 import type { PlayInfo } from '@/lib/playback'
 import { forgetCover, rememberCover } from '@/offline/cache'
 import {
@@ -50,15 +65,19 @@ import {
   removeFile,
   requestPersistence,
   revokeCurrent,
+  type CopyVariant,
 } from '@/offline/opfs'
 import { openStore, type KeyStore } from '@/offline/store'
 
-export type DownloadState = 'queued' | 'downloading' | 'paused' | 'downloaded' | 'failed'
+export type DownloadState =
+  'preparing' | 'queued' | 'downloading' | 'paused' | 'downloaded' | 'failed'
+
+export type { CopyVariant }
 
 export type PauseReason = 'by-hand' | 'interrupted' | 'network' | 'elsewhere'
 
 /** Failures the manager itself decides, beside the worker's. */
-export type DeviceFailure = 'evicted' | 'unreadable'
+export type DeviceFailure = 'evicted' | 'unreadable' | 'unprepared'
 
 export type DownloadReason = PauseReason | FailCode | DeviceFailure
 
@@ -73,10 +92,40 @@ export interface DownloadRecord {
   userId: number
   episodeId: number
   animeId: number
-  /** The OPFS file name. Derived from the episode id, never from input. */
+  /** The OPFS file name. Derived from the episode id and the variant, never from input. */
   name: string
-  /** The server's `download_url` for the episode. */
-  url: string
+  /**
+   * Where the bytes come from: the small copy's `url`, or the episode's
+   * `download_url`. `null` while the server has not yet said where the small
+   * copy is — such a record names no bytes on disk.
+   */
+  url: string | null
+  /** Which copy this is (M19). Records from before it are `full`. */
+  variant: CopyVariant
+  /** The episode's `download_url`, kept so a small-copy wish can fall back to it. */
+  fullUrl?: string | null
+  /** The server's progress making the small copy, 0–1, while `preparing`; null when unknown. */
+  serverProgress?: number | null
+  /**
+   * The trip this copy is kept for (M19 T6, FR-A12): set when the auto-keep
+   * hook starts it, or adopts a record the device already had for one of the
+   * trip's episodes. Its arrival is confirmed to the server, and its deletion
+   * reported, under this trip.
+   */
+  tripId?: number
+  /**
+   * Whether the server has heard that this trip copy is on the device:
+   * `pending` from the worker's `done` until `POST …/delivered` succeeds
+   * (retried on launch, reconnect, return to the screen and every hook tick),
+   * then `done`.
+   */
+  confirm?: 'pending' | 'done'
+  /**
+   * The small copy vanished from the server mid-download (a 404) and the
+   * server was asked again by itself. Once per record until a download next
+   * finishes, so a copy that keeps vanishing ends at "gone" instead of looping.
+   */
+  reasked?: boolean
   state: DownloadState
   /** Bytes on the device. */
   bytes: number
@@ -101,8 +150,26 @@ export type Downloads = Readonly<Record<number, DownloadRecord>>
 
 export interface StartInput {
   episodeId: number
-  /** The `download_url` the show payload carried for the episode. */
+  /**
+   * The `download_url` the show payload carried for the episode: the
+   * fallback when the server cannot make a small copy.
+   */
   url: string
+}
+
+/**
+ * A trip episode whose small copy is waiting on the server (M19 T6): the
+ * auto-keep hook hands it over. No `/offline` request is made — the server
+ * answers that route for a `ready` episode only, and a trip-only episode is
+ * never ready — the copy's own `url` is downloaded straight away.
+ */
+export interface TripCopyInput {
+  episodeId: number
+  tripId: number
+  /** The copy's URL (`/media/{id}/offline.mp4`). */
+  url: string
+  /** The full-size `download_url`, when the episode is also ready; else none. */
+  fullUrl?: string | null
 }
 
 /** What the manager needs of a worker, so a test can hand it a fake. */
@@ -133,6 +200,140 @@ export const MESSAGES: Record<DownloadReason, string> = {
   error: 'The download stopped. Try again.',
   evicted: 'Removed by the device to free space — Keep offline again.',
   unreadable: 'This download would not play. Try again to download it afresh.',
+  unprepared: 'Arc could not make the smaller copy for this device. Try again.',
+}
+
+/** Which copy is on the device, in words: the control's menu (M19). */
+export const COPY_LABEL: Record<CopyVariant, string> = {
+  small: 'Smaller copy for this device',
+  full: 'Full-size copy',
+}
+
+/** The same, quietly, beside the size on the Downloads page. */
+export const COPY_NOTE: Record<CopyVariant, string> = {
+  small: 'smaller copy',
+  full: 'full size',
+}
+
+/** How often a `preparing` record asks the server, while the page is on screen. */
+export const POLL_MS = 20_000
+
+/**
+ * Whether this device's `<video>` can play a copy with these RFC 6381 codecs
+ * (`avc1.640028`, `hvc1.1.6.L93.B0`). An empty answer from `canPlayType` is a
+ * "no"; `maybe` and `probably` are yeses. A copy that names no codecs is
+ * taken on trust.
+ */
+export function codecsPlayable(
+  codecs: string | null,
+  canPlayType: (type: string) => string,
+): boolean {
+  if (codecs === null || codecs.trim() === '') return true
+  return canPlayType(`video/mp4; codecs="${codecs.trim()}"`) !== ''
+}
+
+/** This device's `<video>.canPlayType`; `''` (no) where there is no DOM. */
+export function canPlayTypeHere(type: string): string {
+  return defaultCanPlayType(type)
+}
+
+function defaultCanPlayType(type: string): string {
+  try {
+    return document.createElement('video').canPlayType(type)
+  } catch {
+    return ''
+  }
+}
+
+function defaultRequestCopy(episodeId: number): Promise<OfflineCopyOut> {
+  return apiFetch<OfflineCopyOut>(`/api/episodes/${String(episodeId)}/offline`, {
+    method: 'POST',
+  })
+}
+
+function defaultPollCopy(episodeId: number): Promise<OfflineCopyOut> {
+  return apiFetch<OfflineCopyOut>(`/api/episodes/${String(episodeId)}/offline`)
+}
+
+function defaultConfirmDelivered(
+  tripId: number,
+  episodeId: number,
+  etag: string | null,
+): Promise<unknown> {
+  return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
+    method: 'POST',
+    body: JSON.stringify({ etag }),
+  })
+}
+
+function defaultReleaseDelivered(tripId: number, episodeId: number): Promise<unknown> {
+  return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
+    method: 'DELETE',
+  })
+}
+
+/**
+ * A confirmation the server answered with a final no: the trip or the episode
+ * is not this account's (404), or this account may not keep copies (403).
+ * Nothing more can be told, so the record stops asking.
+ */
+function confirmIsFinal(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 404 || error.status === 403)
+}
+
+/** The note that says this account took a trip episode off the device by hand. */
+function declineKey(userId: number, tripId: number, episodeId: number): string {
+  return `${DECLINE_PREFIX}${String(userId)}:${String(tripId)}:${String(episodeId)}`
+}
+
+const DECLINE_PREFIX = 'trip-skip:'
+
+function defaultIsVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
+/**
+ * The refusals after which the device takes the full-size file instead: the
+ * server no longer has the source to make a copy from (409 `source_gone`), is
+ * short of disk (409 `storage_held`), or has too many copies waiting already
+ * (429 `copy_queue_full`).
+ */
+function takesFullInstead(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  const body = error.body
+  const detail =
+    typeof body === 'object' && body !== null ? (body as { detail?: unknown }).detail : undefined
+  if (error.status === 409) return detail === 'source_gone' || detail === 'storage_held'
+  if (error.status === 429) return detail === 'copy_queue_full'
+  return false
+}
+
+/** A record the server has not yet given a URL: it names no bytes on disk. */
+function holdsNoFile(record: DownloadRecord): boolean {
+  return record.url === null
+}
+
+/**
+ * A trip record with no URL yet waits for the auto-keep hook, not for the
+ * `/offline` routes: those answer for a `ready` episode only, and a trip-only
+ * episode never is (they would say 404, which is not "gone" here).
+ */
+function waitsForTrip(record: DownloadRecord): boolean {
+  return record.tripId !== undefined && record.url === null
+}
+
+/** A record waiting on the server: being made, or a request that found no network. */
+function awaitingServer(record: DownloadRecord): boolean {
+  return (
+    record.state === 'preparing' ||
+    (record.state === 'paused' && record.reason === 'network' && record.url === null)
+  )
+}
+
+/** A record from before M19 (no `variant`) is the full-size file. */
+function normalise(record: DownloadRecord): DownloadRecord {
+  const variant: CopyVariant = record.variant === 'small' ? 'small' : 'full'
+  return record.variant === variant ? record : { ...record, variant }
 }
 
 const RESTARTED = 'Arc re-encoded this episode, so the download started again.'
@@ -169,6 +370,23 @@ export interface ManagerOptions {
   keepCover?: (userId: number, animeId: number, url: string | null) => Promise<void>
   dropCover?: (userId: number, animeId: number) => Promise<void>
   now?: () => number
+  /** `POST /api/episodes/{id}/offline`: ask for the small copy. */
+  requestCopy?: (episodeId: number) => Promise<OfflineCopyOut>
+  /** `GET /api/episodes/{id}/offline`: how the small copy is getting on. */
+  pollCopy?: (episodeId: number) => Promise<OfflineCopyOut>
+  /** `HTMLMediaElement.canPlayType`, for the codec check. */
+  canPlayType?: (type: string) => string
+  /** Whether the page is on screen; polling waits while it is not. */
+  isVisible?: () => boolean
+  /** `POST /api/trips/{id}/episodes/{eid}/delivered {etag}` (M19 T6). */
+  confirmDelivered?: (tripId: number, episodeId: number, etag: string | null) => Promise<unknown>
+  /** `DELETE /api/trips/{id}/episodes/{eid}/delivered`: the device deleted its copy. */
+  releaseDelivered?: (tripId: number, episodeId: number) => Promise<unknown>
+  /**
+   * Where the trip episodes taken off the device by hand are remembered, so
+   * the auto-keep hook does not fetch them again (IndexedDB `player`).
+   */
+  notes?: KeyStore
 }
 
 function defaultWorker(): WorkerLike {
@@ -238,6 +456,17 @@ export class DownloadManager {
   private readonly keepCover: (userId: number, animeId: number, url: string | null) => Promise<void>
   private readonly dropCover: (userId: number, animeId: number) => Promise<void>
   private readonly now: () => number
+  private readonly requestCopy: (episodeId: number) => Promise<OfflineCopyOut>
+  private readonly pollCopy: (episodeId: number) => Promise<OfflineCopyOut>
+  private readonly canPlayType: (type: string) => string
+  private readonly isVisible: () => boolean
+  private readonly confirmDelivered: (
+    tripId: number,
+    episodeId: number,
+    etag: string | null,
+  ) => Promise<unknown>
+  private readonly releaseDelivered: (tripId: number, episodeId: number) => Promise<unknown>
+  private readonly notes: KeyStore
 
   private worker: WorkerLike | null = null
   /** Every user's records on this device, by `user:episode`. */
@@ -262,6 +491,14 @@ export class DownloadManager {
   private hydrated: Promise<void> | null = null
   /** Episodes whose payload is being fetched, so a double tap starts one download. */
   private starting = new Set<string>()
+  /** The server request in flight per key, by a token; a pause or delete forgets it. */
+  private asking = new Map<string, number>()
+  private asks = 0
+  private ticker: ReturnType<typeof setInterval> | null = null
+  /** Trip confirmations in flight, by key, so a tick does not send a second. */
+  private confirming = new Set<string>()
+  /** Trip episodes taken off the device by hand: `trip-skip:<user>:<trip>:<episode>`. */
+  private declined = new Set<string>()
 
   constructor(options: ManagerOptions = {}) {
     this.store = options.store ?? openStore('downloads')
@@ -277,6 +514,13 @@ export class DownloadManager {
       options.keepCover ?? ((userId, animeId, url) => rememberCover(userId, animeId, url))
     this.dropCover = options.dropCover ?? forgetCover
     this.now = options.now ?? (() => Date.now())
+    this.requestCopy = options.requestCopy ?? defaultRequestCopy
+    this.pollCopy = options.pollCopy ?? defaultPollCopy
+    this.canPlayType = options.canPlayType ?? defaultCanPlayType
+    this.isVisible = options.isVisible ?? defaultIsVisible
+    this.confirmDelivered = options.confirmDelivered ?? defaultConfirmDelivered
+    this.releaseDelivered = options.releaseDelivered ?? defaultReleaseDelivered
+    this.notes = options.notes ?? openStore('player')
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -299,6 +543,7 @@ export class DownloadManager {
       }
     }
     this.snapshot = next
+    this.keepPolling()
     for (const listener of this.listeners) listener()
   }
 
@@ -355,6 +600,8 @@ export class DownloadManager {
       for (const record of Object.values(this.snapshot)) {
         if (record.state === 'failed' && record.reason === 'auth') this.resume(record.episodeId)
       }
+      // Whatever of this account waits on the server asks now.
+      this.poll()
     }
     this.pump()
   }
@@ -380,12 +627,26 @@ export class DownloadManager {
   }
 
   private async reconcile(): Promise<void> {
+    try {
+      for (const [key, value] of await this.notes.entries<unknown>()) {
+        if (key.startsWith(DECLINE_PREFIX) && value === true) this.declined.add(key)
+      }
+    } catch {
+      // Nothing remembered: the hook may offer a removed trip episode again.
+    }
     const entries = await this.store.entries<DownloadRecord>()
-    for (const [key, record] of entries) {
-      if (typeof record !== 'object' || record === null) continue
-      const bytes = await this.sizeOf(record.name)
+    for (const [key, stored] of entries) {
+      if (typeof stored !== 'object' || stored === null) continue
+      const record = normalise(stored)
+      // A record with no URL yet names no bytes; whatever is on disk under its
+      // name is somebody else's, or an orphan.
+      const bytes = holdsNoFile(record) ? 0 : await this.sizeOf(record.name)
       let next: DownloadRecord
-      if (record.total > 0 && bytes === record.total) {
+      if (record.state === 'preparing') {
+        // The server carries on making it whether Arc is open or not; the
+        // poll picks it up again.
+        next = { ...record, bytes: 0 }
+      } else if (record.total > 0 && bytes === record.total) {
         next = { ...record, bytes, state: 'downloaded', reason: null, message: null }
       } else if (record.state === 'downloaded') {
         // The device took it back (eviction, or storage cleared). Said, not
@@ -416,11 +677,15 @@ export class DownloadManager {
     for (const record of Object.values(this.snapshot)) {
       if (record.state === 'failed' && record.reason === 'auth') this.resume(record.episodeId)
     }
+    this.poll()
+    this.confirmPending()
   }
 
   /** Remove every episode file no record names: the orphans of an interrupted delete. */
   private async sweep(): Promise<void> {
-    const named = new Set([...this.all.values()].map((record) => record.name))
+    const named = new Set(
+      [...this.all.values()].filter((record) => !holdsNoFile(record)).map((record) => record.name),
+    )
     for (const name of await this.listFiles()) {
       if (!named.has(name) && !this.releasing.has(name)) await this.removeFrom(name)
     }
@@ -486,7 +751,13 @@ export class DownloadManager {
 
   /* --- Doing ------------------------------------------------------------------ */
 
-  /** Start keeping an episode on this device. Needs the network (for its payload). */
+  /**
+   * Start keeping an episode on this device. Needs the network (for its
+   * payload, and to ask the server for its small copy).
+   *
+   * Rejects only when the episode's payload cannot be had; everything after
+   * that — the server's answer, or no answer — lands on the record.
+   */
   async start(input: StartInput): Promise<void> {
     // A tap that lands before the launch-time reconcile must not race it.
     await this.hydrate()
@@ -503,25 +774,22 @@ export class DownloadManager {
     try {
       const info = await this.loadInfo(input.episodeId)
       if (this.owner !== owner || this.all.has(key)) return
-      const name = fileNameFor(input.episodeId)
-      // A delete of this file still waiting for the worker must not now take
-      // the bytes this download is about to write.
-      this.doomed.delete(name)
-      const shared = this.sharedRecord(name)
       const at = this.stamp()
       this.write({
         userId: owner,
         episodeId: input.episodeId,
         animeId: info.anime.id,
-        name,
-        url: input.url,
-        state: 'queued',
-        // Another account's copy is vouched for and is resumed (or confirmed
-        // whole); anything else on disk is an orphan and starts over.
-        bytes: shared === undefined ? 0 : await this.sizeOf(name),
-        total: shared?.total ?? 0,
-        etag: shared?.etag ?? null,
-        fresh: shared === undefined,
+        name: fileNameFor(input.episodeId, 'small'),
+        // Nothing to download until the server says where the copy is.
+        url: null,
+        variant: 'small',
+        fullUrl: input.url,
+        state: 'preparing',
+        serverProgress: null,
+        bytes: 0,
+        total: 0,
+        etag: null,
+        fresh: true,
         reason: null,
         message: null,
         snapshot: { anime: info.anime, episode: info.episode, duration: info.duration },
@@ -531,11 +799,10 @@ export class DownloadManager {
       // Asked on the first download the viewer actually starts.
       void this.persist()
       void this.keepCover(owner, info.anime.id, info.anime.cover_large_url ?? info.anime.cover_url)
-      this.queue.push(key)
-      this.pump()
     } finally {
       this.starting.delete(key)
     }
+    await this.ask(key, 'request')
   }
 
   pause(episodeId: number): void {
@@ -544,15 +811,40 @@ export class DownloadManager {
     const key = keyOfRecord(record)
     if (this.active === key) this.halt(record)
     this.queue = this.queue.filter((queued) => queued !== key)
+    // Stop waiting on the server: the server keeps or expires its copy itself.
+    this.asking.delete(key)
     this.patch(key, { state: 'paused', reason: 'by-hand', message: MESSAGES['by-hand'] })
     this.pump()
   }
 
-  /** Resume a paused download, or try a failed one again. */
+  /**
+   * Resume a paused download, or try a failed one again. A record the server
+   * has not given a URL yet — and a small copy the server no longer has —
+   * asks the server again instead.
+   */
   resume(episodeId: number): void {
     const record = this.snapshot[episodeId]
     if (record === undefined || record.state === 'downloaded') return
     const key = keyOfRecord(record)
+    if (record.state === 'preparing') {
+      if (!this.asking.has(key)) void this.ask(key, 'poll')
+      return
+    }
+    const askAgain =
+      record.url === null ||
+      (record.variant === 'small' && record.state === 'failed' && record.reason === 'gone')
+    if (askAgain && this.active !== key) {
+      this.queue = this.queue.filter((queued) => queued !== key)
+      this.patch(key, {
+        state: 'preparing',
+        url: null,
+        serverProgress: null,
+        reason: null,
+        message: null,
+      })
+      void this.ask(key, 'request')
+      return
+    }
     if (this.active === key) {
       this.nudge()
       return
@@ -568,8 +860,19 @@ export class DownloadManager {
     if (record === undefined) return
     const key = keyOfRecord(record)
     this.queue = this.queue.filter((queued) => queued !== key)
+    this.asking.delete(key)
     this.urls.delete(key)
     this.all.delete(key)
+    if (record.tripId !== undefined) {
+      // A trip episode taken off the device by hand: the server stops counting
+      // it as held (best effort — a lost call only means the window keeps
+      // skipping it until the trip ends), and the auto-keep hook leaves it
+      // alone until "Ask again".
+      const declined = declineKey(record.userId, record.tripId, record.episodeId)
+      this.declined.add(declined)
+      void this.notes.put(declined, true).catch(() => undefined)
+      void this.releaseDelivered(record.tripId, record.episodeId).catch(() => undefined)
+    }
     await this.store.delete(key)
     this.emit()
     if (this.active === key) this.halt(record)
@@ -591,13 +894,16 @@ export class DownloadManager {
 
   /** The app is on screen again, or back online: carry on with whatever was running. */
   nudge(): void {
+    // Whatever is waiting on the server asks now rather than at the next tick.
+    this.poll()
+    this.confirmPending()
     const key = this.active
     const active = key === null ? undefined : this.all.get(key)
-    if (key !== null && active !== undefined) {
+    if (key !== null && active !== undefined && active.url !== null) {
       if (active.state === 'paused' && active.reason === 'network') {
         this.patch(key, { state: 'downloading', reason: null, message: null })
       }
-      this.send(this.commandFor(active))
+      this.send(this.commandFor(active, active.url))
       return
     }
     // A download another window was doing may be free by now.
@@ -628,18 +934,376 @@ export class DownloadManager {
     }
   }
 
+  /* --- The server's small copy ------------------------------------------------- */
+
+  /**
+   * Poll while anything of the signed-in account waits on the server, and not
+   * otherwise. Run on every change ({@link emit}), so it can never be left
+   * ticking for a record that is gone, or idle for one that waits.
+   */
+  private keepPolling(): void {
+    const owner = this.owner
+    const waiting =
+      owner !== null &&
+      [...this.all.values()].some(
+        (record) => record.userId === owner && awaitingServer(record) && !waitsForTrip(record),
+      )
+    if (waiting && this.ticker === null) {
+      this.ticker = setInterval(() => {
+        if (this.isVisible()) this.poll()
+      }, POLL_MS)
+    } else if (!waiting && this.ticker !== null) {
+      clearInterval(this.ticker)
+      this.ticker = null
+    }
+  }
+
+  /** Ask the server about every record of the signed-in account that waits on it. */
+  private poll(): void {
+    for (const record of Object.values(this.snapshot)) {
+      if (!awaitingServer(record) || waitsForTrip(record)) continue
+      const key = keyOfRecord(record)
+      if (this.asking.has(key)) continue
+      void this.ask(key, record.state === 'preparing' ? 'poll' : 'request')
+    }
+  }
+
+  /**
+   * One request to the server about a record's small copy — `POST` to ask for
+   * it, `GET` to see how it is getting on — and what its answer means. Never
+   * rejects. An answer that arrives after a pause, a delete or a change of
+   * account is dropped.
+   */
+  private async ask(key: string, how: 'request' | 'poll'): Promise<void> {
+    const record = this.all.get(key)
+    if (record === undefined) return
+    this.asks += 1
+    const token = this.asks
+    this.asking.set(key, token)
+    let answer: OfflineCopyOut | null = null
+    let refusal: unknown = null
+    try {
+      const found = await (how === 'request'
+        ? this.requestCopy(record.episodeId)
+        : this.pollCopy(record.episodeId))
+      if (typeof found === 'object' && found !== null) answer = found
+      else refusal = new Error('the server sent no answer')
+    } catch (error) {
+      refusal = error
+    }
+    if (this.asking.get(key) !== token) return
+    this.asking.delete(key)
+    const current = this.all.get(key)
+    if (current === undefined || current.userId !== this.owner || !awaitingServer(current)) return
+    try {
+      if (answer === null) await this.refused(key, current, refusal, how)
+      else await this.answered(key, answer, how)
+    } catch (error) {
+      this.fail(key, 'error', `${MESSAGES.error} (${String(error)})`)
+    }
+  }
+
+  private async answered(
+    key: string,
+    copy: OfflineCopyOut,
+    how: 'request' | 'poll',
+  ): Promise<void> {
+    // A copy this device cannot play is no use however small: the full file.
+    if (!codecsPlayable(copy.codecs, this.canPlayType)) {
+      await this.place(key, 'full')
+      return
+    }
+    switch (copy.state) {
+      case 'available':
+        await (copy.url === null ? this.place(key, 'full') : this.place(key, 'small', copy.url))
+        return
+      case 'queued':
+      case 'preparing':
+        this.patch(key, {
+          state: 'preparing',
+          serverProgress: copy.progress,
+          reason: null,
+          message: null,
+        })
+        return
+      case 'none':
+        // Nothing on the server (the wish expired there): ask for it again.
+        this.patch(key, { state: 'preparing', serverProgress: null, reason: null, message: null })
+        if (how === 'poll') await this.ask(key, 'request')
+        return
+      case 'failed':
+        this.patch(key, {
+          state: 'failed',
+          url: null,
+          serverProgress: null,
+          reason: 'unprepared',
+          message: MESSAGES.unprepared,
+        })
+        return
+      case 'unavailable':
+        await this.place(key, 'full')
+        return
+    }
+  }
+
+  private async refused(
+    key: string,
+    record: DownloadRecord,
+    error: unknown,
+    how: 'request' | 'poll',
+  ): Promise<void> {
+    if (takesFullInstead(error)) {
+      await this.place(key, 'full')
+      return
+    }
+    if (error instanceof ApiError && !isUnreachable(error)) {
+      if (error.status === 401 || error.status === 403) {
+        this.fail(key, 'auth')
+      } else if (error.status === 404 && record.tripId !== undefined) {
+        // A trip-only episode: the hook hands over its copy's URL when the
+        // trip says it is available.
+        this.patch(key, { state: 'preparing', url: null, reason: null, message: null })
+      } else if (error.status === 404) {
+        this.fail(key, 'gone')
+      } else if (how === 'request') {
+        this.fail(key, 'error', `${MESSAGES.error} (${error.message})`)
+      }
+      // A poll the server answered oddly: the next tick asks again.
+      return
+    }
+    // No answer at all. A poll just waits for the next tick; a request says
+    // it is waiting for a connection, and the ticker asks again.
+    if (how === 'request' && record.state !== 'paused') {
+      this.patch(key, {
+        state: 'paused',
+        url: null,
+        serverProgress: null,
+        reason: 'network',
+        message: MESSAGES.network,
+      })
+    }
+  }
+
+  private fail(key: string, reason: FailCode | DeviceFailure, message?: string): void {
+    this.patch(key, {
+      state: 'failed',
+      serverProgress: null,
+      reason,
+      message: message ?? MESSAGES[reason],
+    })
+  }
+
+  /**
+   * Queue the download of `variant`: the small copy from the URL the server
+   * gave, or the full-size file from the episode's `download_url`. The same
+   * shared-file rule as ever, per file name: another account's copy *of the
+   * same variant* is resumed or confirmed; anything else on disk starts over.
+   */
+  private async place(key: string, variant: CopyVariant, given?: string): Promise<void> {
+    const record = this.all.get(key)
+    if (record === undefined) return
+    const url =
+      given ??
+      (variant === 'full'
+        ? (record.fullUrl ?? (record.variant === 'full' ? record.url : null))
+        : null)
+    if (url === null) {
+      this.fail(key, 'gone')
+      return
+    }
+    const name = fileNameFor(record.episodeId, variant)
+    // A delete of this file still waiting for the worker must not now take
+    // the bytes this download is about to write.
+    this.doomed.delete(name)
+    const shared = this.sharedRecord(name, key)
+    const bytes = shared === undefined ? 0 : await this.sizeOf(name)
+    const current = this.all.get(key)
+    if (current === undefined || current.userId !== this.owner || !awaitingServer(current)) return
+    this.write({
+      ...current,
+      name,
+      url,
+      variant,
+      state: 'queued',
+      bytes,
+      total: shared?.total ?? 0,
+      etag: shared?.etag ?? null,
+      fresh: shared === undefined,
+      serverProgress: null,
+      reason: null,
+      message: null,
+      updated_at: this.stamp(),
+    })
+    if (!this.queue.includes(key)) this.queue.push(key)
+    this.pump()
+  }
+
+  /* --- Trips (M19 T6, FR-A12) ---------------------------------------------------- */
+
+  /**
+   * Keep one trip episode's small copy on this device: what the auto-keep
+   * hook calls for an `available` episode. A record the device already has is
+   * adopted ({@link adoptTrip}) rather than started again — and so a record
+   * paused by hand stays paused. Rejects only when the episode's payload
+   * cannot be had, as {@link start} does.
+   */
+  async keepTripCopy(input: TripCopyInput): Promise<void> {
+    await this.hydrate()
+    const owner = this.owner
+    if (owner === null) return
+    const key = keyOf(owner, input.episodeId)
+    if (this.all.has(key)) {
+      this.adoptTrip(input.episodeId, input.tripId, input.url)
+      return
+    }
+    if (this.starting.has(key)) return
+    this.starting.add(key)
+    try {
+      const info = await this.loadInfo(input.episodeId)
+      if (this.owner !== owner || this.all.has(key)) return
+      const at = this.stamp()
+      this.write({
+        userId: owner,
+        episodeId: input.episodeId,
+        animeId: info.anime.id,
+        name: fileNameFor(input.episodeId, 'small'),
+        url: null,
+        variant: 'small',
+        fullUrl: input.fullUrl ?? null,
+        state: 'preparing',
+        serverProgress: null,
+        tripId: input.tripId,
+        bytes: 0,
+        total: 0,
+        etag: null,
+        fresh: true,
+        reason: null,
+        message: null,
+        snapshot: { anime: info.anime, episode: info.episode, duration: info.duration },
+        created_at: at,
+        updated_at: at,
+      })
+      void this.persist()
+      void this.keepCover(owner, info.anime.id, info.anime.cover_large_url ?? info.anime.cover_url)
+    } finally {
+      this.starting.delete(key)
+    }
+    await this.place(key, 'small', input.url)
+  }
+
+  /**
+   * A record the device already has for one of a trip's episodes joins the
+   * trip: a copy already on the device (either size) is confirmed at once; a
+   * record still waiting on the server for a small copy, or one whose copy
+   * vanished, takes the trip's copy (`url`, when it is available). Anything
+   * else — queued, downloading, paused (by hand or not) — is left exactly as
+   * it is, and confirms when it finishes.
+   */
+  adoptTrip(episodeId: number, tripId: number, url: string | null): void {
+    const record = this.snapshot[episodeId]
+    if (record === undefined) return
+    const key = keyOfRecord(record)
+    if (record.tripId !== tripId) {
+      this.patch(key, {
+        tripId,
+        confirm: record.state === 'downloaded' ? 'pending' : undefined,
+      })
+    }
+    const current = this.all.get(key)
+    if (current === undefined) return
+    const copyGone =
+      current.state === 'failed' &&
+      current.variant === 'small' &&
+      (current.reason === 'gone' || current.reason === 'unprepared')
+    if (url !== null && this.active !== key && (awaitingServer(current) || copyGone)) {
+      this.asking.delete(key)
+      this.queue = this.queue.filter((queued) => queued !== key)
+      if (copyGone) {
+        this.patch(key, { state: 'preparing', url: null, reason: null, message: null })
+      }
+      void this.place(key, 'small', url)
+      return
+    }
+    this.confirm(key)
+  }
+
+  /** Every trip copy of the signed-in account the server has not heard about yet: tell it. */
+  confirmPending(): void {
+    for (const record of Object.values(this.snapshot)) this.confirm(keyOfRecord(record))
+  }
+
+  /** Whether the signed-in account took this trip episode off the device by hand. */
+  isDeclined(tripId: number, episodeId: number): boolean {
+    const owner = this.owner
+    return owner !== null && this.declined.has(declineKey(owner, tripId, episodeId))
+  }
+
+  /** "Ask again": the auto-keep hook may fetch this trip episode once more. */
+  forgetDecline(tripId: number, episodeId: number): void {
+    const owner = this.owner
+    if (owner === null) return
+    const key = declineKey(owner, tripId, episodeId)
+    if (!this.declined.delete(key)) return
+    void this.notes.delete(key).catch(() => undefined)
+    this.emit()
+  }
+
+  /**
+   * `POST …/delivered` for one downloaded trip copy, unless it is confirmed
+   * already or a confirmation is in flight. A failure leaves `confirm:
+   * 'pending'` for the next try; a final no from the server ends the asking.
+   */
+  private confirm(key: string): void {
+    const record = this.all.get(key)
+    if (
+      record === undefined ||
+      record.userId !== this.owner ||
+      record.tripId === undefined ||
+      record.state !== 'downloaded' ||
+      record.confirm === 'done' ||
+      this.confirming.has(key)
+    ) {
+      return
+    }
+    const tripId = record.tripId
+    this.confirming.add(key)
+    if (record.confirm !== 'pending') this.patch(key, { confirm: 'pending' })
+    const settled = (final: boolean) => {
+      this.confirming.delete(key)
+      const current = this.all.get(key)
+      if (!final || current === undefined || current.tripId !== tripId) return
+      if (current.confirm !== 'done') this.patch(key, { confirm: 'done' })
+    }
+    void this.confirmDelivered(tripId, record.episodeId, record.etag).then(
+      () => {
+        settled(true)
+      },
+      (error: unknown) => {
+        settled(confirmIsFinal(error))
+      },
+    )
+  }
+
   /* --- The worker --------------------------------------------------------------- */
 
-  private sharedRecord(name: string): DownloadRecord | undefined {
-    for (const record of this.all.values()) if (record.name === name) return record
+  /**
+   * Another record that vouches for the bytes in `name` — the same copy of the
+   * same episode kept by another account. A record with no URL yet vouches
+   * for nothing.
+   */
+  private sharedRecord(name: string, except?: string): DownloadRecord | undefined {
+    for (const [key, record] of this.all) {
+      if (key === except || holdsNoFile(record)) continue
+      if (record.name === name) return record
+    }
     return undefined
   }
 
-  private commandFor(record: DownloadRecord): WorkerCommand {
+  private commandFor(record: DownloadRecord, url: string): WorkerCommand {
     return {
       cmd: 'download',
       name: record.name,
-      url: record.url,
+      url,
       etag: record.fresh === true ? null : record.etag,
       total: record.fresh === true || record.total <= 0 ? null : record.total,
       fresh: record.fresh === true,
@@ -653,7 +1317,12 @@ export class DownloadManager {
     while (this.queue.length > 0) {
       const key = this.queue.shift() ?? ''
       const record = this.all.get(key)
-      if (record === undefined || record.userId !== this.owner || record.state !== 'queued') {
+      if (
+        record === undefined ||
+        record.userId !== this.owner ||
+        record.state !== 'queued' ||
+        record.url === null
+      ) {
         continue
       }
       this.active = key
@@ -662,7 +1331,7 @@ export class DownloadManager {
       this.patch(key, { state: 'downloading', reason: null, message: null })
       this.wantWakeLock = true
       void this.holdWakeLock()
-      this.send(this.commandFor(record))
+      this.send(this.commandFor(record, record.url))
       return
     }
     this.wantWakeLock = false
@@ -818,6 +1487,20 @@ export class DownloadManager {
           this.activeRun = null
           this.pump()
         }
+        // The server dropped the small copy (idle sweep, re-encode): ask it
+        // again, once, and carry on from its answer.
+        if (message.code === 'gone' && record.variant === 'small' && record.reasked !== true) {
+          this.queue = this.queue.filter((queued) => queued !== key)
+          this.patch(key, {
+            state: 'preparing',
+            url: null,
+            serverProgress: null,
+            reason: null,
+            message: null,
+            reasked: true,
+          })
+          void this.ask(key, 'request')
+        }
         break
       case 'done':
         this.patch(key, {
@@ -828,12 +1511,16 @@ export class DownloadManager {
           fresh: false,
           reason: null,
           message: null,
+          reasked: false,
+          // A trip copy that has arrived is told to the server (M19 T6).
+          ...(record.tripId === undefined ? {} : { confirm: 'pending' as const }),
         })
         if (running) {
           this.active = null
           this.activeRun = null
           this.pump()
         }
+        this.confirm(key)
         break
     }
   }

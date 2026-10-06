@@ -46,6 +46,13 @@ describe('chooseSource', () => {
     })
   })
 
+  it('never streams a null playlist (an offline-only trip episode, M19)', () => {
+    const tripOnly: PlayInfo = { ...PLAY_INFO, playlist_url: null, offline_only: true }
+    expect(chooseSource(tripOnly, null)).toEqual({ kind: 'none' })
+    expect(chooseSource({ ...PLAY_INFO, playlist_url: null }, null)).toEqual({ kind: 'none' })
+    expect(chooseSource(tripOnly, 'blob:x')).toEqual({ kind: 'file', url: 'blob:x' })
+  })
+
   it('has nothing to play for a rebuilt payload whose file would not open', () => {
     const offline: PlayInfo = { ...PLAY_INFO, playlist_url: '', from_device: true }
     expect(chooseSource(offline, null)).toEqual({ kind: 'none' })
@@ -76,7 +83,7 @@ describe('loadPlayInfo', () => {
     expect(recall).toHaveBeenCalledWith(USER, 9001)
     expect(info).toMatchObject({
       from_device: true,
-      playlist_url: '',
+      playlist_url: null,
       resume_position: 312,
       duration: PLAY_INFO.duration,
       previous: null,

@@ -67,6 +67,21 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # ``search_release``'s batch branch reads it, and a batch already in
         # flight is unaffected.
         "batch_fallback": True,
+        # How long a ready episode's small offline copy (FR-P6) may go
+        # unfetched before it is deleted, counted from the last time the media
+        # route served it, else from when it was made. Seven days: long enough
+        # for every device in a household to pick it up, short enough that
+        # copies nobody is keeping do not quietly double the disk.
+        "offline_idle_days": 7,
+        # The most episodes one trip may take (FR-A12, owner 2026-10-05). 50,
+        # which is also the most the panel accepts: a trip is the next stretch
+        # of one show, and fifty is past a whole cour or two of anything.
+        "trip_max_episodes": 50,
+        # How long a trip's copies wait for the device (FR-A12): an episode's
+        # copy goes unclaimed this many days after it became available and it
+        # is deleted; a trip that reaches this many days with an episode never
+        # made gives up on it. Fourteen: a fortnight away is a long trip.
+        "trip_copy_days": 14,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

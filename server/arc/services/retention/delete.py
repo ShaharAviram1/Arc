@@ -17,8 +17,9 @@ awkward state behind:
    cannot re-fetch the file retention is about to remove,
 3. the rendition directory, 4. the source directory, 5. any loose source file
    (a manual drop lives in ``DATA_DIR/manual`` and has no directory of its
-   own; a batch member is a loose file too), 6. the ``renditions``,
-   ``media_files`` and ``torrents`` rows, and the tombstoned ``wants`` rows
+   own; a batch member is a loose file too) and the small offline copy
+   (FR-P6), 6. the ``renditions``, ``media_files``, ``torrents`` and
+   ``offline_copies`` rows, and the tombstoned ``wants`` rows
    that were the reason this episode could go
    (:func:`_delete_leftover_wants` — with one exception, which is the whole of
    its docstring), and
@@ -61,14 +62,27 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, MediaFile, Rendition, Torrent, TorrentFile, Want
+from arc.models import (
+    Episode,
+    EpisodeState,
+    MediaFile,
+    OfflineCopy,
+    Rendition,
+    Torrent,
+    TorrentFile,
+    Want,
+)
 from arc.services.acquisition.claims import release_files
 from arc.services.acquisition.qbit import QbitClient
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import STALE_DROP_REASON
+from arc.services.media.copies import encoding_episode_ids
+from arc.services.media.names import offline_path_for
 from arc.services.retention.sweep import (
     PROTECTED_STATES,
+    REASON_IDLE_COPY,
     RETENTION_REASON,
+    IdleCopy,
     Targets,
     safe_path,
 )
@@ -96,6 +110,10 @@ class Removed:
     #: Tombstoned ``wants`` rows cleared with the files. Never the stale ones
     #: (:func:`_delete_leftover_wants`), and never a live want.
     wants: int = 0
+    #: The small offline copy's file, when one was removed, and whether its
+    #: ``offline_copies`` row went with it (FR-P6).
+    offline_file: str | None = None
+    offline_copies: int = 0
     hashes: tuple[str, ...] = ()
     freed_bytes: int = 0
     state_changed: bool = False
@@ -111,6 +129,8 @@ class Removed:
             "torrents": self.torrents,
             "torrent_files": self.torrent_files,
             "wants": self.wants,
+            "offline_file": self.offline_file,
+            "offline_copies": self.offline_copies,
             "hashes": list(self.hashes),
             "freed_bytes": self.freed_bytes,
             "state_changed": self.state_changed,
@@ -245,6 +265,14 @@ async def _release_claims(session: AsyncSession, targets: Targets) -> int:
     return len(rows)
 
 
+async def _delete_copy_row(session: AsyncSession, episode_id: int) -> int:
+    """The ``offline_copies`` row of one episode, if it has one (FR-P6)."""
+    result = await session.execute(
+        sql_delete(OfflineCopy).where(OfflineCopy.episode_id == episode_id)
+    )
+    return cast("CursorResult[Any]", result).rowcount or 0
+
+
 async def _delete_rows(session: AsyncSession, targets: Targets) -> tuple[int, int]:
     """The ``renditions``, ``media_files`` and ``torrents`` rows (FR-T3).
 
@@ -277,18 +305,41 @@ async def delete_episode_files(
     *,
     reason: str = RETENTION_REASON,
     dry_run: bool = False,
+    keep_copy: bool = False,
 ) -> Removed:
     """Remove everything ``targets`` names and reset the episode (FR-T3).
+
+    ``keep_copy`` leaves the small offline copy, file and row, where it is:
+    the one caller is a trip-only episode whose source goes as soon as its
+    copy is made, while the copy waits for the device (FR-A12, M19 T3).
 
     Flushes but does not commit: the caller owns the transaction, so the rows,
     the state change and the job's own bookkeeping land together. The *files*
     are of course gone either way, which is why the row deletions come last
     and why a re-run of the whole thing is harmless.
+
+    The episode row is locked ``FOR UPDATE`` and re-read first. "Keep offline"
+    (:func:`~arc.services.media.copies.request_copy`) and the offline encode's
+    last step take the same lock, so a copy can neither be requested between
+    the in-flight check below and the deletion, nor be put in place on an
+    episode this has just reset (FR-P6).
     """
+    await session.flush()
+    await session.refresh(episode, with_for_update=True)
     if episode.state in PROTECTED_STATES:
         log.warning(
             "refusing to delete the files of an episode that is still in flight",
             extra={"episode_id": episode.id, "state": episode.state.value},
+        )
+        return Removed(episode_id=episode.id, acted=False)
+
+    # A small copy being made is reading the source right now (FR-P6). Asked
+    # here, immediately before anything irreversible, and not only by the
+    # planner: an encode can be queued in the minutes between the two.
+    if await encoding_episode_ids(session, [episode.id]):
+        log.info(
+            "an offline copy of this episode is being made; leaving its files alone",
+            extra={"episode_id": episode.id},
         )
         return Removed(episode_id=episode.id, acted=False)
 
@@ -328,8 +379,15 @@ async def delete_episode_files(
         else None
     )
     loose = sum(1 for path in targets.loose_files if _remove_file(path, settings))
+    # The copy is found again *now*, by the id, rather than taken from the plan:
+    # one requested and made since the plan was drawn up goes with the rest.
+    offline_path = offline_path_for(settings, episode.id)
+    offline_file = (
+        str(offline_path) if not keep_copy and _remove_file(offline_path, settings) else None
+    )
 
     files, torrents = await _delete_rows(session, targets)
+    copies = 0 if keep_copy else await _delete_copy_row(session, episode.id)
     wants = await _delete_leftover_wants(session, episode.id)
     state_changed = transition(episode, EpisodeState.NOT_WANTED, reason=reason)
     await session.flush()
@@ -343,6 +401,8 @@ async def delete_episode_files(
         torrents=torrents,
         torrent_files=claims,
         wants=wants,
+        offline_file=offline_file,
+        offline_copies=copies,
         hashes=targets.torrent_hashes,
         freed_bytes=targets.bytes,
         state_changed=state_changed,
@@ -351,4 +411,71 @@ async def delete_episode_files(
     return removed
 
 
-__all__ = ["Removed", "delete_episode_files"]
+async def delete_idle_copy(
+    session: AsyncSession, settings: Settings, idle: IdleCopy, *, dry_run: bool = False
+) -> bool:
+    """Remove one idle offline copy, file and row (FR-P6, FR-T7). True if it did.
+
+    The episode itself is untouched: it is still ``ready`` and still streams,
+    and "Keep offline" makes the copy again from the source on the next
+    request. Flushed, not committed, like :func:`delete_episode_files`; the
+    in-flight check is repeated here for the same reason as there.
+    """
+    if await encoding_episode_ids(session, [idle.episode_id]):
+        return False
+    if dry_run:
+        log.info(
+            "retention dry run: would delete an idle offline copy",
+            extra={"episode_id": idle.episode_id, "bytes": idle.bytes, "reason": REASON_IDLE_COPY},
+        )
+        return True
+    removed = idle.path is not None and _remove_file(idle.path, settings)
+    rows = await _delete_copy_row(session, idle.episode_id)
+    await session.flush()
+    log.info(
+        "retention deleted an idle offline copy",
+        extra={
+            "episode_id": idle.episode_id,
+            "file": str(idle.path) if removed else None,
+            "rows": rows,
+            "bytes": idle.bytes,
+            "idle_since": idle.anchor.isoformat(),
+            "reason": REASON_IDLE_COPY,
+        },
+    )
+    return True
+
+
+async def delete_copy(
+    session: AsyncSession, settings: Settings, episode_id: int, *, reason: str
+) -> bool:
+    """Remove one episode's small offline copy, file and row, and nothing else.
+
+    The trip settle's deletion (M19 T4, FR-T7): the copy of an episode that is
+    not ``ready`` once every device that asked for it has it, or once its trip
+    stopped waiting. No torrent, source or rendition is touched — the source of
+    a trip-only episode went when the copy was made (owner decision 4). False,
+    and nothing removed, while an ``offline_encode`` for the episode is pending
+    or running (the same in-flight guard as every deleter here). The path is
+    derived from the id and re-checked against the data roots. Flushed, not
+    committed.
+    """
+    if await encoding_episode_ids(session, [episode_id]):
+        return False
+    path = offline_path_for(settings, episode_id)
+    removed = _remove_file(path, settings)
+    rows = await _delete_copy_row(session, episode_id)
+    await session.flush()
+    log.info(
+        "deleted an offline copy",
+        extra={
+            "episode_id": episode_id,
+            "file": str(path) if removed else None,
+            "rows": rows,
+            "reason": reason,
+        },
+    )
+    return True
+
+
+__all__ = ["Removed", "delete_copy", "delete_episode_files", "delete_idle_copy"]

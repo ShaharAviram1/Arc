@@ -12,7 +12,8 @@ Two halves, and they never meet in the same process:
 
 * **Publish** (:func:`publish`) — called from the write that matters:
   :func:`arc.services.acquisition.states.transition` for every episode state
-  change and :func:`arc.services.tmdb.enrich.apply_enrichment` for artwork.
+  change, :func:`arc.services.tmdb.enrich.apply_enrichment` for artwork, and
+  :func:`arc.services.media.copies.publish_copy` for an offline copy (FR-P6).
   It does not send anything itself. It *stages* the payload on the session and
   a ``before_commit`` listener turns the staged list into ``pg_notify`` calls
   **inside the transaction that is committing**, which is the whole point:
@@ -102,8 +103,11 @@ _STAGED: Final = "arc_events_staged"
 EPISODE_STATE: Final = "episode_state"
 #: Artwork landed on a show or its episodes (§5.8).
 ART: Final = "art"
+#: An episode's small offline copy changed state (FR-P6): queued, preparing,
+#: ready or failed. ``state`` is the copy's, not the episode's.
+OFFLINE_COPY: Final = "offline_copy"
 
-type EventKind = Literal["episode_state", "art"]
+type EventKind = Literal["episode_state", "art", "offline_copy"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +147,11 @@ def episode_state_event(*, anime_id: int, episode_id: int | None, state: str) ->
 def art_event(*, anime_id: int) -> Event:
     """The event landing artwork publishes."""
     return Event(kind=ART, anime_id=anime_id)
+
+
+def offline_copy_event(*, anime_id: int, episode_id: int, state: str) -> Event:
+    """The event an offline copy's state change publishes (FR-P6)."""
+    return Event(kind=OFFLINE_COPY, anime_id=anime_id, episode_id=episode_id, state=state)
 
 
 # --- Publish ----------------------------------------------------------------
@@ -454,6 +463,7 @@ __all__ = [
     "CHANNEL",
     "EPISODE_STATE",
     "HEARTBEAT_SECONDS",
+    "OFFLINE_COPY",
     "BrokerFull",
     "Event",
     "EventBroker",
@@ -461,5 +471,6 @@ __all__ = [
     "art_event",
     "asyncpg_dsn",
     "episode_state_event",
+    "offline_copy_event",
     "publish",
 ]

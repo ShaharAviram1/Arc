@@ -262,6 +262,19 @@ def slice_parts(sizes: Sequence[int], span: ByteSpan) -> list[PartRead]:
     return reads
 
 
+def stat_etag(size: int, mtime_ns: int) -> str:
+    """A strong validator for one plain file, from its size and mtime.
+
+    Not a hash of the content: a segment is a megabyte, a small offline copy
+    a hundred, and this is answered on every revalidation. Size *and* mtime
+    because a re-encode reuses the name and can plausibly produce a file of the
+    same length. Here rather than in the router because the offline encode
+    stores the very string the route will answer with (FR-P6), so a device can
+    later say which copy it holds and the server can tell whether it is this one.
+    """
+    return f'"{size:x}-{mtime_ns:x}"'
+
+
 def download_etag(parts: Sequence[tuple[str, int, int]]) -> str:
     """A strong ETag over ``(name, size, mtime_ns)`` for every part, in order.
 
@@ -356,4 +369,5 @@ __all__ = [
     "parse_range",
     "playlist_parts",
     "slice_parts",
+    "stat_etag",
 ]

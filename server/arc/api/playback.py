@@ -51,7 +51,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
-from arc.api.deps import CurrentUser, EpisodeId, SessionDep
+from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep
 from arc.api.episode_extras import episode_extras, renditions_for
 from arc.api.media_stream import playlist_url
 from arc.api.playback_schemas import EpisodeRef, PlayInfo, ProgressIn, ProgressOut
@@ -64,6 +64,7 @@ from arc.services.playback.progress import (
     resume_position,
     unmark_watched,
 )
+from arc.services.trips.rules import holds_trip_episode
 
 log = logging.getLogger(__name__)
 
@@ -114,15 +115,26 @@ def _neighbours(
     summary="Everything the player needs to open one episode (FR-S1, FR-S2)",
     responses={404: {"description": NOT_PLAYABLE}},
 )
-async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) -> PlayInfo:
-    """404 unless the episode is ``ready``.
+async def play(
+    episode_id: EpisodeId, user: CurrentUser, session: SessionDep, settings: SettingsDep
+) -> PlayInfo:
+    """404 unless the episode is ``ready`` — or is the caller's trip episode.
 
     "Not ready" and "no such episode" are one answer on purpose: an episode
     that is still downloading has nothing to play, and the show page is where
     a user learns why — this endpoint's job is to open a player or not.
+
+    The one exception is a trip episode (FR-A12, M19 T4): an episode that is
+    not ready but on which the caller holds a ``pending`` or ``delivered``
+    trip row lives on their device. It is answered with ``offline_only`` and
+    no ``playlist_url``, the resume position and the neighbours as usual, so
+    the player can open the device's copy. Everyone else keeps the 404.
     """
     episode = await session.get(Episode, episode_id)
-    if episode is None or episode.state is not EpisodeState.READY:
+    if episode is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
+    offline_only = episode.state is not EpisodeState.READY
+    if offline_only and not await holds_trip_episode(session, user.id, episode.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
 
     anime = await session.get(Anime, episode.anime_id)
@@ -130,7 +142,9 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
 
     siblings = await episodes_for(session, episode.anime_id)
-    extras = await episode_extras(session, [episode.id])
+    extras = await episode_extras(
+        session, [episode.id], offline_codec=settings.offline_codec, offline_demo=user.is_demo
+    )
     rendition = extras.renditions.get(episode.id)
     progress = await session.get(WatchProgress, (user.id, episode.id))
     # FR-W5's other half: an episode at or below the caller's list progress is
@@ -138,6 +152,9 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
     # read, on a route that already does four.
     entry = await session.get(ListEntry, (user.id, episode.anime_id))
     duration = rendition.duration if rendition is not None and rendition.duration else 0.0
+    if offline_only and progress is not None and progress.duration_s:
+        # No rendition to measure: the length the device's player last reported.
+        duration = progress.duration_s
 
     at = now()
     previous, following = _neighbours(siblings, episode)
@@ -155,9 +172,12 @@ async def play(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) ->
             release=extras.torrents.get(episode.id),
             rendition=rendition,
             transcode_job=extras.transcode_jobs.get(episode.id),
+            offline=extras.offline.out(episode),
+            trip_only=episode.id in extras.trip_only,
         ),
         anime=AnimeSummary.from_anime(anime),
-        playlist_url=playlist_url(episode.id),
+        playlist_url=None if offline_only else playlist_url(episode.id),
+        offline_only=offline_only,
         duration=duration,
         resume_position=resume_position(progress, duration or None),
         previous=previous,

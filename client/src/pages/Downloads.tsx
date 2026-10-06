@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Artwork, buttonClass, cx, EmptyState, FOCUS_RING, RowGroup } from '@/components/ui'
+import { useMe } from '@/lib/auth'
 import { formatSize } from '@/lib/review'
+import { useCancelTrip, useCurrentTrip } from '@/lib/trips'
 import { coverUrl } from '@/offline/cache'
-import { downloads, SCREEN_NOTE, type DownloadRecord } from '@/offline/downloads'
+import { COPY_NOTE, downloads, SCREEN_NOTE, type DownloadRecord } from '@/offline/downloads'
 import { canDownloadInApp, estimate, persisted } from '@/offline/opfs'
 import { useDownloads } from '@/offline/useDownloads'
 
@@ -24,6 +26,12 @@ import { useDownloads } from '@/offline/useDownloads'
  * keep them (*persistent*): without that, iOS may evict a download under
  * storage pressure, and "my episode vanished" is a failure with no visible
  * cause. Arc asks for persistence on the first download.
+ *
+ * **A trip's episodes are one group** (M19, FR-A12): "Trip · <show> · N
+ * episodes · <total>", how many are on the device and how many are still on
+ * their way, the rows as ever, and — while the trip is the account's active
+ * one and the server can be reached — Cancel trip, confirmed in the page. A
+ * trip copy the server has not yet heard arrived says so quietly on its row.
  */
 
 const LEDE = 'Episodes kept inside Arc on this device. They play with no connection.'
@@ -43,10 +51,14 @@ const NOTES = [
 ]
 
 function percentOf(record: DownloadRecord): number {
+  if (record.state === 'preparing') {
+    return Math.max(0, Math.min(100, Math.floor((record.serverProgress ?? 0) * 100)))
+  }
   return record.total > 0 ? Math.min(100, Math.floor((record.bytes / record.total) * 100)) : 0
 }
 
 const STATE_LABEL: Record<DownloadRecord['state'], string> = {
+  preparing: 'Preparing on the server',
   queued: 'Queued',
   downloading: 'Downloading',
   paused: 'Paused',
@@ -74,8 +86,11 @@ function DownloadRow({
   confirming,
   onConfirm,
   onCancel,
+  grouped = false,
 }: {
   record: DownloadRecord
+  /** In a trip's group, whose heading already names the show: the episode leads. */
+  grouped?: boolean
   confirming: boolean
   onConfirm: () => void
   onCancel: () => void
@@ -85,34 +100,51 @@ function DownloadRow({
   const { anime, episode } = record.snapshot
   const percent = percentOf(record)
   const done = record.state === 'downloaded'
-  const running = record.state === 'downloading' || record.state === 'queued'
+  const preparing = record.state === 'preparing'
+  const serverKnown = preparing && (record.serverProgress ?? null) !== null
+  const running =
+    record.state === 'downloading' || record.state === 'queued' || record.state === 'preparing'
   const episodeLabel = `Episode ${String(episode.number)}${episode.title === null ? '' : ` · ${episode.title}`}`
   const name = `${anime.title.preferred} episode ${String(episode.number)}`
+  const headline = grouped ? episodeLabel : anime.title.preferred
 
   return (
     <div className="flex flex-col gap-3 rounded-row p-3.5">
-      <div className="flex items-center gap-4">
+      {/*
+        On a phone the buttons take a line of their own under the text, lined
+        up with it (as the show page's rows do); from `sm` it is one row.
+      */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2.5 sm:flex-nowrap">
         <Artwork url={cover} shape="thumb" className="w-[46px] shrink-0" />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 basis-[calc(100%-62px)] sm:basis-auto">
           <p className="truncate text-[16px] font-medium text-[var(--arc-text)]">
             {done ? (
               <Link to={`/watch/${String(record.episodeId)}`} className={FOCUS_RING}>
-                {anime.title.preferred}
+                {headline}
               </Link>
             ) : (
-              anime.title.preferred
+              headline
             )}
           </p>
-          <p className="truncate text-[13px] text-[var(--arc-text-muted)]">{episodeLabel}</p>
+          {grouped ? null : (
+            <p className="truncate text-[13px] text-[var(--arc-text-muted)]">{episodeLabel}</p>
+          )}
           <p className="text-[13px] tabular-nums text-[var(--arc-text-muted)]">
             {STATE_LABEL[record.state]}
-            {' · '}
-            {done
-              ? formatSize(record.bytes)
-              : `${formatSize(record.bytes)} of ${record.total > 0 ? formatSize(record.total) : '…'} · ${String(percent)}%`}
+            {preparing
+              ? serverKnown
+                ? ` · ${String(percent)}%`
+                : null
+              : ` · ${
+                  done
+                    ? formatSize(record.bytes)
+                    : `${formatSize(record.bytes)} of ${record.total > 0 ? formatSize(record.total) : '…'} · ${String(percent)}%`
+                }`}
+            {preparing ? null : ` · ${COPY_NOTE[record.variant]}`}
+            {done && record.confirm === 'pending' ? ' · telling Arc it arrived' : null}
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 pl-[62px] sm:pl-0">
           {done ? (
             <Link
               to={`/watch/${String(record.episodeId)}`}
@@ -159,8 +191,8 @@ function DownloadRow({
       {done ? null : (
         <span
           role="progressbar"
-          aria-label={`Downloading ${name}`}
-          aria-valuenow={percent}
+          aria-label={preparing ? `Preparing ${name} on the server` : `Downloading ${name}`}
+          aria-valuenow={preparing && !serverKnown ? undefined : percent}
           aria-valuemin={0}
           aria-valuemax={100}
           className="block h-1 overflow-hidden rounded-full bg-[rgba(255,255,255,0.16)]"
@@ -189,10 +221,14 @@ function DownloadRow({
           className="rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-4"
         >
           <p className="text-[14px] text-[var(--arc-text)]">
-            Delete from this device? It frees {formatSize(record.bytes)}.
+            {record.bytes > 0
+              ? `Delete from this device? It frees ${formatSize(record.bytes)}.`
+              : 'Delete from this device? Nothing of it has downloaded yet.'}
           </p>
           <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
-            Your progress is kept, and Arc still has the episode if you want it again.
+            {record.tripId === undefined
+              ? 'Your progress is kept, and Arc still has the episode if you want it again.'
+              : 'Your progress is kept. While the trip lasts, Ask again on the show page fetches it once more.'}
           </p>
           <div className="mt-3 flex gap-2.5">
             <button
@@ -252,14 +288,159 @@ function StorageCard({ used }: { used: number }) {
   )
 }
 
+/** The bytes a record will be once whole: its total when known, else what is here. */
+function sizeOf(record: DownloadRecord): number {
+  return Math.max(record.total, record.bytes)
+}
+
+/** "3 on this device · 2 downloading · 1 waiting": the group's counts, nothing that is zero. */
+function tripCounts(records: readonly DownloadRecord[]): string {
+  const count = (states: DownloadRecord['state'][]) =>
+    records.filter((record) => states.includes(record.state)).length
+  const parts: [number, string][] = [
+    [count(['downloaded']), 'on this device'],
+    [count(['downloading', 'queued']), 'downloading'],
+    [count(['preparing']), 'waiting for the server'],
+    [count(['paused']), 'paused'],
+    [count(['failed']), 'stopped'],
+  ]
+  return parts
+    .filter(([n]) => n > 0)
+    .map(([n, words]) => `${String(n)} ${words}`)
+    .join(' · ')
+}
+
+function TripGroup({
+  tripId,
+  records,
+  active,
+  renderRow,
+}: {
+  tripId: number
+  records: DownloadRecord[]
+  /** This is the account's active trip, and the server answered: it can be cancelled. */
+  active: boolean
+  renderRow: (record: DownloadRecord) => ReactNode
+}) {
+  const cancel = useCancelTrip()
+  const [confirming, setConfirming] = useState(false)
+  const first = records[0]
+  if (first === undefined) return null
+  const show = first.snapshot.anime.title.preferred
+  const total = records.reduce((sum, record) => sum + sizeOf(record), 0)
+  const n = records.length
+
+  return (
+    <section
+      aria-label={`Trip · ${show}`}
+      className="rounded-card border-[0.5px] border-[var(--arc-border)] sm:p-1.5"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 pt-2.5 pb-1">
+        <div className="min-w-0">
+          <h2 className="text-[16px] font-medium text-[var(--arc-text)]">
+            {`Trip · ${show} · ${String(n)} episode${n === 1 ? '' : 's'} · ${formatSize(total)}`}
+          </h2>
+          <p className="text-[13px] text-[var(--arc-text-muted)] tabular-nums">
+            {tripCounts(records)}
+          </p>
+        </div>
+        {active ? (
+          <button
+            type="button"
+            aria-expanded={confirming}
+            className={buttonClass('chip', 'px-4 text-[13px]')}
+            onClick={() => {
+              cancel.reset()
+              setConfirming(!confirming)
+            }}
+          >
+            Cancel trip
+          </button>
+        ) : null}
+      </div>
+      {confirming && active ? (
+        <div
+          role="group"
+          aria-label="Cancel this trip?"
+          className="mx-3.5 my-2 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-4"
+        >
+          <p className="text-[14px] text-[var(--arc-text)]">Cancel this trip?</p>
+          <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
+            Episodes already on this device stay. Arc stops fetching the rest.
+          </p>
+          <div className="mt-3 flex gap-2.5">
+            <button
+              type="button"
+              disabled={cancel.isPending}
+              className={buttonClass('danger')}
+              onClick={() => {
+                cancel.mutate(
+                  { tripId, animeId: first.animeId },
+                  {
+                    onSuccess: () => {
+                      setConfirming(false)
+                    },
+                  },
+                )
+              }}
+            >
+              {cancel.isPending ? 'Cancelling…' : 'Cancel trip'}
+            </button>
+            <button
+              type="button"
+              className={buttonClass('chip')}
+              onClick={() => {
+                setConfirming(false)
+              }}
+            >
+              Keep the trip
+            </button>
+          </div>
+          {cancel.isError ? (
+            <p role="alert" className="mt-2 text-[13px] text-[var(--arc-error)]">
+              Could not cancel the trip. Try again when Arc is reachable.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      <RowGroup>{records.map(renderRow)}</RowGroup>
+    </section>
+  )
+}
+
 export function Downloads() {
   const records = useDownloads()
+  const { data: me } = useMe()
+  const { data: current } = useCurrentTrip(me !== undefined && me !== null && !me.is_demo)
   const [confirming, setConfirming] = useState<number | null>(null)
   const items = Object.values(records).sort((a, b) => {
     const show = a.snapshot.anime.title.preferred.localeCompare(b.snapshot.anime.title.preferred)
     return show !== 0 ? show : a.snapshot.episode.number - b.snapshot.episode.number
   })
   const used = items.reduce((sum, item) => sum + item.bytes, 0)
+  const loose = items.filter((record) => record.tripId === undefined)
+  const trips = new Map<number, DownloadRecord[]>()
+  for (const record of items) {
+    if (record.tripId === undefined) continue
+    trips.set(record.tripId, [...(trips.get(record.tripId) ?? []), record])
+  }
+  // The newest trip first: a larger id is a later trip.
+  const groups = [...trips.entries()].sort(([a], [b]) => b - a)
+
+  const renderRow = (record: DownloadRecord) => (
+    <DownloadRow
+      grouped={record.tripId !== undefined}
+      key={record.episodeId}
+      record={record}
+      confirming={confirming === record.episodeId}
+      onConfirm={() => {
+        setConfirming(record.episodeId)
+      }}
+      onCancel={() => {
+        setConfirming(null)
+      }}
+    />
+  )
 
   return (
     <section>
@@ -281,21 +462,18 @@ export function Downloads() {
             }
           />
         ) : (
-          <RowGroup>
-            {items.map((record) => (
-              <DownloadRow
-                key={record.episodeId}
-                record={record}
-                confirming={confirming === record.episodeId}
-                onConfirm={() => {
-                  setConfirming(record.episodeId)
-                }}
-                onCancel={() => {
-                  setConfirming(null)
-                }}
+          <>
+            {groups.map(([tripId, group]) => (
+              <TripGroup
+                key={tripId}
+                tripId={tripId}
+                records={group}
+                active={current !== undefined && current !== null && current.id === tripId}
+                renderRow={renderRow}
               />
             ))}
-          </RowGroup>
+            {loose.length === 0 ? null : <RowGroup>{loose.map(renderRow)}</RowGroup>}
+          </>
         )}
 
         <StorageCard used={used} />

@@ -385,7 +385,10 @@ async def is_storage_held(session: AsyncSession, settings: Settings) -> bool:
     _measure_failure_logged = False
     held = storage_hold(usage.free, floor)
     if held:
-        log.info(
+        # Debug, not info: read paths (the show page, a trip's phase, slot
+        # views) ask this on every request, and the jobs that act on a hold
+        # say so in their own log lines.
+        log.debug(
             "acquisition held: free space is below the floor",
             extra={"free_bytes": usage.free, "min_free_bytes": floor},
         )

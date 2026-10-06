@@ -35,9 +35,15 @@ from sqlalchemy import select
 from arc.models import Episode, Want
 from arc.services.acquisition.qbit import QbitUnavailable
 from arc.services.jobs.registry import JobContext, register
-from arc.services.retention.delete import delete_episode_files
+from arc.services.retention.delete import delete_episode_files, delete_idle_copy
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
-from arc.services.retention.sweep import REASON_MANUAL, candidates, targets_for_episode
+from arc.services.retention.rules import offline_idle_period
+from arc.services.retention.sweep import (
+    REASON_MANUAL,
+    candidates,
+    idle_copies,
+    targets_for_episode,
+)
 
 
 async def _wanted_again(ctx: JobContext, episode_id: int) -> bool:
@@ -109,12 +115,27 @@ async def retention_sweep(ctx: JobContext) -> None:
         if not dry_run:
             await ctx.session.commit()
 
+    # Then the small offline copies of ready episodes nobody has fetched for
+    # ``offline_idle_days`` (FR-P6). The episode stays; only the copy goes, one
+    # commit each for the same reason as above.
+    idle = await idle_copies(
+        ctx.session, ctx.settings, now=now, idle=await offline_idle_period(ctx.session)
+    )
+    copies = 0
+    for copy in idle:
+        if await delete_idle_copy(ctx.session, ctx.settings, copy, dry_run=dry_run):
+            copies += 1
+            freed += copy.bytes
+            if not dry_run:
+                await ctx.session.commit()
+
     ctx.log.info(
         "retention sweep finished",
         extra={
             "job_id": ctx.job.id,
             "candidates": len(found),
             "deleted": swept,
+            "idle_copies": copies,
             "skipped_qbit_down": unreachable,
             "freed_bytes": freed,
             "dry_run": dry_run,

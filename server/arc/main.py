@@ -26,12 +26,14 @@ from arc.api import (
     mal,
     media,
     media_stream,
+    offline_copies,
     playback,
     recs,
     retention,
     review,
     schedule,
     sync,
+    trips,
     users,
 )
 from arc.api import list as list_api
@@ -212,6 +214,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(acquisition.router)
     app.include_router(retention.router)
     app.include_router(media.router)
+    app.include_router(offline_copies.router)
+    app.include_router(trips.router)
     app.include_router(playback.router)
     app.include_router(sync.router)
     app.include_router(mal.router)

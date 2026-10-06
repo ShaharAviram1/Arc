@@ -1,9 +1,12 @@
 """Authenticated HLS and episode downloads (FR-S1, FR-S7, architecture §5.4).
 
-Three routes, mounted at ``/media`` and deliberately **not** under ``/api``:
+Four routes, mounted at ``/media`` and deliberately **not** under ``/api``:
 
 * ``GET /media/{episode_id}/index.m3u8``
 * ``GET /media/{episode_id}/episode.mp4`` — the whole episode as one file
+* ``GET /media/{episode_id}/offline.mp4`` — the small offline copy (FR-P6), a
+  real file served exactly like a segment, with the copy's own access rule
+  (:func:`~arc.services.media.copies.may_fetch_copy`)
 * ``GET /media/{episode_id}/{init.mp4 | seg_NNNNN.m4s}``
 
 They are outside ``/api`` because they are not part of the JSON API — nothing
@@ -85,6 +88,7 @@ import os
 import stat
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from email.utils import formatdate
 from pathlib import Path
 from typing import IO, Annotated, Any, Final, NoReturn
@@ -94,12 +98,14 @@ import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from sqlalchemy import or_, update
 from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
 
 from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep, get_current_user
-from arc.models import Anime, Episode, EpisodeState
+from arc.models import Anime, Episode, EpisodeState, OfflineCopy, OfflineCopyState
 from arc.services.catalog import preferred_title
+from arc.services.media.copies import may_fetch_copy, served_recently, touch_interval
 from arc.services.media.download import (
     MAX_PLAYLIST_BYTES,
     PART_NAME_PATTERN,
@@ -114,8 +120,9 @@ from arc.services.media.download import (
     parse_range,
     playlist_parts,
     slice_parts,
+    stat_etag,
 )
-from arc.services.media.names import output_dir_for
+from arc.services.media.names import offline_path_for, output_dir_for
 from arc.services.media.plan import PLAYLIST_NAME
 
 log = logging.getLogger(__name__)
@@ -195,6 +202,11 @@ DOWNLOAD_CHUNK: Final[int] = 1 << 20
 #: The demo account may watch but not take files away (owner, 2026-10-04).
 DEMO_REFUSED: Final[str] = "downloads are turned off for the demo account"
 
+#: The small offline copy's name (FR-P6). A literal like :data:`DOWNLOAD_NAME`,
+#: registered before the segment route so it wins the match, and outside the
+#: segment vocabulary so it is never mistaken for a part.
+OFFLINE_NAME: Final[str] = "offline.mp4"
+
 
 def playlist_url(episode_id: int) -> str:
     """Where a client points hls.js for one episode.
@@ -213,6 +225,11 @@ def download_url(episode_id: int) -> str:
     sent and the route that answers it live in one file.
     """
     return f"{router.prefix}/{episode_id}/{DOWNLOAD_NAME}"
+
+
+def offline_url(episode_id: int) -> str:
+    """Where a client downloads one episode's small offline copy (FR-P6)."""
+    return f"{router.prefix}/{episode_id}/{OFFLINE_NAME}"
 
 
 def _miss() -> NoReturn:
@@ -262,13 +279,8 @@ async def _ready_dir(session: SessionDep, settings: SettingsDep, episode_id: int
 
 
 def _etag(info: os.stat_result) -> str:
-    """A strong validator from size and mtime.
-
-    Not a hash of the content: a segment is a megabyte and this is answered on
-    every revalidation. Size *and* mtime because a re-encode reuses the name
-    and can plausibly produce a file of the same length.
-    """
-    return f'"{info.st_size:x}-{info.st_mtime_ns:x}"'
+    """A strong validator from size and mtime (:func:`~arc.services.media.download.stat_etag`)."""
+    return stat_etag(info.st_size, info.st_mtime_ns)
 
 
 def _matches(header: str | None, etag: str) -> bool:
@@ -375,7 +387,13 @@ def _checked_stat(directory: Path, path: Path) -> os.stat_result:
 
 
 def _serve(
-    request: Request, directory: Path, path: Path, *, media_type: str, cache: str
+    request: Request,
+    directory: Path,
+    path: Path,
+    *,
+    media_type: str,
+    cache: str,
+    extra: dict[str, str] | None = None,
 ) -> Response:
     """One file from inside ``directory``, with caching, conditionals, ranges.
 
@@ -384,6 +402,10 @@ def _serve(
     missing file has to become a 404 (``FileResponse`` raises ``RuntimeError``
     and 500s), and the ETag has to exist before the ``If-None-Match``
     comparison that may mean no file is read at all.
+
+    ``extra`` headers go on the file's own answers (200, 206) and nowhere
+    else — the offline copy's ``Content-Disposition`` describes a body, and a
+    304 or a range refusal has none.
     """
     info = _checked_stat(directory, path)
     etag = _etag(info)
@@ -403,7 +425,11 @@ def _serve(
         # ``Content-Length`` would be a lie about a body that is not there.
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return _JSONRangeErrors(
-        path, media_type=media_type, headers=headers, stat_result=info, validators=headers
+        path,
+        media_type=media_type,
+        headers={**headers, **(extra or {})},
+        stat_result=info,
+        validators=headers,
     )
 
 
@@ -808,6 +834,120 @@ def _download_response(
     )
 
 
+# --- The small offline copy (FR-P6) ------------------------------------------
+
+
+@router.get(
+    f"/{{episode_id}}/{OFFLINE_NAME}",
+    summary="The small offline copy of one episode as one MP4 file (FR-P6)",
+    response_class=FileResponse,
+    responses={
+        200: {"content": {SEGMENT_TYPE: {}}, "description": "the whole file"},
+        206: {"description": "a byte range of the file"},
+        304: {"description": "the caller's copy is current"},
+        400: {"description": RANGE_ERRORS[status.HTTP_400_BAD_REQUEST]},
+        401: {"description": "not authenticated"},
+        403: {"description": DEMO_REFUSED},
+        404: {"description": NOT_FOUND},
+        416: {"description": RANGE_ERRORS[status.HTTP_416_RANGE_NOT_SATISFIABLE]},
+    },
+)
+async def offline_copy(
+    episode_id: EpisodeId,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    """Serve ``offline/<id>.mp4``, the copy a device keeps instead of ``episode.mp4``.
+
+    A real file on disk, so everything :func:`_serve` does for a segment it
+    does here: the symlink and confinement refusals, the strong ETag, the 304,
+    ``Range`` and ``If-Range`` (Starlette's, which answers a mismatched
+    ``If-Range`` with the whole file), and the JSON 400/416. Revalidated
+    rather than cached for ever — a copy is remade under the same name — and
+    named for the person saving it like the full-size download.
+
+    The demo account is refused before anything is looked up. Then the copy
+    must exist and be ``ready``, and :func:`~arc.services.media.copies.
+    may_fetch_copy` must say this caller may have it; every other answer is
+    the router's one 404. ``last_served_at`` is touched at most hourly, for
+    the idle rule (``offline_idle_days``), and only when bytes go out.
+    """
+    if user.is_demo:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
+    episode = await session.get(Episode, episode_id)
+    copy = await session.get(OfflineCopy, episode_id)
+    if episode is None or copy is None or copy.state is not OfflineCopyState.READY:
+        _miss()
+    if not await may_fetch_copy(session, user, episode, copy):
+        _miss()
+    anime = await session.get(Anime, episode.anime_id)
+    if anime is None:  # pragma: no cover - the foreign key says otherwise
+        _miss()
+
+    response = _serve(
+        request,
+        settings.offline_dir,
+        offline_path_for(settings, episode_id),
+        media_type=SEGMENT_TYPE,
+        cache=DOWNLOAD_CACHE,
+        extra={"Content-Disposition": content_disposition(preferred_title(anime), episode.number)},
+    )
+    interval = touch_interval(episode)
+    if _sends_bytes(request, response, copy.size) and not served_recently(copy, interval=interval):
+        # A Core UPDATE rather than an ORM write: no flush of anything else in
+        # the session, and a row retention deleted a moment ago is zero rows
+        # touched rather than a 500. The hour is checked again in SQL so two
+        # ranged requests landing together write once.
+        moment = datetime.now(UTC)
+        await session.execute(
+            update(OfflineCopy)
+            .where(
+                OfflineCopy.episode_id == episode_id,
+                or_(
+                    OfflineCopy.last_served_at.is_(None),
+                    OfflineCopy.last_served_at < moment - timedelta(seconds=interval),
+                ),
+            )
+            .values(last_served_at=moment)
+        )
+        await session.commit()
+    # As for ``episode.mp4``: the body goes out over minutes and needs no
+    # connection, so give it back now rather than when the response ends.
+    await session.close()
+    log.info(
+        "offline copy request",
+        extra={
+            "user_id": user.id,
+            "episode_id": episode_id,
+            "status": response.status_code,
+            "range": request.headers.get("range"),
+        },
+    )
+    return response
+
+
+def _sends_bytes(request: Request, response: Response, size: int | None) -> bool:
+    """Whether this answer to a GET will carry some of the file.
+
+    Not a 304, not a HEAD, and not a ``Range`` Starlette is about to refuse
+    (400/416): only those count as the copy being *fetched* for the idle rule.
+    The range is judged the way :func:`~arc.services.media.download.
+    parse_range` judges it, which is close enough to Starlette's that the
+    disagreement can only ever cost one hourly touch.
+    """
+    if request.method != "GET" or response.status_code != status.HTTP_200_OK:
+        return False
+    if size is None:
+        return True
+    try:
+        parse_range(request.headers.get("range"), size)
+    except RangeMalformed, RangeNotSatisfiable:
+        return False
+    return True
+
+
 @router.get(
     "/{episode_id}/{name}",
     summary="One init or media segment (FR-S1)",
@@ -858,6 +998,7 @@ async def segment(
 for _route, _endpoint in (
     ("/{episode_id}/index.m3u8", playlist),
     (f"/{{episode_id}}/{DOWNLOAD_NAME}", download),
+    (f"/{{episode_id}}/{OFFLINE_NAME}", offline_copy),
     ("/{episode_id}/{name}", segment),
 ):
     router.add_api_route(_route, _endpoint, methods=["HEAD"], include_in_schema=False)
@@ -868,6 +1009,7 @@ __all__ = [
     "DOWNLOAD_CACHE",
     "DOWNLOAD_NAME",
     "NOT_FOUND",
+    "OFFLINE_NAME",
     "PLAYLIST_CACHE",
     "PLAYLIST_TYPE",
     "RANGE_ERRORS",
@@ -875,6 +1017,7 @@ __all__ = [
     "SEGMENT_PATTERN",
     "SEGMENT_TYPE",
     "download_url",
+    "offline_url",
     "playlist_url",
     "router",
 ]

@@ -54,13 +54,19 @@ class PlayInfo(BaseModel):
 
     episode: EpisodeOut
     anime: AnimeSummary
-    #: Always ``/media/{episode_id}/index.m3u8`` — derived from the id, never
-    #: from anything on disk (spec §7). Sent rather than assumed so the client
-    #: has one place to read it from.
-    playlist_url: str
+    #: ``/media/{episode_id}/index.m3u8`` — derived from the id, never from
+    #: anything on disk (spec §7). Sent rather than assumed so the client has
+    #: one place to read it from. ``null`` exactly when ``offline_only``.
+    playlist_url: str | None
     #: The rendition's own duration in seconds. ``0`` only for a ``ready``
-    #: episode whose rendition row somehow carries no duration.
+    #: episode whose rendition row somehow carries no duration, and for an
+    #: ``offline_only`` episode the caller has never reported a duration for.
     duration: float
+    #: A trip episode that lives only on the caller's devices (FR-A12, M19
+    #: T4): not ``ready``, no rendition to stream, and answered only to a user
+    #: holding a pending or delivered trip row on it. The player opens the
+    #: device's copy, or says to keep it offline first.
+    offline_only: bool = False
     #: Where to seek on open, or null for the beginning (FR-S2).
     resume_position: float | None = None
     previous: EpisodeRef | None = None

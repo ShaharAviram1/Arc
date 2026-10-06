@@ -107,6 +107,9 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   audio_lang: 'ja',
   acquisition_paused: false,
   batch_fallback: true,
+  offline_idle_days: 7,
+  trip_max_episodes: 50,
+  trip_copy_days: 14,
 }
 
 /** What this server actually holds: three of them moved off the default. */

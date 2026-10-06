@@ -22,11 +22,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from arc.api.episode_extras import EpisodeRelease
+from arc.api.episode_extras import EpisodeRelease, OfflineFacts
 from arc.api.media_stream import download_url
+from arc.api.offline_schemas import OfflineOut
 from arc.api.schemas import OverrideOut
+from arc.api.trip_schemas import TripLimits, TripOut
 from arc.core.text import trim_middle
 from arc.models import (
+    DEFAULT_SETTINGS,
     Anime,
     Episode,
     EpisodeState,
@@ -49,6 +52,7 @@ from arc.services.catalog.airing import (
     out_of_order,
 )
 from arc.services.playback.watched import WatchedSource, watched_source
+from arc.services.trips.names import TRIP_MAX_EPISODES_KEY
 
 
 class TitleOut(BaseModel):
@@ -621,6 +625,17 @@ class EpisodeOut(BaseModel):
     #: demo account is sent it too and refused by the route; the show page
     #: hides the control for it.
     download_url: str | None = None
+    #: The small offline copy (FR-P6), on a ``ready`` episode only — null on
+    #: every other. What "Keep offline" downloads: ``available`` with a
+    #: ``url``, ``queued``/``preparing`` with a percentage, ``none`` (ask with
+    #: ``POST /api/episodes/{id}/offline``), ``failed``, or ``unavailable``
+    #: (no source left; :attr:`download_url` is the fallback).
+    offline: OfflineOut | None = None
+    #: True when every live want on the episode is a trip's (FR-A12) and it is
+    #: not ``ready``: it is being made into a small copy for somebody's device
+    #: and will not be prepared for streaming. The same for every caller — the show page says
+    #: "Not prepared for streaming" to anyone who is not on that trip.
+    trip_only: bool = False
 
     @classmethod
     def from_episode(
@@ -637,6 +652,8 @@ class EpisodeOut(BaseModel):
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
         next_search_at: datetime | None = None,
+        offline: OfflineOut | None = None,
+        trip_only: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -684,6 +701,10 @@ class EpisodeOut(BaseModel):
             failure_reason=prepare.failure_reason,
             rendition=rendition_out,
             download_url=download_url(episode.id) if rendition_out is not None else None,
+            offline=offline if episode.state is EpisodeState.READY else None,
+            # Never on a ``ready`` episode: that one streams, whoever's trip
+            # also covers it.
+            trip_only=trip_only and episode.state is not EpisodeState.READY,
         )
 
 
@@ -910,6 +931,11 @@ class AnimeDetail(AnimeCore):
     #: The caller's live sample want, or null (FR-A8). Null is the ordinary
     #: case: a sample is something a user asked for on this one show.
     sample: SampleOut | None = None
+    #: The caller's active trip on this show, or null (FR-A12).
+    trip: TripOut | None = None
+    #: What a trip may ask for (FR-A12): ``{max_episodes}``, the
+    #: ``trip_max_episodes`` setting. Sent to every caller.
+    trip_limits: TripLimits
     #: This show's per-show rule override (FR-A3), **for an admin only** — null
     #: for everybody else and for a show that follows the global rules (M16,
     #: owner 2026-09-18). It is on the show payload rather than behind a route
@@ -932,7 +958,11 @@ class AnimeDetail(AnimeCore):
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
         next_searches: dict[int, datetime] | None = None,
+        offline: OfflineFacts | None = None,
         sample: SampleOut | None = None,
+        trip: TripOut | None = None,
+        trip_limits: TripLimits | None = None,
+        trip_only: frozenset[int] = frozenset(),
         slots: SlotView | None = None,
         tmdb_mapped: bool = False,
         override: OverrideOut | None = None,
@@ -982,6 +1012,9 @@ class AnimeDetail(AnimeCore):
             relations=relations,
             list_entry=_entry_out(list_entry, mal_sync, anime_status=anime.status, slots=slots),
             sample=sample,
+            trip=trip,
+            trip_limits=trip_limits
+            or TripLimits(max_episodes=int(DEFAULT_SETTINGS[TRIP_MAX_EPISODES_KEY])),
             override=override,
             episodes=[
                 EpisodeOut.from_episode(
@@ -999,6 +1032,8 @@ class AnimeDetail(AnimeCore):
                     rendition=(renditions or {}).get(episode.id),
                     transcode_job=(transcode_jobs or {}).get(episode.id),
                     next_search_at=(next_searches or {}).get(episode.id),
+                    offline=offline.out(episode) if offline is not None else None,
+                    trip_only=episode.id in trip_only,
                 )
                 for episode in episodes
             ],

@@ -1,4 +1,7 @@
-"""The four side lookups an :class:`~arc.api.anime_schemas.EpisodeOut` needs.
+"""The side lookups an :class:`~arc.api.anime_schemas.EpisodeOut` needs.
+
+(Four in M7–M18; the fifth, the small offline copy of M19, is at the end of
+this docstring.)
 
 An episode row on a page is more than the ``episodes`` row behind it: the
 download percentage comes from ``torrents`` — or, for an episode being served
@@ -18,6 +21,10 @@ same episode shape, and a helper that only the show page had is how the home
 page came to render a ``preparing`` episode with no percentage on it. Keyed on
 episode id rather than on anime id for the same reason — the home page's rows
 come from a dozen different shows.
+
+The fifth is the small offline copy (FR-P6, :class:`OfflineFacts`): the copy
+rows, the job behind any copy still being made, and which episodes still have a
+source to make one from — three queries for the page, whatever its length.
 """
 
 from __future__ import annotations
@@ -30,9 +37,23 @@ from typing import cast
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job, JobStatus, Rendition, Torrent, TorrentFile, TorrentKind
+from arc.api.offline_schemas import OfflineOut
+from arc.models import (
+    Episode,
+    EpisodeState,
+    Job,
+    JobStatus,
+    OfflineCopy,
+    OfflineCopyState,
+    Rendition,
+    Torrent,
+    TorrentFile,
+    TorrentKind,
+)
 from arc.services.acquisition.names import SEARCH_RELEASE
-from arc.services.media.names import latest_transcode_jobs
+from arc.services.media.copies import episodes_with_sources
+from arc.services.media.names import latest_offline_jobs, latest_transcode_jobs
+from arc.services.trips.rules import trip_only_episode_ids
 
 #: The payload key both job types happen to spell the same way.
 EPISODE_KEY = "episode_id"
@@ -64,6 +85,65 @@ class EpisodeRelease:
 
 
 @dataclass(frozen=True, slots=True)
+class OfflineFacts:
+    """What the page's episodes have in the way of small offline copies (FR-P6).
+
+    Three lookups for the whole page: the ``offline_copies`` rows, the latest
+    ``offline_encode`` job of the ones still being made (their percentage
+    lives in its payload), and which episodes still have a source to make one
+    from. ``codec`` is the host's ``OFFLINE_CODEC``, for the copies not yet
+    made; null when the caller did not say, which only costs the client a
+    ``codecs`` on an episode it has not asked about yet.
+    """
+
+    copies: dict[int, OfflineCopy] = field(default_factory=dict)
+    jobs: dict[int, Job] = field(default_factory=dict)
+    sources: frozenset[int] = frozenset()
+    codec: str | None = None
+    #: The caller is the demo account, which gets no copies (FR-D5): every
+    #: ``out()`` is null, so the client offers no control it would refuse.
+    demo: bool = False
+
+    def out(self, episode: Episode) -> OfflineOut | None:
+        """``EpisodeOut.offline`` for one episode: null unless it is ``ready``."""
+        if self.demo or episode.state is not EpisodeState.READY:
+            return None
+        return OfflineOut.build(
+            episode.id,
+            copy=self.copies.get(episode.id),
+            job=self.jobs.get(episode.id),
+            has_source=episode.id in self.sources,
+            codec=self.codec,
+        )
+
+
+async def offline_facts_for(
+    session: AsyncSession, episode_ids: Sequence[int], *, codec: str | None = None
+) -> OfflineFacts:
+    """:class:`OfflineFacts` for a page of episodes, in at most three queries."""
+    if not episode_ids:
+        return OfflineFacts(codec=codec)
+    wanted = set(episode_ids)
+    copies = {
+        copy.episode_id: copy
+        for copy in (
+            await session.scalars(select(OfflineCopy).where(OfflineCopy.episode_id.in_(wanted)))
+        ).all()
+    }
+    in_flight = [
+        episode_id
+        for episode_id, copy in copies.items()
+        if copy.state in (OfflineCopyState.QUEUED, OfflineCopyState.PREPARING)
+    ]
+    return OfflineFacts(
+        copies=copies,
+        jobs=await latest_offline_jobs(session, in_flight),
+        sources=frozenset(await episodes_with_sources(session, list(wanted))),
+        codec=codec,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeExtras:
     """Everything the four lookups found, keyed by episode id.
 
@@ -80,6 +160,11 @@ class EpisodeExtras:
     #: the job row rather than in a column (FR-A6), so this is the only place
     #: "next try at 23:26" can be read from.
     next_searches: dict[int, datetime] = field(default_factory=dict)
+    #: The small offline copies (FR-P6); :meth:`OfflineFacts.out` per episode.
+    offline: OfflineFacts = field(default_factory=OfflineFacts)
+    #: The episodes wanted only by trips (FR-A12): no rendition is coming for
+    #: them, whoever is looking. One grouped query for the page.
+    trip_only: frozenset[int] = frozenset()
 
 
 async def torrents_for(
@@ -190,23 +275,42 @@ async def next_searches_for(
     return found
 
 
-async def episode_extras(session: AsyncSession, episode_ids: Sequence[int]) -> EpisodeExtras:
-    """All four lookups for one page's worth of episodes, in five queries."""
+async def episode_extras(
+    session: AsyncSession,
+    episode_ids: Sequence[int],
+    *,
+    offline_codec: str | None = None,
+    offline_demo: bool = False,
+) -> EpisodeExtras:
+    """All five lookups for one page's worth of episodes, in at most eight queries.
+
+    ``offline_codec`` is the host's ``OFFLINE_CODEC``, passed by the callers
+    that hold the settings (:class:`OfflineFacts`); ``offline_demo`` is
+    whether the caller is the demo account, which is sent no copies.
+    """
     if not episode_ids:
-        return EpisodeExtras()
+        return EpisodeExtras(offline=OfflineFacts(codec=offline_codec, demo=offline_demo))
     return EpisodeExtras(
         torrents=await torrents_for(session, episode_ids),
         renditions=await renditions_for(session, episode_ids),
         transcode_jobs=await latest_transcode_jobs(session, episode_ids),
         next_searches=await next_searches_for(session, episode_ids),
+        offline=(
+            OfflineFacts(codec=offline_codec, demo=True)
+            if offline_demo
+            else await offline_facts_for(session, episode_ids, codec=offline_codec)
+        ),
+        trip_only=frozenset(await trip_only_episode_ids(session, episode_ids)),
     )
 
 
 __all__ = [
     "EpisodeExtras",
     "EpisodeRelease",
+    "OfflineFacts",
     "episode_extras",
     "next_searches_for",
+    "offline_facts_for",
     "renditions_for",
     "torrents_for",
 ]

@@ -261,6 +261,32 @@ BATCH_WORD: Final[str] = "BATCH"
 #: seeded releases are packs.
 MAX_BATCH_QUERIES: Final[int] = 3
 
+#: What a caller that **prefers** a pack hands :func:`search_for_episode`
+#: (a trip on a finished show, FR-A12, owner 2026-10-05): given the packs whose
+#: names cover enough, best first, try to take one and say whether it did. The
+#: search cannot decide that by itself — whether a pack really holds the
+#: episodes is settled by its file list, which only the client can read — so
+#: the decision is the caller's and the request budget stays the search's.
+PackTaker = Callable[[list["Ranked"]], Awaitable[bool]]
+
+
+@dataclass(frozen=True, slots=True)
+class PackPreference:
+    """Ask for a pack **first**, and offer ``take`` the ones worth it (FR-A12, FR-A11).
+
+    ``numbers`` are a trip's attachable episodes and ``need`` how many of them
+    a pack must hold. A pack whose name gives a range is offered only when
+    that range covers at least ``need`` of ``numbers``; a pack whose name gives
+    no range is offered too, ranked behind every ranged one, because only its
+    file list can say what it holds and ``take`` is what reads that list (and
+    applies ``need`` to it). Whether anything is taken is ``take``'s answer.
+    """
+
+    take: PackTaker
+    numbers: tuple[int, ...]
+    need: int
+
+
 #: Punctuation a release group drops and a catalogue keeps. Every one of these
 #: either glues two words into one token (``Yarichin☆Bitch-bu``) or hangs off
 #: the end of one (``Love Live! Superstar!!``), and Nyaa's search ANDs *tokens*
@@ -2143,6 +2169,11 @@ class Search:
     #: whether one is taken is ``search_release``'s, which reads the torrent's
     #: contents before it fetches anything.
     batches: list[Ranked] = field(default_factory=list)
+    #: True when a **preferred** pack was taken (``prefer``, FR-A12's trip
+    #: packs) and the search stopped there: no title form was asked, ``forms``
+    #: counts the pack forms, ``ranked`` and ``batches`` are empty, and the
+    #: episode is already downloading. Always false without ``prefer``.
+    pack_taken: bool = False
 
     @property
     def kept(self) -> int:
@@ -2159,6 +2190,7 @@ async def search_for_episode(
     threshold: float = TITLE_THRESHOLD,
     offset: int | None = None,
     wanted_numbers: Collection[int] = (),
+    prefer: PackPreference | None = None,
 ) -> Search:
     """Run **every** :func:`queries` form, merge by info hash, filter and rank.
 
@@ -2245,6 +2277,18 @@ async def search_for_episode(
     ``wanted_numbers`` are that show's currently wanted episodes, supplied by
     the caller because it is the caller that has a session, and they only
     order the batch list (:func:`covered_wanted`). Empty is neutral.
+
+    **A trip on a finished show turns the order round** (``prefer``, FR-A12,
+    owner 2026-10-05). Twelve episodes for a device are one pack with twelve
+    files selected, not twelve singles, so for a :func:`deep_search` entry that
+    is not a film the three :func:`batch_queries` forms are asked **first**,
+    the packs among them whose names cover at least ``prefer.need`` of
+    ``prefer.numbers`` (or name no range at all) are handed to ``prefer.take``,
+    and if it took one the search ends there. Otherwise everything above runs
+    exactly as it would have, on the same pool and the same request count: the
+    three forms are inside :data:`MAX_REQUESTS` like every other, they are not
+    asked a second time at the end, and the narrowing no longer reserves room
+    for them. ``prefer=None`` — every search but a trip's — changes nothing.
     """
     titles = anime_titles(anime)
     season = anime_season(anime)
@@ -2254,6 +2298,7 @@ async def search_for_episode(
     counts: list[int] = []
     asked: set[str] = set()
     requests = 0
+    preferred_forms = 0
 
     def enough() -> bool:
         """Whether the pool already holds enough to compare (FR-A3)."""
@@ -2290,6 +2335,64 @@ async def search_for_episode(
         )
         return len(items)
 
+    def packs(numbers: Collection[int]) -> list[Ranked]:
+        """The pool's acceptable batches, ranked by how much of ``numbers`` they hold."""
+        return rank(
+            filter_items(
+                merged.values(),
+                titles=titles,
+                number=number,
+                season=season,
+                threshold=threshold,
+                single=single,
+                year=anime.season_year,
+                offset=offset,
+                batches=True,
+                only_batches=True,
+            ),
+            rules,
+            wanted_numbers=numbers,
+        )
+
+    if prefer is not None and deep_search(anime) and not single:
+        # A trip's pack (FR-A12): the batch forms before anything else, and the
+        # packs that cover enough offered to the caller, who reads the file list.
+        for query in batch_queries(anime):
+            if requests >= MAX_REQUESTS:
+                break
+            log.debug(
+                "nyaa preferred batch query",
+                extra={"query": query, "anime_id": anime.id, "number": number},
+            )
+            await ask(query)
+            preferred_forms += 1
+        offered = [
+            entry
+            for entry in packs(prefer.numbers)
+            if not entry.candidate.covers or entry.covered_wanted >= prefer.need
+        ]
+        log.info(
+            "nyaa preferred packs",
+            extra={
+                "anime_id": anime.id,
+                "number": number,
+                "requests": requests,
+                "need": prefer.need,
+                "offered": len(offered),
+                "top_batch": offered[0].item.title if offered else None,
+            },
+        )
+        if offered and await prefer.take(offered):
+            return Search(
+                ranked=[],
+                # The forms this search actually asked, so FR-A7's row reads
+                # "3 forms" rather than claiming nothing was asked.
+                forms=preferred_forms,
+                results=len(merged),
+                requests=requests,
+                pack_taken=True,
+            )
+
     for query in queries(anime, number, offset=offset):
         if requests >= MAX_REQUESTS:
             log.warning(
@@ -2311,7 +2414,11 @@ async def search_for_episode(
         # forms are never reached — which is precisely the show most likely to
         # have nothing but packs. A film keeps the plain ceiling, because it
         # never asks for one, and an airing show never gets here at all.
-        narrowing_ceiling = MAX_REQUESTS if single else MAX_REQUESTS - MAX_BATCH_QUERIES
+        # A trip's search that asked the pack forms first has nothing left to
+        # reserve for: they will not be asked again below.
+        narrowing_ceiling = (
+            MAX_REQUESTS if single or preferred_forms else MAX_REQUESTS - MAX_BATCH_QUERIES
+        )
         for query in group_queries(anime, number, rules):
             if requests >= narrowing_ceiling:
                 log.warning(
@@ -2345,7 +2452,7 @@ async def search_for_episode(
     ranked = rank(candidates, rules)
 
     batches: list[Ranked] = []
-    narrowed = requests - len(counts)
+    narrowed = requests - len(counts) - preferred_forms
     if not ranked and deep_search(anime) and not single:
         # A pack has to be **asked for** (:func:`batch_queries`, corrected
         # 2026-09-18): every form above carries the episode number, no batch
@@ -2369,22 +2476,7 @@ async def search_for_episode(
             await ask(query)
         # ``only_batches`` keeps the two lists apart: a single always wins, so
         # there is nothing for a mixed ranking to decide.
-        batches = rank(
-            filter_items(
-                merged.values(),
-                titles=titles,
-                number=number,
-                season=season,
-                threshold=threshold,
-                single=single,
-                year=anime.season_year,
-                offset=offset,
-                batches=True,
-                only_batches=True,
-            ),
-            rules,
-            wanted_numbers=wanted_numbers,
-        )
+        batches = packs(wanted_numbers)
 
     log.info(
         "nyaa candidates",
@@ -2458,6 +2550,8 @@ __all__ = [
     "NyaaItem",
     "NyaaUnavailable",
     "PREQUEL_RELATION",
+    "PackPreference",
+    "PackTaker",
     "PrequelResolver",
     "Ranked",
     "SINGLE_KINDS",

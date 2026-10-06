@@ -37,7 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState
 from arc.services.acquisition.states import TERMINAL_STATES, advance_to_matched
-from arc.services.media.names import enqueue_transcode
+from arc.services.media.names import OFFLINE_WHY_TRIP, enqueue_offline_encode, enqueue_transcode
+from arc.services.trips.names import enqueue_trip_release
+from arc.services.trips.rules import (
+    ended_trip_leftover,
+    needs_rendition,
+    pending_episode_ids,
+    trip_copy_priority,
+)
 
 log = logging.getLogger(__name__)
 
@@ -119,9 +126,32 @@ async def link(
     # ``preparing`` or ``ready`` is left alone: ``advance_to_matched`` refused
     # to move it, and re-encoding what is already playable is exactly what
     # FR-P5 and the ``force`` path exist to make deliberate.
+    #
+    # A **trip-only** episode (FR-A12) is the exception: every live want on it
+    # is a trip's, so it is made into the small offline copy instead and never
+    # gets an HLS rendition (:func:`~arc.services.trips.rules.needs_rendition`).
+    # And an episode a trip is waiting on that is *also* wanted for streaming
+    # gets both: the rendition, and the copy behind it (the copy's priority
+    # puts it after every transcode).
+    #
+    # And a file that lands after its trip was cancelled, for an episode
+    # nobody else wants, is not prepared at all: the trip's release deletes it
+    # (FR-A12) instead of a transcode running for nobody.
     queued = None
-    if episode.state is EpisodeState.MATCHED:
-        queued = await enqueue_transcode(session, episode.id)
+    if episode.state is EpisodeState.MATCHED and await ended_trip_leftover(session, episode.id):
+        queued = await enqueue_trip_release(session, episode.id)
+    elif episode.state is EpisodeState.MATCHED:
+        streaming = await needs_rendition(session, episode.id)
+        if streaming:
+            queued = await enqueue_transcode(session, episode.id)
+        if not streaming or await pending_episode_ids(session, [episode.id]):
+            copy_job = await enqueue_offline_encode(
+                session,
+                episode.id,
+                why=OFFLINE_WHY_TRIP,
+                priority=await trip_copy_priority(session, episode.id),
+            )
+            queued = queued or copy_job
 
     log.info(
         "media file linked",

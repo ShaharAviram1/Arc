@@ -24,7 +24,9 @@ from arc.models import (
     EPISODE_FILE_INDEX,
     IN_PROGRESS_INDEX,
     OFFLINE_SEARCH_INDEX,
+    ONE_ACTIVE_TRIP_INDEX,
     TRANSCODE_EPISODE_INDEX,
+    TRIP_EPISODE_INDEX,
     WANTED_CLAIM_INDEX,
     Base,
 )
@@ -144,7 +146,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 12
+    assert len(seeded) == 15
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -165,6 +167,13 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     # single may take a pack and fetch one file out of it. It is the switch for
     # the riskiest acquisition change since M6, so it has to be findable.
     assert seeded["batch_fallback"] is True
+    # And the idle rule for the small offline copies (FR-P6, M19): a ready
+    # episode's copy nobody fetches for a week is deleted.
+    assert seeded["offline_idle_days"] == 7
+    # And the two trip rules (FR-A12, M19 T3): at most fifty episodes a trip,
+    # and a fortnight for a copy to be claimed.
+    assert seeded["trip_max_episodes"] == 50
+    assert seeded["trip_copy_days"] == 14
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:
@@ -333,3 +342,93 @@ def test_the_unmarked_at_column_is_created_by_a_migration(
             await engine.dispose()
 
     assert asyncio.run(run()) == ("timestamp with time zone", "YES")
+
+
+def test_the_offline_copies_table_is_keyed_on_the_episode(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``offline_copies`` (FR-P6, M19 T1): one row per episode, and no path column.
+
+    The primary key *is* the episode, so two requests cannot make two rows; and
+    the file is derived from the id (``offline/<id>.mp4``), so there is no
+    column a hand edit could point somewhere else.
+    """
+
+    async def run() -> tuple[list[str], str | None]:
+        engine = create_async_engine(test_database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                columns = await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'offline_copies' ORDER BY column_name"
+                    )
+                )
+                key = await connection.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE t.relname = 'offline_copies' AND c.contype = 'p'"
+                    )
+                )
+                row = key.first()
+                return [str(name) for (name,) in columns.all()], (
+                    None if row is None else str(row[0])
+                )
+        finally:
+            await engine.dispose()
+
+    columns, primary = asyncio.run(run())
+    assert "episode_id" in columns and "state" in columns and "last_served_at" in columns
+    assert not any("path" in name for name in columns)
+    assert primary == "PRIMARY KEY (episode_id)"
+
+
+def test_one_active_trip_per_user_is_a_partial_unique_index(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``ux_trips_one_active_per_user`` (FR-A12, owner 2026-10-05).
+
+    Partial on ``state = 'active'`` so a user's finished and cancelled trips
+    do not count against the one active trip; unique so a second request
+    racing the create path's own check cannot make two.
+    """
+    definition = _index_definition(test_database_url, "trips", ONE_ACTIVE_TRIP_INDEX)
+
+    assert definition is not None, f"{ONE_ACTIVE_TRIP_INDEX} is not on the trips table"
+    assert "UNIQUE INDEX" in definition
+    assert "(user_id)" in definition
+    assert "WHERE" in definition and "'active'" in definition
+
+
+def test_trip_episodes_are_indexed_by_episode(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    definition = _index_definition(test_database_url, "trip_episodes", TRIP_EPISODE_INDEX)
+
+    assert definition is not None
+    assert "UNIQUE" not in definition and "(episode_id)" in definition
+
+
+def test_wants_trip_is_not_null_and_defaults_false(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``wants.trip``: every row that existed before trips reads false."""
+
+    async def run() -> tuple[str, str, str | None] | None:
+        engine = create_async_engine(test_database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT data_type, is_nullable, column_default "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = 'wants' AND column_name = 'trip'"
+                    )
+                )
+                row = found.first()
+                return None if row is None else (str(row[0]), str(row[1]), row[2])
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(run()) == ("boolean", "NO", "false")

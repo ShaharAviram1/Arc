@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
+import { TripControl, TripPanel } from '@/components/Trip'
 import {
   Artwork,
   Button,
@@ -59,6 +60,10 @@ import {
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
+import { PHASE_LABEL, tripCandidates, tripCodecsPlayable, type TripEpisode } from '@/lib/trips'
+import { canPlayTypeHere } from '@/offline/downloads'
+import { canDownloadInApp } from '@/offline/opfs'
+import { useDownload } from '@/offline/useDownloads'
 import { usePendingWatched } from '@/offline/useOutbox'
 
 /**
@@ -368,6 +373,45 @@ function episodeState(episode: EpisodeOut, tz?: string): EpisodeState {
     return { label: `${restingLabel(episode.state)} · ${summary}`, ...quiet }
   }
   return { label: restingLabel(episode.state), ...quiet }
+}
+
+/** What the row says about an episode nobody streams (FR-A12, M19). */
+const NOT_FOR_STREAMING = 'Not prepared for streaming'
+const NOT_FOR_STREAMING_HINT =
+  'Arc is making a small copy of this episode for somebody’s trip. It is prepared for streaming once somebody’s next episodes include it.'
+
+/**
+ * The state column for an episode that is not ready and that a trip holds
+ * (M19): the viewer's own trip episode says where the trip has it; somebody
+ * else's trip-only episode says it will not stream. Null for every other
+ * episode, which {@link episodeState} describes as before.
+ */
+function tripEpisodeState(
+  episode: EpisodeOut,
+  trip: TripEpisode | undefined,
+  onDevice: boolean,
+): EpisodeState | null {
+  if (episode.state === 'ready') return null
+  if (trip !== undefined) {
+    if (onDevice)
+      return { label: 'On this device', tone: 'bright', percent: null, progressLabel: '' }
+    const moving = trip.phase === 'downloading' || trip.phase === 'preparing'
+    const percent =
+      moving && trip.progress !== null
+        ? Math.max(0, Math.min(100, Math.floor(trip.progress * 100)))
+        : null
+    return {
+      label: `Trip · ${PHASE_LABEL[trip.phase]}${percent === null ? '' : ` ${String(percent)}%`}`,
+      tone:
+        trip.phase === 'available' ? 'bright' : trip.phase === 'unavailable' ? 'error' : 'muted',
+      percent,
+      progressLabel: 'Trip progress',
+    }
+  }
+  if (episode.trip_only === true) {
+    return { label: NOT_FOR_STREAMING, tone: 'muted', percent: null, progressLabel: '' }
+  }
+  return null
 }
 
 /**
@@ -939,16 +983,23 @@ function EpisodeRow({
   isAdmin,
   canDownload,
   timezone,
+  trip,
 }: {
   anime: AnimeDetail
   episode: EpisodeOut
   isAdmin: boolean
   canDownload: boolean
   timezone?: string
+  /** The viewer's trip holds this episode (M19): its id and the episode's phase. */
+  trip?: { id: number; episode: TripEpisode }
 }) {
-  const playable = episode.state === 'ready'
+  const record = useDownload(episode.id)
+  const onDevice = canDownload && record?.state === 'downloaded'
+  // A trip-only episode is never ready, but the copy on this device plays (FR-S9).
+  const playable = episode.state === 'ready' || onDevice
   const title = episode.title ?? `Episode ${String(episode.number)}`
-  const state = episodeState(episode, timezone)
+  const state =
+    tripEpisodeState(episode, trip?.episode, onDevice) ?? episodeState(episode, timezone)
   const problem = episodeProblem(episode)
 
   return (
@@ -991,7 +1042,10 @@ function EpisodeRow({
 
       <div className="flex w-full items-center gap-4 sm:w-auto sm:shrink-0 sm:gap-5">
         <div className="flex min-w-0 flex-1 flex-col items-start gap-1.5 text-left text-[14px] sm:w-[132px] sm:flex-none sm:items-end sm:text-right">
-          <span className={TONE_CLASS[state.tone]} title={state.label}>
+          <span
+            className={TONE_CLASS[state.tone]}
+            title={state.label === NOT_FOR_STREAMING ? NOT_FOR_STREAMING_HINT : state.label}
+          >
             <span>{state.label}</span>
             {problem === null ? null : (
               <ProblemHint label={problem.label} reason={problem.reason} />
@@ -1026,7 +1080,21 @@ function EpisodeRow({
           it while the offline menu is open, so the menu is not drawn under them.
         */}
         <div className="relative z-10 flex shrink-0 items-center gap-2.5 has-[[data-offline-menu]]:z-30">
-          {canDownload ? <OfflineButton episode={episode} /> : null}
+          {canDownload ? (
+            <OfflineButton
+              episode={episode}
+              trip={
+                trip === undefined
+                  ? null
+                  : {
+                      id: trip.id,
+                      phase: trip.episode.phase,
+                      progress: trip.episode.progress,
+                      url: trip.episode.url ?? null,
+                    }
+              }
+            />
+          ) : null}
           <WatchedControl animeId={anime.id} episode={episode} />
         </div>
       </div>
@@ -1251,16 +1319,24 @@ function Episodes({
         <EmptyState className="mt-5" message={NO_EPISODES} />
       ) : (
         <div className="mt-5 flex flex-col gap-0.5">
-          {anime.episodes.map((episode) => (
-            <EpisodeRow
-              key={episode.id}
-              anime={anime}
-              episode={episode}
-              isAdmin={isAdmin}
-              canDownload={canDownload}
-              timezone={timezone}
-            />
-          ))}
+          {anime.episodes.map((episode) => {
+            const tripEpisode = anime.trip?.episodes.find((row) => row.episode_id === episode.id)
+            return (
+              <EpisodeRow
+                key={episode.id}
+                anime={anime}
+                episode={episode}
+                isAdmin={isAdmin}
+                canDownload={canDownload}
+                timezone={timezone}
+                trip={
+                  anime.trip === null || anime.trip === undefined || tripEpisode === undefined
+                    ? undefined
+                    : { id: anime.trip.id, episode: tripEpisode }
+                }
+              />
+            )
+          })}
         </div>
       )}
     </section>
@@ -1453,8 +1529,35 @@ function MadeBy({ anime }: { anime: AnimeDetail }) {
   )
 }
 
+/** Why "Prepare for a trip" is not offered on this device (FR-A12, FR-S9). */
+const TRIP_NO_STORAGE =
+  'Trips need a browser that can keep episodes inside Arc — open Arc from the Home Screen on an iPad or iPhone.'
+const TRIP_NO_CODEC = 'This device can’t play Arc’s small copies, so it can’t prepare a trip.'
+
+/**
+ * Whether this browser can keep a trip (OPFS, workers, and the copies' video
+ * format), or the sentence saying why not.
+ */
+function tripSupport(anime: AnimeDetail): string | null {
+  if (!canDownloadInApp()) return TRIP_NO_STORAGE
+  if (!tripCodecsPlayable(anime, canPlayTypeHere)) return TRIP_NO_CODEC
+  return null
+}
+
 /** The hero, its title block, and the row of actions under it. */
-function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
+function Hero({
+  anime,
+  timezone,
+  canTrip,
+}: {
+  anime: AnimeDetail
+  timezone?: string
+  /** Not the demo account (FR-D5), and `me` has loaded. */
+  canTrip: boolean
+}) {
+  const hasTrip = anime.trip !== null && anime.trip !== undefined
+  const tripBlocked =
+    canTrip && !hasTrip && tripCandidates(anime).length > 0 ? tripSupport(anime) : null
   const alternatives = altTitles(anime)
   const entry = anime.list_entry
   const playable = playableEpisode(anime.episodes)
@@ -1492,7 +1595,11 @@ function Hero({ anime, timezone }: { anime: AnimeDetail; timezone?: string }) {
         />
         <SampleControl anime={anime} />
         {entry === null ? null : <ScoreControl animeId={anime.id} score={entry.score} />}
+        {canTrip && !hasTrip && tripBlocked === null ? <TripControl anime={anime} /> : null}
       </div>
+      {tripBlocked === null ? null : (
+        <p className="mt-2 text-[13px] text-[var(--arc-text-muted)]">{tripBlocked}</p>
+      )}
 
       <DormantNote anime={anime} />
       <WaitingNote anime={anime} />
@@ -1584,7 +1691,10 @@ export function Show() {
 
   return (
     <div>
-      <Hero anime={anime} timezone={timezone} />
+      <Hero anime={anime} timezone={timezone} canTrip={me?.is_demo === false} />
+      {me?.is_demo === false && anime.trip !== null && anime.trip !== undefined ? (
+        <TripPanel trip={anime.trip} />
+      ) : null}
       <Episodes
         anime={anime}
         isAdmin={me?.role === 'admin'}

@@ -317,6 +317,14 @@ class QbitStub:
         #: gate is code no test ever reaches.
         self.ignores_prio: dict[str, list[int]] = {}
         self.calls: list[str] = []
+        #: Hashes passed to ``torrents/bottomPrio`` (FR-A12's trip torrents),
+        #: and whether the client's queueing is on (off answers 409).
+        self.bottomed: list[str] = []
+        #: And to ``torrents/topPrio`` (a trip torrent somebody now streams).
+        self.topped: list[str] = []
+        self.queueing = True
+        #: Make ``torrents/bottomPrio`` alone unreachable.
+        self.bottom_down = False
         #: Set to make the next non-login call answer 403 once, as an expired
         #: session does.
         self.expire_once = False
@@ -471,6 +479,21 @@ class QbitStub:
             for torrent in self.torrents:
                 if torrent["hash"].lower() in {value.lower() for value in wanted}:
                     torrent["state"] = "downloading"
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/bottomPrio"):
+            if self.bottom_down:
+                raise httpx.ConnectError("qbittorrent went away", request=request)
+            # 409 is what a client with queueing switched off answers.
+            if not self.queueing:
+                return httpx.Response(409, text="Torrent queueing must be enabled")
+            hashes = self._form(request).get("hashes", "")
+            self.bottomed.extend(value for value in hashes.split("|") if value)
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/topPrio"):
+            if not self.queueing:
+                return httpx.Response(409, text="Torrent queueing must be enabled")
+            hashes = self._form(request).get("hashes", "")
+            self.topped.extend(value for value in hashes.split("|") if value)
             return httpx.Response(200, text="")
         if path.endswith("/app/version"):
             return httpx.Response(200, text=self.version)

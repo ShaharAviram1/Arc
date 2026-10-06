@@ -2,8 +2,13 @@
  * A download manager with nothing real behind it (FR-S9): a fake worker that
  * records commands and can answer, a map for the files on "disk", and a
  * memory store for the records. Shared by the manager, player and page tests.
+ *
+ * The server's small copy (M19) is answered `unavailable` unless a test says
+ * otherwise, so a plain start downloads the full-size `download_url` exactly
+ * as M18 did; the small-copy tests hand in their own `requestCopy`.
  */
 
+import type { OfflineCopyOut } from '@/lib/anime'
 import type { PlayInfo } from '@/lib/playback'
 import type { WorkerCommand, WorkerMessage } from '@/offline/download'
 import {
@@ -66,6 +71,27 @@ export interface ManagerHarness {
   revokes: { count: number }
 }
 
+/** The server's answer when it has no small copy to give: download the full file. */
+export const NO_SMALL_COPY: OfflineCopyOut = {
+  state: 'unavailable',
+  progress: null,
+  size: null,
+  url: null,
+  codecs: null,
+}
+
+/** A small copy ready to download, as the server would describe it. */
+export function smallCopy(episodeId: number, patch: Partial<OfflineCopyOut> = {}): OfflineCopyOut {
+  return {
+    state: 'available',
+    progress: null,
+    size: 210_000_000,
+    url: `/media/${String(episodeId)}/offline.mp4`,
+    codecs: 'avc1.640028',
+    ...patch,
+  }
+}
+
 export const INFO_BY_ID: Record<number, PlayInfo> = {
   9001: PLAY_INFO,
   9002: PLAY_INFO_EPISODE_2,
@@ -115,6 +141,14 @@ export function managerHarness(
       return Promise.resolve()
     },
     now: () => Date.parse('2026-10-05T12:00:00Z'),
+    requestCopy: () => Promise.resolve(NO_SMALL_COPY),
+    pollCopy: () => Promise.resolve(NO_SMALL_COPY),
+    canPlayType: () => 'probably',
+    isVisible: () => true,
+    // Trips (M19 T6): the server always hears, and nothing is remembered on disk.
+    confirmDelivered: () => Promise.resolve(null),
+    releaseDelivered: () => Promise.resolve(null),
+    notes: memoryStore(),
     ...options,
   })
   return { manager, worker, workers, store, files, removed, covers, revokes }
@@ -132,6 +166,7 @@ export function downloadedRecord(
     animeId: info.anime.id,
     name: fileNameFor(info.episode.id),
     url: `/media/${String(info.episode.id)}/episode.mp4`,
+    variant: 'full',
     state: 'downloaded',
     bytes,
     total: bytes,

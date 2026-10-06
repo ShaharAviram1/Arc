@@ -115,6 +115,15 @@ class Want(Base):
     sample: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    #: True when the row exists **only** because of a trip (FR-A12): no window,
+    #: no sample. Rewritten by the reconciler on every run, so it is a fact
+    #: about the last reconciliation rather than about how the row was made.
+    #: An episode whose live wants are all trip wants is *trip-only*: it gets a
+    #: small offline copy and never an HLS rendition, and a trip want never
+    #: occupies a slot (FR-A10).
+    trip: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
 
 class Torrent(Base):

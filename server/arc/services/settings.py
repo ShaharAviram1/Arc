@@ -69,6 +69,7 @@ from arc.services.acquisition.rules import (
     set_paused,
 )
 from arc.services.catalog import preferred_title
+from arc.services.trips.names import TRIP_MAX_EPISODES_CEILING
 
 log = logging.getLogger(__name__)
 
@@ -232,6 +233,15 @@ _VALIDATORS: Final[dict[str, Any]] = {
     # figure the reader clamps at, so what the panel accepts and what
     # acquisition acts on cannot differ.
     "min_free_gb": lambda value: _bounded_int(value, low=0, high=MAX_MIN_FREE_GB),
+    # Days an unfetched offline copy is kept (FR-P6, FR-T7). At least one: 0
+    # would delete a copy in the hour between its encode and the device
+    # fetching it, which is a copy made for nobody.
+    "offline_idle_days": lambda value: _bounded_int(value, low=1, high=MAX_DAYS),
+    # The trip cap (FR-A12, owner 2026-10-05): 1..50, the owner's range.
+    "trip_max_episodes": lambda value: _bounded_int(value, low=1, high=TRIP_MAX_EPISODES_CEILING),
+    # Days a trip's copy waits for the device. At least one, for the same
+    # reason as the idle rule above.
+    "trip_copy_days": lambda value: _bounded_int(value, low=1, high=MAX_DAYS),
     "sub_lang": _language,
     "audio_lang": _language,
 }

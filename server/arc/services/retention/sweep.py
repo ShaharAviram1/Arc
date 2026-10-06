@@ -94,13 +94,20 @@ from arc.models import (
     EpisodeState,
     ListEntry,
     MediaFile,
+    OfflineCopy,
+    OfflineCopyState,
     Rendition,
     Torrent,
     TorrentFile,
+    Trip,
+    TripEpisode,
+    TripEpisodeState,
+    TripState,
     Want,
     WatchProgress,
 )
-from arc.services.media.names import output_dir_for
+from arc.services.media.copies import encoding_episode_ids
+from arc.services.media.names import offline_path_for, output_dir_for
 from arc.services.retention.rules import grace_period
 
 log = logging.getLogger(__name__)
@@ -155,13 +162,19 @@ RETENTION_REASON = "retention"
 def allowed_roots(settings: Settings) -> tuple[Path, ...]:
     """The only directories retention may delete anything inside.
 
-    Three, not two. ``renditions`` and ``downloads`` are FR-T3's own words;
-    ``manual`` is there because FR-T3 also says a manually dropped file is
-    deleted *itself* rather than with its directory, and the manual drop
-    directory is precisely where such a file lives. Deleting a rendition of a
-    file Arc may never delete would leave the loop half-closed.
+    Four. ``renditions`` and ``downloads`` are FR-T3's own words; ``manual`` is
+    there because FR-T3 also says a manually dropped file is deleted *itself*
+    rather than with its directory, and the manual drop directory is precisely
+    where such a file lives. ``offline`` holds the small copies (FR-P6), which
+    go with their episode and, on their own, when nobody has fetched them for
+    ``offline_idle_days``.
     """
-    return (settings.renditions_dir, settings.downloads_dir, settings.manual_dir)
+    return (
+        settings.renditions_dir,
+        settings.downloads_dir,
+        settings.manual_dir,
+        settings.offline_dir,
+    )
 
 
 def _within(path: Path, roots: tuple[Path, ...]) -> Path | None:
@@ -273,6 +286,11 @@ class Targets:
     #: unlinked**, so that a start for another episode cannot re-fetch what
     #: retention has just removed.
     torrent_file_ids: tuple[int, ...] = ()
+    #: The small offline copy (FR-P6): its file, resolved and checked, when it
+    #: is on disk, and whether there is an ``offline_copies`` row to delete —
+    #: a row whose file has gone is a leftover like any other.
+    offline_file: Path | None = None
+    offline_copy: bool = False
     #: What all of that adds up to on disk.
     bytes: int = 0
 
@@ -294,6 +312,8 @@ class Targets:
             or self.loose_files
             or self.torrent_hashes
             or self.torrent_ids
+            or self.offline_file
+            or self.offline_copy
         )
 
 
@@ -324,6 +344,7 @@ def build_targets(
     media_files: list[MediaFile],
     torrents: list[Torrent],
     torrent_files: Sequence[TorrentFile] = (),
+    offline_copy: OfflineCopy | None = None,
 ) -> Targets:
     """Work out what deleting ``episode_id`` would remove. No I/O beyond stat.
 
@@ -379,6 +400,15 @@ def build_targets(
         if directory is not None:
             total += dir_size(directory)
 
+    # The small copy goes with its episode (FR-P6). Its path is the id's, like
+    # the rendition's; a row is deleted whether or not the file is still there.
+    offline_raw = offline_path_for(settings, episode_id)
+    offline_file: Path | None = None
+    if offline_raw.exists() or offline_raw.is_symlink():
+        offline_file = _within(offline_raw, roots)
+        if offline_file is not None:
+            total += _file_size(offline_file, offline_copy.size if offline_copy else None)
+
     return Targets(
         episode_id=episode_id,
         rendition_dir=rendition_dir,
@@ -389,6 +419,8 @@ def build_targets(
         torrent_hashes=tuple(torrent.info_hash for torrent in torrents if torrent.info_hash),
         torrent_ids=tuple(torrent.id for torrent in torrents),
         torrent_file_ids=tuple(row.id for row in torrent_files),
+        offline_file=offline_file,
+        offline_copy=offline_copy is not None,
         bytes=total,
     )
 
@@ -430,6 +462,7 @@ async def targets_for_episode(
         media_files=media_files,
         torrents=torrents,
         torrent_files=torrent_files,
+        offline_copy=await session.get(OfflineCopy, episode_id),
     )
 
 
@@ -455,6 +488,9 @@ class _Facts:
     #: not batch-backed, which is every episode written before FR-A11 and most
     #: of them since.
     torrent_files: list[TorrentFile] = field(default_factory=list)
+    #: The small offline copy, when there is one (FR-P6). It goes with the
+    #: episode; it is never a reason to keep one.
+    offline_copy: OfflineCopy | None = None
 
     @property
     def anchor(self) -> tuple[datetime, str] | None:
@@ -601,6 +637,11 @@ async def _facts(session: AsyncSession) -> dict[int, _Facts]:
         if claim.episode_id is not None:
             facts[claim.episode_id].torrent_files.append(claim)
 
+    for copy in (
+        await session.scalars(select(OfflineCopy).where(OfflineCopy.episode_id.in_(retained)))
+    ).all():
+        facts[copy.episode_id].offline_copy = copy
+
     return facts
 
 
@@ -619,6 +660,9 @@ async def candidates(
     moment = now or datetime.now(UTC)
     window = grace if grace is not None else await grace_period(session)
     facts = await _facts(session)
+    # A copy being made is reading the source right now (FR-P6). The episode
+    # waits for the next sweep; the deleter asks again before it acts.
+    encoding = await encoding_episode_ids(session)
 
     episodes = (
         await session.scalars(
@@ -629,7 +673,7 @@ async def candidates(
     found: list[Deletable] = []
     for episode in episodes:
         fact = facts.get(episode.id, _Facts())
-        if fact.active_wants:
+        if fact.active_wants or episode.id in encoding:
             continue
 
         if episode.state is EpisodeState.READY and fact.rendition is None and not fact.media_files:
@@ -653,6 +697,7 @@ async def candidates(
                         media_files=[],
                         torrents=fact.torrents,
                         torrent_files=fact.torrent_files,
+                        offline_copy=fact.offline_copy,
                     ),
                 )
             )
@@ -679,6 +724,7 @@ async def candidates(
             media_files=fact.media_files,
             torrents=fact.torrents,
             torrent_files=fact.torrent_files,
+            offline_copy=fact.offline_copy,
         )
         if targets.empty:
             continue
@@ -691,6 +737,79 @@ async def candidates(
                 reason=_reason(base, anchor, window),
                 targets=targets,
                 anchor=anchor,
+            )
+        )
+    return found
+
+
+# --- Idle offline copies (FR-P6) ---------------------------------------------
+
+
+#: What the idle rule's deletions are logged as.
+REASON_IDLE_COPY = "nobody has fetched this offline copy"
+
+
+@dataclass(frozen=True, slots=True)
+class IdleCopy:
+    """One ready episode's offline copy that has gone unfetched too long."""
+
+    episode_id: int
+    #: The file, resolved and checked, or ``None`` when it is already gone.
+    path: Path | None
+    #: ``last_served_at``, else ``ready_at``: what the idle period ran from.
+    anchor: datetime
+    bytes: int = 0
+
+
+async def idle_copies(
+    session: AsyncSession, settings: Settings, *, now: datetime, idle: timedelta
+) -> list[IdleCopy]:
+    """Ready episodes' copies nobody has fetched for ``idle`` (FR-P6, FR-T7).
+
+    Counted from the last time the media route served any of the file, else
+    from when it was made. A ready episode only: the copy of an episode that is
+    not ``ready`` belongs to a trip, and trips have rules of their own (M19
+    T4). A copy whose episode has an encode in flight is left alone, like its
+    source. So is the copy of a ready episode an active trip is still waiting
+    on (FR-A12): the trip's own clock (``trip_copy_days``, 14) is longer than
+    the idle one (7), and the device has yet to collect it.
+    """
+    anchor = func.coalesce(OfflineCopy.last_served_at, OfflineCopy.ready_at)
+    waited_on = (
+        select(TripEpisode.episode_id)
+        .join(Trip, Trip.id == TripEpisode.trip_id)
+        .where(Trip.state == TripState.ACTIVE, TripEpisode.state == TripEpisodeState.PENDING)
+    )
+    rows = (
+        await session.execute(
+            select(OfflineCopy, anchor)
+            .join(Episode, Episode.id == OfflineCopy.episode_id)
+            .where(
+                OfflineCopy.state == OfflineCopyState.READY,
+                Episode.state == EpisodeState.READY,
+                anchor.is_not(None),
+                anchor < now - idle,
+                OfflineCopy.episode_id.notin_(waited_on),
+            )
+            .order_by(OfflineCopy.episode_id)
+        )
+    ).all()
+    if not rows:
+        return []
+    encoding = await encoding_episode_ids(session, [copy.episode_id for copy, _ in rows])
+    roots = allowed_roots(settings)
+    found: list[IdleCopy] = []
+    for copy, moment in rows:
+        if copy.episode_id in encoding:
+            continue
+        raw = offline_path_for(settings, copy.episode_id)
+        path = _within(raw, roots) if (raw.exists() or raw.is_symlink()) else None
+        found.append(
+            IdleCopy(
+                episode_id=copy.episode_id,
+                path=path,
+                anchor=moment,
+                bytes=_file_size(path, copy.size) if path is not None else 0,
             )
         )
     return found
@@ -713,10 +832,14 @@ class RetainedUsage:
     renditions: int
     #: How many episodes the figures cover.
     episodes: int
+    #: The small offline copies on disk (FR-P6), from ``offline_copies.size``.
+    #: Every ready copy, not only those of retained episodes: a trip's copy
+    #: (M19 T3) sits on the disk for an episode that is not ``ready`` at all.
+    offline_bytes: int = 0
 
     @property
     def total(self) -> int:
-        return self.sources + self.renditions
+        return self.sources + self.renditions + self.offline_bytes
 
 
 async def retained_usage(session: AsyncSession, settings: Settings) -> RetainedUsage:
@@ -748,8 +871,16 @@ async def retained_usage(session: AsyncSession, settings: Settings) -> RetainedU
         return sum(dir_size(directory) for directory in directories)
 
     renditions = await asyncio.to_thread(measure) if directories else 0
+    offline = await session.scalar(
+        select(func.coalesce(func.sum(OfflineCopy.size), 0)).where(
+            OfflineCopy.state == OfflineCopyState.READY
+        )
+    )
     return RetainedUsage(
-        sources=int(sources or 0), renditions=renditions, episodes=int(episodes or 0)
+        sources=int(sources or 0),
+        renditions=renditions,
+        episodes=int(episodes or 0),
+        offline_bytes=int(offline or 0),
     )
 
 
@@ -777,6 +908,7 @@ async def retained_bytes(session: AsyncSession, settings: Settings) -> int:
 __all__ = [
     "PROTECTED_STATES",
     "REASON_DROPPED",
+    "REASON_IDLE_COPY",
     "REASON_MANUAL",
     "REASON_NO_FILES",
     "REASON_UNWANTED",
@@ -784,12 +916,14 @@ __all__ = [
     "RETAINED_STATES",
     "RETENTION_REASON",
     "Deletable",
+    "IdleCopy",
     "RetainedUsage",
     "Targets",
     "allowed_roots",
     "build_targets",
     "candidates",
     "dir_size",
+    "idle_copies",
     "retained_bytes",
     "retained_usage",
     "safe_path",

@@ -45,6 +45,11 @@ GRACE_KEY: Final[str] = "grace_days_g"
 #: (FR-T2).
 UNWATCHED_KEY: Final[str] = "unwatched_days_d"
 
+#: How long a ready episode's small offline copy may go unfetched (FR-P6,
+#: FR-T7). Read with a floor of one day: a zero would delete a copy in the
+#: hour between its encode and the device fetching it.
+OFFLINE_IDLE_KEY: Final[str] = "offline_idle_days"
+
 #: Hard ceiling on either window, whatever the table says. Ten years: the
 #: point is to catch a hand-edited row that would otherwise mean "never", not
 #: to second-guess an admin who wants a long grace period.
@@ -78,6 +83,16 @@ async def unwatched_days(session: AsyncSession) -> int:
     return await _days(session, UNWATCHED_KEY)
 
 
+async def offline_idle_days(session: AsyncSession) -> int:
+    """Days an unfetched offline copy is kept (FR-P6), never fewer than one."""
+    return max(await _days(session, OFFLINE_IDLE_KEY), 1)
+
+
+async def offline_idle_period(session: AsyncSession) -> timedelta:
+    """:func:`offline_idle_days` as a ``timedelta``."""
+    return timedelta(days=await offline_idle_days(session))
+
+
 async def grace_period(session: AsyncSession) -> timedelta:
     """G as a ``timedelta``, which is how every caller uses it."""
     return timedelta(days=await grace_days(session))
@@ -91,9 +106,12 @@ async def unwatched_period(session: AsyncSession) -> timedelta:
 __all__ = [
     "GRACE_KEY",
     "MAX_DAYS",
+    "OFFLINE_IDLE_KEY",
     "UNWATCHED_KEY",
     "grace_days",
     "grace_period",
+    "offline_idle_days",
+    "offline_idle_period",
     "unwatched_days",
     "unwatched_period",
 ]

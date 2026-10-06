@@ -25,6 +25,7 @@ import {
 } from '@/lib/playback'
 import { rememberPosition } from '@/offline/cache'
 import { useOffline } from '@/offline/network'
+import { useDownload } from '@/offline/useDownloads'
 import { HlsVideo } from '@/player/HlsVideo'
 import { ProgressReporter } from '@/player/ProgressReporter'
 import { chooseSource, useLocalCopy } from '@/player/source'
@@ -159,6 +160,14 @@ const LOAD_FAILED_BODY = 'Could not load this episode. Try again shortly.'
 const OFFLINE_TITLE = 'You’re offline'
 const OFFLINE_BODY =
   'This episode isn’t downloaded to this device. Episodes you have downloaded play without a connection.'
+
+/**
+ * A trip episode that lives only on this account's devices (FR-A12, M19), and
+ * this device does not have it yet.
+ */
+const OFFLINE_ONLY_TITLE = 'Not on this device yet'
+const OFFLINE_ONLY_BODY =
+  'This episode is only for your device — keep it offline first. Arc downloads a trip’s episodes by itself while it is open.'
 
 /** A download whose file the browser would not open (evicted, or damaged). */
 const FILE_UNREADABLE =
@@ -686,6 +695,7 @@ function PlayerView({ id }: { id: number }) {
    * called synchronously from the event that asked for it.
    */
   const local = useLocalCopy(id)
+  const localRecord = useDownload(id)
   const offline = useOffline()
   const { data: me } = useMe()
   const userId = me?.id ?? null
@@ -1248,6 +1258,29 @@ function PlayerView({ id }: { id: number }) {
   const info: PlayInfo = data
   const source = chooseSource(info, local.url)
   if (source.kind === 'none') {
+    // A trip-only episode with no copy here (or one still on its way): say
+    // where it comes from. A copy that is here but would not open is the
+    // unreadable case below, whichever kind of episode it is.
+    if (info.offline_only === true && localRecord?.reason !== 'unreadable') {
+      return (
+        <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+          <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
+            {OFFLINE_ONLY_TITLE}
+          </h1>
+          <p className="mt-3 text-[16px] leading-[1.55] text-[var(--arc-text-muted)]">
+            {OFFLINE_ONLY_BODY}
+          </p>
+          <div className="mt-7 flex flex-wrap justify-center gap-2.5">
+            <Link to="/downloads" className={buttonClass('primary')}>
+              Go to Downloads
+            </Link>
+            <Link to={`/anime/${String(info.anime.id)}`} className={buttonClass('secondary')}>
+              Back to the show
+            </Link>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
         <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">

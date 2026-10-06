@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -39,7 +40,7 @@ from arc.services.jobs import (
     run_worker_loop,
 )
 from arc.services.jobs import registry as job_registry
-from arc.services.jobs.loop import process_caps
+from arc.services.jobs.loop import full_types, process_caps
 from arc.services.jobs.runner import MAX_BACKOFF
 from arc.services.library import names as library_names
 from arc.services.mal import names as mal_names
@@ -814,11 +815,123 @@ async def _does_nothing(ctx: JobContext) -> None:
     return None
 
 
-def test_the_only_capped_type_is_the_transcode(settings: Settings) -> None:
-    """The mapping is built from settings, so a cap cannot drift from its knob."""
-    assert process_caps(settings) == {media_names.TRANSCODE: settings.max_transcodes}
+def test_the_only_capped_group_is_the_two_encoders(settings: Settings) -> None:
+    """The mapping is built from settings, so a cap cannot drift from its knob.
+
+    One group since M19 (2026-10-05): ``transcode`` and ``offline_encode``
+    both run a whole-episode ffmpeg, and share ``MAX_TRANSCODES`` between them.
+    """
+    encoders = frozenset({media_names.TRANSCODE, media_names.OFFLINE_ENCODE})
+    assert process_caps(settings) == {encoders: settings.max_transcodes}
     lowered = settings.model_copy(update={"max_transcodes": 1})
-    assert process_caps(lowered) == {media_names.TRANSCODE: 1}
+    assert process_caps(lowered) == {encoders: 1}
+
+
+def test_a_group_is_full_when_its_members_add_up_to_the_cap(settings: Settings) -> None:
+    caps = process_caps(settings.model_copy(update={"max_transcodes": 2}))
+    encoders = {media_names.TRANSCODE, media_names.OFFLINE_ENCODE}
+
+    assert full_types(caps, Counter({media_names.TRANSCODE: 1})) == frozenset()
+    assert full_types(
+        caps, Counter({media_names.TRANSCODE: 1, media_names.OFFLINE_ENCODE: 1})
+    ) == frozenset(encoders)
+    assert full_types(caps, Counter({media_names.OFFLINE_ENCODE: 2})) == frozenset(encoders)
+    assert full_types(caps, Counter({"compute_wants": 5})) == frozenset()
+
+
+async def test_a_pending_transcode_is_claimed_before_a_pending_copy(
+    jobs_factory: SessionFactory,
+) -> None:
+    """Preparing an episode for streaming is what somebody is waiting on (FR-P3).
+
+    The copy was queued first and the transcode has the worst priority a
+    transcode can have; the transcode still goes first.
+    """
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    copy = await _enqueued(
+        jobs_factory,
+        media_names.OFFLINE_ENCODE,
+        {"episode_id": 1, "why": "request"},
+        priority=media_names.OFFLINE_REQUEST_PRIORITY,
+        run_after=due - timedelta(minutes=5),
+    )
+    transcode = await _enqueued(
+        jobs_factory,
+        media_names.TRANSCODE,
+        {"episode_id": 2},
+        priority=media_names.MAX_DISTANCE_PRIORITY,
+        run_after=due,
+    )
+
+    async with jobs_factory() as session:
+        first = await claim_one(session, WORKER)
+    async with jobs_factory() as session:
+        second = await claim_one(session, WORKER)
+
+    assert first is not None and first.id == transcode.id
+    assert second is not None and second.id == copy.id
+    assert media_names.MAX_DISTANCE_PRIORITY < media_names.OFFLINE_REQUEST_PRIORITY
+    assert media_names.OFFLINE_REQUEST_PRIORITY < media_names.OFFLINE_TRIP_PRIORITY
+
+
+async def test_a_copy_does_not_start_while_a_transcode_holds_the_only_encoder(
+    jobs_factory: SessionFactory,
+    settings: Settings,
+    stub_handler: Callable[[str, JobHandler], None],
+) -> None:
+    """One ``MAX_TRANSCODES`` for both: a copy waits *pending* behind an encode."""
+    release = asyncio.Event()
+    started: list[str] = []
+
+    async def fake_encoder(ctx: JobContext) -> None:
+        started.append(ctx.job.type)
+        await release.wait()
+
+    stub_handler(media_names.TRANSCODE, fake_encoder)
+    stub_handler(media_names.OFFLINE_ENCODE, fake_encoder)
+    stub_handler(acquisition_names.COMPUTE_WANTS, _does_nothing)
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    transcode = await _enqueued(
+        jobs_factory, media_names.TRANSCODE, {"episode_id": 1}, priority=10, run_after=due
+    )
+    copy = await _enqueued(
+        jobs_factory,
+        media_names.OFFLINE_ENCODE,
+        {"episode_id": 2, "why": "request"},
+        priority=media_names.OFFLINE_REQUEST_PRIORITY,
+        run_after=due,
+    )
+    wants = await _enqueued(
+        jobs_factory,
+        acquisition_names.COMPUTE_WANTS,
+        priority=acquisition_names.COMPUTE_WANTS_PRIORITY,
+        run_after=due,
+    )
+    one_encoder = settings.model_copy(update={"max_transcodes": 1})
+
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        run_worker_loop(
+            jobs_factory, one_encoder, stop, worker_id=WORKER, concurrency=3, poll_interval=0.05
+        )
+    )
+    try:
+        await _wait_for_status(jobs_factory, wants.id, JobStatus.DONE)
+        await asyncio.sleep(0.25)
+        parked = await _reload(jobs_factory, copy.id)
+        assert parked.status is JobStatus.PENDING, "the copy must wait for the encoder"
+        assert parked.attempts == 0
+        assert started == [media_names.TRANSCODE]
+
+        release.set()
+        await _wait_for_status(jobs_factory, transcode.id, JobStatus.DONE)
+        await _wait_for_status(jobs_factory, copy.id, JobStatus.DONE)
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(worker, timeout=5)
+
+    assert started == [media_names.TRANSCODE, media_names.OFFLINE_ENCODE]
 
 
 def test_the_claim_statement_is_unchanged_when_nothing_is_excluded() -> None:

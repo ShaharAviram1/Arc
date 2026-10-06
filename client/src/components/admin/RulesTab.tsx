@@ -73,7 +73,7 @@ const EXPLANATION =
  * what happened when the server settled on 0–365 for G and D.
  */
 const NUMBER_FIELDS: {
-  key: 'look_ahead_n' | 'slot_cap_k' | 'grace_days_g' | 'unwatched_days_d' | 'min_free_gb'
+  key: keyof typeof NUMBER_BOUNDS
   label: string
   help: string
 }[] = [
@@ -107,6 +107,25 @@ const NUMBER_FIELDS: {
       'Below this much free space on the data volume acquisition holds itself: nothing new is ' +
       'searched for, downloads and playback carry on, and it resumes on its own when retention ' +
       'frees room. 0 turns the guard off (FR-T6).',
+  },
+  {
+    key: 'offline_idle_days',
+    label: 'Idle small copies (days)',
+    help:
+      'A ready episode’s smaller copy for devices that nobody has downloaded for this many ' +
+      'days is deleted; the episode still streams, and the next Keep offline makes it again (FR-T7).',
+  },
+  {
+    key: 'trip_max_episodes',
+    label: 'Most episodes per trip',
+    help: 'The largest “Prepare for a trip” a user may ask for on one show (FR-A12).',
+  },
+  {
+    key: 'trip_copy_days',
+    label: 'Trip copies wait (days)',
+    help:
+      'How long a trip’s copies wait on the server for the device to download them before ' +
+      'they expire (FR-A12, FR-T7).',
   },
 ]
 

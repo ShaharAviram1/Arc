@@ -371,6 +371,26 @@ class Settings(BaseSettings):
     #: ``worker_stale_after`` bounds silence, not work.
     transcode_timeout_seconds: float = Field(default=10800.0, gt=0)
 
+    # --- The small offline copy (M19, FR-P6) ------------------------------
+    #: What "Keep offline" downloads: one MP4 per episode, much smaller than
+    #: the streaming rendition, with the subtitles burned in exactly as the
+    #: rendition's are. H.264 by default because every browser Arc's viewers
+    #: use plays it; ``hevc`` is roughly 40 % smaller at the same quality and
+    #: is for a household whose devices all decode it (the client checks with
+    #: ``canPlayType`` before it downloads one). Not admin-editable: like the
+    #: transcode knobs beside it, an encode setting is a property of the host
+    #: and of the people using it, set before the worker starts.
+    offline_codec: Literal["h264", "hevc"] = "h264"
+    #: The tallest the copy may be. A source shorter than this is never
+    #: upscaled; a taller one is scaled down, keeping its aspect ratio.
+    offline_height: int = Field(default=720, ge=144, le=2160)
+    #: Quality target, and the encoder speed preset. CRF 26 at 720p is about
+    #: 100 MB for a 24-minute episode on the owner's own sources.
+    offline_crf: int = Field(default=26, ge=0, le=51)
+    offline_preset: str = "fast"
+    #: AAC stereo bitrate, as ffmpeg writes it (``96k``).
+    offline_audio_bitrate: str = Field(default="96k", pattern=r"^[1-9][0-9]{1,3}k$")
+
     # --- Library: ingest and matching (M5) --------------------------------
     #: How often the worker walks the download and manual-drop directories
     #: (FR-L1). Two minutes: a torrent that finishes is handed over by
@@ -586,6 +606,16 @@ class Settings(BaseSettings):
         ``DATA_DIR`` is relative.
         """
         return (self.data_dir / "renditions").resolve()
+
+    @property
+    def offline_dir(self) -> Path:
+        """Where the small offline copies live: ``offline/<episode id>.mp4``.
+
+        Resolved like :attr:`renditions_dir`, and for the same reason: the
+        encode is written into a staging directory beside it and renamed into
+        place, and both names must be the same directory.
+        """
+        return (self.data_dir / "offline").resolve()
 
     @property
     def fonts_dir(self) -> Path:

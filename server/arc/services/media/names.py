@@ -1,4 +1,4 @@
-"""The transcode job type, its dedupe key, and its priority (FR-P1, FR-P3).
+"""The transcode and offline-copy job types, their keys and priorities (FR-P1, FR-P3, FR-P6).
 
 Handler-free, like :mod:`arc.services.library.names` and
 :mod:`arc.services.acquisition.names`, and for the same reason: the API route
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import DEFAULT_PRIORITY, Episode, Job, ListEntry, Want
-from arc.services.jobs.queue import enqueue
+from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue
 
 #: Prepare one episode for playback: probe, plan, burn in, package (FR-P1).
 TRANSCODE = "transcode"
@@ -53,6 +53,119 @@ PRIORITY_PER_EPISODE = 10
 #: episodes the difference stops meaning anything, and without a cap a want on
 #: episode 900 of a long-runner would sort behind housekeeping.
 MAX_DISTANCE_PRIORITY = 500
+
+
+#: Make the small offline copy of one episode (FR-P6, architecture.md §5.3b).
+OFFLINE_ENCODE = "offline_encode"
+
+#: The job types that run ffmpeg over a whole episode. They share one cap —
+#: ``MAX_TRANSCODES`` is a statement about the host's cores, not about one job
+#: type — and one semaphore (:func:`arc.services.jobs.loop.process_caps`).
+ENCODE_TYPES: frozenset[str] = frozenset({TRANSCODE, OFFLINE_ENCODE})
+
+#: Why a copy is being made. ``request`` is "Keep offline" on a ready episode;
+#: ``trip`` is a trip's episode (M19 T3).
+OFFLINE_WHY_REQUEST = "request"
+OFFLINE_WHY_TRIP = "trip"
+OFFLINE_WHY: frozenset[str] = frozenset({OFFLINE_WHY_REQUEST, OFFLINE_WHY_TRIP})
+
+#: Payload key holding :data:`OFFLINE_WHY`.
+WHY_KEY = "why"
+
+#: Payload key holding the user who asked for a ``request`` copy.
+USER_KEY = "user_id"
+
+#: Queue priorities for copies (FR-P3). Every transcode sorts in front —
+#: :func:`transcode_priority` tops out at :data:`MAX_DISTANCE_PRIORITY` (500)
+#: and an unwanted episode takes 100 — because preparing an episode for
+#: streaming is what somebody is waiting on, and a copy is for later. An
+#: on-demand copy then goes before a trip's (600 + 10 × its position in the
+#: trip, so a trip's copies come in episode order). A running copy is never
+#: pre-empted; this only orders claims.
+OFFLINE_REQUEST_PRIORITY = 520
+OFFLINE_TRIP_PRIORITY = 600
+
+#: The copy's file inside its staging directory, and the copy's own name.
+OFFLINE_SUFFIX = ".mp4"
+
+
+def offline_dedupe_key(episode_id: int) -> str:
+    """One queued copy per episode, however many devices ask for it."""
+    return f"{OFFLINE_ENCODE}:{episode_id}"
+
+
+def offline_path_for(settings: Settings, episode_id: int) -> Path:
+    """``DATA_DIR/offline/<episode id>.mp4`` — derived from the id, never input.
+
+    The same rule as :func:`output_dir_for` (spec §7), and here for the same
+    reason: the media route and retention find the file again by the id, and
+    neither may import the encoder to do it.
+    """
+    return settings.offline_dir / f"{episode_id}{OFFLINE_SUFFIX}"
+
+
+async def latest_offline_jobs(session: AsyncSession, episode_ids: Sequence[int]) -> dict[int, Job]:
+    """The live (pending or running) ``offline_encode`` job for each of ``episode_ids``.
+
+    Live only, and asked only for the copies that are ``queued`` or
+    ``preparing`` — the two states whose progress lives in a job payload — so
+    the scan is over the handful of active rows rather than the whole jobs
+    table's history, which a device polling every 20 s would otherwise repeat.
+    An absent entry is itself the answer a caller needs: a queued or
+    preparing copy with no live job behind it is a dead encode.
+    """
+    if not episode_ids:
+        return {}
+    wanted = {str(episode_id) for episode_id in episode_ids}
+    key = cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
+    rows = await session.scalars(
+        select(Job)
+        .where(Job.type == OFFLINE_ENCODE, Job.status.in_(ACTIVE_STATUSES), key.in_(wanted))
+        .distinct(key)
+        .order_by(key, Job.id.desc())
+    )
+    latest: dict[int, Job] = {}
+    for job in rows.all():
+        raw: Any = job.payload.get(EPISODE_KEY)
+        try:
+            latest[int(raw)] = job
+        except TypeError, ValueError:  # pragma: no cover - a hand-written row
+            continue
+    return latest
+
+
+async def enqueue_offline_encode(
+    session: AsyncSession,
+    episode_id: int,
+    *,
+    why: str = OFFLINE_WHY_REQUEST,
+    priority: int | None = None,
+    user_id: int | None = None,
+) -> Job:
+    """Queue the small copy of one episode, deduplicated on the episode.
+
+    Flushed, not committed. ``why`` is ``request`` or ``trip``; the priority
+    defaults to :data:`OFFLINE_REQUEST_PRIORITY` for a request and to
+    :data:`OFFLINE_TRIP_PRIORITY` for a trip (whose caller passes its own,
+    with the episode's position folded in). ``user_id`` is who asked, stored
+    for a ``request`` so the per-user queue cap can count it
+    (:func:`arc.services.media.copies.request_copy`); a trip has caps of its
+    own and need not pass it.
+    """
+    if why not in OFFLINE_WHY:
+        raise ValueError(f"unknown reason for an offline copy: {why!r}")
+    if priority is None:
+        priority = OFFLINE_REQUEST_PRIORITY if why == OFFLINE_WHY_REQUEST else OFFLINE_TRIP_PRIORITY
+    payload: dict[str, Any] = {EPISODE_KEY: episode_id, WHY_KEY: why}
+    if user_id is not None:
+        payload[USER_KEY] = user_id
+    return await enqueue(
+        session,
+        OFFLINE_ENCODE,
+        payload,
+        priority=priority,
+        dedupe_key=offline_dedupe_key(episode_id),
+    )
 
 
 def transcode_dedupe_key(episode_id: int) -> str:
@@ -124,6 +237,9 @@ async def transcode_priority(session: AsyncSession, episode_id: int) -> int:
     entry by the length of one reconciliation, and a missing entry reads as
     "watched nothing", which is the pessimistic answer and therefore the safe
     one.
+
+    Trip wants are not counted (FR-A12): a trip is for later, and an episode a
+    trip wants nine episodes ahead is not one anybody is about to reach.
     """
     distance = func.greatest(Episode.number - func.coalesce(ListEntry.progress, 0), 0)
     nearest = await session.scalar(
@@ -134,7 +250,11 @@ async def transcode_priority(session: AsyncSession, episode_id: int) -> int:
             ListEntry,
             (ListEntry.user_id == Want.user_id) & (ListEntry.anime_id == Episode.anime_id),
         )
-        .where(Want.episode_id == episode_id, Want.dropped_at.is_(None))
+        .where(
+            Want.episode_id == episode_id,
+            Want.dropped_at.is_(None),
+            Want.trip.is_(False),
+        )
     )
     if nearest is None:
         return DEFAULT_PRIORITY
@@ -174,12 +294,26 @@ async def enqueue_transcode(
 
 
 __all__ = [
+    "ENCODE_TYPES",
     "EPISODE_KEY",
     "MAX_DISTANCE_PRIORITY",
+    "OFFLINE_ENCODE",
+    "OFFLINE_REQUEST_PRIORITY",
+    "OFFLINE_SUFFIX",
+    "OFFLINE_TRIP_PRIORITY",
+    "OFFLINE_WHY",
+    "OFFLINE_WHY_REQUEST",
+    "OFFLINE_WHY_TRIP",
     "PRIORITY_PER_EPISODE",
     "TRANSCODE",
+    "USER_KEY",
+    "WHY_KEY",
+    "enqueue_offline_encode",
     "enqueue_transcode",
+    "latest_offline_jobs",
     "latest_transcode_jobs",
+    "offline_dedupe_key",
+    "offline_path_for",
     "output_dir_for",
     "transcode_dedupe_key",
     "transcode_priority",

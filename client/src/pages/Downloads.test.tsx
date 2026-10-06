@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -8,13 +8,16 @@ import { createQueryClient } from '@/lib/queryClient'
 import { rememberUser } from '@/offline/cache'
 import { setDownloads, type DownloadRecord } from '@/offline/downloads'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
-import { mockApi, TEST_USER } from '@/test/apiMock'
-import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
+import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
+import { downloadedRecord, managerHarness, recordEntry, smallCopy } from '@/test/downloadFixtures'
 
 const TITLE = PLAY_INFO.anime.title.preferred
 
-function install(records: DownloadRecord[]) {
-  const harness = managerHarness({ initial: records.map(recordEntry) })
+function install(
+  records: DownloadRecord[],
+  options: Omit<Parameters<typeof managerHarness>[0], 'initial'> = {},
+) {
+  const harness = managerHarness({ ...options, initial: records.map(recordEntry) })
   for (const record of records) harness.files.set(record.name, record.bytes)
   setDownloads(harness.manager)
   return harness
@@ -171,5 +174,172 @@ describe('Downloads (FR-S9)', () => {
 
     await user.click(screen.getByRole('button', { name: `Resume ${TITLE} episode 1` }))
     expect(worker.lastCommand()).toMatchObject({ cmd: 'download', name: 'episode-9001.mp4' })
+  })
+
+  it('says quietly which copy each episode is (M19)', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    install([
+      {
+        ...downloadedRecord(TEST_USER.id, PLAY_INFO, 210 * 1024 * 1024),
+        name: 'episode-9001-o.mp4',
+        url: smallCopy(9001).url,
+        variant: 'small',
+      },
+      downloadedRecord(TEST_USER.id, PLAY_INFO_EPISODE_2, 700 * 1024 * 1024),
+    ])
+
+    renderApp()
+
+    expect(await screen.findByText(/On this device · 210 MB · smaller copy/)).toBeInTheDocument()
+    expect(screen.getByText(/On this device · 700 MB · full size/)).toBeInTheDocument()
+  })
+
+  it('lists a copy the server is still making as "Preparing on the server"', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    const waiting: DownloadRecord = {
+      ...downloadedRecord(TEST_USER.id),
+      name: 'episode-9001-o.mp4',
+      url: null,
+      variant: 'small',
+      fullUrl: '/media/9001/episode.mp4',
+      state: 'preparing',
+      serverProgress: null,
+      bytes: 0,
+      total: 0,
+      etag: null,
+    }
+    install([waiting], {
+      pollCopy: () =>
+        Promise.resolve({
+          state: 'preparing',
+          progress: 0.4,
+          size: null,
+          url: null,
+          codecs: 'avc1.640028',
+        }),
+    })
+
+    renderApp()
+
+    expect(await screen.findByText(/Preparing on the server · 40%/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('progressbar', { name: `Preparing ${TITLE} episode 1 on the server` }),
+    ).toHaveAttribute('aria-valuenow', '40')
+    expect(screen.getByRole('button', { name: `Pause ${TITLE} episode 1` })).toBeInTheDocument()
+    expect(screen.queryByText(/smaller copy/)).not.toBeInTheDocument()
+  })
+})
+
+describe('a trip on the Downloads page (M19 T6)', () => {
+  const TRIP_ID = 77
+
+  function tripRecords(): DownloadRecord[] {
+    const first: DownloadRecord = {
+      ...downloadedRecord(TEST_USER.id, PLAY_INFO, 100_000_000),
+      name: 'episode-9001-o.mp4',
+      variant: 'small',
+      tripId: TRIP_ID,
+      confirm: 'pending',
+    }
+    const second: DownloadRecord = {
+      ...downloadedRecord(TEST_USER.id, PLAY_INFO_EPISODE_2, 25_000_000),
+      name: 'episode-9002-o.mp4',
+      variant: 'small',
+      tripId: TRIP_ID,
+      state: 'downloading',
+      total: 100_000_000,
+    }
+    return [first, second]
+  }
+
+  const CURRENT = {
+    id: TRIP_ID,
+    anime_id: PLAY_INFO.anime.id,
+    anime_title: TITLE,
+    first_number: 1,
+    last_number: 2,
+    count: 2,
+    state: 'active',
+    created_at: '2026-10-06T08:00:00Z',
+    deadline_at: '2026-10-20T08:00:00Z',
+    episodes: [],
+  }
+
+  it('groups the trip’s episodes under one heading with their total and counts', async () => {
+    pretendOpfs()
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/trips/current': { body: null },
+    })
+    // The server has not answered the confirmation yet.
+    install(tripRecords(), { confirmDelivered: () => new Promise(() => undefined) })
+
+    renderApp()
+
+    const group = await screen.findByRole('region', { name: `Trip · ${TITLE}` })
+    expect(
+      within(group).getByRole('heading', { name: `Trip · ${TITLE} · 2 episodes · 191 MB` }),
+    ).toBeInTheDocument()
+    // The download that was running when Arc closed comes back paused.
+    expect(within(group).getByText('1 on this device · 1 paused')).toBeInTheDocument()
+    expect(within(group).getByText(/telling Arc it arrived/)).toBeInTheDocument()
+    // Not the active trip (the server says there is none): nothing to cancel.
+    expect(within(group).queryByRole('button', { name: 'Cancel trip' })).not.toBeInTheDocument()
+  })
+
+  it('keeps episodes outside a trip in their own list', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips/current': { body: null } })
+    const [first] = tripRecords()
+    install([first as DownloadRecord, downloadedRecord(TEST_USER.id, PLAY_INFO_EPISODE_2, 700)])
+
+    renderApp()
+
+    const group = await screen.findByRole('region', { name: `Trip · ${TITLE}` })
+    expect(within(group).getAllByRole('button', { name: /^Delete / })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /^Delete / })).toHaveLength(2)
+  })
+
+  it('cancels the active trip from its group, after a confirmation in the page', async () => {
+    pretendOpfs()
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/trips/current': { body: CURRENT },
+      [`DELETE /api/trips/${String(TRIP_ID)}`]: { status: 204 },
+    })
+    install(tripRecords())
+    const user = userEvent.setup()
+
+    renderApp()
+
+    const group = await screen.findByRole('region', { name: `Trip · ${TITLE}` })
+    await user.click(await within(group).findByRole('button', { name: 'Cancel trip' }))
+    const ask = within(group).getByRole('group', { name: 'Cancel this trip?' })
+    await user.click(within(ask).getByRole('button', { name: 'Cancel trip' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(`DELETE /api/trips/${String(TRIP_ID)}`)
+    })
+    // What is on the device stays.
+    expect(screen.getByRole('button', { name: `Delete ${TITLE} episode 1` })).toBeInTheDocument()
+  })
+
+  it('tells the server when a trip episode is deleted from the device', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips/current': { body: null } })
+    const releaseDelivered = vi.fn(() => Promise.resolve(null))
+    const [first] = tripRecords()
+    install([{ ...(first as DownloadRecord), confirm: 'done' }], { releaseDelivered })
+    const user = userEvent.setup()
+
+    renderApp()
+    await user.click(await screen.findByRole('button', { name: `Delete ${TITLE} episode 1` }))
+    await user.click(screen.getByRole('button', { name: 'Delete download' }))
+
+    await waitFor(() => {
+      expect(releaseDelivered).toHaveBeenCalledWith(TRIP_ID, 9001)
+    })
   })
 })

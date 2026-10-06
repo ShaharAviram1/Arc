@@ -986,6 +986,54 @@ class QbitClient:
             await self.request("POST", "/torrents/pause", data=data)
         log.info("torrents stopped", extra={"count": len(wanted)})
 
+    async def bottom_prio(self, info_hash: str) -> bool:
+        """Move one torrent to the bottom of the client's queue (FR-A12).
+
+        Called after adding a torrent that was taken only for trip-only
+        episodes: a trip is for later, and anything the window is fetching for
+        tonight should start first. ``torrents/bottomPrio`` answers **409**
+        when the client's own queueing is switched off, in which case there is
+        no queue to be at the bottom of; that is reported as ``False`` rather
+        than raised, because the torrent is already added and downloading is
+        the right outcome either way. Only hashes Arc added itself are passed.
+        """
+        response = await self.request(
+            "POST",
+            "/torrents/bottomPrio",
+            allow_status=frozenset({httpx.codes.CONFLICT}),
+            data={"hashes": info_hash.lower()},
+        )
+        if response.status_code == httpx.codes.CONFLICT:
+            log.info(
+                "qbittorrent queueing is off; a trip's torrent was not moved",
+                extra={"hash": info_hash},
+            )
+            return False
+        log.info("trip torrent moved to the bottom of the queue", extra={"hash": info_hash})
+        return True
+
+    async def top_prio(self, info_hash: str) -> bool:
+        """Move one torrent to the top of the client's queue (FR-A12).
+
+        :meth:`bottom_prio` undone: a torrent sent to the back for a trip that
+        somebody now wants for streaming as well. The same 409 rule — queueing
+        off means there is no queue, reported as ``False``.
+        """
+        response = await self.request(
+            "POST",
+            "/torrents/topPrio",
+            allow_status=frozenset({httpx.codes.CONFLICT}),
+            data={"hashes": info_hash.lower()},
+        )
+        if response.status_code == httpx.codes.CONFLICT:
+            log.info(
+                "qbittorrent queueing is off; a torrent was not moved up",
+                extra={"hash": info_hash},
+            )
+            return False
+        log.info("torrent moved to the top of the queue", extra={"hash": info_hash})
+        return True
+
     async def torrents(self) -> list[TorrentInfo]:
         """Everything in Arc's category, as ``hash → state`` rows."""
         response = await self.request("GET", "/torrents/info", params={"category": self.category})

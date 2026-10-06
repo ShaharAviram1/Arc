@@ -78,6 +78,7 @@ from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep
 from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.api.schemas import OverrideOut
+from arc.api.trip_schemas import TripLimits, TripOut
 from arc.models import Anime, Job, ListEntry, UserRole
 from arc.services.acquisition.samples import (
     SampleError,
@@ -107,6 +108,9 @@ from arc.services.mal.writelog import SyncState, sync_state
 from arc.services.playback.progress import completed_episode_ids
 from arc.services.settings import read_override
 from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
+from arc.services.trips.create import active_trip
+from arc.services.trips.rules import trip_max_episodes
+from arc.services.trips.view import trip_facts
 
 log = logging.getLogger(__name__)
 
@@ -337,11 +341,21 @@ async def detail(
     # (FR-A7, FR-P1, FR-P4); four queries for the whole list rather than four
     # per episode.
     episode_ids = [episode.id for episode in episodes]
-    extras = await episode_extras(session, episode_ids)
+    extras = await episode_extras(
+        session, episode_ids, offline_codec=settings.offline_codec, offline_demo=user.is_demo
+    )
     # The caller's own "try episode 1" want, if they have one (FR-A8). The
     # episode number comes from the list already loaded rather than from a
     # second query — the sample is always one of these rows.
     want = await sample_for(session, user_id=user.id, anime_id=anime.id)
+    # The caller's active trip, when it is on this show (FR-A12): one indexed
+    # lookup, and the trip's own few queries only when there is one.
+    trip = await active_trip(session, user.id)
+    trip_out = (
+        TripOut.build(await trip_facts(session, settings, trip))
+        if trip is not None and trip.anime_id == anime.id
+        else None
+    )
     # Where the caller stands under the slot cap (FR-A10), and only when it
     # could possibly say anything: the note is about an entry of theirs that
     # is watching or planned. One pass over that user's list, on the one page
@@ -386,6 +400,11 @@ async def detail(
         # When Arc will look again, for the rows that are still being looked
         # for (FR-A7): the retry schedule is a job row, not a column.
         next_searches=extras.next_searches,
+        # The small offline copies (FR-P6), from the same batched lookup.
+        offline=extras.offline,
+        trip=trip_out,
+        trip_limits=TripLimits(max_episodes=await trip_max_episodes(session)),
+        trip_only=extras.trip_only,
         sample=(
             SampleOut.build(want, by_id[want.episode_id])
             if want is not None and want.episode_id in by_id

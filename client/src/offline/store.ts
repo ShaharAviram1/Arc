@@ -37,7 +37,11 @@
  */
 
 export const DB_NAME = 'arc'
-export const DB_VERSION = 2
+/**
+ * v1: `outbox`. v2 (M18): the five FR-S9 stores. v3 (M19): no new store; each
+ * `downloads` record gains `variant: 'full'` ({@link upgradeDatabase}).
+ */
+export const DB_VERSION = 3
 
 /** Every object store. Append, then bump {@link DB_VERSION}; never rename or remove. */
 export const STORE_NAMES = [
@@ -159,6 +163,53 @@ export function createMissingStores(db: {
   }
 }
 
+/** The bits of a cursor and a versionchange transaction the record migrations use. */
+interface MigrationCursor {
+  value: unknown
+  update(value: unknown): unknown
+  continue(): void
+}
+
+export interface MigrationTransaction {
+  objectStore(name: string): {
+    openCursor(): { result: MigrationCursor | null; onsuccess: (() => void) | null }
+  }
+}
+
+/**
+ * v3 (M19): a download record from before the small copy is the full-size
+ * file. Records that already say which copy they are, and anything that is
+ * not a record, are left exactly as they are; nothing is deleted.
+ */
+function defaultVariants(transaction: MigrationTransaction): void {
+  const request = transaction.objectStore('downloads').openCursor()
+  request.onsuccess = () => {
+    const cursor = request.result
+    if (cursor === null) return
+    const value = cursor.value
+    if (typeof value === 'object' && value !== null && !('variant' in value)) {
+      cursor.update({ ...value, variant: 'full' })
+    }
+    cursor.continue()
+  }
+}
+
+/**
+ * The whole upgrade: create the stores that are missing, then migrate the
+ * records of stores that already existed, inside the versionchange
+ * transaction (so the database opens only once they are done). Never touches
+ * the outbox.
+ */
+export function upgradeDatabase(
+  db: Parameters<typeof createMissingStores>[0],
+  transaction: MigrationTransaction | null,
+  oldVersion: number,
+): void {
+  createMissingStores(db)
+  // A v1 database had no `downloads` store, so nothing in it to migrate.
+  if (transaction !== null && oldVersion >= 2 && oldVersion < 3) defaultVariants(transaction)
+}
+
 /** Close this connection when another tab wants a newer version, and reopen later. */
 function yieldToNewerVersions(db: IDBDatabase): void {
   db.onversionchange = () => {
@@ -184,8 +235,12 @@ function openDatabase(factory: IDBFactory | null): Promise<IDBDatabase | null> {
       resolve(null)
       return
     }
-    request.onupgradeneeded = () => {
-      createMissingStores(request.result)
+    request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
+      upgradeDatabase(
+        request.result,
+        request.transaction as unknown as MigrationTransaction | null,
+        event.oldVersion,
+      )
     }
     request.onsuccess = () => {
       const db = request.result

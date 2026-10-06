@@ -180,10 +180,17 @@ from arc.models import (
     Episode,
     EpisodeState,
     Job,
+    JobStatus,
     ListEntry,
     ListStatus,
+    OfflineCopy,
+    OfflineCopyState,
     Rendition,
     Torrent,
+    Trip,
+    TripEpisode,
+    TripEpisodeState,
+    TripState,
     UpdatedBy,
     Want,
     WatchProgress,
@@ -193,11 +200,14 @@ from arc.services.acquisition.dormancy import REASON_DORMANT, is_dormant
 from arc.services.acquisition.names import (
     QBIT_CANCEL,
     QBIT_CANCEL_PRIORITY,
+    QBIT_TOP,
+    QBIT_TOP_PRIORITY,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
     cancel_dedupe_key,
     enqueue_compute_wants,
     search_dedupe_key,
+    top_dedupe_key,
 )
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_CANCELLED
 from arc.services.acquisition.rules import (
@@ -208,9 +218,20 @@ from arc.services.acquisition.rules import (
 from arc.services.acquisition.slots import SETTLED, SlotShow, assign_slots
 from arc.services.acquisition.states import transition
 from arc.services.catalog.airing import RELEASING, aired_through, is_aired
-from arc.services.jobs.queue import enqueue
+from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue
+from arc.services.media.copies import episodes_with_sources, file_matches
+from arc.services.media.names import (
+    OFFLINE_WHY_TRIP,
+    enqueue_offline_encode,
+    enqueue_transcode,
+    latest_offline_jobs,
+    latest_transcode_jobs,
+    offline_path_for,
+)
 from arc.services.playback.watched import watched_through
 from arc.services.retention.rules import unwatched_period
+from arc.services.trips.names import TRIP_SEARCH_PRIORITY, enqueue_trip_release
+from arc.services.trips.rules import pending_episode_ids, trip_copy_priority
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +295,13 @@ REASON_NOT_WANTING = "show no longer watching or planned"
 #: of one. The days themselves are in the log line.
 STALE_DROP_REASON = "unwatched for D days"
 
+#: What :func:`_reconcile` writes into ``wants.drop_reason`` when a row a trip
+#: brought in stops being asked for and its show is not an admitted,
+#: followed one (FR-A12). It revives unconditionally, like
+#: :data:`REASON_NOT_WANTING`; the trip release ignores these rows when it
+#: decides whether a cancelled trip's bytes may go at once.
+REASON_TRIP_ENDED = "trip ended"
+
 
 @dataclass(frozen=True, slots=True)
 class _Touch:
@@ -333,9 +361,20 @@ class WantsResult:
     #: something to fetch and there was no slot free. Summed across users, so
     #: two users each waiting on one show is two.
     waiting: int = 0
+    #: Trip-only episodes a normal want has arrived on while their source was
+    #: still here: transcodes queued for them (FR-A12's promotion).
+    promoted: int = 0
+    #: Copies queued for pending trip episodes that had none (FR-A12).
+    copies: int = 0
+    #: Episodes that were trip-only before this run and are not any more: a
+    #: torrent sent to the back of the client's queue for them is moved back to
+    #: the top (FR-A12). Not a count, so not in :meth:`as_dict`.
+    untripped: tuple[int, ...] = ()
 
     def as_dict(self) -> dict[str, int]:
         return {
+            "promoted": self.promoted,
+            "copies": self.copies,
             "wanted": self.wanted,
             "added": self.added,
             "removed": self.removed,
@@ -444,6 +483,11 @@ def window(
 
     Pure, so the table of progress/N/aired combinations in the tests is the
     specification of the rule rather than a description of it.
+
+    An episode a device of the user holds from a trip (FR-A12) is **not**
+    left out (owner, 2026-10-06): the window is about streaming, and an
+    episode kept on an iPad may still be watched on a Mac. Inside the window
+    it is fetched and prepared like any other.
     """
     if look_ahead <= 0:
         return []
@@ -545,17 +589,29 @@ async def _live_wants(
     ``live`` is every live want including the samples, and it is what decides
     whether a show is *hungry*: an episode somebody already has a row for is
     not something the show is waiting to ask for.
+
+    **Trip wants are in neither** (FR-A12). Not in ``occupied``, because a
+    trip never counts against K; and not in ``live`` either, because an
+    episode wanted only for a device is still one the show's *window* is
+    waiting to ask for — leaving it out of "hungry" would let the window take
+    it over without competing for a slot, which is the cap bypassed by the back
+    door. ``wants.trip`` is the previous run's answer, which is the one there
+    is at planning time.
     """
     if not user_ids:
         return set(), set()
     rows = await session.execute(
-        select(Want.user_id, Want.episode_id, Episode.anime_id, Episode.state, Want.sample)
+        select(
+            Want.user_id, Want.episode_id, Episode.anime_id, Episode.state, Want.sample, Want.trip
+        )
         .join(Episode, Episode.id == Want.episode_id)
         .where(Want.dropped_at.is_(None), Want.user_id.in_(user_ids))
     )
     live: set[tuple[int, int]] = set()
     occupied: set[tuple[int, int]] = set()
-    for user_id, episode_id, anime_id, state, sample in rows.all():
+    for user_id, episode_id, anime_id, state, sample, trip in rows.all():
+        if trip:
+            continue
         live.add((user_id, episode_id))
         if not sample and state not in SETTLED:
             occupied.add((user_id, anime_id))
@@ -636,7 +692,6 @@ async def _plan_wants(
         ),
     )
     live, occupied = await _live_wants(session, {entry.user_id for entry, _ in entries})
-
     touches: dict[tuple[int, int], _Touch] = {}
     windows: dict[tuple[int, int], list[Episode]] = {}
     shows: dict[int, list[SlotShow]] = defaultdict(list)
@@ -829,6 +884,10 @@ async def compute_wants(
     # added to the plan rather than worked out inside it (FR-A8).
     desired = dict(plan.desired)
     desired.update(await _sample_wants(session, plan.wanting))
+    # And the trips (FR-A12), the other kind no list accounts for. Passed
+    # beside ``desired`` rather than merged into it, because a trip key that
+    # nothing else asked for is a *trip-only* row and has to be marked so.
+    trips = await _trip_wants(session)
 
     result = await _reconcile(
         session,
@@ -837,11 +896,44 @@ async def compute_wants(
         plan.dormant,
         plan.held,
         progress=plan.progress,
+        trips=trips,
         now=moment,
     )
     result = replace(result, waiting=plan.held_back)
-    result = await _drop_stale(session, result, now=moment)
-    return await _start_searches(session, result, now=moment, held=held)
+    result = await _drop_stale(session, result, now=moment, exclude=trips.keys())
+    return await _start_searches(session, result, now=moment, held=held, settings=settings)
+
+
+async def _trip_wants(session: AsyncSession) -> dict[tuple[int, int], _Touch]:
+    """``(user, episode)`` for every episode an active trip is waiting on (FR-A12).
+
+    ``pending`` rows of ``active`` trips, and only those: a delivered episode
+    is on the device, an expired or cancelled one is not wanted any more, and
+    a trip that has ended wants nothing. Like a sample, a trip is not derived
+    from any list, so it is read off its own rows — and it **touches no list
+    entry**: a dormant import stays dormant (FR-A9) and nothing here can lead
+    to a MyAnimeList write.
+
+    The ``_Touch`` is the trip's own creation, Arc-side: asking for a trip is
+    the user acting on the show, so it may revive a want FR-T2 dropped before
+    the trip was made, exactly as a list edit would.
+    """
+    # ``FOR SHARE OF trips``: a cancel takes the trip ``FOR UPDATE`` before it
+    # writes, so a reconciliation that has read an active trip finishes with it
+    # before the cancel can commit, and one that starts after the cancel reads
+    # it cancelled. Without it a reconciliation that read the trip just before
+    # the cancel committed would write trip wants for a trip that is over (they
+    # would only be undone by the next run).
+    rows = await session.execute(
+        select(Trip.user_id, TripEpisode.episode_id, Trip.created_at)
+        .join(Trip, Trip.id == TripEpisode.trip_id)
+        .where(Trip.state == TripState.ACTIVE, TripEpisode.state == TripEpisodeState.PENDING)
+        .with_for_update(of=Trip, read=True)
+    )
+    return {
+        (user_id, episode_id): _Touch(at=created, by=UpdatedBy.ARC)
+        for user_id, episode_id, created in rows.all()
+    }
 
 
 async def _sample_wants(
@@ -913,9 +1005,26 @@ async def _reconcile(
     held: Collection[tuple[int, int]] = (),
     *,
     progress: Mapping[tuple[int, int], int] | None = None,
+    trips: Mapping[tuple[int, int], _Touch] | None = None,
     now: datetime,
 ) -> WantsResult:
     """Make ``wants`` equal ``desired``: insert, revive, drop, delete.
+
+    ``trips`` is FR-A12's half (:func:`_trip_wants`). Every trip key is wanted
+    too, and the ones nothing in ``desired`` asked for are **trip-only**: the
+    row's ``trip`` flag is written to say so on every run, which is what makes
+    the flag a fact about the current reconciliation rather than about how the
+    row was first made — with one exception: a row that **already existed** on
+    a show the slot cap is holding is never flagged (the held-show rule below:
+    such rows are left exactly as they were found, and a flag would later make
+    the trip's ending take the row with it). A trip-flagged row is therefore
+    always one the trip itself brought in. When it leaves (the trip ended, or
+    the episode was delivered) it is **deleted** if its show is still in
+    ``wanting`` and not held — the ordinary "left the window" ending — and
+    otherwise **shelved** with :data:`REASON_TRIP_ENDED`, held show included,
+    so retention keeps the moment it stopped being wanted (FR-T1's anchor)
+    and a held show does not keep an episode wanted for a device that no
+    longer asks for it.
 
     **Leaving is two different things** (FR-W4). A row whose (user, show) still
     has a ``watching``/``planned`` entry left the *window* — the user watched
@@ -978,6 +1087,12 @@ async def _reconcile(
     — touching the show in Arc brings it straight back.
     """
     watched_through = progress or {}
+    trip_touches = trips or {}
+    # Trip-only: a trip asked for it and nothing else did (FR-A12).
+    trip_only = {key for key in trip_touches if key not in desired}
+    wanted_now: dict[tuple[int, int], _Touch] = dict(desired)
+    for key in trip_only:
+        wanted_now[key] = trip_touches[key]
     rows = await session.execute(
         select(Want, Episode.anime_id, Episode.number).join(Episode, Episode.id == Want.episode_id)
     )
@@ -988,29 +1103,65 @@ async def _reconcile(
         (want.user_id, want.episode_id): (want, anime_id, number)
         for want, anime_id, number in rows.all()
     }
+    # Trip-only before this run (FR-A12): read before the loop rewrites the
+    # flags, so the end of the run can say which stopped being so.
+    live_trip: dict[int, bool] = {}
+    for (_, episode_id), (want, _, _) in existing.items():
+        if want.dropped_at is None:
+            live_trip[episode_id] = live_trip.get(episode_id, True) and want.trip
+    was_trip_only = {episode_id for episode_id, only in live_trip.items() if only}
 
     added = revived = 0
-    for key, touch in desired.items():
+    for key, touch in wanted_now.items():
+        is_trip = key in trip_only
         found = existing.get(key)
         if found is None:
-            session.add(Want(user_id=key[0], episode_id=key[1]))
+            session.add(Want(user_id=key[0], episode_id=key[1], trip=is_trip))
             added += 1
             continue
         want = found[0]
+        if is_trip and not want.trip and (key[0], found[1]) in held:
+            # A row the held show already had: none of the trip's business
+            # (FR-A10's "left exactly as found"; see the docstring).
+            continue
+        if want.trip != is_trip:
+            want.trip = is_trip
         if want.dropped_at is None:
             continue
-        if want.drop_reason == STALE_DROP_REASON and not touch.came_back_after(want.dropped_at):
+        trip_touch = trip_touches.get(key)
+        if (
+            want.drop_reason == STALE_DROP_REASON
+            and not touch.came_back_after(want.dropped_at)
+            and not (trip_touch is not None and trip_touch.came_back_after(want.dropped_at))
+        ):
             continue
         want.dropped_at = None
         want.drop_reason = None
+        if is_trip and want.sample:
+            # A cancelled sample brought back by a trip is the trip's row now:
+            # left a sample, it would come back live on its own when the trip
+            # ended, which is the one thing cancelling it ruled out (FR-A8).
+            want.sample = False
         revived += 1
 
     removed: list[tuple[int, int]] = []
     shelved = 0
     for key, (want, anime_id, number) in existing.items():
-        if key in desired:
+        if key in wanted_now:
             continue
         pair = (key[0], anime_id)
+        if want.trip:
+            # A row the trip brought in, which it no longer asks for (see
+            # above): the window's ordinary delete on a followed, admitted
+            # show; shelved everywhere else, held shows included.
+            if pair in wanting and pair not in held:
+                removed.append(key)
+                continue
+            if want.dropped_at is None:
+                want.dropped_at = now
+                shelved += 1
+            want.drop_reason = REASON_TRIP_ENDED
+            continue
         if pair in held:
             # FR-A10: waiting for a slot, so this row is none of our business —
             # unless the user has watched past it, which is the one ending that
@@ -1037,6 +1188,20 @@ async def _reconcile(
             delete(Want).where(Want.user_id == user_id, Want.episode_id == episode_id)
         )
     await session.flush()
+    untripped: tuple[int, ...] = ()
+    if was_trip_only:
+        untripped = tuple(
+            sorted(
+                (
+                    await session.scalars(
+                        select(Want.episode_id)
+                        .where(Want.episode_id.in_(was_trip_only), Want.dropped_at.is_(None))
+                        .group_by(Want.episode_id)
+                        .having(~func.bool_and(Want.trip))
+                    )
+                ).all()
+            )
+        )
 
     if added or revived or removed or shelved:
         log.info(
@@ -1049,16 +1214,29 @@ async def _reconcile(
             },
         )
     return WantsResult(
-        wanted=len(desired),
+        wanted=len(wanted_now),
         added=added,
         removed=len(removed),
         shelved=shelved,
         revived=revived,
+        untripped=untripped,
     )
 
 
-async def _drop_stale(session: AsyncSession, result: WantsResult, *, now: datetime) -> WantsResult:
+async def _drop_stale(
+    session: AsyncSession,
+    result: WantsResult,
+    *,
+    now: datetime,
+    exclude: Collection[tuple[int, int]] = (),
+) -> WantsResult:
     """Drop wants on episodes that have sat ready and unwatched for D days (FR-T2).
+
+    Never a trip's (FR-A12): neither a trip-only row nor any (user, episode)
+    an active trip is waiting on (``exclude``). A trip is the user saying they
+    mean to watch it later, somewhere else — the opposite of what FR-T2 is
+    trying to detect — and dropping a key the trip has just revived would make
+    every reconciliation revive and drop it again.
 
     Only ``ready`` episodes are considered, because "unwatched" is only a
     statement about an episode the user *could* have watched: an episode still
@@ -1118,6 +1296,7 @@ async def _drop_stale(session: AsyncSession, result: WantsResult, *, now: dateti
             )
             .where(
                 Want.dropped_at.is_(None),
+                Want.trip.is_(False),
                 Episode.state == EpisodeState.READY,
                 WatchProgress.user_id.is_(None),
                 ready_since.is_not(None),
@@ -1126,8 +1305,11 @@ async def _drop_stale(session: AsyncSession, result: WantsResult, *, now: dateti
         )
     ).scalars()
 
+    skip = set(exclude)
     dropped = 0
     for want in rows.all():
+        if (want.user_id, want.episode_id) in skip:
+            continue
         want.dropped_at = now
         want.drop_reason = STALE_DROP_REASON
         dropped += 1
@@ -1151,8 +1333,12 @@ async def start_search(
     now: datetime,
     newest_job: int = 0,
     retry_now: bool = False,
+    priority: int = SEARCH_RELEASE_PRIORITY,
 ) -> tuple[bool, bool]:
     """Take one wanted episode from resting to ``wanted`` + a queued search.
+
+    ``priority`` is the search's place in the queue: the window's own 150, or
+    a trip's 160 (FR-A12) for an episode only a trip wants.
 
     Returns ``(started, enqueued)``: whether the episode moved, and whether a
     *new* ``search_release`` row was written (a dedupe hit is not one —
@@ -1191,7 +1377,7 @@ async def start_search(
         session,
         SEARCH_RELEASE,
         {"episode_id": episode.id},
-        priority=SEARCH_RELEASE_PRIORITY,
+        priority=priority,
         dedupe_key=search_dedupe_key(episode.id),
     )
     return True, job.id > newest_job
@@ -1355,7 +1541,12 @@ async def enqueue_cancel(session: AsyncSession, episode_id: int) -> None:
 
 
 async def _start_searches(
-    session: AsyncSession, result: WantsResult, *, now: datetime, held: bool = False
+    session: AsyncSession,
+    result: WantsResult,
+    *,
+    now: datetime,
+    held: bool = False,
+    settings: Settings | None = None,
 ) -> WantsResult:
     """Move episodes into and out of ``wanted``, and queue the searches.
 
@@ -1386,7 +1577,39 @@ async def _start_searches(
     runner's backoff behind it.
     """
     live = select(Want.episode_id).where(Want.dropped_at.is_(None))
-    with_wants = set((await session.scalars(live.distinct())).all())
+    # ``episode → whether every live want on it is a trip's`` (FR-A12), read
+    # after ``_reconcile`` has rewritten the flags, so it is this run's answer.
+    all_trip: dict[int, bool] = {
+        episode_id: bool(only)
+        for episode_id, only in (
+            await session.execute(
+                select(Want.episode_id, func.bool_and(Want.trip))
+                .where(Want.dropped_at.is_(None))
+                .group_by(Want.episode_id)
+            )
+        ).all()
+    }
+    with_wants = set(all_trip)
+    trip_only = {episode_id for episode_id, only in all_trip.items() if only}
+    # A trip-only episode whose copy is made needs nothing more: its source was
+    # deleted once the copy was ready (owner, 2026-10-05) and it sits in
+    # ``not_wanted`` with the copy waiting for the device. Searching for it
+    # again would fetch the very bytes that were just thrown away.
+    # With ``settings`` the file itself is checked (size and ETag), so a copy
+    # whose file has gone does not keep the episode from being fetched again;
+    # without them (a caller with no data directory) the row's word is taken.
+    copied: set[int] = set()
+    if trip_only:
+        for copy in (
+            await session.scalars(
+                select(OfflineCopy).where(
+                    OfflineCopy.episode_id.in_(trip_only),
+                    OfflineCopy.state == OfflineCopyState.READY,
+                )
+            )
+        ).all():
+            if settings is None or file_matches(offline_path_for(settings, copy.episode_id), copy):
+                copied.add(copy.episode_id)
     # Ids are handed out in order, so "queued by this run" is "newer than
     # anything that existed before it". Read once, because the only thing it is
     # used for is telling a fresh row from the one ``enqueue`` returns on a
@@ -1408,11 +1631,24 @@ async def _start_searches(
 
     started = searches = released = 0
     cancelled: list[int] = []
+    matched: list[Episode] = []
     for episode in interesting:
         if episode.id in with_wants:
+            if episode.state is EpisodeState.MATCHED:
+                matched.append(episode)
             if held:
                 continue
-            moved, enqueued = await start_search(session, episode, now=now, newest_job=newest_job)
+            if episode.id in copied:
+                continue
+            moved, enqueued = await start_search(
+                session,
+                episode,
+                now=now,
+                newest_job=newest_job,
+                priority=(
+                    TRIP_SEARCH_PRIORITY if episode.id in trip_only else SEARCH_RELEASE_PRIORITY
+                ),
+            )
             started += int(moved)
             searches += int(enqueued)
         elif await release_if_unwanted(session, episode, wanted_ids=with_wants):
@@ -1425,6 +1661,9 @@ async def _start_searches(
         await enqueue_cancel(session, episode_id)
     if cancelled:
         await session.flush()
+    await _enqueue_tops(session, result.untripped)
+    promoted = await _promote(session, matched, trip_only=trip_only, copied=copied)
+    copies = 0 if held else await _requeue_trip_copies(session)
     if started or released or cancelled:
         log.info(
             "acquisition window applied",
@@ -1444,7 +1683,148 @@ async def _start_searches(
         searches=searches,
         released=released,
         cancelled=len(cancelled),
+        promoted=promoted,
+        copies=copies,
     )
+
+
+async def _enqueue_tops(session: AsyncSession, episode_ids: Collection[int]) -> None:
+    """Queue a move to the top for each in-flight episode no longer trip-only.
+
+    A torrent taken only for a trip went to the back of the client's queue
+    (FR-A12); once somebody wants the episode for streaming that is the wrong
+    place for it. Only ``downloading`` episodes have a torrent to move. The
+    job talks to the client; this does not.
+    """
+    if not episode_ids:
+        return
+    downloading = (
+        await session.scalars(
+            select(Episode.id).where(
+                Episode.id.in_(set(episode_ids)), Episode.state == EpisodeState.DOWNLOADING
+            )
+        )
+    ).all()
+    for episode_id in downloading:
+        await enqueue(
+            session,
+            QBIT_TOP,
+            {"episode_id": episode_id},
+            priority=QBIT_TOP_PRIORITY,
+            dedupe_key=top_dedupe_key(episode_id),
+        )
+    if downloading:
+        await session.flush()
+
+
+async def _promote(
+    session: AsyncSession,
+    matched: Collection[Episode],
+    *,
+    trip_only: Collection[int],
+    copied: Collection[int],
+) -> int:
+    """Settle the wanted ``matched`` episodes the encode paths left behind (FR-A12).
+
+    **Promotion.** A ``matched`` episode that is *not* trip-only, has no
+    rendition and no transcode queued or running is one a trip held back from
+    streaming — the link gave it an offline encode rather than a transcode —
+    and a normal want has since arrived on it. Its source is still here, so it
+    is transcoded now. (Once the source is gone the episode is ``not_wanted``
+    and the ordinary search above fetches it again.) A transcode that has used
+    up its attempts is left alone, as the startup sweep leaves it: that is a
+    job for a person — and so is one an admin cancelled.
+
+    **The safety net.** A trip-only ``matched`` episode whose copy is ready
+    should have had its source deleted by the copy hook's ``trip_release``;
+    if that job was lost, it is queued again here (deduplicated).
+
+    Returns how many transcodes were queued.
+    """
+    if not matched:
+        return 0
+    trip_only_ids = set(trip_only)
+    streaming = [episode.id for episode in matched if episode.id not in trip_only_ids]
+    promoted = 0
+    if streaming:
+        with_rendition = set(
+            (
+                await session.scalars(
+                    select(Rendition.episode_id).where(Rendition.episode_id.in_(streaming))
+                )
+            ).all()
+        )
+        jobs = await latest_transcode_jobs(session, streaming)
+        for episode_id in streaming:
+            if episode_id in with_rendition:
+                continue
+            job = jobs.get(episode_id)
+            if job is not None and (
+                job.status in ACTIVE_STATUSES
+                # Cancelled by an admin: deliberate, and only the startup
+                # sweep second-guesses it (as it always has).
+                or job.status is JobStatus.CANCELLED
+                or (job.status is JobStatus.FAILED and job.attempts >= job.max_attempts)
+            ):
+                continue
+            await enqueue_transcode(session, episode_id)
+            promoted += 1
+            log.info("trip episode promoted to streaming", extra={"episode_id": episode_id})
+    for episode in matched:
+        if episode.id in trip_only_ids and episode.id in copied:
+            await enqueue_trip_release(session, episode.id)
+    return promoted
+
+
+#: Episode states whose linked source a trip copy can be made from.
+_COPYABLE: frozenset[EpisodeState] = frozenset(
+    {EpisodeState.READY, EpisodeState.MATCHED, EpisodeState.PREPARING, EpisodeState.FAILED}
+)
+
+
+async def _requeue_trip_copies(session: AsyncSession) -> int:
+    """Queue the copy a pending trip episode is missing (FR-A12, FR-P6).
+
+    An episode some active trip still waits on, whose source is linked, that
+    has **no** copy row and no live ``offline_encode``: its copy was never
+    queued (the episode arrived by a path that queued none) or was deleted
+    since (a ``ready`` episode's copy can be removed by retention). A copy row
+    in any state is left to its own path — ``failed`` is not retried
+    automatically (FR-P6). Skipped while storage is held, like the searches.
+    Deduplicated, so a second run queues nothing. Returns how many were queued.
+    """
+    pending = await pending_episode_ids(session)
+    if not pending:
+        return 0
+    candidates = set(
+        (
+            await session.scalars(
+                select(Episode.id).where(Episode.id.in_(pending), Episode.state.in_(_COPYABLE))
+            )
+        ).all()
+    )
+    candidates &= await episodes_with_sources(session, list(candidates))
+    if not candidates:
+        return 0
+    candidates -= set(
+        (
+            await session.scalars(
+                select(OfflineCopy.episode_id).where(OfflineCopy.episode_id.in_(candidates))
+            )
+        ).all()
+    )
+    candidates -= set(await latest_offline_jobs(session, sorted(candidates)))
+    for episode_id in sorted(candidates):
+        await enqueue_offline_encode(
+            session,
+            episode_id,
+            why=OFFLINE_WHY_TRIP,
+            priority=await trip_copy_priority(session, episode_id),
+        )
+    if candidates:
+        await session.flush()
+        log.info("trip copies queued", extra={"episode_ids": sorted(candidates)})
+    return len(candidates)
 
 
 __all__ = [
@@ -1452,6 +1832,7 @@ __all__ = [
     "NOBODY_WANTS",
     "QBIT_CANCELLED",
     "REASON_NOT_WANTING",
+    "REASON_TRIP_ENDED",
     "RELEASABLE",
     "STALE_DROP_REASON",
     "STARTABLE",

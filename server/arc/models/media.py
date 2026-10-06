@@ -1,7 +1,8 @@
-"""Files on disk: ``media_files`` and ``renditions`` (architecture.md §4).
+"""Files on disk: ``media_files``, ``renditions``, ``offline_copies`` (architecture.md §4).
 
 A ``MediaFile`` is the source Arc downloaded (or that was dropped in the
-manual directory); a ``Rendition`` is the browser-ready HLS output. Sources
+manual directory); a ``Rendition`` is the browser-ready HLS output; an
+``OfflineCopy`` is the small single-file MP4 a device keeps (FR-P6). Sources
 are kept after transcoding so a rendition can be redone (FR-P5).
 """
 
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
 from arc.models._columns import TZDateTime, bigint_pk, created_at
-from arc.models.enums import ReviewState, enum_column
+from arc.models.enums import OfflineCopyState, ReviewState, enum_column
 
 
 class MediaFile(Base):
@@ -80,3 +81,54 @@ class Rendition(Base):
     audio_lang: Mapped[str | None] = mapped_column(String(16))
     #: Set when the transcode finished; null while it is still preparing.
     ready_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class OfflineCopy(Base):
+    """The small offline copy of one episode (FR-P6, architecture.md §5.3b).
+
+    One per episode, keyed on it, so "is there a copy?" is a primary-key
+    lookup and two requests for the same episode cannot make two rows. There
+    is **no path column**: the file is ``DATA_DIR/offline/<episode_id>.mp4``,
+    derived from the id (:func:`arc.services.media.names.offline_path_for`),
+    so a hand-edited row cannot point the media route at anything else.
+
+    Progress is not here either. It lives in the ``offline_encode`` job's
+    payload, the same way a transcode's does (:mod:`arc.services.media.jobs`).
+    """
+
+    __tablename__ = "offline_copies"
+
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    state: Mapped[OfflineCopyState] = mapped_column(
+        enum_column(OfflineCopyState),
+        nullable=False,
+        default=OfflineCopyState.QUEUED,
+        server_default=OfflineCopyState.QUEUED.value,
+    )
+    #: Bytes of the finished file, and the strong validator the media route
+    #: answers with — so a device can confirm it holds *this* copy (M19 T4).
+    size: Mapped[int | None] = mapped_column(BigInteger)
+    etag: Mapped[str | None] = mapped_column(String(80))
+    #: What the copy was made with: ``h264`` or ``hevc``, the height cap, the
+    #: CRF and the audio bitrate, and a short hash over every setting that
+    #: changes the bytes (languages included). Recorded only: a settings
+    #: change does not re-make a ready copy (owner, 2026-10-06).
+    codec: Mapped[str | None] = mapped_column(String(16))
+    height: Mapped[int | None] = mapped_column(Integer)
+    crf: Mapped[int | None] = mapped_column(Integer)
+    audio_bitrate: Mapped[str | None] = mapped_column(String(16))
+    settings_key: Mapped[str | None] = mapped_column(String(32))
+    #: The source the copy was made from. Null once that file is gone, which
+    #: is the ordinary fate of a source (retention, or a trip, M19 T3).
+    media_file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_files.id", ondelete="SET NULL")
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: When the media route last sent any of it, touched at most hourly. The
+    #: idle rule (``offline_idle_days``) counts from here, else from
+    #: ``ready_at``.
+    last_served_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: The head and tail of the last failure, for the person who asked.
+    error: Mapped[str | None] = mapped_column(Text)

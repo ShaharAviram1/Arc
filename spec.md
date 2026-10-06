@@ -145,7 +145,13 @@ that the course professor can log in at any time, and the owner uses it daily.
   episodes available (N configurable by admin, default 2), counted from that
   user's furthest watched episode. For airing shows, the newest aired episode
   is fetched on its air day. Nothing outside this window is fetched, and no
-  more of it at once than FR-A10's per-user cap allows.
+  more of it at once than FR-A10's per-user cap allows — the two exceptions
+  being a sample (FR-A8) and a trip (FR-A12), each something a user asked for
+  explicitly. An episode a device of the user already holds from a trip
+  (FR-A12) is **not** left out of the window (owner, 2026-10-06: "what if I
+  downloaded the episode for a trip, never watched it on the iPad, and then
+  wanna watch it on my Mac?"): inside the next N it is fetched and prepared
+  for streaming like any other unwatched episode.
 - FR-A2 Wants from all users are merged: an episode is fetched once even if
   several users want it.
 - FR-A3 Release selection uses ranked, admin-editable rules:
@@ -271,6 +277,29 @@ that the course professor can log in at any time, and the owner uses it daily.
   (FR-D2, default on), which stops both halves: no new pack is taken and no
   further file is enabled in one Arc already has, while a pack already
   downloading finishes the episodes it was taken for.
+  **A trip on a finished show prefers a pack** (FR-A12, owner 2026-10-05):
+  when the episode being searched is wanted only by trips, the show has
+  finished airing, `batch_fallback` is on and at least `TRIP_BATCH_MIN` (4)
+  of the show's trip-only episodes are still to be fetched (and at least two
+  of them can be taken along — one file is a single's job), the three batch
+  queries are asked **first** rather than last, and a pack is taken there and
+  then if it holds at least `min(4, the trip episodes this search may take
+  along)` of them: by the range its name gives, or — for a pack whose name
+  gives none — by its file list. A pack that holds too few is kept stopped
+  for the same search's ordinary fallback (added once, never deleted and
+  added again) and removed before it fetches anything if that does not take
+  it; what such a pack was found to hold is remembered for the show's other
+  trip searches, so the siblings do not read it again; and a pack whose name
+  gives no range is never remembered as unreadable merely for not holding
+  one episode. Otherwise the ordinary search follows, on the same pool and
+  inside the same per-episode ceiling — the three are not asked again and no
+  longer need reserving. Trip searches of one show take the pack in turn, and
+  every pack take re-checks under lock that the episodes it takes along are
+  still free, so two searches running at once never claim one episode. Every rule above still holds: only the wanted files are
+  selected, the other trip episodes ride along in the same breath, and their
+  own searches attach to the pack with no request at all. An airing show, a
+  search for an episode somebody wants for streaming, and the switch off
+  search exactly as before.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
   library pipeline.
@@ -317,15 +346,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   exception and keeps fetching. Activation never expires. "Try episode 1"
   (FR-A8) is allowed on a dormant entry and fetches that one episode without
   activating it — one episode is the point of a sample; activation means the
-  window.
+  window. **A trip (FR-A12) is not a touch either**: it fetches its own
+  episodes and leaves the entry dormant.
 - FR-A10 At most K shows per user fetch at once (default 5; 0 = unlimited):
   shows already fetching keep their slot, free slots go to currently airing
   shows first and then to the most recently updated entries, and the rest wait
   visibly on their show page. A show holds no slot once its wanted episodes
   have arrived, or once Arc has given up on finding them (FR-A6). A sample
   (FR-A8) never counts: it may add one episode beyond the cap, and is never
-  refused by it.
-- FR-A11 A batch taken under FR-A4's exception is held as **one** torrent
+  refused by it. **A trip (FR-A12) never counts either** (owner, 2026-10-05):
+  its episodes hold no slot and are never refused one, and an episode wanted
+  only by a trip does not stop a show's own window from waiting for a slot.
+- FR-A11 A batch taken under FR-A4's exception — or preferred for a trip
+  (FR-A4's trip amendment, FR-A12) — is held as **one** torrent
   record with no episode of its own and one file record per file, each carrying
   the episode it holds, whether Arc asked for it, and its own progress. An
   episode is complete when **its file** is; the torrent is complete when every
@@ -339,6 +372,69 @@ that the course professor can log in at any time, and the owner uses it daily.
   to remove per episode. Retention deletes a batch-backed episode's **file**, never the
   torrent; the bytes an episode is charged with are its own file's, and the
   size Arc reserves or reports for a batch is the sum of its **wanted** files.
+- FR-A12 **Trips** (M19, owner 2026-10-05). "Prepare for a trip" on a show:
+  the next X **aired** episodes after the user's progress (FR-W5's boundary),
+  made into small offline copies (FR-P6) for a device to keep. X is chosen by
+  the user, 1..`trip_max_episodes` (default and most 50); fewer are taken
+  when fewer have aired, and the trip says how many it took. **One active
+  trip per user.** Refused for the demo account (FR-D5), while another trip
+  is active, while acquisition is held for disk space (FR-T6), for a count
+  outside the range, and when nothing has aired after the user's progress.
+  The trip's episodes are wanted like any other episode (FR-A2 merges them
+  with everybody's wants) and their searches start at once, just behind the
+  window's own; a torrent taken only for a trip goes to the bottom of the
+  torrent client's queue, and goes back to the top once somebody wants one
+  of its episodes for streaming. On a **finished** show a trip of four or more
+  episodes is fetched as **one pack** with only its episodes' files selected
+  rather than as a dozen singles (FR-A4's trip amendment, FR-A11). A trip is not a list change: it activates no
+  dormant entry (FR-A9), holds no slot (FR-A10), touches no list entry, and
+  can cause no MyAnimeList write. An episode a trip wants **and** some user
+  wants for streaming (their window, or a sample) is prepared both ways: the
+  HLS rendition and the small copy. An episode wanted **only** by trips is
+  *trip-only*: the server makes the small copy and **never an HLS rendition**
+  (FR-P1); it never becomes `ready` and is never streamable. Its **source is
+  deleted as soon as the copy is made and checked** (owner, 2026-10-05) — a
+  single's torrent removed with its files, a pack's file given back under
+  FR-A11's rule — and the episode returns to `not_wanted` holding only the
+  copy, which waits for the device; it is not fetched again while that copy
+  stands (if the copy is lost, it is fetched again for the trip). If a user
+  later wants it for streaming it is fetched again by the ordinary path; if that want arrives while the source is still here, the
+  episode is simply prepared for streaming as well. **Cancelling** a trip
+  undoes it at once: episodes still being looked for are released, a
+  download in flight is stopped (a single removed with its partial files, a
+  pack's file given back), bytes and copies already made for trip-only
+  episodes — and a file that arrives after the cancel — are deleted without
+  FR-T1's grace rather than prepared, and a `ready` episode is left to
+  ordinary retention; a show's own wants (its window, even while it waits for
+  a slot) are untouched by a trip starting or ending; episodes another user still wants are untouched, and an
+  episode already delivered to the device stays the device's. **Delivery**
+  (M19 T4): when the device has the whole copy it confirms it, and Arc
+  records the episode as delivered — repeats change nothing, and a copy
+  re-made meanwhile is still accepted; a confirmation arriving after the
+  episode expired on an ended trip, or after a cancel, is recorded but
+  gives no right to fetch the copy again. The device's copy does not
+  change what the user's window wants (FR-A1): an episode both on the device
+  and among the next N is prepared for streaming as usual; the device saying
+  it deleted its copy is recorded for the trip only. The device may ask for a
+  delivered or expired episode **again** while the trip is active, which puts
+  it back in the trip and fetches or re-makes the copy by the ordinary paths.
+  A trip-only episode's copy can be fetched only by a user whose trip holds
+  it (waiting or delivered; anybody else is told it does not exist), and
+  opening it in the player is answered "offline only" for that user. Copies
+  the device does not collect **expire** `trip_copy_days` (default 14) after
+  they were made (a download still running at that moment stops, by
+  design), and an episode whose copy was never made expires at the
+  trip's deadline (14 days after the trip was made); a trip with nothing left
+  waiting **ends** — finished at the confirmation of its last episode, or at
+  the hourly check (expired if nothing reached the device) — and the user may
+  then start another at once. **An episode wanted both by a trip and by the
+  user's window (or anybody's) is not trip-only**: it keeps its source and
+  gets its full HLS rendition for normal viewing as well as the small copy;
+  only an episode wanted by trips alone loses its source when the copy is
+  made (owner, 2026-10-06). A copy still being downloaded by a device (fetched
+  in the last ten minutes) is not deleted under it, for at most six hours
+  after the last confirmation. Nothing in delivery or expiry touches
+  a list entry or MyAnimeList.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -365,7 +461,9 @@ that the course professor can log in at any time, and the owner uses it daily.
 ### 4.4 Playback preparation
 - FR-P1 As soon as a MediaFile is matched to an episode, a transcode job runs.
   Every file is fully transcoded to H.264 + AAC with the chosen subtitle
-  track **burned in**, and packaged as HLS (fMP4 segments, ~6 s).
+  track **burned in**, and packaged as HLS (fMP4 segments, ~6 s). The one
+  exception is a **trip-only** episode (FR-A12): it gets the small offline
+  copy (FR-P6) instead and never an HLS rendition.
 - FR-P2 Subtitle track choice: prefer the first English (or configured
   language) text track; fall back to no subtitles and flag the episode.
   Audio track choice: prefer Japanese (configurable); otherwise the
@@ -377,11 +475,51 @@ that the course professor can log in at any time, and the owner uses it daily.
   only copy kept and a dub burned in is only discoverable by ear.
 - FR-P3 Preparation is scheduled to finish before the user is likely to ask:
   new downloads are transcoded immediately; the job queue prioritises
-  episodes users are closest to reaching.
+  episodes users are closest to reaching. **Small offline copies (FR-P6) come
+  after every transcode** (M19, owner 2026-10-05): preparing an episode for
+  streaming is what somebody is waiting on, a copy is for later. A copy asked
+  for from a ready episode goes before a trip's, and a trip's go in episode
+  order. Copies and transcodes share the host's encoder cap — at most
+  `MAX_TRANSCODES` of the two together — and a copy already being made is
+  never interrupted for a transcode.
 - FR-P4 Episode state visible to users: `preparing` (with %), `ready`,
   `failed` (with retry).
 - FR-P5 The original source file is kept until retention removes it (so a
   transcode can be redone with different settings).
+- FR-P6 **A small offline copy** (M19, owner 2026-10-05). On request, the
+  server makes a second, smaller file of a `ready` episode for a device to
+  keep (FR-S9): one MP4, at most 720 lines tall (a smaller source is never
+  scaled up), H.264 by default (HEVC selectable by the operator,
+  `OFFLINE_CODEC`), CRF 26, AAC stereo at 96 kbit/s, arranged so a player can
+  start it before the last byte arrives, and with **the same subtitle and audio
+  tracks burned in as the rendition** (FR-P2) — drawn after the picture is
+  scaled, so the text is as sharp at 720p as it was meant to be. About a
+  quarter the size of the full-size file (≈100 MB for a 24-minute episode
+  measured on the owner's sources). It is made from the source the server
+  still holds; once that source is gone no copy can be made and the device
+  takes FR-S7's full-size file instead. A request for an episode whose copy
+  already exists, or is being made, starts nothing new. The copy is checked
+  before it is offered (the expected codec, no taller than the cap, no shorter
+  than the tracks it was made from, playable while downloading); a copy that
+  fails the check is never served, the request reads "failed", and it is not
+  retried automatically — the same encode would fail the same way. An encode
+  that died without saying so (its worker killed, its attempts used up) also
+  reads "failed" rather than "preparing" for ever; asking again starts it
+  afresh. **A new copy is refused** (owner, 2026-10-06), and the device takes
+  the full-size file instead, while the data volume is under its floor
+  (FR-T6), and when the requester already has 10 copies queued or being made
+  or the host has 30 — a copy already made is still handed out either way, and
+  a trip's copies are counted by the trip, not here. A copy waits behind every
+  episode being prepared for streaming (FR-P3), so on a busy host it can take
+  a while to start. Changing the copy settings does **not** re-make copies that
+  already exist (owner, 2026-10-06); they are recorded with the settings they
+  were made with. Every signed-in account
+  except the demo one may ask for and fetch a ready episode's copy; the copy
+  is behind the same session rule as every media route, its path is derived
+  from the episode id, and it is fetched in resumable pieces like FR-S7's
+  file. A copy is deleted with its episode (FR-T1) and on its own when nobody
+  has fetched it for `offline_idle_days` (FR-T7). Trips (FR-A12) build on
+  it: a trip's episode gets its copy whether or not it is `ready`.
 
 ### 4.5 Streaming and player
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
@@ -449,7 +587,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode is re-prepared) so a later in-app offline mode can fetch it in
   pieces. An episode that is not ready, or whose prepared files are not all
   present and intact, cannot be downloaded (404, never a partial file). The
-  demo account is refused (403) and sees no offline control.
+  demo account is refused (403) and sees no offline control. Since M19 the
+  route is **the fallback**, not the first choice: Keep offline takes the
+  small copy (FR-P6) whenever the server can make one, and comes here only
+  when the episode's source is gone (owner, 2026-10-05).
 - FR-S8 **Progress made offline is kept and synced later** (owner,
   2026-10-04: "we gotta make sure we hold on to the records to sync them in
   later when ipad is back online"; revised 2026-10-05). When a progress
@@ -497,8 +638,10 @@ that the course professor can log in at any time, and the owner uses it daily.
      again; the pages refresh once the server has taken the records.
 - FR-S9 **Episodes kept inside Arc, to watch with no network** (owner,
   2026-10-04: "so i can use arc when traveling"; the design is Audiosey's).
-  **Keep offline** downloads FR-S7's file into Arc's own storage on this
-  device, where Arc's player finds it. It is **one icon button, the same in
+  **Keep offline** downloads the episode into Arc's own storage on this
+  device, where Arc's player finds it — the server's **smaller copy for
+  devices** (FR-P6) when it can have one, else FR-S7's full-size file (item 7,
+  owner 2026-10-05). It is **one icon button, the same in
   two places** (owner, 2026-10-05): on a ready episode's row on the show page,
   beside the Watched control, and in the **player's top bar**, opposite the
   back button. A download glyph when not kept; a ring that fills while
@@ -506,8 +649,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   out of the queue); the ring held where it stopped while paused (tap
   resumes); a small warning mark when it failed (tap tries again); a filled
   check when it is on the device, where a tap opens a small menu in the page —
-  "On this device · size", **Remove from this device**, and a link to
-  Downloads — never a browser `confirm()`. A paused or failed download's
+  which copy it is and its size ("Smaller copy for this device · 210 MB" or
+  "Full-size copy · 700 MB"), **Remove from this device**, and a link to
+  Downloads — never a browser `confirm()`. While the server is still making
+  the smaller copy the button reads **"Preparing on the server"**: a dotted
+  ring, filled with the server's percentage once it has one, and a tap stops
+  waiting (the wish goes; the server keeps or expires its copy on its own). A paused or failed download's
   reason is a short line beside it (the row's secondary text; under the
   episode line in the player). Downloading the episode being streamed does
   not interrupt it, and the player does not switch to the device copy
@@ -573,6 +720,75 @@ that the course professor can log in at any time, and the owner uses it daily.
      when Arc is back on screen or back online. A downloaded episode the
      server later re-prepares keeps playing the device's older copy; nothing
      says so yet (deleting and downloading again fetches the new one).
+  7. **The smaller copy** (owner, 2026-10-05: a 700 MB episode is too big to
+     carry). Keep offline asks the server for the episode's small copy
+     (FR-P6, about a quarter of the size). If it is ready it downloads at
+     once; if the server is still making it, the episode reads "Preparing on
+     the server" (with the server's percentage once known), Arc asks again
+     every 20 seconds while it is on screen and whenever it comes back on
+     screen or online, and the download starts by itself when the copy is
+     ready. Pausing or removing it stops the asking. If the server could not
+     make it (including a copy whose job died on the server), the episode
+     says so with Try again (which asks again). If the server no longer has
+     the episode's source to make one from, is short of disk, or already has
+     too many copies waiting, or **this
+     device cannot play the copy's video format** (checked against the
+     device's own player before downloading), Keep offline takes the
+     full-size file instead, without fuss. No answer from the server is
+     "Waiting for a connection" and is asked again — never dropped. If the
+     smaller copy disappears from the server while the device is downloading
+     it (cleared as unused, or re-made), Arc asks the server again by itself
+     and carries on from its answer — waits while it is made again, starts the
+     new copy afresh, or takes the full-size file — once; if it happens again
+     before a download finishes, the episode says it is gone, with Try again.
+     The two
+     copies are separate files on the device, so two accounts keeping
+     different copies of one episode never touch each other's. An episode
+     already on the device as a full-size copy stays as it is (no automatic
+     re-download, and no "replace with the smaller copy" yet). The Downloads
+     page says quietly which copy each episode is ("smaller copy" / "full
+     size") and lists one still being made as "Preparing on the server".
+  8. **Trips on the device** (FR-A12, M19 T6, 2026-10-06). The show page
+     offers **Prepare for a trip** (not to the demo account; where the
+     browser cannot keep episodes, or cannot play the small copies' video
+     format, a one-line sentence says so instead): how many episodes, from 1
+     to whichever is fewer of the server's cap (`trip_max_episodes`, sent on
+     the show page) and the episodes aired after the viewer's progress, the range it takes ("Episodes 4–15"), a size labelled as an
+     estimate (about 100 MB an episode), and one action. A refusal is a
+     sentence: another trip is active (with a link to its show), the server
+     is short of disk, nothing has aired after the viewer's progress, more
+     episodes than the server allows. While the trip is active its panel on
+     the show page lists every episode where it stands — this device's copy
+     first, else the server's phase — with **Ask again** for an expired
+     episode or one no longer on this device, **Cancel trip** behind an
+     in-page confirmation, and a line saying downloads run while Arc is open
+     and that the server keeps each copy until this device has it (at most
+     until the trip's deadline).
+     **While Arc is open** (any page, the player included) the device asks
+     about the trip on opening, every minute, when Arc comes back on screen
+     or online, and when the live stream says a copy changed; each episode
+     the server has ready — it sends the copy's address once it can be
+     downloaded — is downloaded by itself through the usual queue;
+     an episode already on the device (either copy) is confirmed at once; a
+     download the viewer paused by hand stays paused; an episode the viewer
+     deleted from the device is not fetched again until Ask again. When a
+     trip copy is whole the device **confirms** it to the server, asking
+     again on launch, reconnect, return to the screen and every minute until
+     the server has heard (the Downloads page says "telling Arc it arrived"
+     meanwhile); deleting one tells the server too (best effort). The
+     Downloads page groups a trip's episodes under "Trip · show · N
+     episodes · total size" with how many are on the device and how many
+     are still on their way, and offers Cancel trip while it is the active
+     trip and Arc is reachable. In the player, a trip-only episode with no
+     copy on this device says "This episode is only for your device — keep
+     it offline first" with a link to Downloads; with a copy it plays from
+     the device; previous / next prefer a downloaded episode where the
+     server's neighbour is not ready. Somebody else's trip-only episode
+     reads "Not prepared for streaming" on its row, with nothing to play or
+     keep. A kept trip episode that the viewer's look-ahead later reaches is
+     prepared for streaming as usual (owner, 2026-10-06): its row becomes an
+     ordinary ready row, and the copy on the device still plays and still
+     shows as on this device.
 
 ### 4.6 Watch tracking and list states
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
@@ -734,6 +950,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   below a user's list progress counts as completed by that user, anchored on
   that entry's last change — so an episode somebody skipped past is deleted on
   the same schedule as one they watched in Arc.
+  An episode's small offline copy (FR-P6) is among its files and goes with
+  it (M19). While a copy is being made from an episode's source, that source
+  is never deleted; the episode waits for the next sweep.
 - FR-T2 Additionally, if a user who wants the episode has not watched it
   within **D** days of it becoming ready (default D = 21) — counted from
   the later of the episode becoming ready and the user's last action on
@@ -746,7 +965,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   applies from that moment; a want never disappears without leaving a
   grace anchor behind.
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
-  rewinds or a new user wants it, it is re-acquired.
+  rewinds or a new user wants it, it is re-acquired. The small offline copy
+  (FR-P6) is deleted with the rest, row and file.
 - FR-T1/FR-T3 for a **batch-backed** episode (FR-A11): what is deleted is the
   episode's **own file**, and the torrent is kept. The episode is charged the
   bytes of that file and nothing else — never the pack's total, and never
@@ -763,6 +983,24 @@ that the course professor can log in at any time, and the owner uses it daily.
 - FR-T6 Acquisition holds itself while free space on the data volume is below
   an admin-set floor (default 10 GB): reconciliation, ingest and playback
   continue, no new search starts; it resumes on its own when space is freed.
+  **A new trip (FR-A12) is refused while held**; an existing trip's episodes
+  that have not started wait like any other.
+- FR-T7 **Idle small copies** (M19, owner 2026-10-05). A `ready` episode's
+  small offline copy (FR-P6) that nobody has fetched for `offline_idle_days`
+  (default 7, admin-editable, at least 1) is deleted by the hourly sweep — the
+  file and its record, never the episode, which stays `ready` and streams; the
+  next Keep offline makes the copy again from the source. The days count from
+  the last time any of the file was sent, else from when it was made. A copy
+  an active trip (FR-A12) is still waiting for is never idle: the trip's own
+  `trip_copy_days` governs it. Copies
+  count towards the disk usage FR-T4 shows. **A trip's copy of an episode
+  that is not `ready`** (M19 T4) — its source already deleted when the copy
+  was made — is deleted, file and record, **an hour after the last device
+  confirmed it** (so a second device of the same user can finish), once no
+  trip is still waiting for it; at **expiry** (`trip_copy_days`, 14, counted
+  from when the copy was made); at **cancellation** (FR-A12); and once
+  its user's account is deleted. A `ready`
+  episode's copy is never deleted by a trip: it follows the idle rule above.
 
 ### 4.10 Admin (phase 2 UI; the underlying settings exist from phase 1 via config)
 - FR-D1 Users & invites; deactivate a user.
@@ -775,7 +1013,13 @@ that the course professor can log in at any time, and the owner uses it daily.
   batch exception (FR-A11) off, and with it off such an episode waits for a
   single instead — no new pack is taken and no further file is enabled in one
   Arc already has, while a pack already downloading finishes the episodes it
-  was taken for.
+  was taken for. **Idle small copies** (`offline_idle_days`, default 7, M19)
+  are edited here too (FR-T7), and so are the two trip rules (FR-A12, M19):
+  `trip_max_episodes` (default 50, 1..50) and `trip_copy_days` (default 14,
+  at least 1). The small copy's encode settings (FR-P6:
+  `OFFLINE_CODEC`, `OFFLINE_HEIGHT`, `OFFLINE_CRF`, `OFFLINE_PRESET`,
+  `OFFLINE_AUDIO_BITRATE`) are the operator's, in the environment, like the
+  transcode's.
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
@@ -783,7 +1027,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   `arc.cli demo-list --demo`. The flag gates **presentation** — and, since
   2026-10-04, one capability: the demo account **cannot download an episode
   as a file** (FR-S7: the route answers 403 and no offline control is
-  shown); it streams like anybody else. Otherwise nothing:
+  shown) and, since M19, **gets no small offline copy** (FR-P6: asking for
+  one, reading where one stands, and fetching one all answer 403, before
+  anything is looked up) and **cannot make a trip** (FR-A12: 403); it streams
+  like anybody else. Otherwise nothing:
   a fourth top-nav entry, **How Arc works** (and the same entry at the top of
   the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
   hero pointing at it — dismissal is remembered per account in that browser.
@@ -806,15 +1053,15 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). On a phone the state and the two controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%") — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On a phone the state and the two controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
 | Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk, review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
 | How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
-| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode, pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). Reached from the account menu (not for the demo account) and from the offline line on every page |
+| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). Reached from the account menu (not for the demo account) and from the offline line on every page |
 
 Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
 sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
@@ -872,6 +1119,14 @@ arriving. A want going away unwinds everything up to and including
 is retention's to measure and delete (FR-T1), so the episode is left where it
 is and the grace period decides.
 
+A **trip-only** episode (FR-A12) adds no state. It goes `… → matched` like
+any other, and there, instead of a transcode, its small copy is made; once the
+copy is ready its source is deleted and it takes the existing `matched →
+not_wanted` edge, holding only the copy. A `matched` episode may therefore be
+one that will never be `ready`, and a `not_wanted` one may hold a copy waiting
+for a device. Cancelling a trip deletes a trip-only episode's landed bytes
+through the same edge, without the grace period.
+
 ## 7. Non-functional requirements
 
 - **Correctness of MAL writes** is the top priority: no write without a
@@ -897,8 +1152,10 @@ is and the grace period decides.
   installable web app is in scope (FR-U1, owner 2026-10-04).
 - Downloading whole seasons or a general "download anything" UI. (FR-S9 is
   not that: it is a per-episode copy of a file Arc has already prepared for
-  streaming, and fetches nothing new.) A "save the MP4 to Files" link is out
-  too (owner, 2026-10-05).
+  streaming. A trip, FR-A12, is not that either: it is the next X aired
+  episodes of one show after the user's progress, at most 50, one trip at a
+  time, asked for explicitly.) A "save the MP4 to Files" link is out too
+  (owner, 2026-10-05).
 - Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
   at play time.
 - Per-user private libraries.
@@ -1732,3 +1989,121 @@ is and the grace period decides.
   the player's top bar (FR-S9, §5). A download finishing mid-playback never
   swaps the player's source; the copy being played cannot be removed from the
   player.
+- 2026-10-05 (owner) — **Keep offline takes the smaller copy** (FR-S9.7,
+  M19 T2). The device asks for the server's small copy (FR-P6) and downloads
+  it when ready; while the server makes it the button and the Downloads page
+  read "Preparing on the server" (server percentage, asked every 20 s while
+  on screen and on every return/reconnect; a tap stops waiting). It falls
+  back to the full-size file when the source is gone, the copy is
+  `unavailable`, or the device's player cannot play the copy's codecs; a
+  failed copy offers Try again. The two copies are separate files on the
+  device. The on-device menu and the Downloads page say which copy it is. A
+  full-size copy already on a device stays; "Replace with the smaller copy"
+  is left out (it needs two files per record while the new one downloads).
+- 2026-10-05 (owner) — **The small offline copy, server side** (FR-P6 new;
+  FR-P3, FR-S7, FR-T1, FR-T3, FR-D2, FR-D5 amended; FR-T7 new for the idle
+  rule; M19 T1). The server makes a second, smaller MP4 of a ready episode on
+  request — 720p at most and never upscaled, H.264 CRF 26 by default (HEVC by
+  `OFFLINE_CODEC`), AAC 96k stereo, faststart, the rendition's own subtitle and
+  audio tracks burned in after the scale — from the source it still holds; FR-S7's
+  full-size file is the fallback once the source is gone. Copies queue behind
+  every transcode and share `MAX_TRANSCODES` with them; a source is never deleted
+  while a copy is being made from it; a copy goes with its episode, and a ready
+  episode's copy nobody fetched for `offline_idle_days` (7) is deleted on its own.
+  The demo account gets no copies. Measured on two of the owner's sources
+  (120 s excerpts): 99 MB and 92 MB per 24 minutes in H.264, 80 MB in HEVC.
+- 2026-10-06 (owner, after the server review) — **FR-S9.7: two more
+  fallbacks and one automatic re-ask.** A server short of disk or with too
+  many copies waiting sends the device to the full-size file, like a missing
+  source. A small copy that vanishes from the server mid-download is asked
+  for again by itself once (until a download next finishes), then reads
+  "gone" with Try again.
+- 2026-10-06 (owner, review of M19 T1) — **FR-P6 tightened.** A copy whose
+  encode died reads "failed", not "preparing" for ever; a copy that fails its
+  check is not retried (and is checked against the chosen tracks' length, not
+  the container's, so a longer unused dub no longer fails every copy); new copy
+  requests are refused while storage is held (409 `storage_held`) and past 10
+  per user / 30 per host queued (429 `copy_queue_full`), the device falling
+  back to the full-size file on both, trips exempt from the per-user count;
+  no automatic re-encode when the copy settings change; the demo account is
+  sent no copy state at all; a request and retention's deletion of the same
+  episode are serialised, so a copy is never left on an episode that is gone.
+- 2026-10-05 (owner) — **Trips, server side: data and acquisition** (FR-A12
+  new; FR-A1, FR-A9, FR-A10, FR-P1, FR-P6, FR-T6, FR-D2, FR-D5, §6 and §8
+  amended; M19 T3). "Prepare for a trip" takes the next X aired episodes
+  after the user's progress (1..`trip_max_episodes`, 50; one active trip per
+  user; refused for the demo account, while storage is held, and when nothing
+  has aired) and wants them through the ordinary reconciler — never a slot,
+  never a dormant entry woken, never a list or MyAnimeList write. An episode
+  wanted only by trips is made into the small copy and never an HLS
+  rendition; its source is deleted as soon as the copy is made, and it is not
+  fetched again while the copy stands. Overlap with a user's window gets both.
+  A normal want arriving on a trip-only episode prepares it for streaming (or
+  fetches it again once its source is gone). Cancelling undoes everything at
+  once; landed trip bytes go without the grace period. Delivery, expiry, the
+  copy route's trip rule and the device side follow in T4–T6.
+- 2026-10-06 (review of M19 T3) — **FR-A12 and FR-T7 tightened.** A trip
+  leaves a show's own wants exactly as they were, a slot-capped show's
+  included; a file that lands after its trip was cancelled is deleted rather
+  than prepared for nobody; a cancelled trip's copy is never left behind; a
+  copy a pending trip waits for is exempt from the idle rule and is re-made if
+  it goes missing; an episode that is ready is never shown as "not prepared
+  for streaming".
+- 2026-10-06 (owner decision of 2026-10-05; M19 T5) — **A trip on a finished
+  show prefers one pack** (FR-A4 and FR-A11 amended, FR-A12 cross-referenced).
+  With at least `TRIP_BATCH_MIN` = 4 trip-only episodes of a finished show
+  still to fetch and `batch_fallback` on, the search asks the three batch
+  queries first and takes a pack whose file list holds at least
+  `min(4, attachable trip episodes)` of them, else falls through to the
+  ordinary single search inside the same request ceiling. Airing shows,
+  non-trip searches and the switch off are unchanged.
+- 2026-10-06 (M19 T4) — **Trips: delivery, settle, expiry** (FR-A12 and
+  FR-T7 amended). A device confirms a trip copy it holds (idempotent), says
+  when it deleted it, and may ask for a delivered or expired episode again
+  while the trip is active. A trip-only episode's copy is served only to users
+  whose trip holds it, and `/play` answers them "offline only". The copy of a
+  non-ready episode goes an hour after the last confirmation once no trip
+  waits for it, at expiry (14 days from when it was made; the trip's deadline
+  if it never was), or on cancel; a trip with nothing waiting ends (finished,
+  or expired if nothing was delivered). No new MAL or list write.
+- 2026-10-06 (review of M19 T5) — **Trip packs tightened** (FR-A4, FR-A12).
+  A pack read and declined by a trip's preferred pass is kept stopped for the
+  same search's fallback rather than deleted and added again; what it holds is
+  remembered for the show's other trip searches; a rangeless pack is not
+  barred for not holding one episode; a preference needs at least two
+  episodes to take along; trip searches of one show take packs in turn and
+  every pack take re-checks its free riders under lock; a torrent sent to the
+  back for a trip returns to the top once an episode of it is wanted for
+  streaming; the row says how many pack forms were asked.
+- 2026-10-06 (review of M19 T4) — **FR-A12 and FR-T7 tightened.** A late
+  confirmation (cancelled trip, or expired on an ended trip) is recorded for
+  the user's window but gives no right to fetch the copy; an expiry stops a
+  download in progress by design; a deleted account's trip copies are
+  cleaned up by the hourly sweep like any other copy nobody waits for.
+- 2026-10-06 (M19 T6) — **Trips on the device** (FR-S9 item 8, §5 Show,
+  Player and Downloads rows). Prepare for a trip and its panel on the show
+  page, the auto-keep that downloads a trip's ready copies while Arc is open
+  and confirms them, the release on delete, the Downloads group, and the
+  player's offline-only states. Small calls: the stepper stops at 50 (the
+  cap is an admin setting the client cannot read; a lower one is the
+  server's sentence); default count 10; the estimate is 100 MB an episode;
+  a trip episode deleted from the device is not fetched again until Ask
+  again (remembered on the device).
+- 2026-10-06 (M19 T6 follow-up) — FR-S9 item 8: the stepper's ceiling is
+  the server's `trip_limits.max_episodes`; the device downloads a trip copy
+  only from the URL the server sends on the trip episode; a kept trip
+  episode the look-ahead reaches turns into an ordinary ready row; the panel
+  says the server keeps each copy until the device has it. The Downloads
+  rows put their buttons on a line of their own on a phone.
+- 2026-10-06 (owner) — **FR-A1 and FR-A12: a delivered episode stays in the
+  window; trips end at their last confirmation.** The window no longer skips
+  an episode a device holds from a trip: an episode on the iPad may still be
+  watched on the Mac, so inside the next N it is fetched and prepared for
+  streaming like any other (the device copy is unaffected; "removed from the
+  device" is trip bookkeeping only). An episode wanted by a trip and by a
+  window keeps its source and its HLS rendition. A trip ends `finished` at the
+  confirmation of its last episode, so the next can start at once; a copy a
+  device fetched in the last ten minutes is not settled under it (ceiling six
+  hours after the last confirmation). The show page sends the trip cap
+  (`trip_limits.max_episodes`) to every caller, and each trip episode carries
+  its copy's `url`.

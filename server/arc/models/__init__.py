@@ -23,8 +23,11 @@ from arc.models.enums import (
     ListStatus,
     MalWriteCause,
     MalWriteStatus,
+    OfflineCopyState,
     ReviewState,
     TorrentKind,
+    TripEpisodeState,
+    TripState,
     UpdatedBy,
     UserRole,
 )
@@ -35,7 +38,7 @@ from arc.models.job import (
     Job,
 )
 from arc.models.mal import MalLink, MalWriteLog
-from arc.models.media import MediaFile, Rendition
+from arc.models.media import MediaFile, OfflineCopy, Rendition
 from arc.models.offline import (
     OFFLINE_SEARCH_INDEX,
     OFFLINE_SEASON_INDEX,
@@ -46,6 +49,7 @@ from arc.models.offline import (
 from arc.models.recs import RecRun
 from arc.models.settings import DEFAULT_SETTINGS, Setting
 from arc.models.tracking import IN_PROGRESS_INDEX, ListEntry, WatchProgress
+from arc.models.trips import ONE_ACTIVE_TRIP_INDEX, TRIP_EPISODE_INDEX, Trip, TripEpisode
 from arc.models.user import Invite, Session, User
 
 __all__ = [
@@ -57,7 +61,9 @@ __all__ = [
     "KIND_EPISODE_PREDICATE",
     "OFFLINE_SEARCH_INDEX",
     "OFFLINE_SEASON_INDEX",
+    "ONE_ACTIVE_TRIP_INDEX",
     "TRANSCODE_EPISODE_INDEX",
+    "TRIP_EPISODE_INDEX",
     "WANTED_CLAIM_INDEX",
     "Anime",
     "Base",
@@ -73,6 +79,8 @@ __all__ = [
     "MalWriteLog",
     "MalWriteStatus",
     "MediaFile",
+    "OfflineCopy",
+    "OfflineCopyState",
     "OfflineAnime",
     "OfflineId",
     "OfflineImport",
@@ -84,6 +92,10 @@ __all__ = [
     "Torrent",
     "TorrentFile",
     "TorrentKind",
+    "Trip",
+    "TripEpisode",
+    "TripEpisodeState",
+    "TripState",
     "UpdatedBy",
     "User",
     "UserRole",

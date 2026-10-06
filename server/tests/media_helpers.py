@@ -69,12 +69,35 @@ PLAYLIST_PROBE: dict[str, Any] = {
     ],
 }
 
+#: And about a finished small offline copy (FR-P6): 720p H.264 and AAC, as
+#: long as the source.
+OFFLINE_PROBE: dict[str, Any] = {
+    "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "12.0"},
+    "streams": [
+        {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "h264",
+            "codec_tag_string": "avc1",
+            "width": 1280,
+            "height": 720,
+        },
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+    ],
+}
+
 _FFPROBE = """\
 import json, sys
 SOURCE = {source}
 PLAYLIST = {playlist}
+OFFLINE = {offline}
 target = sys.argv[-1]
-print(json.dumps(PLAYLIST if target.endswith(".m3u8") else SOURCE))
+if target.endswith(".m3u8"):
+    print(json.dumps(PLAYLIST))
+elif target.endswith("offline.mp4"):
+    print(json.dumps(OFFLINE))
+else:
+    print(json.dumps(SOURCE))
 """
 
 _FFMPEG = """\
@@ -87,6 +110,7 @@ SEGMENTS = {segments!r}
 DURATION = {duration!r}
 MARKER = {marker!r}
 FILTERS = {filters!r}
+FASTSTART = {faststart!r}
 
 def note(kind, argv=None):
     if MARKER:
@@ -127,6 +151,26 @@ if FAIL:
         print("[libx264 @ 0x1] stub complaint line %d" % line, file=sys.stderr)
     print("Error opening output file index.m3u8.", file=sys.stderr)
     sys.exit(1)
+
+if "-movflags" in args:
+    # The small offline copy: one progressive MP4, its boxes in faststart
+    # order unless told otherwise.
+    import struct
+    def box(kind, body=b""):
+        return struct.pack(">I", 8 + len(body)) + kind + body
+    for index in range(SEGMENTS):
+        if SLEEP:
+            time.sleep(SLEEP)
+        print("out_time_us=%d" % int((index + 1) * DURATION / max(SEGMENTS, 1) * 1_000_000))
+        print("progress=continue")
+        sys.stdout.flush()
+    print("progress=end")
+    parts = [box(b"ftyp", b"isom"), box(b"moov", b"m" * 32), box(b"mdat", b"v" * 256)]
+    if not FASTSTART:
+        parts = [parts[0], parts[2], parts[1]]
+    with open(args[-1], "wb") as handle:
+        handle.write(b"".join(parts))
+    sys.exit(0)
 
 playlist = args[-1]
 step = DURATION / max(SEGMENTS, 1)
@@ -174,6 +218,8 @@ def install_fake_ffmpeg(
     marker: Path | None = None,
     source_probe: dict[str, Any] | None = None,
     filters: tuple[str, ...] = ("ass", "subtitles"),
+    offline_probe: dict[str, Any] | None = None,
+    faststart: bool = True,
 ) -> Path:
     """Put a fake ``ffmpeg`` and ``ffprobe`` first on ``PATH``.
 
@@ -183,7 +229,9 @@ def install_fake_ffmpeg(
     ``<marker>.argv`` — which is how "the configured preset actually reached
     ffmpeg" is asserted without stubbing the subprocess away.
     ``filters`` is what it claims to support: pass ``()`` for the Homebrew-style
-    build with no libass.
+    build with no libass. ``offline_probe`` is what ffprobe says about a
+    finished small copy, and ``faststart=False`` makes the fake write ``mdat``
+    before ``moov`` — the two ways a copy's validation is tested.
     """
     write_script(
         directory,
@@ -191,6 +239,7 @@ def install_fake_ffmpeg(
         _FFPROBE.format(
             source=json.dumps(source_probe or SOURCE_PROBE),
             playlist=json.dumps(PLAYLIST_PROBE),
+            offline=json.dumps(offline_probe or OFFLINE_PROBE),
         ),
     )
     write_script(
@@ -204,6 +253,7 @@ def install_fake_ffmpeg(
             duration=duration,
             marker=str(marker) if marker else "",
             filters=filters,
+            faststart=faststart,
         ),
     )
     monkeypatch.setenv("PATH", str(directory), prepend=os.pathsep)
@@ -214,6 +264,7 @@ def install_fake_ffmpeg(
 
 
 __all__ = [
+    "OFFLINE_PROBE",
     "PLAYLIST_PROBE",
     "SOURCE_PROBE",
     "install_fake_ffmpeg",

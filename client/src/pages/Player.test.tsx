@@ -262,7 +262,7 @@ describe('Player', () => {
 
     // Playlists and segments sit behind the session cookie (spec §5.4).
     const xhr = { withCredentials: false } as XMLHttpRequest
-    hls?.config.xhrSetup?.(xhr, PLAY_INFO.playlist_url)
+    hls?.config.xhrSetup?.(xhr, PLAY_INFO.playlist_url ?? '')
     expect(xhr.withCredentials).toBe(true)
   })
 

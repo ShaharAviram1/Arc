@@ -1848,6 +1848,48 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
     )
   })
 
+  it('shows a copy the server is still making on the row, and downloads it when ready (M19)', async () => {
+    pretendOpfs()
+    let ready = false
+    const copy = (state: 'preparing' | 'available') => ({
+      state,
+      progress: state === 'preparing' ? 0.4 : null,
+      size: 210_000_000,
+      url: state === 'available' ? '/media/9001/offline.mp4' : null,
+      codecs: 'avc1.640028',
+    })
+    const { manager, worker } = managerHarness({
+      requestCopy: () => Promise.resolve(copy('preparing')),
+      pollCopy: () => Promise.resolve(copy(ready ? 'available' : 'preparing')),
+    })
+    manager.setOwner(TEST_USER.id)
+    setDownloads(manager)
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Keep episode 1 offline' }))
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Episode 1 is being prepared on the server, 40% — cancel',
+      }),
+    ).toBeInTheDocument()
+    expect(worker.commands).toEqual([])
+
+    ready = true
+    act(() => {
+      manager.nudge()
+    })
+    expect(
+      await screen.findByRole('button', { name: 'Downloading episode 1, 0% — pause' }),
+    ).toBeInTheDocument()
+    expect(worker.lastCommand()).toMatchObject({
+      name: 'episode-9001-o.mp4',
+      url: '/media/9001/offline.mp4',
+    })
+  })
+
   it('says a full disk plainly and offers to try again', async () => {
     pretendOpfs()
     const { manager, worker } = managerHarness()

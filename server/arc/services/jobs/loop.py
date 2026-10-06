@@ -10,7 +10,8 @@ capped below ``WORKER_CONCURRENCY`` by something outside the queue — one
 ``MAX_TRANSCODES`` ffmpeg on a two-vCPU host — and a claim the executing side
 cannot serve is worse than no claim: the job takes a concurrency slot, parks on
 the media semaphore and holds the slot for the length of the encode ahead of
-it. So the loop counts what it is running by type and asks
+it. So the loop counts what it is running by type, adds those counts up per
+capped *group* (``transcode`` and ``offline_encode`` share one), and asks
 :func:`~arc.services.jobs.runner.claim_one` to skip the types that are at their
 cap (:func:`process_caps`), which hands the free slot to the best *other* job.
 Ordering is untouched: nothing is reprioritised, and a skipped type is claimed
@@ -44,13 +45,13 @@ from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import Job, JobStatus
 from arc.services.jobs.runner import claim_one, run_job
-from arc.services.media.names import TRANSCODE
+from arc.services.media.names import ENCODE_TYPES
 
 log = logging.getLogger("arc.worker")
 
 
-def process_caps(settings: Settings) -> dict[str, int]:
-    """Job types capped *inside one worker process*, and by how much.
+def process_caps(settings: Settings) -> dict[frozenset[str], int]:
+    """Groups of job types capped *together* inside one worker process.
 
     ``WORKER_CONCURRENCY`` is how many jobs the queue side runs at once;
     ``MAX_TRANSCODES`` is how many ffmpegs the host's cores can stand, and it is
@@ -62,12 +63,25 @@ def process_caps(settings: Settings) -> dict[str, int]:
     behaving exactly as designed; the mistake was claiming work the encoder
     could not start.
 
-    Named from :mod:`arc.services.media.names` rather than spelled out here, and
-    returned as a mapping rather than handled as a special case, so that a
-    second capped type would be one more entry and no new plumbing. Transcodes
-    are the only one today.
+    A **group** rather than a type since M19 (2026-10-05): the small offline
+    copy (``offline_encode``) is a whole-episode ffmpeg too, and two caps of
+    ``MAX_TRANSCODES`` each would put twice the encoders on the host's cores.
+    So ``transcode`` and ``offline_encode`` count against one number between
+    them, and take the same semaphore (:func:`~arc.services.media.transcode.
+    transcode_semaphore`). Which of the two goes first is the queue's ordinary
+    priority order: every transcode sorts in front of every copy
+    (:mod:`arc.services.media.names`).
     """
-    return {TRANSCODE: settings.max_transcodes}
+    return {ENCODE_TYPES: settings.max_transcodes}
+
+
+def full_types(caps: dict[frozenset[str], int], running: Counter[str]) -> frozenset[str]:
+    """Every job type whose group is at its cap, given what is running."""
+    full: set[str] = set()
+    for group, cap in caps.items():
+        if sum(running[job_type] for job_type in group) >= cap:
+            full |= group
+    return frozenset(full)
 
 
 async def _sleep_unless_stopped(stop: asyncio.Event, seconds: float) -> None:
@@ -110,7 +124,7 @@ async def _run_one(
         semaphore.release()
 
 
-def _log_gate(full: frozenset[str], caps: dict[str, int]) -> None:
+def _log_gate(full: frozenset[str], caps: dict[frozenset[str], int]) -> None:
     """Say once that a type has stopped being claimable, and once when it is again.
 
     Called only when the set changes, not on every poll: the gate can hold for
@@ -120,7 +134,12 @@ def _log_gate(full: frozenset[str], caps: dict[str, int]) -> None:
     if full:
         log.info(
             "at the per-process cap; claiming other work until a slot frees",
-            extra={"types": sorted(full), "caps": {name: caps[name] for name in sorted(full)}},
+            extra={
+                "types": sorted(full),
+                "caps": {
+                    "+".join(sorted(group)): cap for group, cap in caps.items() if group & full
+                },
+            },
         )
     else:
         log.info("below the per-process cap; every job type is claimable again")
@@ -161,7 +180,7 @@ async def run_worker_loop(
             semaphore.release()
             break
 
-        full = frozenset(job_type for job_type, cap in caps.items() if running[job_type] >= cap)
+        full = full_types(caps, running)
         if full != at_cap:
             _log_gate(full, caps)
             at_cap = full
@@ -256,4 +275,4 @@ async def _requeue_cancelled(factory: SessionFactory, job_ids: list[int]) -> Non
     log.info("cancelled jobs returned to the queue", extra={"job_ids": job_ids})
 
 
-__all__ = ["process_caps", "run_worker_loop"]
+__all__ = ["full_types", "process_caps", "run_worker_loop"]

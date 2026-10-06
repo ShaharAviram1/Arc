@@ -59,11 +59,11 @@ Two Python processes share one codebase and one database:
 - **worker** — claims jobs from the `jobs` table and runs the scheduler
   (periodic AniList refresh, Nyaa polling, MAL re-import, retention sweep,
   qBittorrent polling). Can be scaled to more than one instance safely
-  because of `SKIP LOCKED`. A job type with a *process* cap below
-  `WORKER_CONCURRENCY` — `transcode`, capped by `MAX_TRANSCODES` — is not
-  claimed at all while this process is already running its cap's worth, so an
-  encode waiting for an ffmpeg slot never holds a concurrency slot the short
-  jobs need.
+  because of `SKIP LOCKED`. A group of job types with a *process* cap below
+  `WORKER_CONCURRENCY` — `transcode` and `offline_encode` together, capped by
+  `MAX_TRANSCODES` (M19) — is not claimed at all while this process is already
+  running its cap's worth, so an encode waiting for an ffmpeg slot never holds
+  a concurrency slot the short jobs need.
 
 One arrow the diagram does not draw: the worker's writes **announce
 themselves** over Postgres `LISTEN`/`NOTIFY` on the `arc_events` channel, and
@@ -107,15 +107,20 @@ nothing depends on it — every page that reacts to an event also polls.
   inside the worker container's `stop_grace_period` (15 s, §8): Docker's
   SIGKILL lands at the end of the grace whatever the drain is doing.
 - Priorities (lower first): `mal_push` 10, `transcode` 0–500 by user
-  distance, `poll_qbit` 50, `match_file` and the catalogue sweep
+  distance, `offline_encode` 520 for a copy asked for from a ready episode and
+  600 + 10 × position for a trip's (M19 — always behind every transcode, so a
+  pending transcode is always claimed first), `poll_qbit` 50, `match_file` and the catalogue sweep
   schedulers 100, `compute_wants` 120, `search_release` 150, imports,
   catalogue refreshes and library scans 200 — so a write a person is
   waiting for never queues behind bulk work. Bulk jobs hold a slot for
   about two minutes at most (import chunks of 50 spaced 2 s).
 - Per-process caps (`jobs/loop.py`, `process_caps`): the loop counts what it
-  is running by type and passes the types that are at their cap to the claim
-  as `exclude_types`, one `Job.type NOT IN (…)` clause. `transcode` →
-  `MAX_TRANSCODES` is the only entry. Nothing is reprioritised — an excluded
+  is running by type, adds the counts up per capped **group**
+  (`full_types`), and passes every type of a group at its cap to the claim as
+  `exclude_types`, one `Job.type NOT IN (…)` clause. `{transcode,
+  offline_encode}` → `MAX_TRANSCODES` is the only entry (a group since M19,
+  2026-10-05: both run a whole-episode ffmpeg, and both take the one
+  `transcode_semaphore`). Nothing is reprioritised — an excluded
   type keeps its place and is claimed in the usual order the moment a slot
   frees — and the media semaphore stays the safety net for what the loop
   cannot see (a second worker process, or `MAX_TRANSCODES` lowered under a
@@ -154,7 +159,8 @@ arc/
                                  jobs, settings, anime, catalog, catalogue,
                                  list, schedule, home, review, acquisition,
                                  retention, media, media_stream, playback,
-                                 mal, recs (+ csrf, deps and the schema and
+                                 offline_copies, sync, mal, recs (+ csrf, deps
+                                 and the schema and
                                  `episode_extras` helpers they share; there is
                                  no `admin` router — the admin panel is the
                                  admin-gated half of these)
@@ -164,7 +170,9 @@ arc/
         nyaa/                    RSS query builder, candidate parsing, ranking
         qbit/                    qBittorrent Web API client
         library/                 file watcher, parser (anitopy), matcher, scoring
-        media/                   ffprobe, transcode plan, HLS packaging
+        media/                   ffprobe, transcode plan, HLS packaging, the
+                                 small offline copy (copies.py rules,
+                                 offline.py job — M19)
         acquisition/             want computation, window logic, samples (FR-A8)
         catalog/                 source protocol, AniList+MAL service, breaker,
                                  cache, seasons, list states, local search
@@ -496,16 +504,19 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason, last_search_at / last_search_forms / last_search_results (FR-A7, 2026-09-14: when `search_release` last asked Nyaa about this episode, how many query forms ran and how many distinct releases they returned between them *before* the filter — smallints, nullable, no backfill, written on every attempt that reaches Nyaa and never cleared. Three columns rather than a blob because all three are rendered on one line of the show page, and because "6 forms, 0 results" is what separates a query that matches nothing from a filter that keeps nothing) |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
+| `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most hourly; the idle rule counts from it, else from ready_at), error. M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
-| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list) |
+| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list), trip (bool NOT NULL DEFAULT false, M19 T3, revision `811a128415cc` — true when the row exists **only** because of a trip, FR-A12: no window and no sample asked for it. **Rewritten by `compute_wants` on every run**, so it is the last reconciliation's answer; an episode whose live wants are all `trip` is *trip-only*, §5.4e) |
+| `trips` | id, user_id (FK CASCADE), anime_id (FK CASCADE), first_number, last_number, count (how many aired episodes it took, ≤ what was asked), state (`active` \| `finished` \| `cancelled` \| `expired`, varchar enum, default `active`), created_at, deadline_at (`created_at + trip_copy_days`), ended_at. Partial unique index `ux_trips_one_active_per_user` on `user_id WHERE state = 'active'` — one active trip per user, held by the database as well as by `create_trip`. M19 T3 (FR-A12), revision `811a128415cc`, which also seeds `trip_max_episodes` (50) and `trip_copy_days` (14) |
+| `trip_episodes` | trip_id + episode_id (PK, both FK CASCADE), state (`pending` \| `delivered` \| `expired` \| `cancelled`, default `pending`), available_at (copy first ready for this trip — the start of the `trip_copy_days` clock; stamped by the copy hook and by `create_trip` when a copy already exists), delivered_at (device confirmed; M19 T4 writes it — set and with released_at null it takes the episode out of that user's window), released_at (device deleted its copy; T4). Index `ix_trip_episodes_episode_id`. "Available" is not a state: it is `pending` with a ready copy |
 | `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, added_at, completed_at |
 | `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
-| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
+| `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for, and offline_idle_days — FR-T7's idle rule for a ready episode's small offline copy, default 7, 1..365, read with a floor of 1, and trip_max_episodes — FR-A12's cap on one trip, default 50, 1..50 — and trip_copy_days — how long a trip's copy waits for the device, default 14, 1..365; both read by `services/trips/rules.py`, clamped), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 | `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
 | `offline_ids` | id (surrogate PK), anidb_id, anilist_id (indexed), mal_id (indexed), kitsu_id, tmdb_tv_id, tmdb_movie_id, tmdb_season, tvdb_id, tvdb_season, imdb_id (the first when the entry carries several), type. Fribb's `anime-lists`, and the only route from an Arc show to a **TMDB** id — AniList publishes none. An entry with neither an AniList nor a MAL id is dropped on import: nothing could ever reach it |
 | `offline_imports` | source (PK: `manami` \| `fribb`), version (manami's release tag out of the header's `$schema`; Fribb's `ETag`/`Last-Modified`/download date), imported_at, rows, checksum (sha256 of the downloaded file — an unchanged file skips the parse and the replace entirely) |
@@ -534,6 +545,15 @@ stores — which rows a reader has dismissed — lives in that browser's
 4. `poll_qbit` (every 60 s): sync progress; on completion → state
    `downloaded`, ingest the largest video file (`library.ingest_file`, called
    inline) and enqueue `match_file` for the row it wrote.
+
+Trips (FR-A12, M19 T3) enter this flow at step 1 and nowhere else: the
+reconciler adds every `pending` row of an `active` trip to `desired` (like a
+sample), marks the rows nothing else asked for `wants.trip`, starts their
+searches at priority 160 (behind the window's 150), and skips an episode a
+device of the user already holds when it builds the user's window. The rest —
+search, download, match — is unchanged; a torrent taken only for trip-only
+episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
+§5.4e has the whole of it.
 
 ### 5.1a Acquisition as built (M6)
 - **Dormant imports (FR-A9, 2026-09-13).** Before the window there is a
@@ -678,6 +698,9 @@ stores — which rows a reader has dismissed — lives in that browser's
   `batch.disposition()`. Queued by `claim_existing`, the reconciler's cancel,
   retention and a rejected member; a job for the two reasons `qbit_cancel` is
   one (the batch bullet below).
+- `qbit_top_prio` (per episode, priority 60, FR-A12, M19 T5): `torrents/topPrio`
+  for the single or pack a `downloading` episode is fetched from, once it is no
+  longer trip-only (the trip-packs bullet below). Queued by the reconciler.
 - **Stalls (FR-A6, 2026-09-13).** The same handler gives up on a torrent that
   is going nowhere, which before this it never did: `poll_qbit` reacted only to
   a torrent that had *vanished*, so a dead magnet held one of qBittorrent's
@@ -1003,6 +1026,53 @@ stores — which rows a reader has dismissed — lives in that browser's
   answer with nothing left in the queue to correct it. One query a minute makes
   that self-healing, and it costs a file an operator turned off by hand being
   turned back on, with a line in the log saying so.
+- **Trip packs (FR-A12 with FR-A4/FR-A11's trip amendment, M19 T5, owner
+  2026-10-05; tightened after review 2026-10-06).** For a trip on a finished
+  show the pack is asked for **first** rather than last. A trip-only search of
+  a finished, non-film show with `batch_fallback` on first takes
+  `pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime_id)` (held to commit, so
+  the show's trip searches pick packs in turn and a sibling's
+  `claim_existing` sees the pack the previous one took). `search_release`
+  then builds a `jobs.TripPass(cover, need)` and a
+  `nyaa.PackPreference(take, numbers, need)` when
+  `jobs.trip_pack_need(wanted, attachable)` answers: `wanted` is the show's
+  trip-only episodes still `wanted`/`searching`, `attachable` the trip ones
+  `_attachable` lets this search take along (`cover`); `None` below
+  `trips.names.TRIP_BATCH_MIN` (4) wanted or below two attachable, else
+  `min(4, attachable)`. `search_for_episode(…, prefer=…)` asks the three
+  `batch_queries` forms before any title form (inside `MAX_REQUESTS`) and
+  offers `take` every pack whose **name** range covers ≥ `need` of `cover`,
+  or names no range. `take` is `_take_batch(…, trip=, prefer=True)`:
+  a pack whose contents an earlier trip search of the show already read and
+  found wanting is skipped unfetched (`_PACK_MEMO`, process-local,
+  `(anime, hash) → episode numbers`, 6 h); a **rangeless** pack must hold ≥
+  `need` of `cover` by its file list or it is **held** — still stopped, its
+  `torrents` row reserved, its listing kept (`_Held`) — for the same search's
+  fallback, which takes it without a second fetch or add; packs held and not
+  taken are deleted (no tombstone) when the search ends (`_drop_held`). In
+  any trip search a rangeless pack that does not hold the searched episode is
+  deleted without a tombstone and not counted as refused. Every pack take
+  (trip or not) re-reads its targets `FOR UPDATE SKIP LOCKED` with
+  `populate_existing` just before the selection is written
+  (`_lock_targets`): a free rider another job holds or that is no longer
+  `wanted` is dropped and the plan rebuilt; if the searched episode itself
+  is no longer `searching` the pack is deleted. A pack taken ends the search
+  (`Search.pack_taken`, `forms` = the pack forms asked); otherwise the
+  ordinary search continues on the same pool and request count, the
+  narrowing reserving nothing and the fallback not asking the forms again.
+  The first search's `_attachable` selects every trip episode (all `wanted`
+  since the trip was made); the siblings then find theirs `downloading`, or
+  attach through `claim_existing`, with zero Nyaa requests. A pack taken only
+  for trip-only episodes goes to the bottom of the client's queue
+  (`_to_the_back`); it comes back to the top (`QbitClient.top_prio`,
+  `torrents/topPrio`) when `qbit_reselect` starts a pack with an in-flight
+  file for a non-trip-only episode and some file for an episode a trip asked
+  for, and — for a single or a pack whose episode stops being trip-only —
+  through the `qbit_top_prio` job (`QBIT_TOP`, priority 60, deduplicated per
+  episode), queued by the reconciler for each `downloading` episode in
+  `WantsResult.untripped` (trip-only before the run, not after). With
+  `prefer=None` — an airing show, a non-trip search, the switch off, too few
+  — `search_for_episode` is byte-for-byte what it was.
 - **Stalls, errors and missing files.** `stall_reason` also treats the client's
   own `error` and `missingFiles` states as a stall (2026-09-18), with no
   threshold — they say the client has stopped, not that it is making slow
@@ -1367,6 +1437,88 @@ but libass rasterises glyphs at the final frame size rather than upscaling a
 `veryfast`, which gives up most of x264's analysis and shows it on flat cels
 and gradients.
 
+### 5.3b The small offline copy (M19 T1, FR-P6)
+One MP4 per episode at `DATA_DIR/offline/<episode_id>.mp4`, made on request
+from a `ready` episode's source, for a device to keep instead of the full-size
+`episode.mp4` (≈100 MB against 300–600 MB). Modules: `media/plan.py`
+(`OfflineOptions`, `offline_encode_args`, pure), `media/copies.py` (handler-free:
+the state rule, `request_copy`, `may_fetch_copy`, `encoding_episode_ids`, the
+codec strings — what the API and retention import), `media/offline.py` (the
+`offline_encode` handler).
+- **Args.** The rendition's own `build_plan` (same video, audio and subtitle
+  tracks, FR-P2), the same `extract_fonts`/`extract_subtitle` into the staging
+  directory's `_work/`, then one pass: `-vf "scale=-2:'min(OFFLINE_HEIGHT,ih)'
+  :flags=bicubic,ass=_work/sub.ass:fontsdir=_work/fonts"` — **scale first,
+  then burn**, so libass draws the glyphs at 720p rather than having 1080p text
+  scaled down; `min(…,ih)` never upscales. H.264: `libx264 -preset
+  $OFFLINE_PRESET -crf $OFFLINE_CRF -tune animation -profile:v high -level 4.0
+  -pix_fmt yuv420p`; HEVC: `libx265 … -tag:v hvc1 -profile:v main -pix_fmt
+  yuv420p` (Safari refuses `hev1`). Common: `-c:a aac -b:a
+  $OFFLINE_AUDIO_BITRATE -ac 2 -sn -dn -map_chapters -1 -map_metadata -1
+  -movflags +faststart -progress pipe:1`, output `offline.mp4` (relative; the
+  staging directory is the working directory).
+- **Job.** `offline_encode`, payload `{episode_id, why: "request"|"trip"}`,
+  dedupe `offline_encode:<id>`, priority 520 (request) / 600 + 10 × position
+  (trip, M19 T3). A transaction-level advisory lock on `('offline_encode',
+  episode_id)` (`jobs.episode_lock(key=OFFLINE_LOCK_KEY)`) — a copy and a
+  rendition of one episode may run side by side, never two copies.
+  Idempotent: a `ready` row whose file matches its size and ETag writes
+  `done` and returns. A `request` copy of an episode that is no longer `ready`
+  is abandoned (row deleted, job done) before anything runs. The row is
+  created with `INSERT … ON CONFLICT DO NOTHING` + re-read here and in
+  `request_copy`, so concurrent creators share it. Otherwise: row →
+  `preparing` (codec, height, CRF, audio bitrate, settings_key, media_file_id
+  recorded — the subtitle/audio languages are the **rendition's own recorded
+  ones** when it has them, else the current rules, so the copy matches what is
+  streamed) and committed; encode into
+  `offline/<id>.tmp-<job id>/` under the shared `transcode_semaphore` with the
+  transcode's own `_Reporter` writing progress and heartbeats into the job
+  payload and `_keep_lock_warm` beating while it waits; validate (one video
+  stream of the expected codec, `hvc1`-tagged for HEVC, height ≤
+  `OFFLINE_HEIGHT`, one audio stream when the plan has one, duration no more
+  than 2 s **short** of `plan.chosen_duration` — the chosen video/audio
+  streams' own lengths (`duration` or Matroska's `DURATION` tag), the
+  container's only when neither states one, because the container is as long
+  as its longest stream and that is often an unchosen dub — and `moov` before
+  `mdat` read from the top-level box headers); then, for a `request`, the
+  episode row is re-read `FOR UPDATE` (the lock `request_copy` and
+  `delete_episode_files` take) and the copy is dropped if the episode left
+  `ready` meanwhile; `os.replace` onto `offline/<id>.mp4`; row → `ready` with
+  size, ETag and ready_at. The staging directory is removed on every exit. A
+  transient failure commits `failed` + the head and tail of ffmpeg's stderr and
+  re-raises for the runner's backoff; a **deterministic** one — a source that
+  is gone, a source with no video stream, an ffmpeg without libass, a finished
+  encode that fails validation (`CopyRefused`) — is committed `failed` and the
+  job ends without a retry, since another full encode would fail the same way.
+  A `queued`/`preparing` row with no live job behind it (attempts used up,
+  row gone) reads `failed` to clients and is re-queued by the next request.
+  `settings_key` is recorded only: a settings change re-makes nothing. The episode's own
+  state never changes. `on_copy_ready(ctx, episode, copy, why=…)` is the single
+  hook a successful copy calls (after its commit) — where M19 T3 hangs a
+  trip-only episode's source deletion.
+- **Shared cap.** `transcode` and `offline_encode` count against one
+  `MAX_TRANSCODES` in the claim loop (§2) and take the same semaphore, and every
+  copy sorts behind every transcode; a running copy is not pre-empted — so on
+  a busy host a copy can wait behind all of normal preparation.
+- **Bounded requests.** A request that would start a *new* encode is refused
+  with 409 `storage_held` while `is_storage_held` (FR-T6) and with 429
+  `copy_queue_full` when the requester has 10 live `why=request` jobs
+  (counted by the `user_id` in the payload) or the host has 30. Trip copies are
+  outside both counts (their trip caps them). An available copy, or one already
+  on its way, is answered whatever the counts.
+- **Start-up housekeeping.** After orphaned jobs are reclaimed, the worker
+  runs `offline.sweep_offline_leftovers`: `<id>.tmp-*` staging directories with
+  no live job and `<id>.mp4` files with no `offline_copies` row are removed
+  (names Arc did not write are left; links are unlinked, never followed).
+- **Measured** (2026-10-05, Apple-silicon dev Mac, ffmpeg-full, `fast`, 120 s
+  excerpts from 5:00, subtitles burned in): SubsPlease *Rakudai Kenja* 01 —
+  8.28 MB → **99 MB per 24 min**, 22.8 s wall (≈5× real time); ToonsHub
+  *Re:Zero* S4E02 dual audio (Japanese chosen, English full subs) — 7.64 MB →
+  **92 MB per 24 min**, 14.3 s; the same *Rakudai* excerpt in HEVC — 6.67 MB →
+  **80 MB per 24 min**, 29.7 s, level 3.1 (`hvc1.1.6.L93.B0`). Both ASS scripts
+  declare PlayRes 640×360; on the 1280×720 frame the dialogue sat bottom-centre
+  at its intended proportion, in the release's own fonts.
+
 ### 5.4 Streaming
 - `GET /media/{episode_id}/index.m3u8` and `/media/{episode_id}/{segment}`
   are served by the API with session auth; playlists are rewritten so segment
@@ -1374,7 +1526,10 @@ and gradients.
   static exposure). Range requests supported on segments.
 - Client uses hls.js with `xhrSetup` sending credentials.
 - `GET /media/{episode_id}/episode.mp4` downloads a ready episode as one MP4
-  file (FR-S7): the same files, concatenated on the fly. See §5.4a.
+  file (FR-S7): the same files, concatenated on the fly. See §5.4a. Since M19
+  it is the **fallback** for Keep offline, used when no small copy can be made.
+- `GET /media/{episode_id}/offline.mp4` serves the small offline copy (FR-P6,
+  §5.3b). See §5.4a.
 
 ### 5.4a Streaming and playback as built (M8)
 - No playlist rewriting: ffmpeg writes bare relative URIs, so
@@ -1539,6 +1694,28 @@ and gradients.
   (owner, 2026-10-05: the "Save file" `<a download>` chip is removed): the
   route and the field exist for the in-app downloader (§5.4d). Caddy needs no change: `video/mp4` is outside its encode list and
   `reverse_proxy` streams and forwards `Range` as is.
+- **`GET|HEAD /media/{id}/offline.mp4`** (M19 T1, FR-P6) — the small copy, a
+  real file, so it goes through `_serve` like a segment: the router's session
+  dependency (401), the demo account 403 **before any lookup**, then the
+  episode, the `offline_copies` row (must be `ready`) and
+  `copies.may_fetch_copy(session, user, episode, copy)` — a `ready` episode's
+  copy is any account's; a non-ready (trip-only) copy belongs only to the
+  users holding a `pending` or `delivered` trip row on it (M19 T4, §5.4e part
+  2). Any miss is the router's one 404. The
+  path is `offline_path_for(id)` under `settings.offline_dir`; `_checked_stat`
+  refuses a symlink by `lstat` and anything resolving outside that directory.
+  Strong ETag `"<size>-<mtime_ns>"` (`download.stat_etag`, the same string the
+  encode stored on the row), 304 on `If-None-Match`, Starlette's `Range`
+  (206) and `If-Range` (a mismatch answers the whole file, 200), the JSON
+  400/416 from `_JSONRangeErrors`, `Cache-Control: private, no-cache`, and
+  `Content-Disposition` from `content_disposition` on the file's own answers
+  (not on a 304). `last_served_at` is written at most hourly
+  (`SERVED_TOUCH_SECONDS`) by a Core `UPDATE … WHERE` (no ORM flush; a row
+  deleted meanwhile is zero rows, not an error), only on a GET that sends
+  bytes (not a HEAD, a 304, or a range that will be refused), and the session is closed
+  before the body starts. Registered before the segment route so the literal
+  wins. `EpisodeOut.offline` and the two `/api/episodes/{id}/offline` endpoints
+  are in §5b.
 
 ### 5.4b Watch Now's own failures (M16, FR-W6)
 
@@ -1715,22 +1892,28 @@ revision `4e76a09e547c`), no new dependency, no second road to MyAnimeList.
 
 Owner, 2026-10-04: "so i can use arc when traveling". Ported from Audiosey
 (its spec §6 D1 and M0 spike, which ran on an iPhone), hardened after review
-(2026-10-05). Client-only: the server side is §5.4a's `GET|HEAD
-/media/{id}/episode.mp4` (FR-S7) and §5.4c's outbox, unchanged. **The service
-worker still never touches `/api` or `/media`**: offline media is not served
-through it.
+(2026-10-05). The server side is §5.4a's `GET|HEAD
+/media/{id}/episode.mp4` (FR-S7), the small copy's `POST|GET
+/api/episodes/{id}/offline` and `GET|HEAD /media/{id}/offline.mp4` (FR-P6,
+M19 — same download contract as `episode.mp4`), and §5.4c's outbox. **The
+service worker still never touches `/api` or `/media`**: offline media is not
+served through it.
 
-**Bytes: OPFS, one file per episode** (`offline/opfs.ts`). The file is
-`episode-<id>.mp4` in the origin-private file system, named from the numeric
-id only. Written only by a **sync access handle inside a dedicated module
+**Bytes: OPFS, one file per episode and copy** (`offline/opfs.ts`). The file
+is `episode-<id>.mp4` (the full-size file) or `episode-<id>-o.mp4` (the small
+copy, M19) in the origin-private file system — `fileNameFor(id, variant)`,
+named from the numeric id and the variant only. The two names are
+load-bearing: with one name, a small-copy start by one account would be
+treated as sharing another account's full copy, get a 200 on its `If-Range`
+and truncate it. Written only by a **sync access handle inside a dedicated module
 worker** (`offline/downloadWorker.ts`) and read on the main thread as
 `URL.createObjectURL(file.slice(0, size, 'video/mp4'))`: disk-backed, one live
 URL at a time (minting revokes the last; `setOwner` and an unplayable file
 revoke it too). The in-app control is shown only where
 `navigator.storage.getDirectory` and `Worker` exist; elsewhere it is hidden
 and the episode simply streams (there is no file link — FR-S7, 2026-10-05). `navigator.storage.persist()` is asked
-on the first download. `listEpisodeFiles()` enumerates `episode-*.mp4` for the
-launch sweep.
+on the first download. `listEpisodeFiles()` enumerates both forms
+(`EPISODE_FILE = ^episode-\d+(?:-o)?\.mp4$`) for the launch sweep.
 
 **The downloader** (`offline/download.ts`, pure, every dependency injected).
 8 MB `Range` requests with `credentials: 'include'`, an `AbortController` per
@@ -1757,7 +1940,8 @@ is closed**, from the `finally`.
 nudge (ends a backoff) unless a pause for it is under way, in which case it
 runs again after the file is closed; one for another file stops the current at
 its next chunk and runs after it. Each run holds the Web Lock
-`arc-download:<file>` (`ifAvailable`); a second Arc window gets `busy`. Every
+`arc-download:<file>` (`ifAvailable`, per file name, so per copy); a second
+Arc window gets `busy`. Every
 message carries the manager's `run` id. Vite builds it as an ES worker
 (`worker.format: 'es'`) into `assets/downloadWorker-*.js`, which the precache
 glob includes.
@@ -1765,13 +1949,19 @@ glob includes.
 **The manager** (`offline/downloads.ts`, a `useSyncExternalStore` store,
 `useDownloads()`). One record per **(user, episode)** in IndexedDB
 `downloads` (key `"<user>:<episode>"`): state, bytes, total, ETag, `fresh`,
-reason, message, the `download_url`, and a **snapshot** of the player payload
-from `GET /api/episodes/{id}/play` at start (`anime`, `episode`, `duration`).
-States `queued → downloading → downloaded`, or `paused` (`by-hand` |
+reason, message, `variant` (`small` | `full`, M19), `url` (what is downloaded:
+the copy's `url` or the `download_url`; `null` until the server has said —
+such a record names no bytes on disk, so it neither shares, protects from
+the sweep, nor is resumed into), `fullUrl` (the `download_url`, the
+fallback), `serverProgress` (while preparing), `tripId?` / `confirm?`
+(M19 T6's trips, below), and a **snapshot** of the player
+payload from `GET /api/episodes/{id}/play` at start (`anime`, `episode`,
+`duration`). States `preparing → queued → downloading → downloaded`, or
+`paused` (`by-hand` |
 `interrupted` | `network` — a message only, the worker keeps retrying |
 `elsewhere`, another window holds the lock, retried on the next nudge) or
 `failed` (`quota` | `auth` | `gone` | `size` | `error` from the worker;
-`evicted` | `unreadable` decided here), each with a sentence. FIFO queue, one
+`evicted` | `unreadable` | `unprepared` decided here), each with a sentence. FIFO queue, one
 active download with a run id; a message whose `run` is not the active one
 is stale and may only update bytes. Screen Wake Lock held while one runs,
 re-requested on return to the screen.
@@ -1791,7 +1981,111 @@ re-requested on return to the screen.
 - **Worker errors** (`error`, `messageerror`): the running record fails with
   a sentence, the worker is terminated and dropped (the next send boots a new
   one), held files count as released, and the queue moves on.
-- `nudge()` on `visibilitychange` → visible and on `online`.
+- `nudge()` on `visibilitychange` → visible and on `online`; it also asks
+  the server about every record waiting on it.
+
+**The start flow (M19, owner 2026-10-05).** `start({episodeId, url:
+download_url})` loads the `/play` payload (a failure rejects, as before),
+writes a `preparing` record (`variant: 'small'`, `url: null`) and `POST
+/api/episodes/{id}/offline`. The answer's `codecs` first:
+`codecsPlayable(codecs, canPlayType)` asks `<video>.canPlayType('video/mp4;
+codecs="…"')`; `''` → the full file (null codecs are trusted). Then by
+`state`: `available` → queue `url` as `small`; `queued` / `preparing` → stay
+`preparing` with the server's `progress`; `failed` → `failed` / `unprepared`
+(Try again asks again; a copy whose server job died also reads `failed`);
+`unavailable`, or a **409 `source_gone`**, **409 `storage_held`** or **429
+`copy_queue_full`** (`takesFullInstead`) → queue `download_url` as `full`; `none` on a poll → ask again (`POST`). 401/403 →
+`auth`, 404 → `gone`; another error fails a request with a sentence and is
+ignored on a poll. **No response** (or 502/503/504) to a request → `paused` /
+`network` with `url: null`, asked again by the ticker — never dropped; to a
+poll → keep waiting. **Polling:** while any record of the signed-in account
+is `preparing` (or that network-paused request), one `setInterval` of
+`POLL_MS` = 20 s runs, asking only while the page is visible; `nudge()`,
+`setOwner(user)` and `hydrate()` ask at once. It is started and stopped from
+`emit()`, so it never outlives the last waiting record. A request in flight
+carries a token per key; `pause()`, `remove()` and a newer request forget it,
+so a late answer is dropped, as is one for a record no longer waiting or not
+the owner's. Pause or remove of a `preparing` record makes no server call
+(the server keeps or expires its copy). `resume()` of a record with no URL,
+or of a `small` record that failed `gone` (an expired copy), asks the server
+again instead of refetching. **A `small` download whose worker fails `gone`**
+(a 404 on a chunk: the idle sweep or a re-encode removed the copy) does this
+by itself: the record goes back to `preparing` with `url: null` and
+`reasked: true`, and the answer is followed as above (poll, a fresh download
+of the new copy, or the full file). Only once: with `reasked` set, the next
+`gone` stays `failed` / `gone` (Try again still asks); a `done` clears it. Queuing (`place`) applies the shared-file rule
+per name: another account's record of **the same copy** is resumed or
+confirmed; anything else starts `fresh`. `hydrate()` keeps `preparing`
+records preparing and normalises a record with no `variant` to `full`. A
+full-size copy already on the device stays as it is; there is no "replace
+with the smaller copy" (one record per (user, episode) cannot hold both
+files while the new one downloads).
+
+**Trips (M19 T6, FR-A12, FR-S9 item 8).** `lib/trips.ts` (wire shapes,
+`useCurrentTrip` / `useCreateTrip` / `useCancelTrip` / `useAskAgain`, the
+pure stepper, refusal and row-status rules), `components/Trip.tsx`
+(`TripControl`, `TripPanel`), `offline/useTripAutoKeep.ts`.
+- **Auto-keep.** `useTripAutoKeep(me)` is mounted by `RequireAuth` beside
+  the downloads session; off for the demo account, for nobody, and where
+  `canDownloadInApp()` is false. It is `GET /api/trips/current` as a query
+  (`['trip','current']`) refetched every 60 s, on focus/visibility and
+  reconnect, and when `lib/events.ts` sees an `offline_copy` event (which
+  marks the show and the trip stale). Each answer runs `autoKeep(trip,
+  manager)`: an `available` episode with no record and not declined →
+  `keepTripCopy({episodeId, tripId, url})`; an episode with a record →
+  `adoptTrip` (sets `tripId`; a downloaded copy of either size is confirmed
+  at once; a record waiting on the server, or a small copy that failed
+  `gone`/`unprepared`, takes the trip's URL; anything else — paused by
+  hand included — is left alone); then `confirmPending()`.
+- **No `/offline` request for a trip copy.** That route answers a `ready`
+  episode only (404 otherwise), and a trip-only episode never is; so
+  `keepTripCopy` writes the record (`variant: 'small'`, `tripId`,
+  `fullUrl: null`) and queues the copy's URL directly — `TripEpisodeOut.url`,
+  the server's own, taken only while the phase is `available`
+  (`tripCopyUrl(episode)`); an episode with `url: null` is not downloadable
+  yet and its button stays the server's. A trip record
+  with no URL is never polled on `/offline`, and a 404 there for one leaves
+  it `preparing` for the hook rather than failing it `gone`.
+- **Confirm and release.** The worker's `done` on a record with `tripId`
+  sets `confirm: 'pending'` and `POST …/delivered {etag}`; success →
+  `'done'`; 404/403 → `'done'` (nothing more to tell); anything else stays
+  pending and is retried by `hydrate()`, `nudge()` (visibility, online) and
+  every hook pass, one request in flight per record. `remove()` of a trip
+  record sends `DELETE …/delivered` (best effort) and writes a decline
+  (`trip-skip:<user>:<trip>:<episode>` in IndexedDB `player`) that the hook
+  respects until "Ask again" (`forgetDecline`, then `POST …/again` for a
+  delivered/expired episode, or `keepTripCopy` for an available one).
+- **Show page.** `TripControl` (chip in the hero's actions, inline card:
+  stepper 1..min(`trip_limits.max_episodes` — 50 for an older payload —,
+  aired after `watched_through`), range, estimate
+  `tripEstimateLabel`, refusal sentences, a link to the show that holds the
+  active trip); hidden with a sentence where OPFS/workers are missing or
+  `tripCodecsPlayable` (a ready episode's `offline.codecs`, else
+  `avc1.640028`) says no. `TripPanel` above the episodes while `anime.trip`
+  is set: per episode `tripRowStatus` (record first, else phase), Ask again,
+  Cancel trip with an in-page confirmation; two columns from `md`. Rows: a
+  non-ready trip episode's state reads "Trip · <phase>"; a downloaded one
+  is playable from the device; somebody else's `trip_only` episode reads
+  "Not prepared for streaming". A kept trip episode that later becomes
+  `ready` (the look-ahead reached it; owner, 2026-10-06) is an ordinary
+  ready row — `tripEpisodeState` steps aside for `ready` — with its device
+  copy still shown and played. `OfflineButton` takes `trip` (`id`, `phase`,
+  `progress`, `url`): with no
+  record, `searching`/`downloading`/`waiting_space` → an inert `server`
+  view (dotted ring, the server's percent), `preparing` → the preparing
+  view, inert; `available` → the arrow (`keepTripCopy`). `useAnime` keeps
+  polling while a trip episode is still moving on the server.
+- **Downloads page.** Records with `tripId` are grouped per trip (newest
+  first): "Trip · show · N episodes · total" (`max(total, bytes)` summed),
+  the counts, and Cancel trip while `useCurrentTrip` names that trip; a
+  `confirm: 'pending'` row says "telling Arc it arrived".
+- **Player.** `PlayInfo.playlist_url` is `string | null` and
+  `offline_only?` is read; `chooseSource` never turns a null or empty
+  playlist into a source. `offline_only` with no device copy → "Not on this
+  device yet … keep it offline first" (Downloads, back to the show); with
+  one → the file. `loadPlayInfo` replaces a previous/next the server says
+  is not ready (or absent) with the nearest downloaded episode that way
+  (`withDeviceNeighbours`); the offline rebuild sets `playlist_url: null`.
 
 **Per-user isolation.** `setOwner(user)` follows the signed-in account and is
 set to `null` by logout and by the session-loss path: the running download of
@@ -1825,7 +2119,7 @@ episode is opened (`Player.offline.test.tsx` holds this).
 button used by the show page's episode rows (beside Watched, as a 44 px
 circle in the chip clothes) and the player's top bar (opposite the back
 button, in its dark glass; at `lg` a pill with a short word: "Download",
-"42%", "Queued", "Paused", "Retry", "On this device"). It reads its record
+"Preparing", "42%", "Queued", "Paused", "Retry", "On this device"). It reads its record
 through `useDownload(id)` (`useDownloads.ts`) and calls the manager's
 existing `start` / `pause` / `resume` / `remove` — no change to
 `offline/*` behaviour. States → glyph → tap: none → download arrow → `start`
@@ -1833,9 +2127,13 @@ existing `start` / `pause` / `resume` / `remove` — no change to
 ring → `pause`; `downloading` → determinate ring (an SVG `role=progressbar`
 beside the button, from `bytes / total`) with pause bars → `pause`; `paused`
 → ring held, dimmed → `resume`; `failed` → arrow + warning mark → `resume`;
+`preparing` → dotted ring (indeterminate; the server's percent drawn over
+the dots, dimmed, once known) → `remove` (stop waiting; the name says "Episode
+3 is being prepared on the server, 40% — cancel");
 `downloaded` → filled check → opens an in-page disclosure (`aria-expanded`;
-Escape or a tap elsewhere closes it): "On this device · size", **Remove from
-this device** (`remove`), Go to Downloads. The accessible name carries the
+Escape or a tap elsewhere closes it): which copy and its size ("Smaller copy
+for this device · 210 MB" / "Full-size copy · 700 MB", `COPY_LABEL`),
+**Remove from this device** (`remove`), Go to Downloads. The accessible name carries the
 state, episode and percentage; a polite live region speaks once per *state*,
 never per percent. The player passes `playingFromDevice` when its source is
 the file: Remove is then **disabled with the reason** ("Playing from this
@@ -1845,7 +2143,9 @@ being open holds the player chrome (`chromeHeld`). `OfflineReason` renders a
 paused / failed record's message as a short line: the row's secondary text,
 and under the episode line in the player's top bar. The Downloads page keeps
 its own text chips (Play / Pause / Resume / Delete) — a management list, not
-a per-episode control.
+a per-episode control; it shows the variant quietly beside the size ("smaller
+copy" / "full size", `COPY_NOTE`) and lists a `preparing` record as
+"Preparing on the server" with the server's percent.
 
 **Offline payload** (`lib/playback.ts` `loadPlayInfo`). The server's `/play`
 first; when it is unreachable (no response, or 502/503/504 —
@@ -1861,16 +2161,19 @@ overridden by a queued outbox mark. A 500 or any other error fails as before.
 
 | Where | Key | What | Cleared |
 |---|---|---|---|
-| OPFS | `episode-<id>.mp4` | the episode file | on delete (last record naming it, after the worker lets go); orphans at launch |
+| OPFS | `episode-<id>.mp4` (full), `episode-<id>-o.mp4` (small copy) | the episode file, one per copy | on delete (last record holding that name, after the worker lets go); orphans at launch |
 | IndexedDB `downloads` | `<user>:<episode>` | the download record + snapshot | on delete |
 | IndexedDB `player` | `pos:<user>:<episode>` | last position on this device | never (per user) |
+| IndexedDB `player` | `trip-skip:<user>:<trip>:<episode>` | a trip episode deleted from the device by hand (M19 T6) | "Ask again" |
 | IndexedDB `payloads` | `home`, `anime:<id>` | last good Watch Now / show page, stamped with the owner whose request it was | sign-out, session loss, any account signing in that does not own them |
 | IndexedDB `covers` | `u<user>:anime:<id>` | poster blob (cross-origin `fetch`, best effort) | with that user's last download of the show |
 | IndexedDB `session` | `user`, `data_owner`, `logout_pending` | the signed-in user, whose payloads these are, a sign-out not yet sent | `user`/`data_owner` on sign-out or session loss; `logout_pending` once the server has it or on a new sign-in |
 | IndexedDB `outbox` | (§5.4c) | queued progress | only by §5.4c's rules |
 
-DB `arc` is version 2 (the five stores appended; `createMissingStores` never
-touches an existing store). **A blocked upgrade** (another tab holds v1)
+DB `arc` is version 3 (v2 appended the five stores; `createMissingStores`
+never touches an existing store; v3 adds no store and, inside the
+versionchange transaction, gives every `downloads` record without a
+`variant` `variant: 'full'` — `upgradeDatabase()`; the outbox is untouched). **A blocked upgrade** (another tab holds v1)
 leaves the tab in memory only for now, but the open request stays alive:
 when it succeeds the database is adopted, every store's memory overlay,
 deletes and clears are written into it, and persistence is restored. Every
@@ -1902,6 +2205,272 @@ persistence is requested but is the browser's call, and the page shows
 whether it was granted. A downloaded episode keeps playing after retention
 (§5.7) removed the server's rendition, and after a server re-encode (the
 older copy plays; no hint yet).
+
+### 5.4e Trips, part 1: data and acquisition (M19 T3, FR-A12)
+
+"Prepare for a trip" on a show takes the next X **aired** episodes after the
+user's progress (`watched_through`, FR-W5 — the reconciler's own boundary) and
+makes each into a small offline copy (§5.3b) for a device to keep. Code in
+`arc/services/trips/`: `names.py` (constants, the `trip_release`,
+`offline_settle` and `trip_sweep` job types, the priorities), `rules.py` (the
+leaf predicates every other package asks), `create.py`, `cancel.py`,
+`hooks.py` (the copy hook), `release.py` (the source and orphan deletion),
+`deliver.py`, `settle.py` and `sweep.py` (part 2 below, M19 T4), `phase.py`
+(pure), `view.py` (the read side), `jobs.py` (the handlers, registered by the
+worker).
+
+- **Create** (`create_trip`, `POST /api/anime/{id}/trip {count}`). Refusals, in
+  this order: demo account 403 `demo_account`; unknown anime 404; an active trip 409
+  `trip_active` (and the partial unique index, behind a savepoint, for the
+  race); storage held 409 `storage_held` (FR-T6); count outside
+  1..`trip_max_episodes` 422 `count_out_of_range`; nothing aired after progress
+  422 `nothing_aired`. Episodes a device of the user already holds (delivered,
+  not released) are passed over and the trip reaches one further for each.
+  Writes the `trips` row, one `trip_episodes` row per episode and a `wants`
+  row each (a new or revived row is `trip = true`; a live window/sample row is
+  left alone). Then, per episode: a ready copy on disk stamps `available_at`;
+  an episode whose source is linked (`ready`, `matched`, `preparing`,
+  `failed`) gets `offline_encode(why="trip")` at `600 + 10 × position`; an
+  episode resting in a startable state gets `start_search(priority=160)` —
+  unless it is trip-only and its copy already exists. The user's want rows,
+  the copies and the newest sources are read in one query each. `compute_wants`
+  is queued for the rest. **No list entry is written or activated (FR-A9) and no
+  MAL job can follow.**
+- **Reconciler** (`acquisition/wants.py`). `_trip_wants` reads the `pending`
+  rows of `active` trips (`FOR SHARE OF trips`, so a cancel — which takes the
+  trip `FOR UPDATE` — cannot interleave with a reconciliation);
+  `_reconcile(…, trips=…)` adds them to what is wanted and writes
+  `wants.trip = key not otherwise desired` on every run — **except** on a row
+  that already existed on a show the slot cap is holding, which is left
+  exactly as found (FR-A10), so `trip = true` always marks a row the trip
+  itself brought in. Such a row that leaves is **deleted** when its show is
+  followed and admitted (the window's ordinary delete) and otherwise
+  **shelved** with `drop_reason = "trip ended"` (`REASON_TRIP_ENDED`): on a
+  held, dormant or unfollowed show the moment it stopped being wanted is
+  retention's anchor. The cost of leaving a held show's own row alone: a
+  trip over that show's waiting episodes gets copies only, so once a slot
+  frees the window may download an episode again whose source the trip
+  already deleted — the price of the cap deciding nothing about a held show.
+  A trip touch is Arc-side at the trip's `created_at`, so it may revive an
+  FR-T2 drop older than the trip. `_live_wants` leaves trip rows out of both
+  `occupied` (FR-A10: never a slot) and `live` (so a show whose window episode
+  only a trip wants is still *hungry* and competes for a slot — the window
+  cannot take a trip's episode over without one). The window does **not**
+  skip episodes delivered to the user (owner, 2026-10-06; it did until then):
+  a delivered episode among the next N is wanted for streaming like any
+  other. `trips.rules.delivered_to` is asked only by `create_trip`, which
+  passes over episodes a device already holds. `_drop_stale` excludes trip rows and every key an active trip
+  waits on. `transcode_priority` ignores trip wants. FR-A6 unchanged.
+  `_start_searches` reads `bool_and(trip)` per episode: a trip-only episode
+  searches at 160, and one whose copy is `ready` is **not searched at all**
+  (its source was deleted on purpose). **Promotion** (`_promote`): a wanted
+  `matched` episode that is *not* trip-only, has no rendition and no transcode
+  pending/running (and none that used up its attempts or that an admin
+  cancelled — those stay the startup sweep's) gets `enqueue_transcode`
+  — a normal want arrived on a trip-only episode while its source was still
+  here; `WantsResult.promoted` counts them. The same pass re-queues
+  `trip_release` for a trip-only `matched` episode with a ready copy (the
+  safety net for a lost job). "Ready copy" here is the row **and** its file
+  (`file_matches`, when the caller passes settings, which the job does): a
+  copy whose file has gone does not stop the episode being fetched again.
+  `_requeue_trip_copies` (skipped while storage is held) queues
+  `offline_encode(why="trip")` for an episode a pending trip waits on whose
+  source is linked and which has no copy row and no live encode — a copy that
+  was never queued, or that retention removed; `WantsResult.copies` counts
+  them.
+- **Trip-only** (`trips.rules.trip_only_episode_ids` / `needs_rendition`): an
+  episode with ≥1 live want, all `trip`. One predicate, asked by
+  `library/link.py` (on `matched`: transcode if it needs a rendition; an
+  `offline_encode(why="trip")` if it does not **or** if a pending trip waits
+  on it, so an overlap gets both), `media/jobs.sweep_transcodes` (trip-only
+  `matched` or `failed` episodes are not transcoded; their missing copy is
+  queued again unless it is `ready` or `failed`), `search_release`
+  (bottomPrio) and the API (`EpisodeOut.trip_only`, one grouped query in
+  `episode_extras`, and **never true on a `ready` episode**, which streams
+  whoever's trip also covers it). No new episode state: a trip-only episode
+  is never `ready`, never has an HLS rendition, so `/media/{id}/index.m3u8`
+  and Home never offer it, and `/play` answers it only `offline_only` to a
+  user whose trip holds it (part 2) — unless an admin forces one through the
+  manual re-encode route (FR-P5), which is an explicit admin action and makes
+  it an ordinary ready episode. The linker also asks
+  `trips.rules.ended_trip_leftover`: a file matched for an episode that was
+  in a trip, that no trip waits on any more and nobody else wants (a cancel
+  during `matching`) queues `trip_release` instead of a transcode.
+- **The source, once the copy is made** (owner decision 4, 2026-10-05).
+  `media/offline.on_copy_ready` → `trips.hooks.trip_copy_ready`: stamps
+  `available_at` on the episode's pending rows and, for an episode that is not
+  `ready`, queues `trip_release` (dedupe per episode, priority 180, 15 s
+  delay so the encode job has finished). `trips.release.release_episode`
+  locks the episode row and, **if it is still trip-only** and its copy is
+  ready on disk, calls `retention.delete.delete_episode_files(…, keep_copy=True)`
+  with targets minus the copy: a single's torrent removed with its files, a
+  pack's claim given back (`qbit_reselect` applies FR-A11's disposition), the
+  rows deleted, `matched → not_wanted`; the `offline_copies` row and file stay
+  `ready`. A deleter that declines (an offline encode still holds the
+  source), or a `transcode` job pending or running for the episode, raises
+  `ReleaseDeferred` and the runner's backoff retries (deferring, not
+  cancelling: whoever queued the transcode asked for it). A non-trip want that
+  arrived first keeps the source (promotion transcodes it). Once the source is
+  gone the reconciler does not search a trip-only episode with a ready copy;
+  a missing or failed copy, or any normal want, fetches it by the ordinary path.
+- **Cancel** (`cancel_trip`, `DELETE /api/trips/{id}`; another user's trip is
+  404). The trip row is locked `FOR UPDATE`; trip `cancelled` + `ended_at`;
+  `pending` rows `cancelled` (delivered rows stay). **No want row is written**:
+  the queued `compute_wants` ends the trip's rows by the rules above. Then,
+  for each episode nobody else wants (the caller's own trip rows not
+  counting) and no other active trip waits on:
+  `release_if_unwanted` (wanted/searching/unavailable), else
+  `cancel_if_unwanted` + `qbit_cancel` (single: torrent `cancelled`, removed
+  with partial files; pack: claim given back) — the reconciler's own helpers;
+  else, for landed states (`downloaded`, `matching`, `matched`, `failed`,
+  `not_wanted` with a copy), the episode's **pending** `offline_encode` jobs
+  are cancelled and `trip_release` is queued, which deletes everything — copy
+  included — without the G grace, but only for an episode that was a trip's,
+  has no live want (a trip row with no pending trip behind it counts as none),
+  no pending trip, is not `ready` and has no work in flight (`matching` is
+  left to the linker's leftover rule). Another user's dropped want still
+  counting its grace keeps landed **source** bytes for retention; it does not
+  keep a `not_wanted` episode's copy, which nothing else would ever delete,
+  and a `trip ended` drop counts no grace at all. `ready` episodes are left to
+  retention. `compute_wants` queued.
+- **Read side.** `TripOut` (`api/trip_schemas.py`): id, anime_id,
+  anime_title, first/last_number, count, state, created_at, deadline_at,
+  `episodes[] = {episode_id, number, phase, progress, size, delivered}`.
+  `phase` is `trips.phase.trip_phase(PhaseFacts)` — pure, in this order: the
+  row's own `delivered`/`expired` (T4 writes them), `cancelled` →
+  `unavailable`; copy `ready` → `available`; any other copy row → `preparing`
+  while an `offline_encode` is pending or running for it (`PhaseFacts.encoding`),
+  else `unavailable` (a failed copy is not retried, FR-P6; a queued row with no
+  live job is a dead encode);
+  then the episode: `ready` → `preparing`/`unavailable` by source; landed
+  states → `preparing`; `downloading`; `wanted`/`searching` → `searching`;
+  `unavailable`/`failed` → `unavailable`; `not_wanted` → `waiting_space` while
+  storage is held, else `searching`. `progress`: the download fraction (the
+  claim's own for a pack), the live encode's, 1.0 once available. Built by
+  `trips.view.trip_facts` in a fixed number of queries.
+- **The device side** (Prepare for a trip, the panel, auto-keep,
+  confirm/release, the Downloads group, the player's `offline_only`) is
+  §5.4d's Trips paragraph (M19 T6).
+- **T5** (trip packs, `prefer_batches`) lives in `search_release` (§5.1a);
+  nothing here steers the search.
+
+**Part 2: delivery, settle, expiry (M19 T4).** Owner decision 4 already took
+the source of a trip-only episode when its copy was made (`trip_release`
+above), so what is settled here is the **copy** — file and row — and the
+`trip_episodes` rows. Nothing in part 2 writes a want, a list entry or MAL.
+
+- **Delivery** (`trips.deliver`, three routes in `api/trips.py`; the caller's
+  own trip only — another user's trip, an unknown id or an episode the trip
+  does not hold is 404 `trip not found`). Every delivery write locks the
+  trip `FOR UPDATE`, then the row, then the episode — the order cancel takes
+  and the locks the sweep (trip + row) and the settle (episode) hold — so a
+  confirmation, an expiry, a trip ending, an "again" and a cancel never
+  cross. `confirm_delivered` (`POST …/delivered {etag?}` → 204): a `pending`
+  row goes `delivered`, and so does an `expired` one **while the trip is
+  still active** (`confirmed_state`, pure); a `cancelled` row, or an
+  `expired` row of an ended trip, keeps its state and only gets
+  `delivered_at` (the record that the device has it) — so a late confirmation
+  restores no right to fetch the copy. `delivered_at` is stamped the first
+  time, and again (with `released_at` cleared) on a confirmation after a
+  release, which restarts the settle hour; an ETag that differs from the
+  copy's is logged, not refused (the device checked size == total). On a
+  change it queues `offline_settle(episode)` at `now + TRIP_SETTLE_DELAY`
+  (1 h; dedupe per episode, priority 180) and `compute_wants` (the trip want
+  ends), ends the trip `finished` when nothing of it is pending any more
+  (`FINISH_ON_LAST_CONFIRM`, on; `sweep.end_if_nothing_pending`), and cancels a
+  **pending** `offline_encode` of a non-ready episode no other trip waits on
+  (`cancel.drop_queued_copies`: the device already has a copy; a running one
+  is not stopped and the settle waits for it); a repeat queues nothing. `release_delivered` (`DELETE
+  …/delivered` → 204): stamps `released_at` on a delivered, unreleased row
+  — trip bookkeeping only (the phase, the "again" offer); idempotent. `ask_again` (`POST …/again` → 200
+  `TripOut`; 409 `trip_not_active` once the trip ended): a `delivered`/`expired` row goes back to `pending` with
+  `delivered_at` and `released_at` **cleared** (the row describes the copy the
+  device is about to get; the old confirmation stays in the log) and `available_at` = now when the copy is
+  still on disk (`file_matches`), else null (the copy hook stamps it). The
+  queued reconciliation re-acquires by the existing paths: the trip want
+  returns; a copy on disk keeps the episode unsearched, a `ready` episode
+  with a source gets its copy from `_requeue_trip_copies`, anything else is
+  searched at 160.
+- **Settle** (`trips.settle.settle_episode`, job `offline_settle {episode_id}`;
+  idempotent). Under the episode's `FOR UPDATE`: an unknown or `ready`
+  episode → kept (a ready episode's copy follows the idle rule, §5.7; a
+  `preparing` one is on its way to ready); a
+  `pending` row of any active trip on it → kept (that row's ending queues its
+  own settle); the **latest** `delivered_at` on the episode, any user, under
+  `TRIP_SETTLE_DELAY` old → deferred to `latest + 1 h` (so two users' devices
+  each get their hour; "latest" is any row's `delivered_at`, whatever its
+  state; a dedupe hit onto an earlier settle is corrected here); an `offline_encode` pending/running → deferred 15 min
+  (`TRIP_SETTLE_RETRY`). A deferral re-enqueues the job itself with
+  `exclude_job_id` rather than raising. Otherwise `retention.delete.
+  delete_copy` removes `offline/<id>.mp4` (path from the id, re-checked
+  against the data roots) and the `offline_copies` row — never a torrent, a
+  pack claim or a rendition — and an episode still in `downloaded`/
+  `matched`/`failed` (a source whose release never ran) gets a
+  `trip_release`, whose own rules decide. The episode rests `not_wanted`; the
+  `trip_episodes` rows are left as they are (`delivered`/`expired` are the
+  trip's history). `release_episode`'s second ending also keeps a copy
+  confirmed under an hour ago, so a cancel cannot cut a second device short.
+- **Sweep** (`trips.sweep.sweep_trips`, job `trip_sweep`, hourly, priority
+  190, first run 10 min after worker start, deduped on the type like
+  `retention_sweep`). (1) **Expiry**: a `pending` row of an active trip
+  expires when `available_at + trip_copy_days <= now`, or — no copy ever
+  (`available_at` null) — when `trips.deadline_at <= now`
+  (`expiry_due`, pure); the row goes `expired` and `offline_settle` is
+  queued at once (an expired row may no longer fetch the copy, so a download
+  still running at that moment ends with a 404 — by design). The rows are
+  read under `FOR UPDATE OF trips, trip_episodes`, so a confirmation that
+  committed while the sweep waited is re-read, not overwritten. (2) **End**:
+  every active trip is locked first and each one's rows are read after
+  (`end_if_nothing_pending`), so an "again" committed meanwhile keeps it
+  active; one with no `pending` row gets `finished` when any row has
+  `delivered_at`, else `expired` (`ending_state`, pure), and `ended_at`.
+  `GET /api/trips/current` answers the **active** trip only, so an ended
+  trip reads `null`. (3) **Safety net**: a copy of an episode neither `ready`
+  nor `preparing` that no trip waits on gets `offline_settle` (dedupe) — a
+  lost settle, a confirmation that never came, a deleted user's trip (its
+  rows went with the user by CASCADE). `compute_wants` is queued when (1) or (2)
+  changed anything. The idle rule for `ready` episodes' copies stays
+  retention's.
+- **Authorisation** (`media.copies.may_fetch_copy`, asked by
+  `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
+  account; a `ready` episode's copy → any account; a non-`ready` episode's →
+  only a user holding a `pending` or `delivered` row on it
+  (`trips.rules.holds_trip_episode`; delivered so a second device can fetch it
+  within the settle hour). Everyone else — another user, an `expired` or
+  `cancelled` row — gets the route's one 404, never a 403.
+- **`/play`** (`api/playback.py`): a non-`ready` episode on which the caller
+  holds a `pending`/`delivered` row answers `PlayInfo` with
+  `playlist_url: null`, `offline_only: true`, `resume_position` and
+  `previous`/`next` as usual, and `duration` = the caller's last reported
+  `watch_progress.duration_s` (else 0; there is no rendition). Everyone else
+  keeps the 404. For the client: a trip-only neighbour in `previous`/`next`
+  reports `ready: false` — whether it is on the device is the device's
+  question.
+- **Edge cases.** Two devices of one user: the second fetches within the
+  hour; after the settle it gets 404 and the trip row offers "again". A lost
+  confirmation: the device retries; the server is idempotent; at worst the row
+  expires at 14 days. The device deleting its copy: the release call.
+  Cancellation: T3's path (delivered rows stay delivered). Retention:
+  `delete_episode_files` removes a copy with its episode; `trip_episodes`
+  rows CASCADE only when the episode row itself is deleted and otherwise stay
+  as history.
+- **Owner switches, on** (2026-10-06; constants so each is one line to turn
+  off): `copies.TRIP_TOUCH_ENABLED` — `offline.mp4` touches a non-ready
+  copy's `last_served_at` every 5 min (`touch_interval`) instead of hourly;
+  `settle.SETTLE_WAITS_FOR_FETCH` — the settle also defers while the copy was
+  served in the last 10 min (`fetch_hold`), never past `latest_delivery +
+  6 h`; `deliver.FINISH_ON_LAST_CONFIRM` — above. The hourly sweep stays the
+  safety net for every trip ending.
+- **Window and trip together.** An episode wanted by a trip **and** by a
+  window (anybody's) is not trip-only: it is transcoded, becomes `ready`, and
+  keeps its source; the copy hook queues no `trip_release` for a `ready`
+  episode and `release_episode` keeps it (tested).
+- **Seams for T6.** `TripOut.episodes[].phase` (`delivered`, `expired` now
+  written), `delivered` and `url` (`/media/{id}/offline.mp4` while the copy
+  is `ready` and the phase is `available` or `delivered`, else null);
+  `AnimeDetail.trip_limits.max_episodes`; `PlayInfo.offline_only` with `playlist_url: null`;
+  the three delivery routes; `offline.mp4` 404 after the settle means "gone,
+  ask again".
 
 ### 5.5 Progress and MAL writes
 1. `POST /progress` {episode_id, position, duration} every 10 s and on
@@ -2294,6 +2863,40 @@ naming it and no episode to charge it to, so it sits there until the pack itself
 reaches DELETE — which for a show somebody keeps on their list may be never (an
 M17 sweep of unclaimed files under `downloads/batch/` is the fix; the bytes are
 bounded by what one un-finished file had fetched).
+
+**The small offline copies (M19 T1, FR-P6, FR-T7).** Four additions, all in
+`retention/sweep.py` and `retention/delete.py`:
+- **The copy goes with its episode.** `Targets` gains `offline_file` (the
+  resolved, checked `offline/<id>.mp4`, charged at its size) and `offline_copy`
+  (whether an `offline_copies` row exists — a row whose file is gone is a
+  leftover like any other); `_facts` loads the rows set-based; `delete_episode_
+  files` unlinks the file with the loose files and deletes the row with the
+  other rows. `Removed` reports `offline_file`/`offline_copies`.
+- **`allowed_roots` gains `settings.offline_dir`** (four roots), so the copy
+  passes the same symlink/confinement re-check as every other deletion.
+- **Never a source mid-encode.** `media/copies.encoding_episode_ids` — episodes
+  with a *pending or running* `offline_encode` job — is excluded from
+  `candidates` and asked again by `delete_episode_files` immediately before
+  anything irreversible (the manual delete included), which answers
+  `acted=False`. It also locks the episode row `FOR UPDATE` first (the lock
+  `request_copy` takes), and removes the copy file and row found **at delete
+  time** by the id, not the plan's snapshot, so a copy requested since the plan
+  goes too. A `preparing` row with no live job behind it is a dead encode
+  and does **not** pin the source.
+- **Idle copies.** After the episode loop the hourly `retention_sweep` asks
+  `idle_copies(now, offline_idle_period())`: `ready` copies of `ready` episodes
+  whose `coalesce(last_served_at, ready_at)` is older than `offline_idle_days`
+  (default 7, floor 1), minus any with an encode in flight and any an active
+  trip is still waiting on (a `pending` `trip_episodes` row — FR-A12, whose
+  own 14-day clock is longer), and
+  `delete_idle_copy` removes file and row (committed one at a time, dry-run
+  honoured). The episode is untouched — it still streams, and the next Keep
+  offline makes the copy again. A non-ready episode's copy (a trip's) is not
+  this rule's: the trip settle and sweep own it (§5.4e part 2).
+- `retained_usage` gains `offline_bytes` (`SUM(offline_copies.size)` over
+  `ready` rows, every episode — a trip's copy sits on the disk for an episode
+  that is not retained) and `total` includes it; `GET /api/retention/disk`
+  sends it as `retained.offline_bytes`.
 
 ### 5.0 Catalogue sources and fallback (M3b)
 - `CatalogSource` protocol: `search(q, page)`, `by_anilist_id(id)`,
@@ -2743,10 +3346,13 @@ arriving. No notifications and no sound — the page just stays true. Polling
   the tab is talking to the api (§2), so an in-process bus cannot carry it and
   the one thing both processes already hold a connection to is the database.
   `arc/services/events.py` publishes on one channel, `arc_events`.
-- **Published from the write, sent by the commit.** Two publishers, both the
-  single writer of the thing they announce: `transition()` (every episode state
-  change, §5.1a) and `apply_enrichment()` (artwork landing, §5.8, and only when
-  it actually wrote something). Neither sends anything itself — `publish()`
+- **Published from the write, sent by the commit.** Three publishers, each the
+  single writer of the thing it announces: `transition()` (every episode state
+  change, §5.1a), `apply_enrichment()` (artwork landing, §5.8, and only when
+  it actually wrote something) and `media/copies.publish_copy()` (a small
+  offline copy queued, preparing, ready or failed — kind `offline_copy`, whose
+  `state` is the copy's; M19, §5.3b). An idle copy's deletion publishes
+  nothing: the next read answers `none`. Neither sends anything itself — `publish()`
   *stages* the payload on the session's `info`, and a `before_commit` listener
   on SQLAlchemy's `Session` turns the staged list into `pg_notify` calls
   **inside the committing transaction**. Postgres delivers a notification only
@@ -2770,7 +3376,7 @@ arriving. No notifications and no sound — the page just stays true. Polling
   *and* fires last — after the unwinding, which is the only point at which
   `in_transaction()` separates the two cases.
 - **Payload: ids, and nothing else.**
-  `{"kind": "episode_state" | "art", "anime_id": N, "episode_id": N | null,
+  `{"kind": "episode_state" | "art" | "offline_copy", "anime_id": N, "episode_id": N | null,
   "state": "…", "ts": iso}` — about 120 bytes, capped at 7,900
   (`MAX_PAYLOAD_BYTES`; Postgres refuses 8,000). A notification is broadcast to
   every listener and read by every signed-in tab, so it carries no titles, no
@@ -2842,7 +3448,7 @@ Mutating requests must carry an allowed `Origin`.
 | Route | Who | Purpose |
 |---|---|---|
 | `GET /api/health` | public | liveness |
-| `GET /api/events` | any | the live event stream (M16, §5.9): `text/event-stream`, a comment line on open and every 25 s, `data:` frames of `{kind: episode_state\|art, anime_id, episode_id, state, ts}` — ids only, no user data, no per-user filtering. `Cache-Control: no-cache, no-store, must-revalidate` and `X-Accel-Buffering: no`; Caddy proxies it with `flush_interval -1` and excludes it from `encode` (§8). 503 `too many live connections` above 100 streams per api process. Nothing depends on it: every page that reacts to an event also polls |
+| `GET /api/events` | any | the live event stream (M16, §5.9): `text/event-stream`, a comment line on open and every 25 s, `data:` frames of `{kind: episode_state\|art\|offline_copy, anime_id, episode_id, state, ts}` (`offline_copy`, M19: a small copy's state changed, `state` being the copy's) — ids only, no user data, no per-user filtering. `Cache-Control: no-cache, no-store, must-revalidate` and `X-Accel-Buffering: no`; Caddy proxies it with `flush_interval -1` and excludes it from `encode` (§8). 503 `too many live connections` above 100 streams per api process. Nothing depends on it: every page that reacts to an event also polls |
 | `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | public / any | session. `login` and `me` answer `UserOut`: id, email, role, timezone, created_at and `is_demo` — the last so the client knows whether to draw M16's "How Arc works" entry and Watch Now strip (spec FR-D5) |
 | `POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/{id}` | admin | invite management |
 | `GET /api/invites/{token}`, `POST /api/invites/{token}/accept` | public (rate-limited) | invite flow |
@@ -2858,7 +3464,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/catalogue/offline` | admin | offline-catalogue import status (M15.5, §5.0a): `{sources: [{source, version, imported_at, rows, checksum}] (newest first), stale, anime_rows, id_rows}`. `stale` is manami's alone — the id map without the titles is not a catalogue — and is true when it has never been imported or is older than `OFFLINE_CATALOGUE_STALE_DAYS`. Reads three counts and nothing else; the import itself is a job |
 | `GET /api/mal/status`, `POST /api/mal/link`, `GET /api/mal/callback`, `DELETE /api/mal/link`, `POST /api/mal/import`, `POST /api/mal/push`, `GET /api/mal/log`, `POST /api/mal/log/{id}/revert` | any (own account) | MAL link, import, push pending, write log, revert. The revert writes `updated_by=arc`, `mal_dirty=true` and stamps `activated_at` if null (FR-A9: it is FR-M7's third user-originated event), on the entry it recreates as well as the one it edits |
 | `GET /api/recs`, `POST /api/recs/runs` | any (own runs) | recommendations (FR-R1…FR-R5): GET returns `{run, remaining_today, limit_per_day, configured}` with the newest run (`RecRunOut` = `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`), plus `chain: [{provider, model, available}]` **for admins only** (the field is absent for everyone else); POST `{prompt}` (trimmed, ≤ 300 chars) creates one → 201 `RecRunOut` `{id, prompt, created_at, model, candidate_count, picks[{anime, case}], continuations[{anime, because}]}`. 429 `{detail, retry_after_seconds}` + `Retry-After` at 10 runs/24 h; 503 unconfigured or refused; 502 upstream; 409 empty pool |
-| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column). The episode's `release` carries `batch: true` when it is one selected file of a pack (FR-A11), and its `download_progress` is then **that file's** and not the pack's: the same `episode_extras` pass resolves a batch-backed episode through the `torrent_files` row that still claims it (one more query for the whole list, never one per episode), so the group and the title a row shows are the pack's — true of every episode in it — and the flag is what keeps the client from rendering them as a release of this one. A claim given back (cancelled, rejected, swept) stops answering for the episode at once, leaving its own `torrents` row, if it ever had one, to answer for it. And `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
+| `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column). Each episode's `offline` carries its small copy as `OfflineOut` (FR-P6, M19 — `null` unless the episode is `ready`; built from the same `episode_extras` pass: the `offline_copies` rows, the latest `offline_encode` job of those queued/preparing, and which episodes still have a `media_files` row — three queries for the page, no N+1 — and sent the same way on `GET /api/home` rows and `/play`'s episode; `unavailable` there means no copy and no source row). The episode's `release` carries `batch: true` when it is one selected file of a pack (FR-A11), and its `download_progress` is then **that file's** and not the pack's: the same `episode_extras` pass resolves a batch-backed episode through the `torrent_files` row that still claims it (one more query for the whole list, never one per episode), so the group and the title a row shows are the pack's — true of every episode in it — and the flag is what keeps the client from rendering them as a release of this one. A claim given back (cancelled, rejected, swept) stops answering for the episode at once, leaving its own `torrents` row, if it ever had one, to answer for it. `trip_limits` = `{max_episodes}` (the `trip_max_episodes` setting, 1..50; every caller, demo included — FR-A12, so the trip stepper knows the cap without the admin-only settings route). And `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `catalog_refresh` for this show (deduped per anime id) |
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
@@ -2871,13 +3477,22 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
 | `GET`/`HEAD /media/{id}/episode.mp4` | any but the demo account (403) | The whole ready episode as one MP4 (FR-S7): `init.mp4` + segments in playlist order, concatenated on the fly; parts checked like segments; 404 unless `ready` and every part is present and plain; `private, no-cache` + strong ETag over all parts/304; single Range → 206, multi-range → 200, JSON 400/416; `If-Range` honoured; `Content-Disposition: attachment` named from the database (§5.4a) |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready` |
+| `GET`/`HEAD /media/{id}/offline.mp4` | any but the demo account (403, before any lookup) | The small offline copy (FR-P6, M19 T1) from `DATA_DIR/offline/<id>.mp4`: 404 unless its `offline_copies` row is `ready`, `copies.may_fetch_copy` agrees (a `ready` episode: anyone; a non-ready trip episode: only a user holding a `pending`/`delivered` trip row on it — M19 T4), and the file is a plain file inside `offline/` (a symlink is refused); `video/mp4`, `private, no-cache`, strong ETag `"<size hex>-<mtime_ns hex>"` (the row's `etag`)/304, Range → 206, JSON 400/416, `If-Range` (a mismatch answers 200 with the whole file), `Content-Disposition: attachment` named like `episode.mp4`'s. Touches `last_served_at` at most hourly (§5.4a) |
+| `POST /api/episodes/{id}/offline` | any but the demo account (403) | "Keep offline" asks for the small copy (FR-P6): **202 `OfflineOut`** = `{state: none\|queued\|preparing\|available\|failed\|unavailable, progress: 0..1 \| null (while queued/preparing), size: bytes \| null (once available), url: "/media/{id}/offline.mp4" \| null (once available), codecs: "avc1.640028" \| "hvc1.1.6.L93.B0" \| null}`. Queues `offline_encode` (deduped per episode, priority 520) and writes the `offline_copies` row as `queued` unless a matching ready copy exists (then `available`, nothing queued) or one is already queued/preparing. **409** when no usable copy can be made now — `{"detail": "source_gone"}` (the episode is ready but its source is not on disk and no copy is made or on its way) or `{"detail": "storage_held"}` (the data volume is under its FR-T6 floor) — and **429 `{"detail": "copy_queue_full"}`** when the caller has 10 copies queued or being made or the host has 30 (trip copies not counted); on all three the device takes `download_url`. `request_copy` locks the episode row `FOR UPDATE` against retention's deletion. 404 `episode not found or not ready` for an unknown or not-`ready` episode |
+| `POST /api/anime/{id}/trip` | any but the demo account (403 `demo_account`) | FR-A12, M19 T3: body `{count}` (strict int) → **201 `TripOut`** = `{id, anime_id, anime_title, first_number, last_number, count, state, created_at, deadline_at, episodes: [{episode_id, number, phase: searching\|downloading\|preparing\|available\|delivered\|expired\|unavailable\|waiting_space, progress, size, delivered, url: "/media/{eid}/offline.mp4" \| null (the copy is `ready` and phase is `available`/`delivered`)}]}`. 409 `trip_active` / `storage_held`; 422 `count_out_of_range` (1..`trip_max_episodes`) / `nothing_aired`; 404 unknown anime. Writes trip, rows, wants; starts searches (160) and queues copies at once; never writes a list entry or MAL (§5.4e) |
+| `GET /api/trips/current` | any | the caller's active `TripOut`, or `null`. The show payload carries the same object as `trip` when the caller's active trip is on that show, and every `EpisodeOut` carries `trip_only` (one grouped query per page, every caller) |
+| `DELETE /api/trips/{id}` | owner only (anybody else's or an unknown id: 404 `trip not found`) | cancel (§5.4e) → 204; a cancelled trip again → 204; a finished/expired one → 409 `trip_not_active` |
+| `POST /api/trips/{id}/episodes/{eid}/delivered` | owner only (anybody else's trip, an unknown id or an episode not in the trip: 404) | M19 T4: body `{etag?}` (≤ 200 chars, extra keys 422) → **204**. The device holds the copy: a `pending` row (or an `expired` one of an active trip) goes `delivered`; a `cancelled` row or an ended trip's `expired` row only gets `delivered_at` (no fetch right back); `delivered_at` stamped first time and again after a release (`released_at` cleared); a differing ETag logged; queues `offline_settle` at +1 h and `compute_wants` on a change; repeats are no-ops (§5.4e part 2) |
+| `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row (trip bookkeeping only; the window never skipped-delivered since 2026-10-06); idempotent |
+| `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4 → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
+| `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready`, `offline_only` (false). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0) |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released" |
-| `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, total}, episodes_retained}` — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
+| `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, offline_bytes, total}, episodes_retained}` (`offline_bytes`, M19: the small copies, `SUM(offline_copies.size)` over ready rows) — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows `paused`, active wants, searching, downloading, `retained_bytes`, plus (2026-09-13) `storage_held`/`free_bytes`/`min_free_bytes` — FR-T6's guard, read from the same measurement and the same `storage_hold` rule the guard itself uses, with an unmeasurable path reading as zeros and *not* held — `dormant_entries`, the count of `watching`/`planned` entries with `activated_at IS NULL` whose show is not `RELEASING` (FR-A9), and `waiting_shows`/`slot_cap_k` — FR-A10's cap, the (user, show) pairs it is holding back right now and K itself, counted by the reconciler's own `wants.slot_totals(session)` (one pass over every list, K returned with the count) so the panel cannot disagree with the next tick. No upstream call |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
 | `GET /api/acquisition/qbit` | admin | `{reachable, version, error, torrents[{hash, name, state, progress, size, dlspeed, upspeed, episode_id, kind, wanted_bytes}]}`. The only route that calls qBittorrent inside a request (`app/version` + `torrents/info?category=arc`, read-only, `asyncio.timeout` bounding the **whole probe** at 5 s — the client logs in and retries a 403 once, so a per-request budget would be six of them) and the only one that **never fails**: down, wrong password or unconfigured is `reachable: false` with the reason in `error`, because that is the answer the admin came for. `episode_id` comes from Arc's `torrents` rows, not from the client's tags — and so do `kind` (`single`/`batch`, null for a torrent Arc has no row for) and `wanted_bytes` (the files Arc asked for, recorded at pick time; null for a single, whose wanted bytes are its whole payload). A batch's `episode_id` is always null, which is why `kind` is worth sending: it is what tells an admin that a row belonging to no episode is a pack rather than somebody's own download. `size` needs no adjustment for one — `torrents/info`'s `size` is already the **selected** files' — and `total_size` is deliberately on no API at all, because a pack's payload is not a figure any rule, log or reservation may read (FR-A11) |
@@ -2888,8 +3503,8 @@ Mutating requests must carry an allowed `Origin`.
 |---|---|---|---|
 | AniList GraphQL `https://graphql.anilist.co` (`ANILIST_URL`, overridable for tests) | none | documented 90 req/min, enforced ~30/min; client paces requests (`ANILIST_MIN_INTERVAL_MS`, default 700), honours `X-RateLimit-Remaining`/`Retry-After`, retries 429 once and 5xx twice | Queries: `SEARCH` (summary fields only; upsert never sets `refreshed_at`), `MEDIA_BY_ID` (full detail + first aired and upcoming schedule pages + relations + studio + `staff(sort: RELEVANCE, perPage: 12)` and `streamingEpisodes` for M15's credits and episode stills — detail-only, so a search page and a season sweep never pay for them), then `AIRED_SCHEDULE_PAGE` follow-ups while `hasNextPage` (cap 20 pages / 2000 episodes, logged if hit). A 429 without `Retry-After` waits 3 s (60 s is only the ceiling for a sent header). **Interactive calls do not wait on 429**: the app's catalogue is built with `wait_on_rate_limit=False` (`create_catalog`), so a 429 on a search or a show page raises `SourceRateLimited` at once and falls straight through to MAL/offline instead of holding the request open — and, being a burst limit rather than an outage, it leaves the breaker closed, only noting a per-client "rate-limited until" so the next interactive call inside the window skips AniList without a request. The worker's `catalog_for()` keeps the wait. Detail is served from cache when `refreshed_at` < 24 h; unreachable AniList with nothing cached → 502 `anilist is unavailable`. |
 | MAL API v2 `https://api.myanimelist.net/v2` | reads: `X-MAL-CLIENT-ID` header only; writes (M9): OAuth 2.0 PKCE (plain), client id + secret in env | modest | Catalogue fallback (read): `anime?q=`, `anime/{id}?fields=…`, `anime/season/{year}/{season}`; broadcast weekday/time used to synthesise episode air dates. List sync (M9): `users/@me/animelist`, `anime/{id}/my_list_status` (PATCH/DELETE). Tokens encrypted with Fernet key from env. |
-| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry, ≤20 requests per episode | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then — only where `absolute_offset` answered **and** the season marker left a shorter base behind — the **absolute pair** `<season-stripped base> - <N+offset>` and the dashless `<base> <N+offset>` (§5.1a: SubsPlease numbered *Jujutsu Kaisen* season two 25–47, and it writes the romaji franchise name, which is why the pair sits ahead of every english form; an unmarked sequel whose base *is* its whole title gets neither form, since nine words plus a running number is a query with no answer, and only a **finished** prequel chain produces an offset at all), then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. **A finished show that found too little is asked again by group** (2026-09-18). The RSS feed **cannot be paged**: `&p=2` and `&p=3` answer byte for byte what `&p=1` answers, and so do `s=`/`o=` — only the HTML listing paginates, verified against the live feed. So the 75 newest matches of a form are all a form can ever see, and for a finished show whose franchise kept going they *are* the franchise: *Kimetsu no Yaiba* (2019, FINISHED, sequels) episode 10 came back under seven forms as 91 merged results with **no season-one single among them** — season 4, season 5, an Infinity Castle rip, remakes and batches, all correctly rejected — because season one's uploads are from 2019 and everything the franchise has done since sits in front of them. Since Nyaa ANDs every word of a query, the fix is a narrower query rather than a deeper one: `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items including the 2019 single at 5–8 seeders. So **after** the title forms have run, **only for an entry the catalogue calls `FINISHED`** (`nyaa.deep_search`; a null status reads as not-finished) and **only while the merged pool holds fewer than `ENOUGH_CANDIDATES` (3) acceptable releases**, `nyaa.group_queries` asks `<form> <group>` for the **top three title forms only** — romaji `- NN`, english `- NN`, romaji `SxxEyy`, the three shapes a group's own upload has — times the groups: `rules.preferred_groups` first (per-show override already merged by `load_rules`), then `DEEP_SEARCH_GROUPS = ("HorribleSubs", "SubsPlease", "Erai-raws")`, de-duplicated case-insensitively so a preferred SubsPlease is not asked twice. The order is **form-major** (all groups of the romaji form, then the english one, then `SxxEyy`), because the form is the stronger signal. Each narrowed form is one ordinary paced and cached RSS request; the narrowing stops at three candidates, and `MAX_REQUESTS` (20) is the ceiling on title and narrowed forms **together** — ten titles plus three forms × six groups would be 28. Narrowed forms do **not** count against `MAX_QUERIES` (that cap is the budget for ways of writing the *title*) and are counted in `Search.requests` rather than `Search.forms`, so the episode row's "N forms" keeps meaning what it has meant since M6 while `search_release`'s log line carries both. An **airing** show asks no narrowed form at all: its weekly release is inside the newest 75. The three groups are a hard-coded claim about who uploads anime and are the part of this worth revisiting; an admin's own `preferred_groups` is where a fourth name belongs. Items parsed with the same filename parser; kept only when kind=episode, episode number equal — **or equal to `N + offset` on a release that names no season at all**, the absolute rule of §5.1a, which is then dropped outright if any season-marked candidate for the same episode also survived — title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked by the ordinary path** (FR-A4; the one exception is asked for explicitly and is at the end of this cell): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. **A finished show with no acceptable single at all is offered batch candidates** (FR-A4 amendment + FR-A11, owner 2026-09-18). "Never fetch whole seasons" is a statement about *bytes*, not about torrents, and for a show that finished airing years ago the only seeded releases are often batches: *Kimetsu no Yaiba* episode 10 came back under seven title forms and six group-narrowed ones with no season-one single among them and several complete-season packs. So where a **finished** show's search ends with **no acceptable single at all**, the pack is **asked for**: `nyaa.batch_queries` adds up to three numberless forms — `<romaji base>`, `<romaji base> BATCH`, `<english base> BATCH` — deduplicated against what has already been asked, counted in `Search.requests` and never in `Search.forms`, inside the same 20-request ceiling and always **last**, after the narrowing has had the budget. (Corrected 2026-09-18: re-reading the merged pool found nothing, because every query form carries the episode number and no batch name does — *One Week Friends* episode 3 returned 16 results and 0 batches against the live feed, *Chivalry of a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and 0; *Kimetsu no Yaiba* episode 10 only appeared to work because `10` is a token of `1080p`.) Then `nyaa.filter_items(…, batches=True, only_batches=True)` reads the whole pool and `rank(…, wanted_numbers=…)` orders them by dub, then by how many of the show's currently wanted episodes the release's span covers, then by FR-A3's four rules; they land in `Search.batches`, which is a list of candidates and not a decision. `acceptable`'s `batches` argument defaults to **false**, so every path written before FR-A11 rejects every batch exactly as it did; with it on, a range must cover the episode (or `number + offset` under §5.1a's absolute rule, on the same four conditions a single needs), a pack naming **no** range at all is a candidate whose coverage its file list settles rather than its name, the season must agree, the title must reach the threshold, a dub is ranked rather than filtered, and a film or one-episode entry gets none of it. `NyaaClient.torrent_file(url)` fetches one `.torrent` — paced like a search, never cached, the URL **and the URL the answer came from** must be on nyaa's own host (redirects are followed, so where Arc asked is not the whole story), the `Content-Length` and the body ≤ `MAX_TORRENT_BYTES` (1 MiB) and bencoded (`d`), else `NyaaUnavailable`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected, as a single (`accept`/`reject`) and as a batch (`batch_accept`/`batch_reject`) (§10). |
-| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/files`, `torrents/filePrio`, `torrents/start`, `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. **A batch is added as the `.torrent` file itself, stopped** (FR-A4's exception, FR-A11, owner 2026-09-18): `torrents/filePrio` is refused while the client has no metadata, so the magnet route has a window in which unwanted bytes arrive and the file route has none — `torrents/add` is posted as `multipart/form-data` with `torrents=("release.torrent", blob, "application/x-bittorrent")`, `savepath` `<downloads>/batch/<info hash>`, `contentLayout=Original`, `autoTMM=false` and **both** `stopped=true` and `paused=true` (5.x reads the first, 4.x the second, each ignores the other), reusing the same `_added()` + `has()` confirmation that makes a duplicate magnet add idempotent, and additionally requiring the **hash itself** to come back (in 5.x's `added_torrent_ids`, or from `has()`) because everything after the add is keyed on a string that came out of a feed. A `torrents/stop` follows the add, idempotent and deliberate: a torrent the client already holds is reported as added whatever run state it is in. Four calls serve the selection: `torrents/files?hash=` (the client's own indices, names, sizes and per-file progress — authoritative, which is why the list is read back rather than bencoded out of the `.torrent`; a row it cannot parse **raises** rather than shortening the answer, since a dropped index is one that never gets turned off and never appears in the read-back), `torrents/filePrio` (`hash`, `id` = `|`-joined indices sorted and de-duplicated, `priority` 0 = off / 1 = normal — never 6 or 7, so a batch does not jump the client's own queue ahead of everybody's singles), and `torrents/start` (5.x's name; 404 falls back once to 4.x's `torrents/resume`, exactly as `torrents/stop` falls back to `torrents/pause`) as the **last** call, after the selection has been written and verified. `MAX_TORRENT_FILES` (500) is the ceiling on a pack Arc will read a selection out of. The same four calls serve a pack for the rest of its life: `poll_qbit` reads `torrents/files` **once per in-flight batch and not at all for a settled one** (every wanted file complete and the client reporting it stopped) for the per-file progress an episode's completion is read from, and `torrents/stop` for a pack whose every wanted file is in; and the `qbit_reselect` job (§5.1a) is the only other writer — `torrents/files`, `filePrio` 0 for the rows now off then 1 for the ones now on, then exactly one of `torrents/start`, `torrents/stop` or `torrents/delete(deleteFiles=true)` per `batch.disposition()`, and nothing at all if the listing no longer matches Arc's rows. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
+| Nyaa RSS `https://nyaa.si/?page=rss&q=…&c=1_2&f=0` (`NYAA_URL`) | none | ≤1 req/2 s (asyncio-paced), 10-min cache per query, 20 s timeout, one retry, ≤20 requests per episode | `c=1_2` = Anime English-translated. Up to **10** query forms per episode, in order: romaji full title, english full title, then the **`SxxEyy` form of both titles** — `<season-stripped base> S<kk>E<nn>`, the season the entry's own title names or 1, the episode padded to two digits (so `S01E1089`, never `S01E089`) — then (only for an entry whose own title names a season) the season-stripped base with `S<k>`, roman numeral and plain, then — only where `absolute_offset` answered **and** the season marker left a shorter base behind — the **absolute pair** `<season-stripped base> - <N+offset>` and the dashless `<base> <N+offset>` (§5.1a: SubsPlease numbered *Jujutsu Kaisen* season two 25–47, and it writes the romaji franchise name, which is why the pair sits ahead of every english form; an unmarked sequel whose base *is* its whole title gets neither form, since nine words plus a running number is a query with no answer, and only a **finished** prequel chain produces an offset at all), then the **head of the romaji title and the head of the english title** — the text in front of the first subtitle separator (`:`, ` - `, ` – `, ` — `, `~`, `〜`, counted only with whitespace on one side so `Re:Zero` stays whole), derived from the season-stripped title so a marked entry's head repeats a short form and dedupes away — then the bare `<romaji> <NN>` for an unmarked entry, then the **english** `SxxEyy` form and the english short forms, then the **symbol-stripped variants of the two full titles**, and finally **up to two synonyms** (`anime.synonyms`, season-stripped, kept only when neither the synonym nor its own head repeats a title or a head already asked for — so *Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season* earns nothing — and only when it is a *name*: two words or six characters, never a bare season marker, since the list is somebody else's free-text field and holds entries like `"Season 2"` and `"2"`). **The order is what the cap cuts**, which is the whole of its design (2026-09-14): every romaji form comes before every english one and the speculative forms come last, so a marked, subtitled title — *Kimetsu no Yaiba: Katanakaji no Sato-hen 2nd Season*, fourteen forms for ten slots — keeps all four of its romaji short forms and loses a variant instead. The **symbol-stripped variant** (`☆ ★ ♪ ♥ ! ? : ; ~ 〜 ～ · ・ — /` each become a space, the runs collapse) turns `Yarichin☆Bitch-bu - 01` into `Yarichin Bitch-bu - 01`, `Love Live! Superstar!! - 03` into `Love Live Superstar - 03` and `Fate/Zero - 12` into `Fate Zero - 12`, because Nyaa matches tokens and a symbol glued between two words makes one token out of both; it is built for the **full titles only** — a variant of an abbreviation is a guess about a guess — and the ordinary hyphen is deliberately not in the set, since it is what separates the number from the title. The set is a short, evidenced subset of the parser's own punctuation class (`_PUNCT_RE` flattens everything, because both sides of a comparison go through it and cost nothing; each character here costs a request). **A film, or an OVA/ONA the catalogue gives one episode** (`nyaa.is_single`), is a different and shorter list (2026-09-14): the **bare titles** and their symbol-stripped variants and synonyms, with no number attached to any of them — nothing on Nyaa writes `Servamp Movie: Alice in the Garden - 01`, which is why *that* film, *The Royal Tutor Movie* and *SAO the Movie: Progressive* all sat in `searching` for a day. **Head forms are not asked for an entry with a `PREQUEL` relation** (`anime.relations[].relation_type`, matched case-insensitively; no relations stored is not evidence and keeps them), because a release named by the bare head is most likely the first season and an unmarked sequel cannot be told apart from it by season agreement. ALL run and merged by info hash before ranking, because Nyaa ANDs every word and groups name shows by neither the whole title nor the same language: `Mushoku Tensei III: Isekai…` vs `Mushoku Tensei S3`, and `Rakudai Kenja no Gakuin Musou: Nidome no Tensei, S-Rank Cheat Majutsushi Bouken-roku` vs `Rakudai Kenja no Gakuin Musou`. The `SxxEyy` forms are third and fourth because a show whose groups name it that way has *nothing* under the dash forms (`One-Room TA - 01` → 0 results, `One-Room TA S01E01` → the seven ToonsHub singles), and they need no `PREQUEL` gate: built from the base rather than the head, a subtitled sequel is asked for by its whole name, and where the base is bare the form carries the season explicitly. Ten is the ceiling (ten paced requests, 2 s apart — it rose 8 → 10 for the symbol variants, which sit behind their own form and would otherwise push a marked entry's english short forms off the end); the dedupe keeps a typical show at three or four. The broad head form is safe only because of the filter below — never weaken it. **A finished show that found too little is asked again by group** (2026-09-18). The RSS feed **cannot be paged**: `&p=2` and `&p=3` answer byte for byte what `&p=1` answers, and so do `s=`/`o=` — only the HTML listing paginates, verified against the live feed. So the 75 newest matches of a form are all a form can ever see, and for a finished show whose franchise kept going they *are* the franchise: *Kimetsu no Yaiba* (2019, FINISHED, sequels) episode 10 came back under seven forms as 91 merged results with **no season-one single among them** — season 4, season 5, an Infinity Castle rip, remakes and batches, all correctly rejected — because season one's uploads are from 2019 and everything the franchise has done since sits in front of them. Since Nyaa ANDs every word of a query, the fix is a narrower query rather than a deeper one: `Kimetsu no Yaiba - 10 HorribleSubs` returns 30 items including the 2019 single at 5–8 seeders. So **after** the title forms have run, **only for an entry the catalogue calls `FINISHED`** (`nyaa.deep_search`; a null status reads as not-finished) and **only while the merged pool holds fewer than `ENOUGH_CANDIDATES` (3) acceptable releases**, `nyaa.group_queries` asks `<form> <group>` for the **top three title forms only** — romaji `- NN`, english `- NN`, romaji `SxxEyy`, the three shapes a group's own upload has — times the groups: `rules.preferred_groups` first (per-show override already merged by `load_rules`), then `DEEP_SEARCH_GROUPS = ("HorribleSubs", "SubsPlease", "Erai-raws")`, de-duplicated case-insensitively so a preferred SubsPlease is not asked twice. The order is **form-major** (all groups of the romaji form, then the english one, then `SxxEyy`), because the form is the stronger signal. Each narrowed form is one ordinary paced and cached RSS request; the narrowing stops at three candidates, and `MAX_REQUESTS` (20) is the ceiling on title and narrowed forms **together** — ten titles plus three forms × six groups would be 28. Narrowed forms do **not** count against `MAX_QUERIES` (that cap is the budget for ways of writing the *title*) and are counted in `Search.requests` rather than `Search.forms`, so the episode row's "N forms" keeps meaning what it has meant since M6 while `search_release`'s log line carries both. An **airing** show asks no narrowed form at all: its weekly release is inside the newest 75. The three groups are a hard-coded claim about who uploads anime and are the part of this worth revisiting; an admin's own `preferred_groups` is where a fourth name belongs. Items parsed with the same filename parser; kept only when kind=episode, episode number equal — **or equal to `N + offset` on a release that names no season at all**, the absolute rule of §5.1a, which is then dropped outright if any season-marked candidate for the same episode also survived — title ≥ 0.90 similar (asymmetric: a release title that *extends* the entry's title with tokens not in any of the entry's own titles is a different show, e.g. a subtitled sequel), season agrees (1 assumed when unmarked on either side), not a remake, **at least one seeder** (`MIN_SEEDERS` = 1; zero is not a worse candidate but a file that cannot be fetched, and taking one used to put a magnet into qBittorrent that sat in `metaDL` for hours), and **the info hash has no `torrents` row at all** — any episode, any state, because a row means Arc already tried that release and it did not produce the episode (§5.1a). **A batch is never picked by the ordinary path** (FR-A4; the one exception is asked for explicitly and is at the end of this cell): a release whose name carries an episode range (`01 ~ 12`, `01-02`, `E01-E12`) or a batch marker (`BATCH`, `Season Pack`, or a `Complete` that names no single episode) parses as kind=batch (§5.2a) and is rejected by the filter before its episode number is even compared, so the ranker never sees one — a batch's low end *is* the number Arc asked for, which is how 6.3 GB of *Dagashi Kashi* season 2 was fetched for two wanted episodes. **A single is filtered differently** (2026-09-14, the other half of the film fix), and in three parts. The release must **say what it is** — the parser's `movie` or `special` (`SINGLE_KINDS`) — because "names no episode" was the first version of this test and it accepted three whole-series Blu-ray packs as films: `[Judas] Sword Art Online [BD 1080p]` carries no number, no range and no batch marker, and it is 20 GB of the franchise. Its title must reach 0.90 under the **strict** comparison, which scores a release that names *less* than the entry with `token_sort_ratio` and forgives only the type word itself (`TYPE_WORDS` — the parser strips a trailing `Movie` from the title it reports while the catalogue keeps it): `kizumonogatari` is a subset of all three parts of *Kizumonogatari* and used to score 1.00 against every one of them. And the **year**, when both sides have one, must agree within one — a franchise reboot carries the original's name exactly, a December premiere is a January disc — with a missing year on either side counting as *no evidence rather than agreement*, which is why the strict title rule is unconditional rather than a fallback. It is then episode 1, the row the catalogue holds for it. A numbered release under a one-episode entry is refused unless the parser read it as the film itself (`[SubsPlease] Yuru Camp - 01` is not *Yuru Camp Specials*), a creditless opening is still ignored, and a batch is still a batch. The cost, stated rather than hidden: a BD rip that names nothing but the franchise (`[Coalgirls] Kizumonogatari [BD 1080p]`) is refused, because nothing in its name distinguishes it from a series pack — a missing file is visible and fixable, the wrong film plays as though it were right. Every rejection is logged with the sentence it was rejected by. Ranked: **a dub below every subbed candidate** (FR-A3, 2026-09-14: `ParsedName.dubbed`, and it sorts ahead of all four rules because a dubbed release is not a worse copy of the episode but the episode in the wrong language; it is a ranking and not a filter, so a dub is still chosen when nothing else was found, with a log line saying so), then preferred groups > preferred/fallback resolution > seeders > trusted; per-show overrides in `settings` key `override:anime:<id>`. **A finished show with no acceptable single at all is offered batch candidates** (FR-A4 amendment + FR-A11, owner 2026-09-18). "Never fetch whole seasons" is a statement about *bytes*, not about torrents, and for a show that finished airing years ago the only seeded releases are often batches: *Kimetsu no Yaiba* episode 10 came back under seven title forms and six group-narrowed ones with no season-one single among them and several complete-season packs. So where a **finished** show's search ends with **no acceptable single at all**, the pack is **asked for**: `nyaa.batch_queries` adds up to three numberless forms — `<romaji base>`, `<romaji base> BATCH`, `<english base> BATCH` — deduplicated against what has already been asked, counted in `Search.requests` and never in `Search.forms`, inside the same 20-request ceiling and always **last**, after the narrowing has had the budget — except for a trip on a finished show, which asks them **first** (§5.1a, trip packs). (Corrected 2026-09-18: re-reading the merged pool found nothing, because every query form carries the episode number and no batch name does — *One Week Friends* episode 3 returned 16 results and 0 batches against the live feed, *Chivalry of a Failed Knight* 13 and 0, *Dagashi Kashi 2* 10 and 0; *Kimetsu no Yaiba* episode 10 only appeared to work because `10` is a token of `1080p`.) Then `nyaa.filter_items(…, batches=True, only_batches=True)` reads the whole pool and `rank(…, wanted_numbers=…)` orders them by dub, then by how many of the show's currently wanted episodes the release's span covers, then by FR-A3's four rules; they land in `Search.batches`, which is a list of candidates and not a decision. `acceptable`'s `batches` argument defaults to **false**, so every path written before FR-A11 rejects every batch exactly as it did; with it on, a range must cover the episode (or `number + offset` under §5.1a's absolute rule, on the same four conditions a single needs), a pack naming **no** range at all is a candidate whose coverage its file list settles rather than its name, the season must agree, the title must reach the threshold, a dub is ranked rather than filtered, and a film or one-episode entry gets none of it. `NyaaClient.torrent_file(url)` fetches one `.torrent` — paced like a search, never cached, the URL **and the URL the answer came from** must be on nyaa's own host (redirects are followed, so where Arc asked is not the whole story), the `Content-Length` and the body ≤ `MAX_TORRENT_BYTES` (1 MiB) and bencoded (`d`), else `NyaaUnavailable`. The query forms and the filter are pinned offline by `tests/fixtures/query_corpus.txt` — one block per real production case: the entry, the episode, the forms that must be built, the forms that must **not** be, and real release names that must be accepted and rejected, as a single (`accept`/`reject`) and as a batch (`batch_accept`/`batch_reject`) (§10). |
+| qBittorrent Web API (`QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `QBIT_CATEGORY`=arc, `QBIT_DOWNLOADS_PATH`=/data/downloads container-side) | cookie login, re-login on 403 | n/a | `torrents/add` (magnet, category, savepath `<downloads>/<episode id>`; handles 4.x `Ok.` and 5.x JSON/409-duplicate dialects idempotently), `torrents/info?category=arc`, `torrents/files`, `torrents/filePrio`, `torrents/start`, `torrents/bottomPrio`/`torrents/topPrio` (a trip's torrent to the back and back again, FR-A12; 409 = queueing off, not an error), `torrents/delete` (Arc category only), `app/setPreferences` (seeding **and queue** policy applied at worker start and daily: ratio limit 0 with action Stop, seeding time 0, upload cap `QBIT_UPLOAD_LIMIT_KIB`, plus `queueing_enabled`, `max_active_downloads` = `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `max_active_torrents` = `QBIT_MAX_ACTIVE_TORRENTS` (12) and `dont_count_slow_torrents` — the client's own defaults are 3 and 5, and a container restart is what loses a limit Arc did not write; the queue half is sent whatever `QBIT_SEEDING` says), `torrents/stop` (any completed torrent still seeding is stopped by `poll_qbit` unless `QBIT_SEEDING`). `dont_count_slow_torrents` carries its own thresholds — `slow_torrent_dl_rate_threshold`/`slow_torrent_ul_rate_threshold` 2 KiB/s and `slow_torrent_inactive_timer` 300 s — so a torrent stops occupying a slot only after five minutes of moving essentially nothing, and an ordinary lull costs a healthy download nothing. The queue only ever changes what *counts*: nothing is removed by it, and the stall rule of §5.1a is the only thing that gets rid of a torrent going nowhere. `torrents/info` is also read for `time_active` (the stall clock), `dlspeed`, and the four peer counts: `num_complete`/`num_incomplete` are the tracker's last scrape of the swarm, where `-1` means "not scraped yet" and is never read as zero, while `num_seeds`/`num_leechs` are only the peers connected this instant — routinely 0 on a healthy torrent, so no rule may read them as an empty swarm. **A batch is added as the `.torrent` file itself, stopped** (FR-A4's exception, FR-A11, owner 2026-09-18): `torrents/filePrio` is refused while the client has no metadata, so the magnet route has a window in which unwanted bytes arrive and the file route has none — `torrents/add` is posted as `multipart/form-data` with `torrents=("release.torrent", blob, "application/x-bittorrent")`, `savepath` `<downloads>/batch/<info hash>`, `contentLayout=Original`, `autoTMM=false` and **both** `stopped=true` and `paused=true` (5.x reads the first, 4.x the second, each ignores the other), reusing the same `_added()` + `has()` confirmation that makes a duplicate magnet add idempotent, and additionally requiring the **hash itself** to come back (in 5.x's `added_torrent_ids`, or from `has()`) because everything after the add is keyed on a string that came out of a feed. A `torrents/stop` follows the add, idempotent and deliberate: a torrent the client already holds is reported as added whatever run state it is in. Four calls serve the selection: `torrents/files?hash=` (the client's own indices, names, sizes and per-file progress — authoritative, which is why the list is read back rather than bencoded out of the `.torrent`; a row it cannot parse **raises** rather than shortening the answer, since a dropped index is one that never gets turned off and never appears in the read-back), `torrents/filePrio` (`hash`, `id` = `|`-joined indices sorted and de-duplicated, `priority` 0 = off / 1 = normal — never 6 or 7, so a batch does not jump the client's own queue ahead of everybody's singles), and `torrents/start` (5.x's name; 404 falls back once to 4.x's `torrents/resume`, exactly as `torrents/stop` falls back to `torrents/pause`) as the **last** call, after the selection has been written and verified. `MAX_TORRENT_FILES` (500) is the ceiling on a pack Arc will read a selection out of. The same four calls serve a pack for the rest of its life: `poll_qbit` reads `torrents/files` **once per in-flight batch and not at all for a settled one** (every wanted file complete and the client reporting it stopped) for the per-file progress an episode's completion is read from, and `torrents/stop` for a pack whose every wanted file is in; and the `qbit_reselect` job (§5.1a) is the only other writer — `torrents/files`, `filePrio` 0 for the rows now off then 1 for the ones now on, then exactly one of `torrents/start`, `torrents/stop` or `torrents/delete(deleteFiles=true)` per `batch.disposition()`, and nothing at all if the listing no longer matches Arc's rows. Dev compose bind-mounts the repo's `data/downloads` so the host worker sees files; first-run temporary password must be replaced with `QBIT_PASS` (see README). |
 | Gemini (AI Studio) `https://generativelanguage.googleapis.com/v1beta/openai/` (`GEMINI_BASE_URL`) | `GEMINI_API_KEY` | **free tier: ~20 requests/day/model for the whole deployment** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), plus per-minute limits; 429 and 503 "high demand" are both common, and a busy model can end a stream after one chunk | The primary provider (`RECS_PROVIDER=gemini`). `RECS_MODEL` lists several models tried in turn — extra daily quota rather than better answers; 3.5 leads because it was the most *available* when measured. Python SDK `openai` (3.11); streamed chat completions, `response_format` json_schema, `reasoning_effort: low`. Reasoning tokens come out of `max_tokens` (16000). A daily-quota 429 puts that model on cooldown until 08:00 UTC. |
 | OpenRouter `https://openrouter.ai/api/v1` (`OPENROUTER_BASE_URL`) | `OPENROUTER_API_KEY` | per account, paid | The fallback (`RECS_FALLBACK_PROVIDER=openrouter`), used once every Gemini model is spent for the day — it is the thing that still works when the free tier does not. Same code path; `RECS_FALLBACK_MODEL` is a `vendor/model` slug. Sends `HTTP-Referer`/`X-Title` for attribution. |
 | Anthropic API | `ANTHROPIC_API_KEY` | n/a | Selectable as either chain end (`RECS_PROVIDER` or `RECS_FALLBACK_PROVIDER` = `anthropic`, `RECS_MODEL=claude-opus-5`). Python SDK `anthropic` (1.4.0); `client.beta.messages.stream` with adaptive thinking, `output_config.format` JSON schema, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). Also M13's match suggestions, whatever the recs provider is. |
@@ -3064,7 +3679,12 @@ or a trusted prior), `LIBRARY_SCAN_INTERVAL_SECONDS` (120),
 `TRANSCODE_CRF` (19), `TRANSCODE_TUNE` (animation; empty means no `-tune`),
 `TRANSCODE_MAXRATE_KBPS` / `TRANSCODE_BUFSIZE_KBPS` (both unset; a maxrate
 with no bufsize gets twice the maxrate), `HLS_SEGMENT_SECONDS` (6), `TRANSCODE_TIMEOUT_SECONDS`
-(10800), `RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400) and
+(10800), the small offline copy's `OFFLINE_CODEC` (`h264` | `hevc`, default
+h264), `OFFLINE_HEIGHT` (720, 144..2160; never upscales), `OFFLINE_CRF` (26),
+`OFFLINE_PRESET` (fast) and `OFFLINE_AUDIO_BITRATE` (96k) — FR-P6, M19, §5.3b;
+the copies live in the derived `offline_dir` = `DATA_DIR/offline` (resolved),
+and the idle rule `offline_idle_days` is an admin setting, not env —
+`RETENTION_DRY_RUN` (false), `BACKUP_INTERVAL_SECONDS` (86400) and
 `BACKUP_KEEP_DAYS` (14) — read by `deploy/backup.sh`, not by the app —
 `QBIT_UPLOAD_LIMIT_KIB` (512), `QBIT_SEEDING`
 (false), `QBIT_MAX_ACTIVE_DOWNLOADS` (8), `QBIT_MAX_ACTIVE_TORRENTS` (12),
@@ -5030,3 +5650,158 @@ asked*, so `make test` is exactly as fast as it was.
   to `useDownloads.ts`. A completed download never swaps the player's source;
   removing the copy being played is disabled in the player. Client only, no
   new dependency.
+- 2026-10-05 (owner) — **Keep offline downloads the small copy** (§5.4d, M19
+  T2, client). `DownloadRecord` gains `variant`, `fullUrl`, `serverProgress`,
+  reserved `tripId?` / `confirm?`, a `preparing` state and an `unprepared`
+  failure; `url` may be `null` until the server says where the copy is. One
+  OPFS file per copy (`episode-<id>.mp4` / `episode-<id>-o.mp4`) so two
+  accounts' different copies never share a file or a Web Lock. `start()`
+  POSTs `/api/episodes/{id}/offline`, polls `GET` every 20 s while visible
+  and on nudges, falls back to `download_url` on 409 `source_gone`,
+  `unavailable` or a codec `canPlayType` says no. IndexedDB v3 defaults old
+  records to `full`. `download.ts` and the worker are unchanged in behaviour.
+  No new dependency.
+- 2026-10-05 (owner) — **The small offline copy, server side** (§4, §5.3b,
+  §5.4a, §5.7, §5.9, §5b, §9; M19 T1, spec FR-P6/FR-T7). New table
+  `offline_copies` (episode_id PK, no path column — `offline/<id>.mp4` from the
+  id) in revision `2abfab654407`, which also seeds `offline_idle_days` = 7. New
+  job `offline_encode` (`media/offline.py`) on the transcode's own plan, font
+  and subtitle extraction, reporter and heartbeat; scale then burn; validated
+  (codec, `hvc1`, height, ±2 s duration, faststart) in a staging directory and
+  `os.replace`d into place. The claim loop's cap becomes a **group** cap
+  `{transcode, offline_encode} → MAX_TRANSCODES` on one semaphore; copies sort
+  at 520/600+ behind every transcode. New route `GET|HEAD /media/{id}/offline.mp4`
+  (through `_serve`; `_serve` gains `extra` headers for the file's own answers;
+  `download.stat_etag` is now the one per-file validator, shared by the route
+  and the encode) and `POST|GET /api/episodes/{id}/offline` (`api/offline_copies.py`)
+  answering `OfflineOut` (`api/offline_schemas.py`), also on every
+  `EpisodeOut.offline` from the `episode_extras` pass. Retention: the copy goes
+  with its episode, `allowed_roots` gains `offline_dir`, a source with a
+  pending/running `offline_encode` is never deleted, idle ready-episode copies
+  go after `offline_idle_days`, and `retained_usage.offline_bytes`. Live
+  events gain kind `offline_copy`. Settings `OFFLINE_CODEC/HEIGHT/CRF/PRESET/
+  AUDIO_BITRATE`. No new dependency.
+- 2026-10-06 — **§5.4d follow-up after the server review** (M19 T2). The
+  request's 409 `storage_held` and 429 `copy_queue_full` fall back to the
+  full file like 409 `source_gone`. A `small` download failing `gone`
+  re-asks the server automatically once per record (`reasked`, cleared on
+  `done`). A poll answering `failed` after `preparing` lands in `failed` /
+  `unprepared` (tested). Client only.
+- 2026-10-06 (owner, review of M19 T1) — **The small copy, hardened** (§5.3b,
+  §5.4a, §5.7, §5b). `latest_offline_jobs` reads live jobs only, and a
+  queued/preparing row without one reads `failed`; validation measures
+  `plan.chosen_duration` (per-stream `duration`/`DURATION` tags) and fails only
+  on a shortfall; `CopyRefused` makes deterministic failures end the job
+  without retry; new request copies 409 `storage_held` / 429 `copy_queue_full`
+  (10 per user via payload `user_id`, 30 per host, trips exempt); the row is
+  upserted (`ON CONFLICT DO NOTHING`); `request_copy`, the encode's last step
+  and `delete_episode_files` serialise on the episode's row lock, and the
+  deletion removes the copy found at delete time; start-up sweep of staging
+  dirs and row-less copies; the copy uses the rendition's recorded languages;
+  the hourly touch is a Core UPDATE and skips refused ranges; demo gets
+  `offline: null`. No automatic re-encode on a settings change. The
+  `media_file_id` index (review nit N6) was **not** added: the trips revision
+  `811a128415cc` already sits on `2abfab654407`, and that revision is not
+  rewritten under it.
+- 2026-10-05 (owner) — **Trips, part 1: data and acquisition** (FR-A12, M19
+  T3; §4, §5.1, new §5.4e, §5b). Revision `811a128415cc`: `trips` (one active
+  per user by a partial unique index), `trip_episodes` (indexed by episode),
+  `wants.trip` (NOT NULL DEFAULT false, no rewrite), and the
+  `trip_max_episodes`/`trip_copy_days` seeds. Trips are wants: the reconciler
+  reads pending rows of active trips, marks the rows nothing else asked for,
+  never lets them hold a slot or count as the window's, never drops them for
+  FR-T2, and deletes them when the trip stops asking. "Trip-only" is one
+  predicate (`trips.rules.needs_rendition`) asked by the linker, the transcode
+  sweep, `search_release` (bottomPrio) and the API; no new episode state. The
+  source of a trip-only episode is deleted by a `trip_release` job the copy
+  hook queues, through retention's deleter with a new `keep_copy=True`, after a
+  locked re-check; the reconciler does not search a trip-only episode whose
+  copy is ready. Promotion transcodes a `matched` episode a normal want has
+  arrived on. Cancel uses the reconciler's own release/cancel helpers and the
+  same release job for landed bytes, without the grace. Small calls: a trip
+  passes over episodes already on the device and reaches further; detail codes
+  rather than sentences; a cancelled trip re-cancelled is 204.
+- 2026-10-06 (review of M19 T3) — **Trips: the fix loop.** A trip never
+  flags a row a held show already had, and a row the trip brought in is
+  shelved (`trip ended`) rather than deleted unless its show is followed and
+  admitted; `cancel_trip` writes no want rows (the queued reconciliation ends
+  them) and locks the trip `FOR UPDATE` against `_trip_wants`' `FOR SHARE`.
+  The release deletes a cancelled trip's `not_wanted` copy whatever dropped
+  wants others hold, defers while a transcode is queued or running, and is
+  queued by the linker for a file matched after its trip ended (no transcode
+  for nobody). The idle-copy rule skips copies a pending trip waits on, and the
+  reconciler queues a missing copy for a pending trip episode with a source.
+  `EpisodeOut.trip_only` is never true on a `ready` episode; a trip phase is
+  `preparing` only while an encode is live. Promotion leaves an
+  admin-cancelled transcode alone; an unknown show is 404 before any 409; the
+  storage-hold log line is debug.
+- 2026-10-06 (owner decision of 2026-10-05; M19 T5) — **Trip packs** (§5.1a,
+  FR-A4/FR-A11 amended, FR-A12). A trip-only search on a finished show with
+  ≥ `TRIP_BATCH_MIN` (4) trip episodes still wanted passes
+  `search_for_episode` a `PackPreference`: the batch forms are asked first,
+  packs whose names cover enough are handed to `_take_batch` with a
+  file-list coverage gate of `min(4, attachable trip episodes)`, and a pack
+  taken ends the search; otherwise the ordinary search runs on the same pool
+  inside the same 20-request ceiling. A pack refused for coverage leaves no
+  tombstone. Gated by `batch_fallback`; airing shows and non-trip searches
+  unchanged.
+- 2026-10-06 (M19 T4) — **Trips, part 2: delivery, settle, expiry, serving**
+  (§5.4e part 2, §5.4a, §5.7, §5b). Three owner-only routes —
+  `POST|DELETE /api/trips/{id}/episodes/{eid}/delivered` and `POST …/again` —
+  over `trips.deliver`; `offline_settle` (`trips.settle`) deletes a non-ready
+  episode's copy (file + row, nothing else; `retention.delete.delete_copy`)
+  once no trip row on it is pending, the latest confirmation is an hour old
+  (`TRIP_SETTLE_DELAY`) and no encode is live, deferring by re-enqueueing
+  itself; `trip_sweep` (hourly, 190) expires pending rows at `available_at +
+  trip_copy_days` or, with no copy, at `deadline_at`, ends trips with nothing
+  pending (`finished` if anything was delivered, else `expired`) and settles
+  leftover copies. `copies.may_fetch_copy` serves a non-ready copy only to a
+  user with a pending/delivered row (others 404); `/play` answers such a user
+  `offline_only` with no playlist. `release_episode` keeps a copy confirmed
+  under an hour ago. Small calls: "again" clears `delivered_at`/`released_at`
+  (the window must not skip an episode the device lacks); a confirmation is
+  accepted in any row state; an expired row's settle runs at once; a trip
+  with nothing delivered ends `expired`; the trip ends at the next sweep, not
+  at the last confirmation; settle ignores `RETENTION_DRY_RUN` like T3's
+  release.
+- 2026-10-06 (review of M19 T5) — **Trip packs tightened** (§5.1a). Declined
+  packs are held stopped for the search's own fallback (`_Held`) instead of
+  deleted and re-added; pack contents are memoised per show for trip searches
+  (`_PACK_MEMO`, 6 h); the file-list gate applies to rangeless packs only and
+  a rangeless pack missing the searched episode leaves no tombstone; a
+  preference needs ≥ 2 attachable; trip searches take
+  `pg_advisory_xact_lock(trip_pack, anime)` and every pack take re-locks its
+  targets `FOR UPDATE SKIP LOCKED` before writing the selection; new job
+  `qbit_top_prio` and `QbitClient.top_prio` undo `bottomPrio` once an episode
+  stops being trip-only (reconciler's `WantsResult.untripped`) or a trip's
+  pack starts serving a streaming episode (`qbit_reselect`).
+- 2026-10-06 (review of M19 T4) — **Trips part 2: the fix loop.** A
+  confirmation on a `cancelled` row, or an `expired` row of an ended trip,
+  only stamps `delivered_at` (no fetch right comes back); the ending and the
+  settle's latest confirmation read `delivered_at`, not the state. Delivery
+  writes lock trip → row → episode; the sweep locks trips and rows for expiry
+  and checks each locked trip's rows separately before ending it. The safety
+  net settles every copy of a non-ready, non-preparing episode no trip waits
+  on (a deleted user's included). A re-confirmation after a release restarts
+  the hour; a confirmation cancels a pending re-make nobody needs. Two
+  behaviours are prepared behind flags, off.
+- 2026-10-06 (M19 T6) — **Trips on the device** (§5.4d Trips, §5.4e
+  cross-reference). `useTripAutoKeep` in `RequireAuth`; trip copies are
+  queued from `tripCopyUrl(id)` with no `/offline` request (that route is
+  ready-only) and never polled there; confirm on `done`, retried until
+  heard; release and a remembered decline on delete; the Downloads group;
+  `playlist_url: string | null` and `offline_only` in the player; device
+  neighbours; `offline_copy` events refresh the trip; the admin Rules tab
+  gains `offline_idle_days`, `trip_max_episodes`, `trip_copy_days`.
+- 2026-10-06 (M19 T6 follow-up) — §5.4d Trips: the client reads
+  `TripEpisodeOut.url` (no client-built media path any more) and
+  `AnimeDetail.trip_limits.max_episodes`; a trip episode turning `ready` is
+  an ordinary ready row; Downloads rows stack their buttons on a phone.
+- 2026-10-06 (owner; review of M19 T4, part 2) — **The window keeps
+  delivered episodes; three switches on; two fields for the client.** The
+  reconciler's `window()` loses `skip` (FR-A1): an episode on a device is
+  still wanted for streaming among the next N; `released_at` is trip
+  bookkeeping only and `DELETE …/delivered` queues no reconciliation.
+  `TRIP_TOUCH_ENABLED`, `SETTLE_WAITS_FOR_FETCH` and `FINISH_ON_LAST_CONFIRM`
+  default on. `TripEpisodeOut.url` (the copy's `offline_url` while ready and
+  available/delivered, else null) and `AnimeDetail.trip_limits.max_episodes`.

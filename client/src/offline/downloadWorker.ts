@@ -19,7 +19,9 @@
  *
  * **One window per file.** Each run holds a Web Lock named after the file
  * (`navigator.locks`, where there is one). A second Arc window asking for the
- * same file gets `busy` back instead of a second writer on one file.
+ * same file gets `busy` back instead of a second writer on one file. The name
+ * carries the copy (`episode-<id>.mp4` / `episode-<id>-o.mp4`), so the full
+ * and the small copy of one episode never share a lock or a file.
  */
 
 import {

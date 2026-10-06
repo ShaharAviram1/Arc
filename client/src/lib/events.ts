@@ -44,6 +44,7 @@ import { acquisitionStatusQueryKey } from '@/lib/acquisition'
 import { animeQueryKey, ANIME_QUERY_KEY } from '@/lib/anime'
 import { useMe } from '@/lib/auth'
 import { HOME_QUERY_KEY } from '@/lib/schedule'
+import { TRIP_QUERY_KEY } from '@/lib/trips'
 
 /** The stream. Same origin, session cookie, no headers of its own. */
 export const EVENTS_PATH = '/api/events'
@@ -52,6 +53,8 @@ export const EVENTS_PATH = '/api/events'
 export const EPISODE_STATE_EVENT = 'episode_state'
 /** Artwork landed on a show or its episodes (§5.8). */
 export const ART_EVENT = 'art'
+/** An episode's small offline copy changed state (FR-P6, M19): queued, preparing, ready, failed. */
+export const OFFLINE_COPY_EVENT = 'offline_copy'
 
 /**
  * How long keys collect before one round of invalidation goes out. Long enough
@@ -141,6 +144,10 @@ export function staleKeys(
     }
     case ART_EVENT:
       return [animeQueryKey(event.anime_id)]
+    case OFFLINE_COPY_EVENT:
+      // A copy became ready (or failed): the show's rows and the trip the
+      // auto-keep hook reads — the refetch is what starts the download.
+      return [animeQueryKey(event.anime_id), TRIP_QUERY_KEY]
     default:
       return []
   }

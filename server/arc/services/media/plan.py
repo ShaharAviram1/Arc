@@ -210,6 +210,11 @@ class Stream:
     default: bool = False
     width: int | None = None
     height: int | None = None
+    #: The stream's own length in seconds, when the container says (an MP4's
+    #: ``duration``, a Matroska ``DURATION`` tag). Used to check a small copy
+    #: against the tracks it was made from rather than against the container,
+    #: whose length is the longest stream's — often an unchosen dub.
+    duration: float | None = None
 
     @property
     def is_ass(self) -> bool:
@@ -239,6 +244,23 @@ class TranscodePlan:
     #: MKV), which is the ordinary case outside fansub releases.
     attachments: tuple[tuple[int, str], ...] = ()
     notes: tuple[str, ...] = ()
+
+    @property
+    def chosen_duration(self) -> float | None:
+        """How long the *chosen* video and audio run, else the container's.
+
+        The longest of the two streams the output is made from, when either
+        states its own length; the container's duration only when neither
+        does. A release whose English dub runs a few seconds past the Japanese
+        track makes the container longer than any copy of the Japanese one can
+        be (FR-P6's validation).
+        """
+        own = [
+            stream.duration
+            for stream in (self.video, self.audio)
+            if stream is not None and stream.duration
+        ]
+        return max(own) if own else self.duration
 
     @property
     def subtitle_lang(self) -> str | None:
@@ -308,6 +330,33 @@ def _int(value: Any) -> int | None:
         return None
 
 
+def _timecode(value: Any) -> float | None:
+    """``HH:MM:SS.fraction`` (Matroska's ``DURATION`` tag) → seconds."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = (float(part) for part in parts)
+    except ValueError:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def stream_duration(raw: Mapping[str, Any]) -> float | None:
+    """A stream's own length in seconds, from ``duration`` or a ``DURATION`` tag."""
+    try:
+        value = float(raw.get("duration"))  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        value = None
+    if value is None or value <= 0:
+        tags = _tags(raw)
+        tagged = next((tags[key] for key in tags if str(key).upper().startswith("DURATION")), None)
+        value = _timecode(tagged)
+    return value if value is not None and value > 0 else None
+
+
 def _stream(raw: Mapping[str, Any], type_index: int) -> Stream:
     tags = _tags(raw)
     codec = raw.get("codec_name")
@@ -321,6 +370,7 @@ def _stream(raw: Mapping[str, Any], type_index: int) -> Stream:
         default=_disposition(raw, "default"),
         width=_int(raw.get("width")),
         height=_int(raw.get("height")),
+        duration=stream_duration(raw),
     )
 
 
@@ -672,6 +722,123 @@ def encode_args(plan: TranscodePlan, options: EncodeOptions | None = None) -> li
     return args
 
 
+#: The small copy's file name inside its staging directory (FR-P6). Relative,
+#: like everything else ffmpeg is told: it runs with the staging directory as
+#: its working directory, so the release name never reaches an output path.
+OFFLINE_OUTPUT: Final[str] = "offline.mp4"
+
+#: The two codecs a copy may be made in, and the encoder each one uses.
+OFFLINE_ENCODERS: Final[Mapping[str, str]] = {"h264": "libx264", "hevc": "libx265"}
+
+
+@dataclass(frozen=True, slots=True)
+class OfflineOptions:
+    """The knobs of the small offline copy (FR-P6, architecture.md §5.3b).
+
+    The defaults are :class:`~arc.config.Settings`' defaults, so a bare
+    ``OfflineOptions()`` encodes what production encodes. ``subtitle_file``
+    and ``fonts_dir`` are filled in by the job once the track and the fonts
+    have actually been extracted — exactly as :class:`EncodeOptions` is.
+    """
+
+    codec: str = "h264"
+    height: int = 720
+    crf: int = 26
+    preset: str = "fast"
+    audio_bitrate: str = "96k"
+    subtitle_file: str | None = None
+    fonts_dir: str | None = field(default=FONTS_DIR)
+
+
+def offline_scale_filter(height: int) -> str:
+    """Scale down to ``height`` at most, never up, keeping the aspect ratio.
+
+    ``min(H,ih)`` is what stops a 480p source being blown up to 720p: the
+    output is the source's own height whenever that is already small enough.
+    ``-2`` keeps the width even, which 4:2:0 needs, and bicubic is the right
+    trade for line art on a downscale. The single quotes are for ffmpeg's
+    filter parser — the comma inside ``min()`` would otherwise end the filter —
+    and not for a shell: there is none.
+    """
+    return f"scale=-2:'min({int(height)},ih)':flags=bicubic"
+
+
+def offline_encode_args(plan: TranscodePlan, options: OfflineOptions | None = None) -> list[str]:
+    """The ffmpeg arguments for the small offline copy, without the binary.
+
+    The same plan as the rendition — the same video, the same audio track, the
+    same subtitle track, burned in from the same extracted file with the same
+    fonts (FR-P2) — and a different output: one progressive MP4, scaled down,
+    with ``moov`` at the front so a player can start it before the last byte
+    has been read.
+
+    **Scale first, then burn the subtitles.** libass renders a script at the
+    size of the frame it is drawing on, so drawing *after* the scale gives
+    720p glyphs at their intended size and sharpness; burning them in at 1080p
+    and scaling the result would blur every edge of the text and spend the
+    bitrate on that blur.
+    """
+    options = options or OfflineOptions()
+    encoder = OFFLINE_ENCODERS.get(options.codec)
+    if encoder is None:
+        raise ValueError(f"unknown offline codec {options.codec!r}")
+
+    args = [
+        "-nostdin",
+        "-hide_banner",
+        "-y",
+        "-i",
+        str(plan.source),
+        "-map",
+        f"0:v:{plan.video.type_index}",
+    ]
+    if plan.audio is not None:
+        args += ["-map", f"0:a:{plan.audio.type_index}"]
+
+    filters = [offline_scale_filter(options.height)]
+    if options.subtitle_file:
+        filters.append(subtitle_filter(options.subtitle_file, fonts_dir=options.fonts_dir))
+    args += ["-vf", ",".join(filters)]
+
+    args += ["-c:v", encoder, "-preset", options.preset, "-crf", str(options.crf)]
+    if options.codec == "h264":
+        args += [
+            "-tune",
+            "animation",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    else:
+        # ``hvc1`` rather than ffmpeg's default ``hev1``: Safari and iOS refuse
+        # to play an MP4 whose HEVC track is tagged ``hev1``.
+        args += ["-tag:v", "hvc1", "-profile:v", "main", "-pix_fmt", "yuv420p"]
+
+    if plan.audio is not None:
+        args += ["-c:a", "aac", "-b:a", options.audio_bitrate, "-ac", "2"]
+    else:
+        args += ["-an"]
+
+    args += [
+        "-sn",
+        "-dn",
+        "-map_chapters",
+        "-1",
+        "-map_metadata",
+        "-1",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        OFFLINE_OUTPUT,
+    ]
+    return args
+
+
 def subtitle_extract_args(plan: TranscodePlan) -> list[str] | None:
     """Arguments that write the chosen subtitle track to its own file.
 
@@ -732,6 +899,8 @@ __all__ = [
     "NOTE_NO_AUDIO_LANGUAGE",
     "NOTE_NO_SUBTITLES",
     "NOTE_NO_SUB_LANGUAGE",
+    "OFFLINE_ENCODERS",
+    "OFFLINE_OUTPUT",
     "PLAYLIST_NAME",
     "SEGMENT_GLOB",
     "SEGMENT_PATTERN",
@@ -739,6 +908,7 @@ __all__ = [
     "TEXT_SUBTITLE_CODECS",
     "WORK_DIR",
     "EncodeOptions",
+    "OfflineOptions",
     "PlanError",
     "Stream",
     "TranscodePlan",
@@ -749,7 +919,10 @@ __all__ = [
     "font_extract_args",
     "language_matches",
     "normalise_language",
+    "offline_encode_args",
+    "offline_scale_filter",
     "subtitle_extract_args",
     "subtitle_filter",
+    "stream_duration",
     "subtitle_score",
 ]

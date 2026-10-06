@@ -85,12 +85,15 @@ from arc.services.library.names import LIBRARY_SCAN, LIBRARY_SCAN_PRIORITY
 from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers)
 from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
 from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
+from arc.services.media import offline as offline_copies  # noqa: F401  (registers handlers)
 from arc.services.media.jobs import sweep_transcodes
 from arc.services.recs.factory import close_shared_model
 from arc.services.retention import jobs as retention_jobs  # noqa: F401  (registers handlers)
 from arc.services.retention.names import RETENTION_PRIORITY, RETENTION_SWEEP
 from arc.services.tmdb import jobs as tmdb_jobs  # noqa: F401  (registers handlers)
 from arc.services.tmdb.names import TMDB_ENRICH_ALL, TMDB_PRIORITY
+from arc.services.trips import jobs as trip_jobs  # noqa: F401  (registers handlers)
+from arc.services.trips.names import TRIP_SWEEP, TRIP_SWEEP_PRIORITY
 
 log = logging.getLogger("arc.worker")
 
@@ -156,6 +159,13 @@ RETENTION_SWEEP_SECONDS = 3600
 #: outage has not been revived yet — and retention is the one job in Arc
 #: whose mistakes are not recoverable. Ten minutes costs nothing.
 RETENTION_SWEEP_DELAY_SECONDS = 600
+
+#: How often the trip sweep runs (FR-A12, FR-T7; architecture.md §5.4e): expiry
+#: is counted in days, so hourly is prompt enough, like retention's. The first
+#: run waits as retention's does — a worker that has just come up has not
+#: reconciled yet, and an expiry is not urgent.
+TRIP_SWEEP_SECONDS = 3600
+TRIP_SWEEP_DELAY_SECONDS = 600
 
 #: When the offline catalogue import runs (UTC). manami publishes one release
 #: a week and Fribb's file moves a few times a week, so weekly is the cadence
@@ -328,6 +338,19 @@ async def _offline_never_imported(factory: SessionFactory) -> bool:
         return False
 
 
+async def _sweep_offline_leftovers(factory: SessionFactory, settings: Settings) -> None:
+    """Remove staging directories and row-less copies a killed worker left (FR-P6).
+
+    Once, at start-up, after orphaned jobs are reclaimed — so a staging
+    directory whose job is still live (another worker's) is left alone.
+    """
+    try:
+        async with factory() as session:
+            await offline_copies.sweep_offline_leftovers(session, settings)
+    except Exception:  # pragma: no cover - housekeeping must not kill the worker
+        log.exception("could not sweep offline-copy leftovers")
+
+
 async def _sweep_transcodes(factory: SessionFactory) -> None:
     """Queue transcodes for episodes the queue has lost track of (M7, FR-P1).
 
@@ -378,6 +401,7 @@ async def run(settings: Settings) -> None:
     # age-based sweep, which from here on is the periodic backstop.
     await _reclaim_orphans(factory, identity)
     await _sweep_stale(factory, stale_after)
+    await _sweep_offline_leftovers(factory, settings)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -533,6 +557,16 @@ async def run(settings: Settings) -> None:
         args=[factory, RETENTION_SWEEP, RETENTION_PRIORITY],
         next_run_time=datetime.now(UTC) + timedelta(seconds=RETENTION_SWEEP_DELAY_SECONDS),
     )
+    # Trips (FR-A12, FR-T7): expire rows past their copy clock, end trips with
+    # nothing pending, settle copies nobody is waiting for.
+    scheduler.add_job(
+        _enqueue_sweep,
+        "interval",
+        seconds=TRIP_SWEEP_SECONDS,
+        id=TRIP_SWEEP,
+        args=[factory, TRIP_SWEEP, TRIP_SWEEP_PRIORITY],
+        next_run_time=datetime.now(UTC) + timedelta(seconds=TRIP_SWEEP_DELAY_SECONDS),
+    )
     scheduler.start()
 
     # …and once now if it has never run. A fresh deployment would otherwise
@@ -564,6 +598,7 @@ async def run(settings: Settings) -> None:
             "qbit_upload_limit_kib": settings.qbit_upload_limit_kib,
             "retention_sweep_s": RETENTION_SWEEP_SECONDS,
             "retention_dry_run": settings.retention_dry_run,
+            "trip_sweep_s": TRIP_SWEEP_SECONDS,
             "scheduled": sorted(job.id for job in scheduler.get_jobs()),
         },
     )

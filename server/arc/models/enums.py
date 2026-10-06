@@ -65,6 +65,52 @@ class TorrentKind(StrEnum):
     BATCH = "batch"
 
 
+class OfflineCopyState(StrEnum):
+    """Lifecycle of a small offline copy (spec FR-P6, architecture.md §5.3b).
+
+    ``queued`` is a request with an ``offline_encode`` job behind it,
+    ``preparing`` an encode under way (the source is in use and retention
+    leaves it alone), ``ready`` a validated file at ``offline/<id>.mp4``, and
+    ``failed`` an encode that did not produce one — asked for again, it goes
+    back to ``queued``.
+    """
+
+    QUEUED = "queued"
+    PREPARING = "preparing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class TripState(StrEnum):
+    """Lifecycle of a trip (spec FR-A12, architecture.md §5.4e).
+
+    ``active`` is the one a user may have at a time (a partial unique index
+    says so); ``finished`` is a trip with nothing left pending, ``cancelled``
+    one the user called off, and ``expired`` one whose deadline passed (M19
+    T4 writes those two).
+    """
+
+    ACTIVE = "active"
+    FINISHED = "finished"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class TripEpisodeState(StrEnum):
+    """Where one episode of a trip stands (spec FR-A12).
+
+    ``pending`` until the device confirms it holds the copy (``delivered``),
+    the copy goes unclaimed for ``trip_copy_days`` (``expired``) or the trip
+    is called off (``cancelled``). "Available" is not a state: it is
+    ``pending`` with a ready copy.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
 class ListStatus(StrEnum):
     """spec §4.6 FR-W2 — the five list states, MAL's vocabulary."""
 

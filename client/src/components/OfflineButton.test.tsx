@@ -3,13 +3,14 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
-import type { EpisodeOut } from '@/lib/anime'
+import type { EpisodeOut, OfflineCopyOut } from '@/lib/anime'
 import { setDownloads } from '@/offline/downloads'
 import { TEST_USER } from '@/test/apiMock'
 import {
   downloadedRecord,
   managerHarness,
   recordEntry,
+  smallCopy,
   type ManagerHarness,
 } from '@/test/downloadFixtures'
 
@@ -178,6 +179,107 @@ describe('OfflineButton (FR-S9, owner 2026-10-05)', () => {
     ).toBeInTheDocument()
   })
 
+  describe('preparing on the server (M19)', () => {
+    function preparing(progress: number | null): OfflineCopyOut {
+      return { state: 'preparing', progress, size: null, url: null, codecs: 'avc1.640028' }
+    }
+
+    async function installPreparing(progress: number | null = null) {
+      const harness = await install({
+        requestCopy: () => Promise.resolve(preparing(null)),
+        pollCopy: () => Promise.resolve(preparing(progress)),
+      })
+      await act(async () => {
+        await harness.manager.start({ episodeId: 9001, url: '/media/9001/episode.mp4' })
+      })
+      return harness
+    }
+
+    it('says the server is preparing it, with no percent until the server gives one', async () => {
+      await installPreparing()
+      renderButton()
+
+      const button = screen.getByRole('button', {
+        name: 'Episode 1 is being prepared on the server — cancel',
+      })
+      expect(button).toHaveAttribute('data-state', 'preparing')
+      expect(button.getAttribute('title')).toMatch(/smaller copy/)
+      const ring = screen.getByRole('progressbar', { name: 'Preparing episode 1 on the server' })
+      expect(ring).not.toHaveAttribute('aria-valuenow')
+      expect(liveText()).toBe('Episode 1 is being prepared on the server.')
+    })
+
+    it("shows the server's percent once it has one", async () => {
+      const { manager } = await installPreparing(0.4)
+      renderButton()
+
+      await act(async () => {
+        manager.nudge()
+        await Promise.resolve()
+      })
+
+      expect(
+        await screen.findByRole('button', {
+          name: 'Episode 1 is being prepared on the server, 40% — cancel',
+        }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('progressbar', { name: 'Preparing episode 1 on the server' }),
+      ).toHaveAttribute('aria-valuenow', '40')
+    })
+
+    it('stops waiting on a tap: the wish goes and Keep offline is back', async () => {
+      const { manager, worker } = await installPreparing()
+      const user = userEvent.setup()
+      renderButton()
+
+      await user.click(
+        screen.getByRole('button', { name: 'Episode 1 is being prepared on the server — cancel' }),
+      )
+
+      await waitFor(() => {
+        expect(manager.record(9001)).toBeUndefined()
+      })
+      expect(screen.getByRole('button', { name: 'Keep episode 1 offline' })).toBeInTheDocument()
+      expect(worker.commands).toEqual([])
+    })
+
+    it('reads "Preparing" on the wide player pill', async () => {
+      await installPreparing()
+      renderButton({ variant: 'player' })
+
+      const button = screen.getByRole('button', {
+        name: 'Episode 1 is being prepared on the server — cancel',
+      })
+      expect(button).toHaveTextContent('Preparing')
+    })
+  })
+
+  it('says which copy is on the device: the smaller one', async () => {
+    const harness = managerHarness({
+      initial: [
+        recordEntry({
+          ...downloadedRecord(TEST_USER.id, undefined, 210 * 1024 * 1024),
+          name: 'episode-9001-o.mp4',
+          url: smallCopy(9001).url,
+          variant: 'small',
+        }),
+      ],
+    })
+    harness.files.set('episode-9001-o.mp4', 210 * 1024 * 1024)
+    harness.manager.setOwner(TEST_USER.id)
+    await harness.manager.hydrate()
+    setDownloads(harness.manager)
+    const user = userEvent.setup()
+    renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Episode 1 is on this device' }))
+
+    expect(screen.getByRole('group', { name: 'Episode 1 on this device' })).toHaveTextContent(
+      'Smaller copy for this device · 210 MB',
+    )
+  })
+
   describe('on this device', () => {
     async function installDownloaded(): Promise<ManagerHarness> {
       const harness = managerHarness({
@@ -201,7 +303,8 @@ describe('OfflineButton (FR-S9, owner 2026-10-05)', () => {
 
       expect(button).toHaveAttribute('aria-expanded', 'true')
       const menu = screen.getByRole('group', { name: 'Episode 1 on this device' })
-      expect(menu).toHaveTextContent('On this device · 1000 B')
+      // Which copy it is (M19): a record from before the small copy is the full file.
+      expect(menu).toHaveTextContent('Full-size copy · 1000 B')
       expect(within(menu).getByRole('link', { name: 'Go to Downloads' })).toHaveAttribute(
         'href',
         '/downloads',

@@ -240,6 +240,50 @@ async def test_a_per_show_override_changes_the_pick(
     assert torrent.resolution == "720p"
 
 
+async def test_a_torrent_taken_only_for_a_trip_goes_to_the_back_of_the_queue(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-A12: ``torrents/bottomPrio`` after the add, for a trip-only episode only."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962091, email="trip-bottom@arc.test"
+    )
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    want.trip = True
+    await db_session.flush()
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.bottomed == [SUBSPLEASE_1080]
+
+
+async def test_a_streaming_torrent_keeps_its_place_and_queueing_off_is_no_failure(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962092, email="trip-nobottom@arc.test"
+    )
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.bottomed == []
+    assert "/api/v2/torrents/bottomPrio" not in wired.qbit.calls
+
+    # A trip-only search on a client with queueing off still downloads.
+    other, second = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962093, email="trip-noqueue@arc.test"
+    )
+    other.qbit.queueing = False
+    want = await db_session.scalar(select(Want).where(Want.episode_id == second.id))
+    assert want is not None
+    want.trip = True
+    await db_session.flush()
+    await search_release(context(db_session, other.settings, {"episode_id": second.id}))
+    assert second.state is EpisodeState.DOWNLOADING
+    assert other.qbit.bottomed == []
+
+
 async def test_the_search_is_a_no_op_for_an_episode_that_moved_on(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2451,6 +2495,58 @@ async def _torrent_files(session: AsyncSession, torrent_id: int) -> list[Torrent
         .order_by(TorrentFile.file_index)
     )
     return list(rows.all())
+
+
+async def test_a_pack_taken_only_for_a_trip_goes_to_the_back_of_the_queue(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-A12: every episode the pack was taken for is a trip's → bottomPrio."""
+    wired, episode = await _finished(
+        db_session, monkeypatch, tmp_path, anilist_id=962190, email="trip-pack@arc.test"
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    want.trip = True
+    await db_session.flush()
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [BATCH_HASH]
+    assert wired.qbit.bottomed == [BATCH_HASH]
+
+
+async def test_a_pack_for_streaming_keeps_its_place(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode = await _finished(
+        db_session, monkeypatch, tmp_path, anilist_id=962191, email="trip-pack2@arc.test"
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [BATCH_HASH]
+    assert wired.qbit.bottomed == []
+
+
+async def test_an_unreachable_client_at_bottom_prio_does_not_fail_the_search(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``QbitUnavailable`` from the nicety is logged; the add already happened."""
+    wired, episode = await wire(
+        db_session, monkeypatch, tmp_path, anilist_id=962192, email="trip-bottom-down@arc.test"
+    )
+    wired.qbit.bottom_down = True
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    want.trip = True
+    await db_session.flush()
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.bottomed == []
 
 
 async def test_a_finished_show_with_no_single_takes_a_batch_and_one_file(

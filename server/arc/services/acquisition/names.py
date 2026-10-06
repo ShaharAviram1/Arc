@@ -65,6 +65,9 @@ QBIT_RESELECT = "qbit_reselect"
 #: separate container that may not be up yet, and "retry it with backoff until
 #: it is" is what a job row already means.
 QBIT_POLICY = "qbit_apply_policy"
+#: Move an in-flight torrent of one episode back to the top of the client's
+#: queue once it is no longer wanted only for a trip (FR-A12).
+QBIT_TOP = "qbit_top_prio"
 
 # --- Queue priorities (lower runs first; the default is 100) ----------------
 #
@@ -91,6 +94,7 @@ QBIT_CANCEL_PRIORITY = 60
 #: same host, and what it changes is which bytes are arriving right now — an
 #: episode somebody is waiting for, or a file nobody wants any more.
 QBIT_RESELECT_PRIORITY = 60
+QBIT_TOP_PRIORITY = 60
 
 #: Above the default: reconciling the whole wants table is a handful of
 #: queries, but nothing is waiting on the answer within the minute.
@@ -114,6 +118,11 @@ def search_dedupe_key(episode_id: int) -> str:
 def cancel_dedupe_key(episode_id: int) -> str:
     """One queued cancel per episode: the second would find nothing to delete."""
     return f"{QBIT_CANCEL}:{episode_id}"
+
+
+def top_dedupe_key(episode_id: int) -> str:
+    """One queued move to the top per episode."""
+    return f"{QBIT_TOP}:{episode_id}"
 
 
 def reselect_dedupe_key(torrent_id: int) -> str:
@@ -153,10 +162,13 @@ __all__ = [
     "QBIT_POLICY_PRIORITY",
     "QBIT_RESELECT",
     "QBIT_RESELECT_PRIORITY",
+    "QBIT_TOP",
+    "QBIT_TOP_PRIORITY",
     "SEARCH_RELEASE",
     "SEARCH_RELEASE_PRIORITY",
     "cancel_dedupe_key",
     "enqueue_compute_wants",
     "reselect_dedupe_key",
     "search_dedupe_key",
+    "top_dedupe_key",
 ]

@@ -3,8 +3,13 @@
  * architecture §5.4d). Ported from Audiosey, whose M0 spike settled it on an
  * iPhone: OPFS plus a blob URL.
  *
- * One file per episode in the origin-private file system, named
- * `episode-<id>.mp4` from the numeric id and nothing else. The main thread only
+ * One file per episode *and copy* in the origin-private file system, named
+ * from the numeric id and nothing else: `episode-<id>.mp4` for the full-size
+ * file (FR-S7) and `episode-<id>-o.mp4` for the server's smaller copy made for
+ * devices (FR-S9, M19). The two names are load-bearing: two accounts on one
+ * iPad may keep the two different copies of one episode, and with one name a
+ * download of the small copy would resume into (and then truncate) the other
+ * account's full one. The main thread only
  * ever reads here: the writing is a sync access handle inside
  * `downloadWorker.ts`, because that API exists only in a worker.
  *
@@ -24,9 +29,16 @@
 
 export const EPISODE_MIME = 'video/mp4'
 
-/** The file for an episode. Derived from the id — never from anything typed. */
-export function fileNameFor(episodeId: number): string {
-  return `episode-${String(Math.trunc(episodeId))}.mp4`
+/** Which of the server's two files a download is: the small copy, or the full-size one. */
+export type CopyVariant = 'small' | 'full'
+
+/**
+ * The file for an episode's copy. Derived from the id and the variant — never
+ * from anything typed.
+ */
+export function fileNameFor(episodeId: number, variant: CopyVariant = 'full'): string {
+  const suffix = variant === 'small' ? '-o' : ''
+  return `episode-${String(Math.trunc(episodeId))}${suffix}.mp4`
 }
 
 export function hasOpfs(): boolean {
@@ -78,8 +90,8 @@ export async function readFile(name: string): Promise<File | null> {
   }
 }
 
-/** `episode-<digits>.mp4`: the only names Arc ever writes. */
-export const EPISODE_FILE = /^episode-\d+\.mp4$/
+/** `episode-<digits>.mp4` and `episode-<digits>-o.mp4`: the only names Arc ever writes. */
+export const EPISODE_FILE = /^episode-\d+(?:-o)?\.mp4$/
 
 /**
  * Every episode file in the origin-private file system, for the launch-time

@@ -315,7 +315,7 @@ async def test_an_empty_library_reports_zero_without_failing(
 ) -> None:
     body = (await admin.get("/api/retention/disk")).json()
 
-    assert body["retained"] == {"sources": 0, "renditions": 0, "total": 0}
+    assert body["retained"] == {"sources": 0, "renditions": 0, "offline_bytes": 0, "total": 0}
     assert body["episodes_retained"] == 0
     assert body["data_dir"]["total"] > 0
 

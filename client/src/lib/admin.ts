@@ -135,6 +135,12 @@ export interface SettingsValues {
    * downloads.
    */
   batch_fallback: boolean
+  /** Days a ready episode's small offline copy may go unfetched before the sweep deletes it (FR-T7, M19). */
+  offline_idle_days: number
+  /** The most episodes one trip may take (FR-A12, M19): 1..50. */
+  trip_max_episodes: number
+  /** Days a trip's copies wait on the server for the device (FR-A12, FR-T7, M19). */
+  trip_copy_days: number
 }
 
 export type SettingsKey = keyof SettingsValues
@@ -164,7 +170,14 @@ export interface SettingsPayload {
  * authority for everything a number field cannot express.
  */
 export const NUMBER_BOUNDS: Record<
-  'look_ahead_n' | 'slot_cap_k' | 'grace_days_g' | 'unwatched_days_d' | 'min_free_gb',
+  | 'look_ahead_n'
+  | 'slot_cap_k'
+  | 'grace_days_g'
+  | 'unwatched_days_d'
+  | 'min_free_gb'
+  | 'offline_idle_days'
+  | 'trip_max_episodes'
+  | 'trip_copy_days',
   {
     min: number
     max: number
@@ -179,6 +192,10 @@ export const NUMBER_BOUNDS: Record<
   // `MAX_MIN_FREE_GB` = 1000: a terabyte of reserve is a mistyped figure, not
   // a policy, and the reader clamps at the same number.
   min_free_gb: { min: 0, max: 1000 },
+  // M19: at least a day each; a trip takes at most `TRIP_MAX_EPISODES_CEILING` = 50.
+  offline_idle_days: { min: 1, max: 365 },
+  trip_max_episodes: { min: 1, max: 50 },
+  trip_copy_days: { min: 1, max: 365 },
 }
 
 /** "0–365", for a hint under the field that carries the same numbers. */
