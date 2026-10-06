@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import pytest
 
-from arc.services.library.parser import ParsedName, parse, title_key
+from arc.services.library.parser import (
+    ParsedName,
+    is_numbered_sequel,
+    parse,
+    strip_season,
+    title_key,
+)
 
 
 class TestTitleKey:
@@ -310,6 +316,81 @@ class TestSeasons:
         parsed = parse("[Judas] Overlord - S1-S4 - 01-52 [1080p].mkv")
         assert parsed.season is None
         assert parsed.title_key == "overlord"
+
+
+PREQUEL = ({"relation_type": "PREQUEL", "anilist_id": 1},)
+
+
+class TestNumberedSequels:
+    """``strip_season(..., numbered=True)``: a catalogue entry's trailing number (2026-10-06).
+
+    *Mairimashita! Iruma-kun 2* is season 2 of *Mairimashita! Iruma-kun*, and
+    SubsPlease writes it ``S2``. The string cannot say so on its own — *Mob
+    Psycho 100* ends in a number too — so the reading is opt-in, and only a
+    caller holding the catalogue's ``PREQUEL`` edge opts in.
+    """
+
+    @pytest.mark.parametrize(
+        ("title", "base", "season", "part"),
+        [
+            ("Mairimashita! Iruma-kun 2", "Mairimashita! Iruma-kun", 2, None),
+            ("Dagashi Kashi 2", "Dagashi Kashi", 2, None),
+            ("Chihayafuru 3", "Chihayafuru", 3, None),
+            (
+                "Kono Subarashii Sekai ni Shukufuku wo! 3",
+                "Kono Subarashii Sekai ni Shukufuku wo!",
+                3,
+                None,
+            ),
+            # The cour comes off first and the season is still the number.
+            ("One Punch Man 3 Part 2", "One Punch Man", 3, 2),
+        ],
+    )
+    def test_a_trailing_digit_is_the_season(
+        self, title: str, base: str, season: int, part: int | None
+    ) -> None:
+        marked = strip_season(title, numbered=True)
+        assert (marked.title, marked.season, marked.part, marked.base) == (base, season, part, base)
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Mob Psycho 100",
+            "Steins;Gate 0",
+            "Darling in the Franxx",
+            "86",
+            "Kaiju No. 8",
+            "Kimetsu no Yaiba: Mugenjou-hen Movie 2",
+            "Ranma1/2",
+            "Re:Zero kara Hajimeru Isekai Seikatsu 1",
+        ],
+    )
+    def test_a_number_that_belongs_to_the_name_stays(self, title: str) -> None:
+        assert strip_season(title, numbered=True) == strip_season(title)
+        assert strip_season(title, numbered=True).season is None
+
+    def test_an_explicit_marker_still_wins(self) -> None:
+        assert strip_season("Mob Psycho 100 III", numbered=True).season == 3
+        assert strip_season("Vinland Saga Season 2", numbered=True).title == "Vinland Saga"
+
+    def test_off_by_default(self) -> None:
+        """The default is today's reading: a filename never gets this rule."""
+        assert strip_season("Dagashi Kashi 2").season is None
+        assert parse("[Erai-raws] Dagashi Kashi 2 - 10 [1080p].mkv").title_key == "dagashi kashi 2"
+
+    def test_a_prequel_and_an_episodic_format_make_a_numbered_sequel(self) -> None:
+        assert is_numbered_sequel(PREQUEL, "TV")
+        assert is_numbered_sequel(PREQUEL, "ona")
+        assert is_numbered_sequel(PREQUEL, None)
+        assert is_numbered_sequel([{"relation_type": "prequel"}], "TV")
+
+    def test_no_prequel_or_a_film_is_not_one(self) -> None:
+        assert not is_numbered_sequel(None, "TV")
+        assert not is_numbered_sequel([], "TV")
+        assert not is_numbered_sequel([{"relation_type": "SEQUEL"}], "TV")
+        assert not is_numbered_sequel(PREQUEL, "MOVIE")
+        assert not is_numbered_sequel(PREQUEL, "SPECIAL")
+        assert not is_numbered_sequel(["PREQUEL"], "TV")
 
 
 class TestFractionalEpisodes:

@@ -86,7 +86,12 @@ from arc.models import Anime
 from arc.services.catalog import CatalogService, SourceUnavailable, upsert_summaries
 from arc.services.catalog.offline.materialise import upsert_offline_summaries
 from arc.services.catalog.offline.search import offline_search
-from arc.services.library.parser import ParsedName, strip_season, title_key
+from arc.services.library.parser import (
+    ParsedName,
+    is_numbered_sequel,
+    strip_season,
+    title_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -227,11 +232,37 @@ class Candidate:
     #: Where this candidate came from: ``"cache"``, ``"offline"``, ``"search"``
     #: or ``"prior"``. Recorded in the reasons, never scored.
     origin: str = "cache"
+    #: Read a bare trailing digit on the titles as the season (2026-10-06):
+    #: *Dagashi Kashi 2* as season 2 of *Dagashi Kashi*. Never set by hand —
+    #: :func:`score` weighs the candidate both ways when
+    #: :attr:`has_numbered_reading` says the second way exists, and keeps the
+    #: better. See :func:`~.parser.is_numbered_sequel`.
+    numbered: bool = False
 
     @property
     def all_titles(self) -> tuple[str, ...]:
         """Published titles and synonyms together, in that order."""
         return self.titles + self.synonyms
+
+    @property
+    def has_numbered_reading(self) -> bool:
+        """Whether a published title ends in a number that may be its season.
+
+        True for *Mairimashita! Iruma-kun 2* with a ``PREQUEL`` edge: the
+        catalogue says something comes before it, so the ``2`` is a season,
+        and a release that writes ``Mairimashita! Iruma-kun S2`` names it.
+        False for *Mob Psycho 100*, *Steins;Gate 0* and anything with no
+        ``PREQUEL`` — those keep the literal reading only.
+        """
+        if self.numbered or not is_numbered_sequel(self.relations, self.format):
+            return False
+        return any(
+            strip_season(name, numbered=True) != strip_season(name) for name in self.titles if name
+        )
+
+    def as_numbered(self) -> Candidate:
+        """This candidate under the numbered-sequel reading."""
+        return replace(self, numbered=True)
 
     @property
     def primary_keys(self) -> tuple[str, ...]:
@@ -245,7 +276,11 @@ class Candidate:
         """
         return tuple(
             key
-            for key in (title_key(strip_season(name).title) for name in self.titles if name)
+            for key in (
+                title_key(strip_season(name, numbered=self.numbered).title)
+                for name in self.titles
+                if name
+            )
             if key
         )
 
@@ -266,7 +301,7 @@ class Candidate:
         for name in self.all_titles:
             if not name:
                 continue
-            key = title_key(strip_season(name).title)
+            key = title_key(strip_season(name, numbered=self.numbered).title)
             if key and key not in keys:
                 keys.append(key)
         return tuple(keys)
@@ -408,23 +443,23 @@ def title_similarity(
     return min(best / 100.0, NON_EXACT_CEILING)
 
 
-def season_in_title(name: str) -> int | None:
+def season_in_title(name: str, *, numbered: bool = False) -> int | None:
     """The season a *catalogue* title names, if it names one.
 
     ``Vinland Saga Season 2`` → 2, ``Mob Psycho 100 III`` → 3, ``Sousou no
-    Frieren`` → ``None``.
+    Frieren`` → ``None``; ``Dagashi Kashi 2`` → 2 only with ``numbered``.
 
     Literally the parser's own rule (:func:`~.parser.strip_season`) applied to
     the other side of the comparison. One definition, so a spelling the
     filename side learns to read is one the catalogue side reads too.
     """
-    return strip_season(name).season
+    return strip_season(name, numbered=numbered).season
 
 
 def candidate_part(candidate: Candidate) -> int | None:
     """The cour a candidate's published titles name, if any."""
     for name in candidate.titles:
-        found = strip_season(name).part
+        found = strip_season(name, numbered=candidate.numbered).part
         if found is not None:
             return found
     return None
@@ -440,7 +475,7 @@ def candidate_season(candidate: Candidate) -> int | None:
     file that named no season at all.
     """
     for name in candidate.titles:
-        found = season_in_title(name)
+        found = season_in_title(name, numbered=candidate.numbered)
         if found is not None:
             return found
     return None
@@ -568,7 +603,36 @@ def score(
     certainty — but only once its own title has cleared
     :data:`PRIOR_MIN_TITLE`. ``penalty`` is subtracted afterwards; it is what
     marks an inferred answer (:func:`offset_candidates`).
+
+    **A numbered sequel is weighed both ways** (2026-10-06). *Mairimashita!
+    Iruma-kun 2* with a ``PREQUEL`` edge is scored as written — so ``[Group]
+    Mairimashita! Iruma-kun 2 - 05`` still matches the title exactly — and as
+    season 2 of *Mairimashita! Iruma-kun*, which is what ``[SubsPlease]
+    Mairimashita! Iruma-kun S2 - 05`` names. The better of the two is kept, so
+    a match through the second reading scores exactly what an entry titled
+    ``… Season 2`` scores for the same file: no bonus and no discount. The
+    threshold, the title bar and the ambiguity cap apply to it unchanged.
     """
+    literal = _score(parsed, candidate, episode=episode, prior=prior, penalty=penalty)
+    if not candidate.has_numbered_reading:
+        return literal
+    numbered_candidate = candidate.as_numbered()
+    numbered = _score(parsed, numbered_candidate, episode=episode, prior=prior, penalty=penalty)
+    if numbered.score <= literal.score:
+        return literal
+    reason = f"title number read as season {candidate_season(numbered_candidate)}"
+    return replace(numbered, reasons=(*numbered.reasons, reason))
+
+
+def _score(
+    parsed: ParsedName,
+    candidate: Candidate,
+    *,
+    episode: int | None,
+    prior: bool,
+    penalty: float,
+) -> Scored:
+    """:func:`score` for one reading of the candidate's titles."""
     exact_title = bool(parsed.title_key) and parsed.title_key in candidate.primary_keys
     title = title_similarity(parsed.title_key, candidate.keys, exact_keys=candidate.primary_keys)
     season = season_agreement(parsed, candidate)

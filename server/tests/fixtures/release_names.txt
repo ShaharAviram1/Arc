@@ -27,6 +27,10 @@
 #   * A bare trailing number is *not* a season marker. "Chihayafuru 3",
 #     "Steins;Gate 0", "86", "Hibike! Euphonium 2" and "Ghost in the Shell
 #     SAC_2045" keep their numbers, because the catalogue carries them too.
+#     (Since 2026-10-06 the *catalogue* side may read one: an entry titled
+#     "Dagashi Kashi 2" with a PREQUEL relation is season 2 of "Dagashi
+#     Kashi", so an "S2" release matches it. A filename never does — the
+#     string alone cannot tell it from "Mob Psycho 100".)
 #   * "Part N" becomes a season only when nothing else named one. Releases
 #     use it for both "second cour" and "second season", and the second
 #     reading is the one that helps a match.
@@ -369,3 +373,17 @@ Solo.Leveling.S02E12.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG.mkv	{"episode": 12, "gro
 [Erai-raws] Servamp Movie - Alice in the Garden [1080p][Multiple Subtitle].mkv	{"episode": null, "group": "Erai-raws", "kind": "movie", "season": null, "title_key": "servamp movie alice in the garden", "version": null}
 [HorribleSubs] Yarichin☆Bitch-bu - 01 [1080p].mkv	{"episode": 1, "group": "HorribleSubs", "kind": "episode", "season": null, "title_key": "yarichin bitch bu", "version": null}
 [SubsPlease] Love Live! Superstar!! - 03 (1080p) [1234ABCD].mkv	{"episode": 3, "group": "SubsPlease", "kind": "episode", "season": 2, "title_key": "love live superstar", "version": null}
+# 2026-10-06: the numbered-sequel releases. SubsPlease writes the season of a
+# catalogue entry titled "Mairimashita! Iruma-kun 2" as `S2`, and production
+# sent every one of these to review because the catalogue side never read the
+# trailing 2 as a season. The filename side was already right — season 2 of
+# the base title — and these pin it; the matcher half is in
+# test_matcher_scoring.py and match_cases.json, the Nyaa half in
+# query_corpus.txt. The last three are the negatives: titles whose trailing
+# number (or lack of one) is part of the name, which no reading may move.
+[SubsPlease] Mairimashita! Iruma-kun S2 - 05 (1080p)	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": 2, "title_key": "mairimashita iruma kun", "version": null}
+[SubsPlease] Mairimashita! Iruma-kun S2 - 01v2 (720p) [C9B9491C].mkv	{"episode": 1, "group": "SubsPlease", "kind": "episode", "season": 2, "title_key": "mairimashita iruma kun", "version": 2}
+[HorribleSubs] Dagashi Kashi S2 - 03 [1080p]	{"episode": 3, "group": "HorribleSubs", "kind": "episode", "season": 2, "title_key": "dagashi kashi", "version": null}
+[SubsPlease] Mob Psycho 100 - 05 (1080p)	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "mob psycho 100", "version": null}
+[SubsPlease] Steins;Gate 0 - 05 (1080p)	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "steins gate 0", "version": null}
+[HorribleSubs] Darling in the FranXX - 05 [1080p].mkv	{"episode": 5, "group": "HorribleSubs", "kind": "episode", "season": null, "title_key": "darling in the franxx", "version": null}

@@ -404,3 +404,99 @@ query: Kimetsu no Yaiba - 20
 batch_accept: [Erai-raws] Kimetsu no Yaiba - 01 ~ 26 [BATCH]
 batch_reject: [Erai-raws] Kimetsu no Yaiba - 01 ~ 12 [BATCH]
 batch_reject: [Erai-raws] Kimetsu no Yaiba - 10 [1080p][Multiple Subtitle][Batch]
+
+case: dagashi-kashi-2-numbered-sequel
+# 2026-10-06. The same entry as `dagashi-kashi-2-batch`, but carrying the
+# PREQUEL edge AniList gives it — and so read as season 2 of `Dagashi Kashi`
+# (the numbered-sequel rule, FR-A3/FR-L2). Until today it was searched as
+# season 1: `S2` releases were rejected as the wrong season, and season one's
+# `Dagashi Kashi - 03` passed the filter as this entry's episode 3.
+romaji: Dagashi Kashi 2
+english: Dagashi Kashi 2
+format: TV
+episodes: 12
+prequel: yes
+number: 3
+query: Dagashi Kashi 2 - 03
+query: Dagashi Kashi S02E03
+query: Dagashi Kashi S2 - 03
+query: Dagashi Kashi II - 03
+query: Dagashi Kashi - 03
+absent: Dagashi Kashi 2 S01E03
+accept: [HorribleSubs] Dagashi Kashi S2 - 03 [1080p]
+accept: [Erai-raws] Dagashi Kashi 2 - 03 [1080p][Multiple Subtitle].mkv
+reject: [HorribleSubs] Dagashi Kashi - 03 [1080p].mkv
+reject: [Group] Dagashi Kashi S3 - 03 [1080p].mkv
+reject: [Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]
+batch_accept: [Erai-raws] Dagashi Kashi 2 - 01 ~ 12 [1080p][Multiple Subtitle]
+batch_reject: [Group] Dagashi Kashi - 01 ~ 12 [1080p]
+
+case: dagashi-kashi-2-no-relations
+# The negative: the same title with no PREQUEL stored (an offline-only row, or
+# one nobody opened). No evidence, no reading — the entry keeps today's
+# literal behaviour and an `S2` release goes unclaimed rather than guessed at.
+romaji: Dagashi Kashi 2
+format: TV
+episodes: 12
+number: 3
+query: Dagashi Kashi 2 - 03
+absent: Dagashi Kashi S2 - 03
+reject: [HorribleSubs] Dagashi Kashi S2 - 03 [1080p]
+
+case: iruma-kun-2-numbered-sequel
+# AniList's "Mairimashita! Iruma-kun 2", FINISHED, 21 episodes, PREQUEL
+# present. Production put every `[SubsPlease] … S2 - NN` file in review on
+# 2026-10-06; the acquisition side had the same blind spot.
+romaji: Mairimashita! Iruma-kun 2
+format: TV
+episodes: 21
+prequel: yes
+number: 5
+query: Mairimashita! Iruma-kun 2 - 05
+query: Mairimashita! Iruma-kun S2 - 05
+query: Mairimashita! Iruma-kun S02E05
+accept: [SubsPlease] Mairimashita! Iruma-kun S2 - 05 (1080p)
+accept: [SubsPlease] Mairimashita! Iruma-kun 2 - 05 (1080p)
+reject: [SubsPlease] Mairimashita! Iruma-kun - 05 (1080p)
+reject: [SubsPlease] Mairimashita! Iruma-kun S3 - 05 (1080p)
+
+case: steins-gate-0-not-a-season
+# A trailing number that is a name, on an entry that *does* have a PREQUEL.
+# 0 is never a season, so the entry is asked for and matched as written.
+romaji: Steins;Gate 0
+format: TV
+episodes: 23
+prequel: yes
+number: 11
+query: Steins;Gate 0 - 11
+absent: Steins;Gate S0 - 11
+absent: Steins;Gate - 11
+accept: [Commie] Steins;Gate 0 - 11 [BD 1080p AAC].mkv
+reject: [Commie] Steins;Gate 0 - 01 ~ 23 [BD 1080p AAC]
+# Not pinned here, and worth knowing: the original series' `Steins;Gate - 11`
+# is *accepted* for this entry today — its key is a token subset of
+# `steins gate 0`, which title_score forgives as an abbreviation. That is the
+# filter's shorter-name rule, untouched by the numbered-sequel work.
+
+case: mob-psycho-100-not-a-season
+# Three digits: a name, never a season, whatever the relations say.
+romaji: Mob Psycho 100
+format: TV
+episodes: 12
+number: 7
+query: Mob Psycho 100 - 07
+query: Mob Psycho 100 07
+accept: [SubsPlease] Mob Psycho 100 - 07 (1080p)
+reject: [Judas] Mob Psycho 100 II - 07 [1080p][HEVC x265 10bit].mkv
+
+case: darling-in-the-franxx-no-number
+# No number at all: nothing to read, and nothing moves.
+romaji: Darling in the Franxx
+english: DARLING in the FRANXX
+format: TV
+episodes: 24
+number: 5
+query: Darling in the Franxx - 05
+query: Darling in the Franxx 05
+accept: [HorribleSubs] Darling in the FranXX - 05 [1080p].mkv
+reject: [HorribleSubs] Darling in the FranXX S2 - 05 [1080p].mkv

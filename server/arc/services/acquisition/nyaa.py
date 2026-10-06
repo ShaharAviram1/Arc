@@ -107,7 +107,14 @@ from rapidfuzz import fuzz
 
 from arc.models import Anime
 from arc.services.acquisition.rules import Rules
-from arc.services.library.parser import ParsedName, parse, strip_season, title_key
+from arc.services.library.parser import (
+    ParsedName,
+    SeasonMark,
+    is_numbered_sequel,
+    parse,
+    strip_season,
+    title_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -796,9 +803,21 @@ def anime_titles(anime: Anime) -> tuple[str, ...]:
 
     The order matters: :func:`queries` builds from the front of this and
     romaji is what release groups write.
+
+    A **numbered sequel** (:func:`numbered_sequel`, 2026-10-06) also carries
+    its base title last: *Dagashi Kashi 2* is season 2 of *Dagashi Kashi*, and
+    ``[HorribleSubs] Dagashi Kashi S2 - 03`` names the base. The season check
+    in :func:`acceptable` is what keeps season one's releases out, exactly as
+    it does for an entry whose title says ``Season 2``.
     """
     names = [anime.title_romaji, anime.title_english, anime.title_native]
     names.extend(anime.synonyms or [])
+    if numbered_sequel(anime):
+        for name in (anime.title_romaji, anime.title_english):
+            if name:
+                marked = strip_season(name, numbered=True)
+                if marked.season is not None and strip_season(name).season is None:
+                    names.append(marked.title)
     seen: dict[str, None] = {}
     for name in names:
         if isinstance(name, str) and name.strip():
@@ -841,18 +860,41 @@ def is_single(anime: Anime) -> bool:
     return fmt in SINGLE_FORMATS and anime.episodes == 1
 
 
+def numbered_sequel(anime: Anime) -> bool:
+    """Whether this entry's trailing title number is its season (2026-10-06).
+
+    :func:`~arc.services.library.parser.is_numbered_sequel` over the row: a
+    ``PREQUEL`` edge and an episodic format. *Dagashi Kashi 2* with a prequel
+    is season 2 of *Dagashi Kashi*; *Mob Psycho 100* and *Steins;Gate 0* are
+    not seasons of anything, and an entry with no relations stored keeps the
+    literal reading — the same rule the file matcher applies.
+    """
+    return is_numbered_sequel(anime.relations, anime.format)
+
+
+def _season_mark(anime: Anime, name: str) -> SeasonMark:
+    """``strip_season`` of one of this entry's titles, numbered where it may be."""
+    return strip_season(name, numbered=numbered_sequel(anime))
+
+
 def anime_season(anime: Anime) -> int | None:
-    """The season this catalogue entry's own titles name, if any of them do."""
+    """The season this catalogue entry's own titles name, if any of them do.
+
+    Including a bare trailing number on a numbered sequel
+    (:func:`numbered_sequel`): *Dagashi Kashi 2* with a ``PREQUEL`` edge is
+    season 2, so its queries ask for ``Dagashi Kashi S2`` and its filter takes
+    an ``S2`` release instead of rejecting it as the wrong season.
+    """
     for name in (anime.title_romaji, anime.title_english):
         if not name:
             continue
-        marked = strip_season(name)
+        marked = _season_mark(anime, name)
         if marked.season is not None:
             return marked.season
     return None
 
 
-def _short_forms(name: str, season: int, padded: str) -> list[str]:
+def _short_forms(name: str, season: int, padded: str, *, numbered: bool = False) -> list[str]:
     """The three ways a group abbreviates a later season of ``name``.
 
     Nyaa ANDs every word of a query, so the *catalogue's* title is the worst
@@ -864,8 +906,11 @@ def _short_forms(name: str, season: int, padded: str) -> list[str]:
     re-attached the three ways groups write it: ``S3``, ``III``, and not at
     all. The last is the broadest query of the set and the one that finds the
     most: it is a subset of every other release's words.
+
+    ``numbered`` is :func:`numbered_sequel`'s answer for the entry, so
+    *Dagashi Kashi 2* is asked for as ``Dagashi Kashi S2 - 03``.
     """
-    base = strip_season(name).base
+    base = strip_season(name, numbered=numbered).base
     if not base:
         return []
     built = [f"{base} S{season} - {padded}"]
@@ -876,7 +921,7 @@ def _short_forms(name: str, season: int, padded: str) -> list[str]:
     return built
 
 
-def _sxxexx_form(name: str, season: int, number: int) -> str:
+def _sxxexx_form(name: str, season: int, number: int, *, numbered: bool = False) -> str:
     """``"One-Room TA S01E01"`` — the way a Western-style group writes it.
 
     The third thing Nyaa's word-ANDing breaks, after the season marker
@@ -905,8 +950,10 @@ def _sxxexx_form(name: str, season: int, number: int) -> str:
     and where the base *is* bare — a marked entry, ``Sousou no Frieren
     S02E07`` — the form carries the season explicitly, which is exactly what
     :func:`acceptable`'s season check reads.
+
+    ``numbered`` as in :func:`_short_forms`.
     """
-    base = strip_season(name).base
+    base = strip_season(name, numbered=numbered).base
     if not base:
         return ""
     return f"{base} S{season:02d}E{number:02d}"
@@ -1242,6 +1289,7 @@ def queries(anime: Anime, number: int, *, offset: int | None = None) -> list[str
     english = anime.title_english
     padded = pad(number, total_episodes=anime.episodes)
     season = anime_season(anime)
+    numbered = numbered_sequel(anime)
     single = is_single(anime)
 
     built: list[str] = []
@@ -1283,9 +1331,9 @@ def queries(anime: Anime, number: int, *, offset: int | None = None) -> list[str
         if english and english != romaji:
             add(f"{english} - {padded}")
         if romaji:
-            add(_sxxexx_form(romaji, season or 1, number))
+            add(_sxxexx_form(romaji, season or 1, number, numbered=numbered))
         if season is not None and romaji:
-            for form in _short_forms(romaji, season, padded):
+            for form in _short_forms(romaji, season, padded, numbered=numbered):
                 add(form)
         if offset:
             # Right behind the romaji short forms, because a group that
@@ -1303,7 +1351,7 @@ def queries(anime: Anime, number: int, *, offset: int | None = None) -> list[str
             # route still applies if such a release turns up under another
             # form.
             full = " ".join((romaji or english or "").split())
-            base = strip_season(full).base
+            base = strip_season(full, numbered=numbered).base
             if base and " ".join(base.split()) != full:
                 combined = anime.episodes + offset if anime.episodes else None
                 running = pad(number + offset, total_episodes=combined)
@@ -1319,9 +1367,9 @@ def queries(anime: Anime, number: int, *, offset: int | None = None) -> list[str
         if season is None and romaji:
             add(f"{romaji} {padded}")
         if english and english != romaji:
-            add(_sxxexx_form(english, season or 1, number))
+            add(_sxxexx_form(english, season or 1, number, numbered=numbered))
             if season is not None:
-                for form in _short_forms(english, season, padded):
+                for form in _short_forms(english, season, padded, numbered=numbered):
                     add(form)
         # Then the symbol-stripped variants of the two full titles, which is
         # the one speculative form worth a slot: a star or a colon glued
@@ -1414,6 +1462,34 @@ def title_score(parsed_key: str, titles: Iterable[str], *, strict: bool = False)
             score = fuzz.token_set_ratio(parsed_key, other)
         best = max(best, score / 100.0)
     return best
+
+
+def release_season(parsed: ParsedName, titles: Sequence[str], season: int | None) -> int | None:
+    """The season a release names, reading a numbered sequel's own title as one.
+
+    The parser reads no season out of ``[Erai-raws] Dagashi Kashi 2 - 01``: on
+    a *filename* a trailing number is as often a name as a season. But when
+    the entry is a numbered sequel (:func:`numbered_sequel`) and the release
+    wrote that entry's title **literally** — its key is one of ``titles``,
+    whose numbered reading is ``season`` and whose base
+    :func:`anime_titles` added beside it — the release has named this entry,
+    and so this entry's season. Without this the release that matches the
+    title exactly would be rejected as season 1 the moment the entry's season
+    became 2 (2026-10-06).
+
+    The base being in ``titles`` is the gate: :func:`anime_titles` adds it only
+    for an entry with a ``PREQUEL`` edge, so *Mob Psycho 100* and every entry
+    with no relations read the release's season exactly as before.
+    """
+    if parsed.season is not None or season is None or not parsed.title_key:
+        return parsed.season
+    for name in titles:
+        if title_key(name) != parsed.title_key or strip_season(name).season is not None:
+            continue
+        marked = strip_season(name, numbered=True)
+        if marked.season == season and marked.title in titles:
+            return season
+    return parsed.season
 
 
 @dataclass(frozen=True, slots=True)
@@ -1536,10 +1612,9 @@ def _acceptable_batch(
         wanted = f"{number} or {running}" if running is not None else f"{number}"
         _rejected_into(why, item, f"batch release{covered}, and this is episode {wanted}")
         return None
-    if not absolute and (parsed.season or 1) != (season or 1):
-        _rejected_into(
-            why, item, f"batch release of season {parsed.season or 1}, not {season or 1}"
-        )
+    released = release_season(parsed, titles, season)
+    if not absolute and (released or 1) != (season or 1):
+        _rejected_into(why, item, f"batch release of season {released or 1}, not {season or 1}")
         return None
     similarity = title_score(parsed.title_key, titles)
     if similarity < threshold:
@@ -1778,8 +1853,9 @@ def acceptable(
     # retry window. That is the right way round. An episode Arc did not fetch
     # is visible and fixable; the wrong season on disk is linked by the
     # matcher's own prior and plays as if it were right.
-    if (parsed.season or 1) != (season or 1):
-        _rejected_into(why, item, f"season {parsed.season or 1}, not {season or 1}")
+    released = release_season(parsed, titles, season)
+    if (released or 1) != (season or 1):
+        _rejected_into(why, item, f"season {released or 1}, not {season or 1}")
         return None
     similarity = title_score(parsed.title_key, titles)
     if similarity < threshold:
@@ -2101,7 +2177,7 @@ def group_queries(anime: Anime, number: int, rules: Rules) -> list[str]:
     if english and english != romaji:
         forms.append(f"{english} - {padded}")
     if romaji:
-        forms.append(_sxxexx_form(romaji, season or 1, number))
+        forms.append(_sxxexx_form(romaji, season or 1, number, numbered=numbered_sequel(anime)))
 
     groups: list[str] = []
     seen_groups: set[str] = set()
@@ -2168,7 +2244,7 @@ def batch_queries(anime: Anime) -> list[str]:
     for name in (anime.title_romaji, anime.title_english):
         if not name:
             continue
-        base = " ".join((strip_season(name).base or name).split())
+        base = " ".join((_season_mark(anime, name).base or name).split())
         if base and base not in bases:
             bases.append(base)
     if not bases:
@@ -2674,11 +2750,13 @@ __all__ = [
     "has_prequel",
     "head_of",
     "is_single",
+    "numbered_sequel",
     "pack_worth_preferring",
     "pad",
     "parse_feed",
     "queries",
     "rank",
+    "release_season",
     "reset_shared_client",
     "search_for_episode",
     "shared_client",

@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
+import { EpisodeMoreMenu } from '@/components/ReleaseSheet'
 import { TripControl, TripPanel } from '@/components/Trip'
 import {
   Artwork,
@@ -60,6 +61,7 @@ import {
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
 import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
+import { CHANGEABLE_STATES } from '@/lib/releases'
 import { PHASE_LABEL, tripCandidates, tripCodecsPlayable, type TripEpisode } from '@/lib/trips'
 import { canPlayTypeHere } from '@/offline/downloads'
 import { canDownloadInApp } from '@/offline/opfs'
@@ -1096,6 +1098,11 @@ function EpisodeRow({
             />
           ) : null}
           <WatchedControl animeId={anime.id} episode={episode} />
+          {/* "Change release…" (FR-A13): only for an episode the viewer wants
+              and nothing has landed for yet; never for the demo account. */}
+          {canDownload && episode.wanted_by_me === true && CHANGEABLE_STATES.has(episode.state) ? (
+            <EpisodeMoreMenu animeId={anime.id} episodeId={episode.id} number={episode.number} />
+          ) : null}
         </div>
       </div>
     </div>

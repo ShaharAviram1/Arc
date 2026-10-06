@@ -177,7 +177,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   match are discarded. **Several forms of the query are asked, because a
   release group names a show by neither the whole catalogue title nor the same
   language**: the full titles, the episode number written the Western way
-  (`S01E07`), a later season's marker written the three ways groups write it,
+  (`S01E07`), a later season's marker written the three ways groups write it
+  (a numbered sequel's bare trailing number counts as that marker, FR-L2:
+  *Dagashi Kashi 2* is asked for as `Dagashi Kashi S2` and its `S2` releases
+  are its own season, not rejected as season 1),
   the head of a subtitled title, the bare title, and up to two of the show's
   other names — each of them also **with its symbols taken out**
   (`Yarichin☆Bitch-bu` → `Yarichin Bitch-bu`, `Love Live! Superstar!!` → `Love
@@ -460,6 +463,42 @@ that the course professor can log in at any time, and the owner uses it daily.
   in the last ten minutes) is not deleted under it, for at most six hours
   after the last confirmation. Nothing in delivery or expiry touches
   a list entry or MyAnimeList.
+- FR-A13 **Manual release choice** (owner, 2026-10-06). Every account except
+  the demo may choose or change the release an episode — or their active
+  trip — downloads from. The show page's episode row offers **Change
+  release…** for an episode the user already wants (their window, a sample or
+  their trip) that has not arrived yet; the trip panel offers **Choose
+  pack…**. Both open a sheet: what is downloading now, Arc's own candidates
+  for it from Nyaa (searched on demand with the same forms and request budget
+  as the automatic search, packs included; at most once a minute per person
+  per episode or trip) — name, resolution, size, seeders, single or pack and
+  which of the user's wanted episodes it would serve, with the reason Arc
+  would not take it where it would not (wrong season, no seeders, a thinly
+  seeded pack for a trip, a release Arc already tried) — and a box to paste a
+  magnet link or a Nyaa page / `.torrent` link (nyaa.si and Arc's configured
+  Nyaa host only; anything else is refused in a sentence). The chosen release
+  **replaces** the running one: a single being downloaded is removed with its
+  partial files, a pack's file is given back (FR-A11's rule decides the pack).
+  A pack is taken file by file (FR-A11): only files of episodes the user wants
+  are ever selected, the selection is verified before a byte moves, and a pack
+  with no file for the episode (for a trip: for any of its pending episodes)
+  is refused and removed before it fetched anything. A pasted magnet is only
+  accepted when Nyaa lists it for that episode (a magnet carries no file list),
+  and a pasted name that is not one numbered episode is always taken file by
+  file, and a pasted torrent whose name is not this show is refused. For a
+  trip, the episodes the chosen pack does not hold keep what they had; the
+  episodes it does hold are switched to it even when another user's download
+  of the same episode was nearly done (the episode has one download, and the
+  trip's owner chose this one). Listing is limited to one search at a time and
+  three a minute per person (and two at once on the server); a request over
+  the limit is told to wait. Refused while acquisition is paused or held for disk space (FR-T6), for
+  a pack while packs are switched off, for a release Arc already tried, and
+  while Arc is choosing for that episode at that moment. A manual choice is
+  marked; nothing automatic replaces it on its own, the stall rule still
+  applies to it, and an episode whose chosen release stalled is told "the
+  release you chose stalled". Every choice is logged with the user, the
+  episode or trip and the info hash. Nothing here touches a list entry or
+  MyAnimeList.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -475,7 +514,14 @@ that the course professor can log in at any time, and the owner uses it daily.
   with its model suggestion, when the scan meets it again.
 - FR-L2 Filename parsing extracts group, title, season, episode, resolution,
   source, codec, and version (v2 etc.). Parser is deterministic
-  (anitopy-style).
+  (anitopy-style). **Season inference on the catalogue side** (owner incident,
+  2026-10-06): a catalogue entry whose title ends in a bare number 2–9
+  (*Mairimashita! Iruma-kun 2*, *Dagashi Kashi 2*) **and** that the catalogue
+  marks as a sequel (a `PREQUEL` relation, episodic format) is season N of the
+  title without the number, so `… S2 - 05` matches it exactly as it would match
+  a title spelled `… Season 2`, at the same confidence. Without the `PREQUEL`
+  the number stays part of the name (*Mob Psycho 100*, *Steins;Gate 0*), and a
+  filename's own trailing number is never read as a season.
 - FR-L3 Matching resolves the parsed title against AniList (local cache first,
   then AniList search) and computes a confidence score. Files downloaded by
   Arc for a known episode start with a strong prior for that episode.
@@ -1089,7 +1135,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On a phone the state and the two controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
 | Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
@@ -1190,8 +1236,10 @@ through the same edge, without the grace period.
   not that: it is a per-episode copy of a file Arc has already prepared for
   streaming. A trip, FR-A12, is not that either: it is the next X aired
   episodes of one show after the user's progress, at most 50, one trip at a
-  time, asked for explicitly.) A "save the MP4 to Files" link is out too
-  (owner, 2026-10-05).
+  time, asked for explicitly. Nor is FR-A13's manual release choice: it only
+  redirects an episode or a trip the user has already asked for to another
+  release, and a pack is still taken only for the user's wanted files.) A
+  "save the MP4 to Files" link is out too (owner, 2026-10-05).
 - Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
   at play time.
 - Per-user private libraries.
@@ -2161,3 +2209,22 @@ through the same edge, without the grace period.
   below `trip_pack_min_seeders` (or stopped before finishing) nor takes one as
   FR-A11's fallback; with only thin packs on offer it retries per FR-A6 and
   gives up with "only a thinly seeded pack".
+- 2026-10-06 (owner request) — **FR-A13: manual release choice.** Every
+  account but the demo may choose or change the release of an episode they
+  want, or of their active trip: Arc's own candidates (same forms and budget
+  as the automatic search, packs included, one live search a minute) with the
+  reason Arc would not take each, or a pasted magnet / Nyaa link (nyaa.si and
+  the configured Nyaa host only). The choice replaces the running download and
+  goes through the existing add paths, a pack file by file (FR-A11). A chosen
+  release is marked manual; the stall rule still applies and says so. §8: this
+  is not a "download anything" UI. Show page (§5): "Change release…" in the
+  episode row's menu and "Choose pack…" on the trip panel.
+- 2026-10-06 (owner incident: `[SubsPlease] Mairimashita! Iruma-kun S2 - 01v2`
+  went to review beside the right entry) — **FR-L2/FR-A4: numbered sequels.** A
+  catalogue title ending in a bare 2–9 with a `PREQUEL` relation (and an
+  episodic format) is season N of the base title, in the file matcher and in
+  the Nyaa query builder and filter alike; a match through it scores like an
+  explicit `S2` match. No `PREQUEL`, no reading: titles like *Mob Psycho 100*,
+  *Steins;Gate 0* and an entry with no relations stored behave as before, and
+  their unmatched files still go to review rather than to a guess (FR-L4). The
+  same kink recorded for *Dagashi Kashi 2* on 2026-09-18 is closed by it.

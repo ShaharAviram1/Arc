@@ -393,6 +393,8 @@ class ReleaseOut(BaseModel):
     #: so the flag is what keeps "1080p · [Judas]" on episode 7 of a
     #: twenty-six-episode pack from reading as a release of episode 7.
     batch: bool = False
+    #: A person chose this release by hand (FR-A13).
+    manual: bool = False
 
     @classmethod
     def from_release(cls, release: EpisodeRelease) -> ReleaseOut:
@@ -402,6 +404,7 @@ class ReleaseOut(BaseModel):
             title=release.torrent.title,
             seeders=release.torrent.seeders,
             batch=release.batch,
+            manual=release.torrent.manual,
         )
 
 
@@ -636,6 +639,9 @@ class EpisodeOut(BaseModel):
     #: and will not be prepared for streaming. The same for every caller — the show page says
     #: "Not prepared for streaming" to anyone who is not on that trip.
     trip_only: bool = False
+    #: Whether the caller has a live want on this episode (window, sample or
+    #: trip): the show page offers "Change release…" only then (FR-A13).
+    wanted_by_me: bool = False
 
     @classmethod
     def from_episode(
@@ -654,6 +660,7 @@ class EpisodeOut(BaseModel):
         next_search_at: datetime | None = None,
         offline: OfflineOut | None = None,
         trip_only: bool = False,
+        wanted_by_me: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -705,6 +712,7 @@ class EpisodeOut(BaseModel):
             # Never on a ``ready`` episode: that one streams, whoever's trip
             # also covers it.
             trip_only=trip_only and episode.state is not EpisodeState.READY,
+            wanted_by_me=wanted_by_me,
         )
 
 
@@ -963,6 +971,7 @@ class AnimeDetail(AnimeCore):
         trip: TripOut | None = None,
         trip_limits: TripLimits | None = None,
         trip_only: frozenset[int] = frozenset(),
+        wanted_by_me: frozenset[int] = frozenset(),
         slots: SlotView | None = None,
         tmdb_mapped: bool = False,
         override: OverrideOut | None = None,
@@ -1034,6 +1043,7 @@ class AnimeDetail(AnimeCore):
                     next_search_at=(next_searches or {}).get(episode.id),
                     offline=offline.out(episode) if offline is not None else None,
                     trip_only=episode.id in trip_only,
+                    wanted_by_me=episode.id in wanted_by_me,
                 )
                 for episode in episodes
             ],

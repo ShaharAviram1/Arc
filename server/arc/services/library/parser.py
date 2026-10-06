@@ -41,6 +41,7 @@ usable regression corpus.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, NamedTuple
 
@@ -400,6 +401,51 @@ _PART_RE = re.compile(r"\s*[-:]?\s*\b(?:Part|Cour)\s*(\d{1,2})\b\s*$", re.IGNORE
 #: A trailing Roman numeral, with at least one word before it.
 _ROMAN_RE = re.compile(r"^(?P<head>.*\S)\s+(?P<numeral>[IVX]{2,5})\s*$")
 
+#: A bare trailing digit 2–9 on a *catalogue* title: ``Dagashi Kashi 2``,
+#: ``Mairimashita! Iruma-kun 2``. Read as a season **only** when the caller
+#: says the entry is a numbered sequel (``strip_season(..., numbered=True)``,
+#: see :func:`is_numbered_sequel`) — on its own a trailing number is as often
+#: part of the name (*Mob Psycho 100*, *Steins;Gate 0*, *Kaiju No. 8*) as a
+#: season, and the string cannot tell which. One digit, never 0 or 1: a "0"
+#: is a prequel and a "1" is no sequel at all.
+_NUMBERED_SEQUEL_RE = re.compile(r"^(?P<head>.*\S)\s+(?P<number>[2-9])\s*$")
+
+#: Words that make a trailing number belong to *them* rather than to the
+#: show: ``Movie 2`` is a second film, ``No. 8`` a name, ``Vol 2`` a volume.
+_NUMBER_OWNER_WORDS: frozenset[str] = frozenset(
+    {
+        "no",
+        "movie",
+        "film",
+        "gekijouban",
+        "vol",
+        "volume",
+        "episode",
+        "ep",
+        "part",
+        "cour",
+        "chapter",
+        "act",
+        "season",
+        "series",
+        "stage",
+        "phase",
+        "level",
+    }
+)
+
+#: Formats a numbered-sequel reading applies to. A film or a special that
+#: ends in a number is "the second film" or "the second special", not a
+#: season of anything (*Kimetsu no Yaiba: Mugenjou-hen Movie 2*,
+#: *Tengen Toppa Gurren Lagann: Parallel Works 2*). ``None`` — a format the
+#: catalogue never said — is allowed through, because the PREQUEL edge is the
+#: evidence that matters and the reading is still compared against the file.
+NUMBERED_SEQUEL_FORMATS: frozenset[str | None] = frozenset({"TV", "TV_SHORT", "ONA", "OVA", None})
+
+#: The relation type that says something comes before an entry, in AniList's
+#: vocabulary (MAL's is upper-cased on the way in).
+PREQUEL_RELATION = "PREQUEL"
+
 #: ``S02E05`` in any casing. anitopy reads this itself for two-digit episode
 #: numbers, but gives up on ``S01E1089`` — which is precisely how the scene
 #: names One Piece — so it is re-read here whenever anitopy found no number.
@@ -690,7 +736,26 @@ class SeasonMark(NamedTuple):
     base: str = ""
 
 
-def _season_from_title(title: str) -> SeasonMark:
+def _numbered_tail(title: str) -> tuple[str, int] | None:
+    """``"Dagashi Kashi 2"`` → ``("Dagashi Kashi", 2)``; ``None`` when not that shape.
+
+    The digit must be a word of its own (whitespace before it), the head must
+    hold a letter, and the word in front of the digit must not own it
+    (:data:`_NUMBER_OWNER_WORDS`): ``Movie 2`` and ``No. 8`` stay whole.
+    """
+    matched = _NUMBERED_SEQUEL_RE.match(title)
+    if matched is None:
+        return None
+    head = matched.group("head").strip(" \t._-~:")
+    if not head or not re.search(r"[^\W\d_]", head):
+        return None
+    last = head.split()[-1].strip(".#").casefold()
+    if last in _NUMBER_OWNER_WORDS or head.endswith("#"):
+        return None
+    return head, int(matched.group("number"))
+
+
+def _season_from_title(title: str, *, numbered: bool = False) -> SeasonMark:
     """Split a trailing season marker off ``title``.
 
     Applied repeatedly, because ``… 2nd Season Part 2`` carries two of them
@@ -698,6 +763,10 @@ def _season_from_title(title: str) -> SeasonMark:
     The first *numbered season* wins; a ``Part``/``Cour`` only counts when no
     season was named, since it means "cour 2" as often as "season 2" and the
     latter is the reading that helps.
+
+    ``numbered`` adds one more marker, last: a bare trailing digit 2–9
+    (:func:`_numbered_tail`). Only a caller that knows the title belongs to a
+    sequel may ask for it — see :func:`strip_season`.
     """
     title = _SEASON_RANGE_RE.sub(" ", title).strip(" \t._-~:")
     season: int | None = None
@@ -749,13 +818,19 @@ def _season_from_title(title: str) -> SeasonMark:
                 if season is None:
                     season = value
                 title, changed = head, True
+                continue
+        if numbered and season is None:
+            tail = _numbered_tail(title)
+            if tail is not None:
+                title, season = tail
+                changed = True
     if season is None:
         season = part
     stripped = title.strip(" \t._-~:")
     return SeasonMark(stripped, season, part, base or stripped)
 
 
-def strip_season(title: str) -> SeasonMark:
+def strip_season(title: str, *, numbered: bool = False) -> SeasonMark:
     """``"Overlord IV"`` → ``("Overlord", 4, None, "Overlord")``. The public form.
 
     Exported because the matcher runs *catalogue* titles through exactly this
@@ -763,8 +838,38 @@ def strip_season(title: str) -> SeasonMark:
     file parsed as season 2 of "Vinland Saga" have to reduce to the same key,
     or the season would be scored twice — once as a title difference and once
     as a season agreement — and the first would drown the second.
+
+    ``numbered=True`` also reads a bare trailing digit 2–9 as the season:
+    ``"Dagashi Kashi 2"`` → ``("Dagashi Kashi", 2, None, "Dagashi Kashi")``
+    (2026-10-06). Off by default and never applied to a *filename*: the string
+    alone cannot tell *Dagashi Kashi 2* from *Mob Psycho 100*, so only a caller
+    holding the catalogue's own evidence that the entry is a sequel
+    (:func:`is_numbered_sequel`) may turn it on — the file matcher and the
+    Nyaa query builder, each for a catalogue entry.
     """
-    return _season_from_title(title)
+    return _season_from_title(title, numbered=numbered)
+
+
+def is_numbered_sequel(relations: Iterable[Any] | None, fmt: str | None) -> bool:
+    """Whether a catalogue entry's trailing title number may be read as its season.
+
+    Two conditions, both from the catalogue rather than from the title: the
+    entry has a ``PREQUEL`` relation — something really does come before it,
+    so ``Mairimashita! Iruma-kun 2`` is season 2 of ``Mairimashita!
+    Iruma-kun`` — and its format is an episodic one
+    (:data:`NUMBERED_SEQUEL_FORMATS`), so ``… Movie 2`` stays a film's name.
+    No relations is no evidence: an entry nobody fetched the detail of keeps
+    today's literal reading and a file naming its season goes to review rather
+    than to a guess (FR-L4).
+    """
+    normalised = (fmt or "").strip().upper() or None
+    if normalised not in NUMBERED_SEQUEL_FORMATS:
+        return False
+    return any(
+        isinstance(relation, dict)
+        and str(relation.get("relation_type") or "").upper() == PREQUEL_RELATION
+        for relation in relations or ()
+    )
 
 
 def _kind_of(
@@ -1153,13 +1258,16 @@ def parse(name: str, *, path: bool = False) -> ParsedName:
 
 
 __all__ = [
+    "NUMBERED_SEQUEL_FORMATS",
     "ORDINAL_WORDS",
+    "PREQUEL_RELATION",
     "EpisodeNumbers",
     "SeasonMark",
     "VIDEO_EXTENSIONS",
     "Kind",
     "ParsedName",
     "basename",
+    "is_numbered_sequel",
     "parse",
     "strip_season",
     "title_key",

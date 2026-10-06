@@ -204,6 +204,13 @@ class Torrent(Base):
     #: log line or reservation may use for a batch (FR-A11): the point of the
     #: exception is that the 14 GB pack costs 1.1 GB of disk.
     wanted_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    #: A person chose this release by hand (FR-A13, owner 2026-10-06), from
+    #: Arc's candidates or by pasting a link. Nothing automatic replaces a
+    #: manual choice on its own; the stall rule still applies to it, and the
+    #: reason an episode is then shown says that its chosen release stalled.
+    manual: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     added_at: Mapped[datetime] = created_at()
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 

@@ -188,6 +188,8 @@ export interface EpisodeRelease {
    * the wire so a cached payload from before batches still parses.
    */
   batch?: boolean
+  /** A person chose this release by hand (FR-A13). Optional on the wire. */
+  manual?: boolean
 }
 
 /**
@@ -312,6 +314,12 @@ export interface EpisodeOut {
    * Optional on the wire so a cached payload from before M19 parses.
    */
   trip_only?: boolean
+  /**
+   * Whether the viewer has a live want on this episode — window, sample or
+   * trip (FR-A13). The row offers "Change release…" only then. Optional on
+   * the wire so a cached payload from before 2026-10-06 parses.
+   */
+  wanted_by_me?: boolean
 }
 
 /**

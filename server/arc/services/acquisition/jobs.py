@@ -883,12 +883,14 @@ async def _add_stopped(
     chosen: Ranked,
     trip: TripPass | None,
     prefer: bool,
+    blob: bytes | None = None,
 ) -> tuple[Torrent, list[FileInfo], str] | int:
     """Steps 1–5 of :func:`_take_batch` for one candidate: fetch, add stopped, read.
 
     Answers the reserved row, the client's listing and the save path, or — for
     a candidate skipped or refused on the way — how many to add to
-    ``refused`` (0 or 1).
+    ``refused`` (0 or 1). ``blob`` is a ``.torrent`` the caller already fetched
+    (FR-A13's manual choice fetches it before it takes any lock).
     """
     info_hash = chosen.item.info_hash
     owner = await ctx.session.scalar(select(Torrent.id).where(Torrent.info_hash == info_hash))
@@ -917,7 +919,8 @@ async def _add_stopped(
     # fetch is one more paced request and has to queue behind the searches.
     nyaa = nyaa_module.shared_client(ctx.settings.nyaa_url)
     try:
-        blob = await nyaa.torrent_file(chosen.torrent_url)
+        if blob is None:
+            blob = await nyaa.torrent_file(chosen.torrent_url)
     except NyaaUnavailable as exc:
         # Not an error for the episode, and nothing to remember: it is
         # one candidate Arc could not fetch *today*, and the next one
@@ -1133,7 +1136,7 @@ async def _take_batch(
 
             kept = await _lock_targets(ctx.session, episode, plan.wanted, attachable)
             if kept is None:
-                last_reason = "the episode episode moved on"
+                last_reason = "the searched episode moved on"
                 await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
                 continue
             if kept != set(plan.wanted):
@@ -1408,7 +1411,12 @@ async def search_release(ctx: JobContext) -> None:
         await _requeue_paused(ctx, episode_id, now=now, message=HELD_LOG)
         return
 
-    episode = await ctx.session.get(Episode, episode_id)
+    # Locked and re-read (FR-A13): a manual choice may have committed this row
+    # to ``downloading`` after an earlier read left it stale in the identity
+    # map, and a search must never overwrite that.
+    episode = await ctx.session.get(
+        Episode, episode_id, with_for_update=True, populate_existing=True
+    )
     if episode is None:
         ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
         return

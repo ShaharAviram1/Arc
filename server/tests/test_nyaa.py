@@ -50,10 +50,12 @@ from arc.services.acquisition.nyaa import (
     has_prequel,
     head_of,
     is_single,
+    numbered_sequel,
     pad,
     parse_feed,
     queries,
     rank,
+    release_season,
     search_for_episode,
     shared_client,
     strip_symbols,
@@ -576,6 +578,48 @@ def test_titles_include_synonyms_and_drop_blanks() -> None:
     )
 
     assert anime_titles(anime) == ("Overlord IV", "オーバーロードIV", "Overlord Season 4")
+
+
+# --- Numbered sequels: a bare trailing number is a season (2026-10-06) -------
+
+
+def _dagashi_2(*, prequel: bool, fmt: str = "TV") -> Anime:
+    return Anime(
+        anilist_id=21843,
+        title_romaji="Dagashi Kashi 2",
+        title_english="Dagashi Kashi 2",
+        format=fmt,
+        episodes=12,
+        relations=[relation("PREQUEL", anilist_id=21368)] if prequel else None,
+    )
+
+
+def test_a_numbered_sequel_names_its_season_and_carries_its_base() -> None:
+    anime = _dagashi_2(prequel=True)
+
+    assert numbered_sequel(anime)
+    assert anime_season(anime) == 2
+    assert anime_titles(anime) == ("Dagashi Kashi 2", "Dagashi Kashi")
+
+
+def test_without_a_prequel_or_as_a_film_the_title_is_read_literally() -> None:
+    for anime in (_dagashi_2(prequel=False), _dagashi_2(prequel=True, fmt="MOVIE")):
+        assert not numbered_sequel(anime)
+        assert anime_season(anime) is None
+        assert anime_titles(anime) == ("Dagashi Kashi 2",)
+
+
+def test_a_release_that_writes_the_numbered_title_names_its_season() -> None:
+    """``Dagashi Kashi 2 - 03`` is season 2 when the entry is; ``Dagashi Kashi - 03`` is not."""
+    anime = _dagashi_2(prequel=True)
+    titles = anime_titles(anime)
+
+    assert release_season(parse("[Erai-raws] Dagashi Kashi 2 - 03 [1080p]"), titles, 2) == 2
+    assert release_season(parse("[HorribleSubs] Dagashi Kashi - 03 [1080p]"), titles, 2) is None
+    assert release_season(parse("[HorribleSubs] Dagashi Kashi S2 - 03 [1080p]"), titles, 2) == 2
+    # The base is the gate: without the PREQUEL it is not among the titles.
+    literal = anime_titles(_dagashi_2(prequel=False))
+    assert release_season(parse("[Erai-raws] Dagashi Kashi 2 - 03 [1080p]"), literal, 2) is None
 
 
 # --- Symbols: a star a group does not write (2026-09-14) --------------------

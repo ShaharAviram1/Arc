@@ -1,6 +1,6 @@
 """The matcher, measured (FR-L3, FR-L4, roadmap M5 definition of done).
 
-98 labelled cases in ``tests/fixtures/match_cases.json`` are run against a
+102 labelled cases in ``tests/fixtures/match_cases.json`` are run against a
 478-title AniList catalogue captured from the live API by
 ``scripts/capture_match_catalogue.py``. The catalogue is deliberately not a
 list of right answers: it is what the searches actually returned, so every

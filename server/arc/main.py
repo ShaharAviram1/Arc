@@ -24,6 +24,7 @@ from arc.api import (
     invites,
     jobs,
     mal,
+    manual_release,
     media,
     media_stream,
     offline_copies,
@@ -216,6 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media.router)
     app.include_router(offline_copies.router)
     app.include_router(trips.router)
+    app.include_router(manual_release.router)
     app.include_router(playback.router)
     app.include_router(sync.router)
     app.include_router(mal.router)

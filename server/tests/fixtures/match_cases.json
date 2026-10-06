@@ -684,5 +684,33 @@
     "expected_anilist_id": 20694,
     "expected_episode": 7,
     "note": "the catalogue has a colon the release does not"
+  },
+  {
+    "name": "[SubsPlease] Chihayafuru S3 - 05 (1080p) [0C0FFEE0].mkv",
+    "expected_title": "Chihayafuru 3",
+    "expected_anilist_id": 101215,
+    "expected_episode": 5,
+    "note": "S3 against a catalogue title that ends in a bare 3 and has a PREQUEL (2026-10-06)"
+  },
+  {
+    "name": "[Group] PSYCHO-PASS S2 - 03 [1080p].mkv",
+    "expected_title": "PSYCHO-PASS 2",
+    "expected_anilist_id": 20513,
+    "expected_episode": 3,
+    "note": "the numbered-sequel reading, on a title with a hyphen in it"
+  },
+  {
+    "name": "[Group] Hibike! Euphonium S2 - 04 [1080p].mkv",
+    "expected_title": "Hibike! Euphonium 2",
+    "expected_anilist_id": 21460,
+    "expected_episode": 4,
+    "note": "S2 must find season 2, not season 1 or the bare-3 season 3"
+  },
+  {
+    "name": "[Group] Kono Subarashii Sekai ni Shukufuku wo! S3 - 02 [1080p].mkv",
+    "expected_title": "Kono Subarashii Sekai ni Shukufuku wo! 3",
+    "expected_anilist_id": 136804,
+    "expected_episode": 2,
+    "note": "a franchise of bare-numbered sequels: 2, 3 and 4 all have PREQUELs"
   }
 ]

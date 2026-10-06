@@ -50,7 +50,7 @@ CORPUS = Path(__file__).parent / "fixtures" / "query_corpus.txt"
 
 #: Where the corpus stands. A floor, not a snapshot: new cases are welcome and
 #: the ones already here are the evidence behind a query form.
-MIN_CASES = 20
+MIN_CASES = 26
 
 #: Fields a block may carry once, and the ones it must.
 SINGLE_FIELDS = frozenset(

@@ -1690,6 +1690,37 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
   Caddy was recreated. The host's `.env` sets no `OFFLINE_*`, so the defaults
   apply (H.264, 720p, CRF 26). The owner's iPad trip is what remains.
 
+### M19.1 — After the first real trip (2026-10-06)
+- [x] **Well-seeded trip packs and no indexing of in-flight files** (owner:
+      "Tried to bulk download for a trip, download stalled"): a trip takes a
+      pack only with ≥ `trip_pack_min_seeders` (10) seeders and never when the
+      best single has 3× as many; a trip pack that stalls with nothing
+      delivered is deleted and its episodes go straight to singles; thin or
+      stopped packs are never re-attached for a trip. The library scan reads
+      the torrent tables and skips files still downloading (qBittorrent
+      pre-allocates them at full size; 21 empty files of the stalled pack had
+      reached the Review queue with an LLM suggestion each) and prunes such
+      rows. Deployed 2026-10-06 as 6938fba; the host's first scan removed the
+      21 rows.
+- [x] **Numbered sequels** (owner: "the review in arc could not match the
+      torrent to anime properly, even though it was matched correctly by
+      gemini"): a sequel entry whose title ends in a bare 2–9 is read as that
+      season by the matcher and the Nyaa query builder when it has a PREQUEL
+      relation. Corpora 259→265 and 20→26 cases, acceptance 89→95 of 102
+      auto-linked.
+- [x] **Manual release choice** (FR-A13, owner: "a way for me to manually add
+      or change the torrent if needed"; every account except demo; candidates
+      or a pasted Nyaa link/magnet; replaces the running download): "Change
+      release…" on an episode row and "Choose pack…" on the trip panel.
+      Reviewer (security focus) found a parser hang, a title-check bypass for
+      pasted torrents, other-show results being choosable, long requests with
+      weak rate limits, orphan torrents on failure and a search/manual race —
+      all fixed with tests. Migration f1a6d3c08b52 (`torrents.manual`).
+- Verified 2026-10-06 (orchestrator): full pass server 4371, client 1116, lint
+  clean, build ok. Note: commit 6938fba carried a half-applied `manual_stall`
+  hunk without its column; it is completed by this deploy (the stall path was
+  the only one affected, and no stall fired in between).
+
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
 from the "possible later" list (the owner may strike any). Starts after

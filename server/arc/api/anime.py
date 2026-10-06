@@ -79,7 +79,7 @@ from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.api.schemas import OverrideOut
 from arc.api.trip_schemas import TripLimits, TripOut
-from arc.models import Anime, Job, ListEntry, UserRole
+from arc.models import Anime, Job, ListEntry, UserRole, Want
 from arc.services.acquisition.samples import (
     SampleError,
     cancel_sample,
@@ -405,6 +405,20 @@ async def detail(
         trip=trip_out,
         trip_limits=TripLimits(max_episodes=await trip_max_episodes(session)),
         trip_only=extras.trip_only,
+        # The caller's own live wants on this show (FR-A13): one query.
+        wanted_by_me=frozenset(
+            (
+                await session.scalars(
+                    select(Want.episode_id).where(
+                        Want.user_id == user.id,
+                        Want.dropped_at.is_(None),
+                        Want.episode_id.in_(episode_ids),
+                    )
+                )
+            ).all()
+        )
+        if episode_ids
+        else frozenset(),
         sample=(
             SampleOut.build(want, by_id[want.episode_id])
             if want is not None and want.episode_id in by_id

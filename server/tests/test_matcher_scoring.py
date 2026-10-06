@@ -623,3 +623,120 @@ class TestOffsetCandidates:
 
     def test_a_batch_is_never_offset(self) -> None:
         assert offset_candidates(parse("[G] Vinland Saga - 01-30 [1080p].mkv"), self.pool()) == []
+
+
+PREQUEL_EDGE = ({"relation_type": "PREQUEL", "anilist_id": 1},)
+
+
+def show(
+    anime_id: int, title: str, *, prequel: bool, episodes: int = 21, **extra: object
+) -> Candidate:
+    """A finished TV entry with one published title, and a prequel if asked."""
+    fields: dict[str, object] = {
+        "anime_id": anime_id,
+        "anilist_id": anime_id,
+        "titles": (title,),
+        "format": "TV",
+        "episodes": episodes,
+        "status": "FINISHED",
+        "relations": PREQUEL_EDGE if prequel else (),
+    }
+    fields.update(extra)
+    return Candidate(**fields)  # type: ignore[arg-type]
+
+
+class TestNumberedSequels:
+    """A catalogue title ending in a bare 2–9, with a PREQUEL, is that season (2026-10-06).
+
+    Production sent ``[SubsPlease] Mairimashita! Iruma-kun S2 - 01v2`` to review
+    with *Mairimashita! Iruma-kun 2* sitting in the pool, because the
+    catalogue side never read the ``2`` as a season. The candidate is now
+    weighed both ways and the better kept.
+    """
+
+    def pool(self) -> list[Candidate]:
+        return [
+            show(1, "Mairimashita! Iruma-kun", prequel=False, episodes=23),
+            show(2, "Mairimashita! Iruma-kun 2", prequel=True),
+            show(3, "Mairimashita! Iruma-kun 3", prequel=True),
+        ]
+
+    def result(self, name: str, pool: list[Candidate]) -> MatchResult:
+        parsed = parse(name)
+        return rank([score(parsed, candidate) for candidate in pool], minimum=MINIMUM)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[SubsPlease] Mairimashita! Iruma-kun S2 - 05 (1080p)",
+            "[SubsPlease] Mairimashita! Iruma-kun S2 - 01v2 (720p) [C9B9491C].mkv",
+        ],
+    )
+    def test_s2_links_the_numbered_sequel(self, name: str) -> None:
+        result = self.result(name, self.pool())
+        best = result.best
+        assert best is not None and best.anime_id == 2
+        assert best.exact_title
+        assert "title number read as season 2" in best.reasons
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_it_scores_exactly_like_an_explicit_season_title(self) -> None:
+        """No bonus and no discount: ``… 2`` with a prequel is ``… Season 2``."""
+        parsed = parse("[SubsPlease] Mairimashita! Iruma-kun S2 - 05 (1080p)")
+        numbered = score(parsed, show(2, "Mairimashita! Iruma-kun 2", prequel=True))
+        explicit = score(parsed, show(2, "Mairimashita! Iruma-kun Season 2", prequel=True))
+        assert numbered.score == pytest.approx(explicit.score)
+        assert numbered.title == explicit.title == 1.0
+
+    def test_dagashi_kashi(self) -> None:
+        pool = [
+            show(1, "Dagashi Kashi", prequel=False, episodes=12),
+            show(2, "Dagashi Kashi 2", prequel=True, episodes=12),
+        ]
+        result = self.result("[HorribleSubs] Dagashi Kashi S2 - 03 [1080p]", pool)
+        assert result.best is not None and result.best.anime_id == 2
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_the_literal_title_still_matches_exactly(self) -> None:
+        """``Iruma-kun 2 - 05`` names the entry as written; that reading is kept."""
+        result = self.result("[G] Mairimashita! Iruma-kun 2 - 05 [1080p].mkv", self.pool())
+        assert result.best is not None and result.best.anime_id == 2
+        assert result.best.exact_title
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_no_season_still_means_the_first(self) -> None:
+        result = self.result("[G] Mairimashita! Iruma-kun - 05 [1080p].mkv", self.pool())
+        assert result.best is not None and result.best.anime_id == 1
+
+    def test_another_season_is_not_this_one(self) -> None:
+        result = self.result("[G] Mairimashita! Iruma-kun S3 - 05 [1080p].mkv", self.pool())
+        assert result.best is not None and result.best.anime_id == 3
+
+    def test_without_a_prequel_the_number_stays_part_of_the_name(self) -> None:
+        """No PREQUEL, no reading: an S2 file is not auto-linked to a guess."""
+        lone = show(2, "Dagashi Kashi 2", prequel=False, episodes=12)
+        assert not lone.has_numbered_reading
+        result = self.result("[HorribleSubs] Dagashi Kashi S2 - 03 [1080p]", [lone])
+        assert result.best is not None
+        assert not result.best.exact_title
+        assert not result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    @pytest.mark.parametrize(
+        ("title", "name"),
+        [
+            ("Mob Psycho 100", "[G] Mob Psycho 100 - 07 [1080p].mkv"),
+            ("Steins;Gate 0", "[Commie] Steins;Gate 0 - 11 [BD 1080p].mkv"),
+            ("Darling in the Franxx", "[G] Darling in the FranXX - 05 [1080p].mkv"),
+        ],
+    )
+    def test_names_ending_in_a_number_are_unaffected(self, title: str, name: str) -> None:
+        """Even with a PREQUEL edge: 100, 0 and no digit are never seasons."""
+        candidate = show(5, title, prequel=True, episodes=24)
+        assert not candidate.has_numbered_reading
+        scored = score(parse(name), candidate)
+        assert scored.exact_title
+        assert not any("title number" in reason for reason in scored.reasons)
+
+    def test_a_film_numbered_two_is_not_a_season(self) -> None:
+        film = show(6, "Dagashi Kashi 2", prequel=True, format="MOVIE", episodes=1)
+        assert not film.has_numbered_reading

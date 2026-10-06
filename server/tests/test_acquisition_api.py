@@ -174,6 +174,7 @@ async def test_a_downloading_episode_reports_its_progress_and_release(
         "title": "[SubsPlease] Sousou no Frieren - 07 (1080p) [24356E19].mkv",
         "seeders": 155,
         "batch": False,
+        "manual": False,
     }
     assert episode["unavailable_reason"] is None
 
@@ -236,6 +237,7 @@ async def test_a_batch_backed_episode_reports_its_own_file_and_says_it_is_a_pack
         "title": "[Judas] Kimetsu no Yaiba [BD 1080p]",
         "seeders": 41,
         "batch": True,
+        "manual": False,
     }
 
 

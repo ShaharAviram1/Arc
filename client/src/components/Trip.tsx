@@ -8,6 +8,7 @@ import {
   inputClass,
   LABEL_CLASS,
 } from '@/components/ui'
+import { ChoosePackButton } from '@/components/ReleaseSheet'
 import type { AnimeDetail } from '@/lib/anime'
 import { formatSize } from '@/lib/review'
 import {
@@ -377,17 +378,21 @@ export function TripPanel({ trip }: { trip: Trip }) {
               : ` · the server keeps each copy until this device has it, at most until ${dateOf(trip.deadline_at)}`}
           </p>
         </div>
-        <button
-          type="button"
-          aria-expanded={confirming}
-          className={buttonClass('chip', 'h-9 px-4 text-[13px]')}
-          onClick={() => {
-            cancel.reset()
-            setConfirming(!confirming)
-          }}
-        >
-          Cancel trip
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* FR-A13: point the trip's pending episodes at a pack of your choosing. */}
+          <ChoosePackButton tripId={trip.id} animeId={trip.anime_id} />
+          <button
+            type="button"
+            aria-expanded={confirming}
+            className={buttonClass('chip', 'h-9 px-4 text-[13px]')}
+            onClick={() => {
+              cancel.reset()
+              setConfirming(!confirming)
+            }}
+          >
+            Cancel trip
+          </button>
+        </div>
       </div>
 
       {confirming ? (
