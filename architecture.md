@@ -1435,6 +1435,18 @@ trip's `pending` episodes, and only episodes with nothing landed
   rather than with the unnumbered first season. The numbered-sequel reading is
   catalogue-side only and never enters `parse()`, so it cannot conflict there;
   in Nyaa an explicit mark already outranks it (`release_season`).
+- **The prior needs the season too** (2026-10-06, VARYG `…Iruma.kun.S04E11…`
+  linked to *Mairimashita! Iruma-kun 2* ep 11). `matcher.entry_season` is the
+  entry's own season (its titles' mark under the numbered-sequel reading where
+  it has one, else 1 — what `nyaa.anime_season` gives the downloader). In
+  `_score` the prior is not believed for a reading whose season the file's
+  explicit mark contradicts (reason "…, but the file names season N"); and
+  `jobs.match_file`, after the season-conflict check, loads the expected row
+  and sends a file for which `prior_season_mismatch` answers to review with
+  "file names season N, the download expected season M", whatever the
+  confidence, candidates kept. A file with no mark, or the entry's own, is
+  unchanged. Pack members already refuse another season in
+  `batch._member_number` and do not read the prior there.
 - `library.link.link()` is the single place a file is attached to an
   episode (auto-link and review confirm); it sets `matched` without
   downgrading `preparing`/`ready`. M7 enqueues the transcode right after it.
@@ -6055,3 +6067,7 @@ asked*, so `make test` is exactly as fast as it was.
   a pack member so named maps to no episode (`batch._member_number`).
   Release-name corpus 265 → 269 (`conflicting_seasons` is an optional corpus
   key, asserted `[]` on every line that omits it); query corpus 26 → 27 cases.
+- 2026-10-06 — §5.2a: the expected-episode prior is not believed for, and
+  `match_file` does not auto-link, a file whose explicit season mark disagrees
+  with the downloaded entry's season (`prior_season_mismatch`); review reason
+  "file names season N, the download expected season M".

@@ -434,6 +434,179 @@ class TestTheThreshold:
         assert media_file.match_candidates[-1] == {"reason": "names two seasons (4 and 2)"}
 
 
+#: *Mairimashita! Iruma-kun 2*'s prequel edge: what makes the trailing ``2`` a
+#: season under the numbered-sequel reading. Made-up ids.
+IRUMA_PREQUEL = [{"relation_type": "PREQUEL", "anilist_id": 990001, "mal_id": None}]
+
+
+class TestAFileNamingAnotherSeasonThanItsDownload:
+    """2026-10-06: the download's prior does not cover a file of another season.
+
+    Production: a download of *Mairimashita! Iruma-kun 2* episode 11 produced
+    ``Welcome.to.Demon.School.Iruma.kun.S04E11…``, and the prior linked season
+    4 to season 2. These run the real matcher (no forced result) so the prior
+    is what is under test, along with FR-L2's "a download's own file is linked
+    with the prior" for every name that agrees or says nothing.
+    """
+
+    async def _iruma(self, session: AsyncSession, *, numbered: bool) -> Anime:
+        anime = Anime(
+            anilist_id=990002,
+            title_romaji="Mairimashita! Iruma-kun 2" if numbered else "Mairimashita! Iruma-kun",
+            format="TV",
+            episodes=21,
+            status="FINISHED",
+            relations=IRUMA_PREQUEL if numbered else [],
+        )
+        session.add(anime)
+        await session.flush()
+        return anime
+
+    async def _season_two(self, session: AsyncSession) -> Anime:
+        anime = Anime(
+            anilist_id=990003,
+            title_romaji="Mairimashita! Iruma-kun Season 2",
+            format="TV",
+            episodes=21,
+            status="FINISHED",
+        )
+        session.add(anime)
+        await session.flush()
+        return anime
+
+    async def test_the_varyg_file_goes_to_review(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        anime = await self._iruma(db_session, numbered=True)
+        name = (
+            "Welcome.to.Demon.School.Iruma.kun.S04E11.1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG.mkv"
+        )
+        media_file = await add_file(db_session, tmp_path, name)
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.episode_id is None
+        assert media_file.match_candidates is not None
+        assert media_file.match_candidates[-1] == {
+            "reason": "file names season 4, the download expected season 2"
+        }
+        kept = [item for item in media_file.match_candidates if "anime_id" in item]
+        assert any(item["anime_id"] == anime.id for item in kept), "candidates are kept"
+
+    async def test_the_prior_is_refused_however_sure_the_result(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The handler's gate, not only the score: a forced sure result still waits."""
+        anime = await self._season_two(db_session)
+        media_file = await add_file(
+            db_session, tmp_path, "[Group] Mairimashita! Iruma-kun S4 - 11 (1080p).mkv"
+        )
+        force(
+            monkeypatch,
+            MatchResult(
+                candidates=(Scored(anime.id, 11, 0.99, title=1.0, exact_title=True, prior=True),),
+                confidence=0.99,
+            ),
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.match_candidates is not None
+        assert media_file.match_candidates[-1] == {
+            "reason": "file names season 4, the download expected season 2"
+        }
+
+    async def test_an_entry_with_no_mark_is_season_one(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        anime = await self._iruma(db_session, numbered=False)
+        media_file = await add_file(
+            db_session, tmp_path, "[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p).mkv"
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.match_candidates is not None
+        assert media_file.match_candidates[-1] == {
+            "reason": "file names season 2, the download expected season 1"
+        }
+
+    async def test_an_agreeing_name_is_linked_with_the_prior(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """FR-L2: the download's own file, naming the same season, links."""
+        anime = await self._season_two(db_session)
+        media_file = await add_file(
+            db_session, tmp_path, "[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p).mkv"
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.AUTO
+        episode = await db_session.get(Episode, media_file.episode_id or 0)
+        assert episode is not None
+        assert (episode.anime_id, episode.number) == (anime.id, 11)
+
+    async def test_a_name_with_no_season_is_linked_with_the_prior(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        anime = await self._season_two(db_session)
+        media_file = await add_file(
+            db_session, tmp_path, "[Group] Mairimashita! Iruma-kun - 11 (1080p).mkv"
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.AUTO
+        episode = await db_session.get(Episode, media_file.episode_id or 0)
+        assert episode is not None
+        assert (episode.anime_id, episode.number) == (anime.id, 11)
+
+    async def test_a_numbered_sequel_takes_its_own_season(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """*… 2* with a ``PREQUEL`` edge is season 2, so ``S2 - 11`` agrees."""
+        anime = await self._iruma(db_session, numbered=True)
+        media_file = await add_file(
+            db_session, tmp_path, "[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p).mkv"
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.AUTO
+        episode = await db_session.get(Episode, media_file.episode_id or 0)
+        assert episode is not None
+        assert (episode.anime_id, episode.number) == (anime.id, 11)
+
+
 class TestTheTitleBar:
     """The second bar the handler applies: ``MATCH_MIN_TITLE_FOR_AUTO``."""
 

@@ -40,7 +40,12 @@ from arc.services.catalog.factory import catalog_for
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest, suggest
 from arc.services.library.link import LinkError, link
-from arc.services.library.matcher import MatchResult, match
+from arc.services.library.matcher import (
+    MatchResult,
+    match,
+    prior_season_mismatch,
+    prior_season_reason,
+)
 from arc.services.library.names import (
     LIBRARY_SCAN,
     LLM_SUGGEST_MATCH,
@@ -224,6 +229,23 @@ async def match_file(ctx: JobContext) -> None:
         ctx.log.info(
             "media file names two seasons",
             extra={"media_file_id": media_file_id, "seasons": list(parsed.conflicting_seasons)},
+        )
+        return
+    prior_row = await ctx.session.get(Anime, expected[0]) if expected is not None else None
+    mismatch = prior_season_mismatch(parsed, prior_row) if prior_row is not None else None
+    if mismatch is not None:
+        # ``S04E11`` landing for a season-2 download (2026-10-06): the file
+        # says which season it is and it is not the one Arc asked for, so the
+        # download's prior is no evidence for it (FR-L2). Not linked to the
+        # prior's entry nor to anything else on the strength of this download.
+        await _review(ctx, media_file, result, prior_season_reason(*mismatch))
+        ctx.log.info(
+            "media file names another season than its download",
+            extra={
+                "media_file_id": media_file_id,
+                "file_season": mismatch[0],
+                "expected_season": mismatch[1],
+            },
         )
         return
     if best.episode_number is None:

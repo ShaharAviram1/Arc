@@ -26,6 +26,7 @@ from arc.services.library.matcher import (
     MatchResult,
     Scored,
     confidence_of,
+    entry_season,
     episode_plausibility,
     format_agreement,
     offset_candidates,
@@ -754,3 +755,36 @@ class TestNumberedSequels:
     def test_a_film_numbered_two_is_not_a_season(self) -> None:
         film = show(6, "Dagashi Kashi 2", prequel=True, format="MOVIE", episodes=1)
         assert not film.has_numbered_reading
+
+
+class TestThePriorNeedsTheSeason:
+    """A file naming another season than the prior's entry is not believed (2026-10-06).
+
+    ``Welcome.to.Demon.School.Iruma.kun.S04E11…`` arrived for a download of
+    *Mairimashita! Iruma-kun 2* episode 11 and the prior linked it.
+    """
+
+    VARYG = "Welcome.to.Demon.School.Iruma.kun.S04E11.1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG.mkv"
+
+    def test_another_season_is_not_believed(self) -> None:
+        sequel = show(2, "Mairimashita! Iruma-kun 2", prequel=True)
+        scored = score(parse(self.VARYG), sequel, episode=11, prior=True)
+        assert scored.prior is False
+        assert "expected episode for this download, but the file names season 4" in scored.reasons
+        assert entry_season(sequel) == 2
+
+    def test_the_same_season_is_believed_through_the_numbered_reading(self) -> None:
+        sequel = show(2, "Mairimashita! Iruma-kun 2", prequel=True)
+        parsed = parse("[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p).mkv")
+        assert score(parsed, sequel, episode=11, prior=True).prior is True
+
+    def test_no_mark_is_believed(self) -> None:
+        sequel = show(2, "Mairimashita! Iruma-kun Season 2", prequel=True)
+        parsed = parse("[Group] Mairimashita! Iruma-kun - 11 (1080p).mkv")
+        assert score(parsed, sequel, episode=11, prior=True).prior is True
+
+    def test_an_unmarked_entry_is_season_one(self) -> None:
+        first = show(1, "Mairimashita! Iruma-kun", prequel=False)
+        assert entry_season(first) == 1
+        assert score(parse("[G] Mairimashita! Iruma-kun S1 - 11.mkv"), first, prior=True).prior
+        assert not score(parse("[G] Mairimashita! Iruma-kun S2 - 11.mkv"), first, prior=True).prior

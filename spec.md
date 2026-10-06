@@ -528,7 +528,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   `… S04E11 … (Mairimashita! Iruma-kun 2nd Season, …)`): the parser reports
   the conflict and withholds the season, and such a file always goes to the
   match-review queue with the reason "names two seasons (4 and 2)", however
-  sure the match looks (FR-L4).
+  sure the match looks (FR-L4). **A download's own file is linked with the
+  prior only when its name agrees on the season** (2026-10-06): a file whose
+  explicit season mark names a season other than the downloaded entry's (its
+  title's mark or numbered-sequel reading, else 1) goes to review with "file
+  names season 4, the download expected season 2"; no mark, or the same one,
+  links as before.
 - FR-L3 Matching resolves the parsed title against AniList (local cache first,
   then AniList search) and computes a confidence score. Files downloaded by
   Arc for a known episode start with a strong prior for that episode.
@@ -2244,3 +2249,10 @@ through the same edge, without the grace period.
   manual list) and the matcher sends such a file to review with the same
   sentence. Marks that agree (`S02E11` beside `2nd Season`) are season 2 as
   before.
+- 2026-10-06 (owner incident: `Welcome.to.Demon.School.Iruma.kun.S04E11…VARYG.mkv`
+  and its siblings S04E12–E16 were auto-linked to episodes 11–16 of
+  *Mairimashita! Iruma-kun 2* by the download's prior) — **FR-L2: the prior
+  does not cover a file naming another season.** The matcher no longer
+  believes the prior for such a file and `match_file` sends it to review with
+  "file names season N, the download expected season M", candidates kept.
+  Agreeing or unmarked names link with the prior as before.

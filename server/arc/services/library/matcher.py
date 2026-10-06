@@ -481,6 +481,47 @@ def candidate_season(candidate: Candidate) -> int | None:
     return None
 
 
+def entry_season(candidate: Candidate) -> int:
+    """The season a catalogue entry *is*: its titles' mark, else season 1.
+
+    Under the numbered-sequel reading where the entry has one, so *Mairimashita!
+    Iruma-kun 2* with a ``PREQUEL`` edge is season 2 — the same answer
+    :func:`~arc.services.acquisition.nyaa.anime_season` gives the downloader.
+    """
+    reading = candidate.as_numbered() if candidate.has_numbered_reading else candidate
+    return candidate_season(reading) or 1
+
+
+def file_season_disagrees(parsed: ParsedName, season: int) -> bool:
+    """Whether the file's own explicit season mark names a season other than ``season``.
+
+    A name with no mark (or with marks that disagree among themselves, which
+    :attr:`ParsedName.season_conflict` reports separately) disagrees with
+    nothing here.
+    """
+    return parsed.season is not None and parsed.season != season
+
+
+def prior_season_mismatch(parsed: ParsedName, row: Anime) -> tuple[int, int] | None:
+    """``(file season, entry season)`` when a file contradicts its download's entry.
+
+    2026-10-06: ``Welcome.to.Demon.School.Iruma.kun.S04E11…`` landed for a
+    download of *Mairimashita! Iruma-kun 2* episode 11, and the prior linked a
+    season-4 episode to season 2. A file whose name says which season it is,
+    and says another one, is not the episode Arc asked for — whatever the
+    download claimed (FR-L2, FR-L4).
+    """
+    season = entry_season(_candidate_from_row(row, origin="prior"))
+    if parsed.season is None or not file_season_disagrees(parsed, season):
+        return None
+    return parsed.season, season
+
+
+def prior_season_reason(file_season: int, expected_season: int) -> str:
+    """The review sentence for :func:`prior_season_mismatch`."""
+    return f"file names season {file_season}, the download expected season {expected_season}"
+
+
 def episode_plausibility(parsed: ParsedName, candidate: Candidate, episode: int | None) -> float:
     """Whether ``episode`` can exist on this show, 0..1.
 
@@ -673,7 +714,12 @@ def _score(
         + FORMAT_WEIGHT * fmt
         + YEAR_WEIGHT * year
     ) / BASE_WEIGHT
-    believed = prior and title >= PRIOR_MIN_TITLE
+    # A file that names a season other than this reading's is not the episode
+    # the download asked for (2026-10-06): the prior is not believed for it.
+    # :func:`score` keeps the better reading, so ``S2`` still believes the
+    # numbered reading of *… 2*.
+    wrong_season = prior and file_season_disagrees(parsed, candidate_season(candidate) or 1)
+    believed = prior and title >= PRIOR_MIN_TITLE and not wrong_season
     if believed:
         total += PRIOR_WEIGHT * (1.0 - total)
 
@@ -688,11 +734,14 @@ def _score(
         f"from {candidate.origin}",
     ]
     if prior:
-        reasons.append(
-            "expected episode for this download"
-            if believed
-            else "expected episode for this download, but the title disagrees"
-        )
+        if believed:
+            reasons.append("expected episode for this download")
+        elif wrong_season:
+            reasons.append(
+                f"expected episode for this download, but the file names season {parsed.season}"
+            )
+        else:
+            reasons.append("expected episode for this download, but the title disagrees")
     if penalty:
         reasons.append(f"absolute numbering (-{penalty:.2f})")
     return Scored(
@@ -1002,12 +1051,16 @@ __all__ = [
     "candidate_part",
     "candidate_season",
     "confidence_of",
+    "entry_season",
     "episode_plausibility",
+    "file_season_disagrees",
     "format_agreement",
     "match",
     "offline_candidates",
     "offset_candidates",
     "part_factor",
+    "prior_season_mismatch",
+    "prior_season_reason",
     "rank",
     "score",
     "search_candidates",
