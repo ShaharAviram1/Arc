@@ -112,6 +112,7 @@ from arc.services.library.parser import (
     SeasonMark,
     is_numbered_sequel,
     parse,
+    season_conflict_reason,
     strip_season,
     title_key,
 )
@@ -1605,6 +1606,11 @@ def _acceptable_batch(
     this show's, and this season's, and :attr:`Candidate.covers` is empty so
     that the pick can see that its coverage was never claimed.
     """
+    if parsed.season_conflict:
+        # Before the coverage test, whose absolute reading reads a null season
+        # as "names none": this one names two (see :func:`acceptable`).
+        _rejected_into(why, item, season_conflict_reason(parsed))
+        return None
     span = parsed.episode_span
     running = number + offset if offset else None
     absolute = running is not None and parsed.season is None and running in span
@@ -1823,6 +1829,15 @@ def acceptable(
         return Candidate(item=item, parsed=parsed, title_similarity=similarity)
     if parsed.kind != "episode":
         _rejected_into(why, item, f"parsed as {parsed.kind}, not a single episode")
+        return None
+    if parsed.season_conflict:
+        # Season marks that disagree (2026-10-06): ``… S04E11 … (Mairimashita!
+        # Iruma-kun 2nd Season, …)`` is season 4 by one mark and season 2 by
+        # the other, and which one the file really is cannot be read off the
+        # name. The parser withholds the season, so this must come before the
+        # absolute reading below — which takes a null season to mean "names
+        # none" — as well as before the season check.
+        _rejected_into(why, item, season_conflict_reason(parsed))
         return None
     # The absolute reading, and only where the release itself offers no season:
     # one that names a season has said which episode it is, and the ordinary

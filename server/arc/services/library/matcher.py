@@ -534,7 +534,20 @@ def season_agreement(parsed: ParsedName, candidate: Candidate) -> float:
     are numbered by arc rather than by season — a release that says ``S3``
     where the catalogue says ``Katanakaji no Sato-hen`` should still reach the
     review queue with the right show in it rather than be thrown away.
+
+    A name whose season marks **disagree** (:attr:`ParsedName.season_conflict`,
+    2026-10-06) carries ``season=None``, which on its own would read as "a first
+    season" and float the unnumbered entry to the top. It is scored instead as
+    the best of the seasons it claims, so the review shortlist leads with an
+    entry one of its marks names. Only the shortlist: such a file never
+    auto-links (:func:`~arc.services.library.jobs.match_file` sends it to
+    review whatever it scores), because picking one of the marks is a guess.
     """
+    if parsed.season_conflict:
+        return max(
+            season_agreement(replace(parsed, season=claimed, conflicting_seasons=()), candidate)
+            for claimed in parsed.conflicting_seasons
+        )
     theirs = candidate_season(candidate)
     if parsed.season is None:
         base = 1.0 if theirs is None else 0.2

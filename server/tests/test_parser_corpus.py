@@ -36,6 +36,13 @@ MIN_TITLE_PRECISION = 0.93
 #: wide for cases that are all the same three answers.
 FIELDS = ("title_key", "episode", "season", "kind", "group", "version")
 
+#: Pinned only by the lines that need it, and asserted on **every** line: a
+#: line that does not state it expects ``[]``. ``conflicting_seasons`` is the
+#: name whose season marks disagree (2026-10-06) — ``S04E11`` beside ``2nd
+#: Season`` — and defaulting it to "no conflict" means every older line also
+#: asserts that the parser found none in it.
+OPTIONAL_FIELDS: dict[str, Any] = {"conflicting_seasons": []}
+
 
 class Case(NamedTuple):
     """One corpus line."""
@@ -67,7 +74,7 @@ CASES = load_corpus()
 #: architecture.md §10 asks for at least 200 real names; the corpus stands
 #: well above that, and the floor is set at where it stands so that the cases
 #: added for a bug cannot be quietly deleted along with the fix.
-MIN_CASES = 265
+MIN_CASES = 269
 
 
 def test_corpus_is_big_enough() -> None:
@@ -78,14 +85,16 @@ def test_corpus_is_big_enough() -> None:
 def test_corpus_pins_every_field() -> None:
     """Every line must state every field, so a missing key cannot pass."""
     for case in CASES:
-        assert set(case.expected) == set(FIELDS), case.id
+        assert set(case.expected) - set(OPTIONAL_FIELDS) == set(FIELDS), case.id
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
 def test_corpus_case(case: Case) -> None:
     parsed = parse(case.name)
-    actual = {field: getattr(parsed, field) for field in FIELDS}
-    assert actual == case.expected
+    actual: dict[str, Any] = {field: getattr(parsed, field) for field in FIELDS}
+    actual["conflicting_seasons"] = list(parsed.conflicting_seasons)
+    expected = {**OPTIONAL_FIELDS, **case.expected}
+    assert actual == expected
 
 
 def _precision(cases: list[Case], check: Any) -> tuple[int, int]:

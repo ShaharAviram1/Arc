@@ -215,6 +215,20 @@ class TestSeasonAgreement:
         )
         assert 0.0 < value < 1.0
 
+    def test_a_name_with_two_seasons_scores_as_the_best_of_them(self) -> None:
+        """2026-10-06: its null season must not read as "a first season".
+
+        Only the review shortlist's order rides on this — such a file never
+        auto-links (``match_file``) — but a null season alone would put the
+        unnumbered first season above the entry one of its marks names.
+        """
+        parsed = parse("[G] Vinland Saga S2 - 05 (Vinland Saga 3rd Season) [1080p].mkv")
+        assert parsed.season_conflict
+        assert season_agreement(parsed, frieren(titles=("Vinland Saga Season 3",))) == 1.0
+        assert season_agreement(parsed, frieren(titles=("Vinland Saga Season 2",))) == 1.0
+        assert season_agreement(parsed, frieren(titles=("Vinland Saga Season 4",))) == 0.0
+        assert season_agreement(parsed, frieren(titles=("Vinland Saga",))) < 1.0
+
 
 class TestFormatAndYear:
     @pytest.mark.parametrize(

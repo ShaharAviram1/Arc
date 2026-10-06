@@ -622,6 +622,84 @@ def test_a_release_that_writes_the_numbered_title_names_its_season() -> None:
     assert release_season(parse("[Erai-raws] Dagashi Kashi 2 - 03 [1080p]"), literal, 2) is None
 
 
+# --- Two seasons in one name (2026-10-06) ------------------------------------
+
+VARYG_CONFLICT = (
+    "Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG"
+    " (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)"
+)
+
+
+def _iruma_2() -> Anime:
+    return Anime(
+        anilist_id=112284,
+        title_romaji="Mairimashita! Iruma-kun 2",
+        title_english="Welcome to Demon School! Iruma-kun Season 2",
+        format="TV",
+        episodes=21,
+        relations=[relation("PREQUEL", anilist_id=101284)],
+    )
+
+
+def test_a_release_naming_two_seasons_is_rejected_with_both() -> None:
+    """``S04E11`` beside ``2nd Season``: production fetched four of these as season 2."""
+    anime = _iruma_2()
+    why: list[str] = []
+
+    found = acceptable(
+        seeded(VARYG_CONFLICT, 50),
+        titles=anime_titles(anime),
+        number=11,
+        season=anime_season(anime),
+        why=why,
+    )
+
+    assert found is None
+    assert why == ["names two seasons (4 and 2)"]
+    # And the same shape whose marks agree is an ordinary season-2 release.
+    agreeing = VARYG_CONFLICT.replace("S04E11", "S02E11")
+    assert (
+        acceptable(
+            seeded(agreeing, 50), titles=anime_titles(anime), number=11, season=anime_season(anime)
+        )
+        is not None
+    )
+
+
+def test_a_two_season_name_is_not_rescued_by_the_absolute_reading() -> None:
+    """The parser withholds its season, and a null season must not read as "names none"."""
+    why: list[str] = []
+    name = VARYG_CONFLICT.replace("S04E11", "S04E35")
+    found = acceptable(
+        seeded(name, 50),
+        titles=("Welcome to Demon School! Iruma-kun",),
+        number=11,
+        season=None,
+        offset=24,
+        why=why,
+    )
+
+    assert found is None
+    assert why == ["names two seasons (4 and 2)"]
+
+
+def test_a_two_season_batch_is_rejected_even_when_batches_are_asked_for() -> None:
+    why: list[str] = []
+    name = "[Grp] Overlord II S1 [BATCH] (01-13) [1080p]"
+    assert parse(name).season_conflict
+    found = acceptable(
+        seeded(name, 50),
+        titles=("Overlord II",),
+        number=5,
+        season=2,
+        batches=True,
+        why=why,
+    )
+
+    assert found is None
+    assert why == ["names two seasons (1 and 2)"]
+
+
 # --- Symbols: a star a group does not write (2026-09-14) --------------------
 
 

@@ -395,6 +395,44 @@ class TestTheThreshold:
         assert media_file.match_candidates is not None
         assert media_file.match_candidates[-1] == {"reason": library_jobs.REASON_NO_EPISODE}
 
+    async def test_a_name_with_two_seasons_goes_to_review_however_sure(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """2026-10-06: ``S04E11`` beside ``2nd Season`` is a guess either way (FR-L4).
+
+        The forced result is as sure as a result can be — exact title, the
+        download's own prior — and the file still goes to a person, with the
+        candidates kept for them and the sentence the Nyaa filter uses.
+        """
+        anime = Anime(anilist_id=FRIEREN_ID, title_romaji="Mairimashita! Iruma-kun 2", episodes=21)
+        db_session.add(anime)
+        await db_session.flush()
+        name = (
+            "Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG"
+            " (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs).mkv"
+        )
+        media_file = await add_file(db_session, tmp_path, name)
+        force(
+            monkeypatch,
+            MatchResult(
+                candidates=(Scored(anime.id, 11, 0.99, title=1.0, exact_title=True, prior=True),),
+                confidence=0.99,
+            ),
+        )
+
+        await run_match(db_session, library_settings, media_file.id, expected=[anime.id, 11])
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.episode_id is None
+        assert media_file.match_candidates is not None
+        assert media_file.match_candidates[0]["anime_id"] == anime.id
+        assert media_file.match_candidates[-1] == {"reason": "names two seasons (4 and 2)"}
+
 
 class TestTheTitleBar:
     """The second bar the handler applies: ``MATCH_MIN_TITLE_FOR_AUTO``."""

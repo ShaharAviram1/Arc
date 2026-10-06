@@ -180,7 +180,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   (`S01E07`), a later season's marker written the three ways groups write it
   (a numbered sequel's bare trailing number counts as that marker, FR-L2:
   *Dagashi Kashi 2* is asked for as `Dagashi Kashi S2` and its `S2` releases
-  are its own season, not rejected as season 1),
+  are its own season, not rejected as season 1; a release whose name carries
+  two season marks that disagree, `S04E11` beside `2nd Season`, is rejected as
+  "names two seasons (4 and 2)", since which season it holds cannot be known),
   the head of a subtitled title, the bare title, and up to two of the show's
   other names — each of them also **with its symbols taken out**
   (`Yarichin☆Bitch-bu` → `Yarichin Bitch-bu`, `Love Live! Superstar!!` → `Love
@@ -521,7 +523,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   title without the number, so `… S2 - 05` matches it exactly as it would match
   a title spelled `… Season 2`, at the same confidence. Without the `PREQUEL`
   the number stays part of the name (*Mob Psycho 100*, *Steins;Gate 0*), and a
-  filename's own trailing number is never read as a season.
+  filename's own trailing number is never read as a season. **A name whose
+  season marks disagree names no season** (owner incident, 2026-10-06:
+  `… S04E11 … (Mairimashita! Iruma-kun 2nd Season, …)`): the parser reports
+  the conflict and withholds the season, and such a file always goes to the
+  match-review queue with the reason "names two seasons (4 and 2)", however
+  sure the match looks (FR-L4).
 - FR-L3 Matching resolves the parsed title against AniList (local cache first,
   then AniList search) and computes a confidence score. Files downloaded by
   Arc for a known episode start with a strong prior for that episode.
@@ -2228,3 +2235,12 @@ through the same edge, without the grace period.
   *Steins;Gate 0* and an entry with no relations stored behave as before, and
   their unmatched files still go to review rather than to a guess (FR-L4). The
   same kink recorded for *Dagashi Kashi 2* on 2026-09-18 is closed by it.
+- 2026-10-06 (owner incident: VARYG's `Welcome to Demon School Iruma kun
+  S04E11 … (Mairimashita! Iruma-kun 2nd Season, …)` was fetched as episodes
+  11-14 of *Mairimashita! Iruma-kun 2*) — **FR-L2/FR-A4: two season marks that
+  disagree make a name ambiguous.** The parser no longer lets the later mark
+  win: it withholds the season and reports the conflict; the Nyaa filter
+  rejects the release ("names two seasons (4 and 2)", also shown in FR-A13's
+  manual list) and the matcher sends such a file to review with the same
+  sentence. Marks that agree (`S02E11` beside `2nd Season`) are season 2 as
+  before.

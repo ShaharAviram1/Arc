@@ -47,7 +47,7 @@ from arc.services.library.names import (
     MATCH_FILE,
     enqueue_suggestion,
 )
-from arc.services.library.parser import ParsedName, parse
+from arc.services.library.parser import ParsedName, parse, season_conflict_reason
 from arc.services.recs.base import RecsFailed, RecsRefused, RecsUnavailable
 from arc.services.recs.factory import shared_model
 
@@ -214,6 +214,17 @@ async def match_file(ctx: JobContext) -> None:
     if best is None:
         await _review(ctx, media_file, result, REASON_NO_CANDIDATES)
         ctx.log.info("no candidates for media file", extra={"media_file_id": media_file_id})
+        return
+    if parsed.season_conflict:
+        # Two season marks that disagree (``S04E11`` beside ``2nd Season``):
+        # which season the file is cannot be read off its name, so linking it
+        # through any season-dependent reading — or the prior's — would be a
+        # guess (FR-L4). The candidates are still gathered, for the person.
+        await _review(ctx, media_file, result, season_conflict_reason(parsed))
+        ctx.log.info(
+            "media file names two seasons",
+            extra={"media_file_id": media_file_id, "seasons": list(parsed.conflicting_seasons)},
+        )
         return
     if best.episode_number is None:
         await _review(ctx, media_file, result, REASON_NO_EPISODE)

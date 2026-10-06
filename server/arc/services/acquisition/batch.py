@@ -284,8 +284,15 @@ def _member_number(parsed: ParsedName, *, season: int | None, offset: int | None
       does has already answered the question the arithmetic is asking — and only
       above the prequel's own total, so the reading can never collide with the
       prequel's numbering.
+
+    A file whose name carries two season marks that disagree
+    (:attr:`~arc.services.library.parser.ParsedName.season_conflict`,
+    2026-10-06) is not one: its null season would otherwise read as "names
+    none" here, and which season it holds cannot be known.
     """
     if parsed.kind not in EPISODE_KINDS or parsed.episode is None:
+        return None
+    if parsed.season_conflict:
         return None
     if not parsed.extension or parsed.extension not in VIDEO_EXTENSIONS:
         return None

@@ -549,6 +549,20 @@ class ParsedName:
     #: worth storing about a file that arrived anyway. ``Dual Audio`` is not a
     #: dub: it has the original track too, so it is an ordinary candidate.
     dubbed: bool = False
+    #: The seasons a name claims when its season marks **disagree**, in the
+    #: order the parser read them (2026-10-06): ``Welcome to Demon School
+    #: Iruma kun S04E11 … (Mairimashita! Iruma-kun 2nd Season, …)`` is
+    #: ``(4, 2)``. Empty for every name whose marks agree or that has at most
+    #: one. When it is not empty :attr:`season` is ``None`` — which season the
+    #: file really is cannot be known from the name, and a guess is exactly
+    #: what FR-L4 forbids — so ``season is None`` alone no longer means "the
+    #: name says nothing"; :attr:`season_conflict` is what tells the two apart.
+    conflicting_seasons: tuple[int, ...] = ()
+
+    @property
+    def season_conflict(self) -> bool:
+        """Whether the name's season marks disagree (:attr:`conflicting_seasons`)."""
+        return bool(self.conflicting_seasons)
 
     @property
     def is_batch(self) -> bool:
@@ -566,7 +580,9 @@ class ParsedName:
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe mapping for ``media_files.parsed``."""
-        return asdict(self)
+        payload = asdict(self)
+        payload["conflicting_seasons"] = list(self.conflicting_seasons)
+        return payload
 
 
 def title_key(text: str) -> str:
@@ -734,6 +750,11 @@ class SeasonMark(NamedTuple):
     #: Dasu`` — right for matching, useless as a search query — and ``base`` as
     #: ``Mushoku Tensei``, which is the name release groups actually write.
     base: str = ""
+    #: Every season the title's markers named, in the order they were read,
+    #: duplicates dropped. :attr:`season` is the first of them; more than one
+    #: is a title that disagrees with itself (``Show II Season 3``), which
+    #: :func:`parse` reports as :attr:`ParsedName.conflicting_seasons`.
+    marks: tuple[int, ...] = ()
 
 
 def _numbered_tail(title: str) -> tuple[str, int] | None:
@@ -772,11 +793,17 @@ def _season_from_title(title: str, *, numbered: bool = False) -> SeasonMark:
     season: int | None = None
     part: int | None = None
     base: str | None = None
+    marks: list[int] = []
+
+    def mark(value: int) -> None:
+        if value not in marks:
+            marks.append(value)
 
     middle = _MID_SEASON_RE.search(title)
     if middle:
         marker = next(value for value in middle.groups() if value)
         season = _ROMAN.get(marker.upper()) or _marker_value(marker)
+        mark(season)
         base = title[: middle.start()].strip(" \t._-~:") or None
         title = (title[: middle.start()] + " " + title[middle.end() :]).strip(" \t._-~:")
         title = re.sub(r"\s+", " ", title)
@@ -788,6 +815,7 @@ def _season_from_title(title: str, *, numbered: bool = False) -> SeasonMark:
         if shout:
             if season is None:
                 season = len(shout.group("marks"))
+            mark(len(shout.group("marks")))
             title, changed = shout.group("head").strip(" \t._-~:"), True
             continue
         for pattern in _SEASON_PATTERNS:
@@ -798,6 +826,7 @@ def _season_from_title(title: str, *, numbered: bool = False) -> SeasonMark:
                     continue
                 if season is None:
                     season = _marker_value(matched.group(1))
+                mark(_marker_value(matched.group(1)))
                 title, changed = head, True
                 break
         if changed:
@@ -817,17 +846,19 @@ def _season_from_title(title: str, *, numbered: bool = False) -> SeasonMark:
             if value is not None and head:
                 if season is None:
                     season = value
+                mark(value)
                 title, changed = head, True
                 continue
         if numbered and season is None:
             tail = _numbered_tail(title)
             if tail is not None:
                 title, season = tail
+                mark(season)
                 changed = True
     if season is None:
         season = part
     stripped = title.strip(" \t._-~:")
-    return SeasonMark(stripped, season, part, base or stripped)
+    return SeasonMark(stripped, season, part, base or stripped, tuple(marks))
 
 
 def strip_season(title: str, *, numbered: bool = False) -> SeasonMark:
@@ -848,6 +879,22 @@ def strip_season(title: str, *, numbered: bool = False) -> SeasonMark:
     Nyaa query builder, each for a catalogue entry.
     """
     return _season_from_title(title, numbered=numbered)
+
+
+def season_conflict_reason(parsed: ParsedName) -> str:
+    """The sentence for a name whose season marks disagree: ``"names two seasons (4 and 2)"``.
+
+    The seasons in the order the parser read them
+    (:attr:`ParsedName.conflicting_seasons`). One sentence for both places
+    that refuse such a name — the Nyaa filter and the file matcher's review
+    queue — so a person who meets the release in the manual list and the file
+    in review reads one explanation. Empty for a name with no conflict.
+    """
+    marks = [str(value) for value in parsed.conflicting_seasons]
+    if len(marks) < 2:
+        return ""
+    count = "two" if len(marks) == 2 else str(len(marks))
+    return f"names {count} seasons ({', '.join(marks[:-1])} and {marks[-1]})"
 
 
 def is_numbered_sequel(relations: Iterable[Any] | None, fmt: str | None) -> bool:
@@ -1168,12 +1215,19 @@ def parse(name: str, *, path: bool = False) -> ParsedName:
 
     episode, episode_end, version, fraction = _episode_numbers(base, parsed)
 
-    season = _first_int(_as_list(parsed.get("anime_season")))
+    anitopy_seasons = _as_list(parsed.get("anime_season"))
+    season = _first_int(anitopy_seasons)
     if episode is None:
         matched = _SXXEXX_RE.search(base)
         if matched:
             season = season if season is not None else int(matched.group(1))
             episode = int(matched.group(2))
+    # Every season mark the name carries, for the disagreement check below:
+    # the ``SxxEyy`` marks first (the most explicit claim a name makes), then
+    # whatever anitopy read — it finds ``2nd Season`` inside a parenthetical
+    # the title never sees — and the title's own markers last.
+    season_marks: list[int] = [int(found.group(1)) for found in _SXXEXX_RE.finditer(base)]
+    season_marks.extend(int(value) for value in anitopy_seasons if value.isdigit())
 
     group = _group_of(base, stem, parsed)
     title = _clean_title(parsed.get("anime_title"), group=group)
@@ -1195,6 +1249,17 @@ def parse(name: str, *, path: bool = False) -> ParsedName:
     title = _TYPE_TAIL_RE.sub("", title).strip(" \t._-~:") or title
     if season is None:
         season = title_season
+    season_marks.extend(marked.marks)
+    # A name whose season marks disagree (``S04E11`` and ``2nd Season``,
+    # ``II`` and ``S1``) names no season Arc can use: which one the file really
+    # is cannot be read off the string, and "the later mark wins" is a guess.
+    # The season is withheld and the disagreement kept, so acquisition rejects
+    # the release and the matcher sends the file to review (2026-10-06).
+    conflicting = tuple(dict.fromkeys(season_marks))
+    if len(conflicting) > 1:
+        season = None
+    else:
+        conflicting = ()
 
     # A scene release puts the year in the title with nothing around it —
     # ``Your.Name.2016.1080p.BluRay.x264-GROUP``. Only for a scene stem (no
@@ -1254,6 +1319,7 @@ def parse(name: str, *, path: bool = False) -> ParsedName:
         year=year,
         extension=extension or None,
         dubbed=dubbed,
+        conflicting_seasons=conflicting,
     )
 
 
@@ -1269,6 +1335,7 @@ __all__ = [
     "basename",
     "is_numbered_sequel",
     "parse",
+    "season_conflict_reason",
     "strip_season",
     "title_key",
 ]

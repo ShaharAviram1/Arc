@@ -15,6 +15,7 @@ from arc.services.library.parser import (
     ParsedName,
     is_numbered_sequel,
     parse,
+    season_conflict_reason,
     strip_season,
     title_key,
 )
@@ -291,6 +292,56 @@ class TestSeasons:
     def test_five_spellings_agree(self, name: str) -> None:
         parsed = parse(name)
         assert (parsed.title_key, parsed.season, parsed.episode) == ("show name", 2, 4)
+
+    @pytest.mark.parametrize(
+        ("name", "seasons"),
+        [
+            (
+                "Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG"
+                " (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)",
+                (4, 2),
+            ),
+            ("[G] Show Name II - S01E04 [1080p].mkv", (1, 2)),
+            ("[G] Shingeki no Kyojin Season 3 - S02E05 [1080p].mkv", (2, 3)),
+            ("[G] Show Name S2 - 04 (Show Name 3rd Season) [1080p]", (3, 2)),
+        ],
+    )
+    def test_marks_that_disagree_name_no_season(self, name: str, seasons: tuple[int, ...]) -> None:
+        """2026-10-06: which season the file is cannot be read off the name."""
+        parsed = parse(name)
+        assert parsed.season is None
+        assert parsed.season_conflict
+        assert set(parsed.conflicting_seasons) == set(seasons)
+        assert parsed.episode is not None
+        assert season_conflict_reason(parsed).startswith("names two seasons (")
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[G] Show Name S02E04 (Show Name 2nd Season) [1080p]",
+            "[G] Show Name 2nd Season - S02E04 [1080p].mkv",
+            "[G] Show Name II - 04 [1080p].mkv",
+            "[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p)",
+        ],
+    )
+    def test_marks_that_agree_are_one_season(self, name: str) -> None:
+        parsed = parse(name)
+        assert parsed.season == 2
+        assert not parsed.season_conflict
+        assert season_conflict_reason(parsed) == ""
+
+    def test_the_reason_lists_the_seasons_in_the_order_they_were_read(self) -> None:
+        parsed = parse(
+            "Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG"
+            " (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)"
+        )
+        assert season_conflict_reason(parsed) == "names two seasons (4 and 2)"
+        assert parsed.as_dict()["conflicting_seasons"] == [4, 2]
+
+    def test_a_title_records_every_mark_it_read(self) -> None:
+        assert strip_season("Overlord II Season 3").marks == (3, 2)
+        assert strip_season("Overlord II").marks == (2,)
+        assert strip_season("Mushishi").marks == ()
 
     def test_a_marker_before_a_subtitle_is_found(self) -> None:
         parsed = parse("[G] Mushoku Tensei II - Isekai Ittara Honki Dasu - 03 [1080p].mkv")

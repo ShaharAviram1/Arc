@@ -279,6 +279,39 @@ def test_another_show_is_not_listed() -> None:
     assert not choice.listed and (choice.reason or "").startswith("title ")
 
 
+def test_a_release_naming_two_seasons_is_listed_as_not_acceptable() -> None:
+    """2026-10-06: ``S04E11`` beside ``2nd Season`` — listed, refused, and said why."""
+    iruma = Anime(
+        id=2,
+        anilist_id=2,
+        title_romaji="Mairimashita! Iruma-kun 2",
+        title_english="Welcome to Demon School! Iruma-kun Season 2",
+        format="TV",
+        status="FINISHED",
+        episodes=21,
+        relations=[{"anilist_id": 1, "relation_type": "PREQUEL", "format": "TV"}],
+    )
+    conflicting = (
+        "Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG"
+        " (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)"
+    )
+    pool = parse_feed(
+        _batch_pool(
+            (conflicting, "d" * 40, 80),
+            ("[SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p)", "a" * 40, 50),
+        )
+    )
+
+    choices = _classify(pool, anime=iruma, number=11, wanted_numbers=(11,), target_ids={110})
+
+    good, refused = choices
+    assert good.acceptable and good.info_hash == "a" * 40
+    assert refused.info_hash == "d" * 40
+    assert not refused.acceptable and refused.listed
+    assert refused.reason == "names two seasons (4 and 2)"
+    assert refused.kind == "single" and refused.covers == (11,)
+
+
 def test_packs_say_what_they_cover_and_a_thin_one_is_flagged_for_a_trip() -> None:
     pool = parse_feed(
         _batch_pool(

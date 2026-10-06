@@ -200,6 +200,15 @@ def test_a_file_naming_another_season_is_dropped() -> None:
     assert plan.refused_reason == "no file in the batch is episode 10"
 
 
+def test_a_file_naming_two_seasons_is_dropped() -> None:
+    """2026-10-06: its withheld season must not read as "this entry's" (season 1)."""
+    files = [file(0, "[Judas] Kimetsu no Yaiba S01E10 (Kimetsu no Yaiba 2nd Season).mkv")]
+
+    plan = plan_files(KIMETSU, (10,), files, required=10)
+
+    assert plan.refused_reason == "no file in the batch is episode 10"
+
+
 def test_a_file_that_names_no_title_is_still_taken_at_its_number() -> None:
     """The release name carried the identity; a member only carries a number.
 

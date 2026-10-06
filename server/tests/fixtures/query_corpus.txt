@@ -460,6 +460,25 @@ accept: [SubsPlease] Mairimashita! Iruma-kun 2 - 05 (1080p)
 reject: [SubsPlease] Mairimashita! Iruma-kun - 05 (1080p)
 reject: [SubsPlease] Mairimashita! Iruma-kun S3 - 05 (1080p)
 
+case: iruma-kun-2-two-seasons-in-one-name
+# 2026-10-06, production: VARYG writes Crunchyroll's English title with
+# Crunchyroll's own season count *and* the romaji title with its season in a
+# parenthetical. "S04E11" beside "2nd Season" names two seasons, the parser
+# read the later one, and Arc fetched episodes 11-14 of it for this entry.
+# Which season the file is cannot be read off the name, so it is refused
+# ("names two seasons (4 and 2)"); the same shape with marks that agree is an
+# ordinary season-2 release, and so is the SubsPlease name.
+romaji: Mairimashita! Iruma-kun 2
+english: Welcome to Demon School! Iruma-kun Season 2
+format: TV
+episodes: 21
+prequel: yes
+number: 11
+query: Mairimashita! Iruma-kun S2 - 11
+accept: [SubsPlease] Mairimashita! Iruma-kun S2 - 11 (1080p)
+accept: Welcome to Demon School Iruma kun S02E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)
+reject: Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)
+
 case: steins-gate-0-not-a-season
 # A trailing number that is a name, on an entry that *does* have a PREQUEL.
 # 0 is never a season, so the entry is asked for and matched as written.

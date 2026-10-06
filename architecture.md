@@ -1308,7 +1308,7 @@ trip's `pending` episodes, and only episodes with nothing landed
 - Parser: `anitopy` plus normalisation into `ParsedName` (title, `title_key`,
   episode/range, season, part, version, group, resolution, year, `dubbed`, kind:
   episode|batch|movie|special|nc|unknown). Pinned by
-  `tests/fixtures/release_names.txt` (265 names, 100 % on episode+kind and
+  `tests/fixtures/release_names.txt` (269 names, 100 % on episode+kind and
   title_key).
 - **A slash is a title character** (2026-09-14). `rsplit("/", 1)` read
   `[SubsPlease] Fate/Zero - 12 (1080p)` as a show called `Zero` with no release
@@ -1414,6 +1414,27 @@ trip's `pending` episodes, and only episodes with nothing landed
   therefore scores exactly what a `… Season 2` title scores for the same
   file; threshold, title bar and ambiguity cap are unchanged. The cold path
   (search summaries, no relations) never takes the reading.
+- **Season marks that disagree** (2026-10-06, FR-L2/FR-A4/FR-L4). `parse()`
+  collects every season mark a name carries — each `SxxEyy`, every value
+  anitopy returned in `anime_season` (it reads `2nd Season` out of a
+  parenthetical the title never sees), and every marker
+  `_season_from_title` stripped (`SeasonMark.marks`) — and when they hold two
+  or more distinct values sets `ParsedName.conflicting_seasons` (in that
+  order, deduplicated; `season_conflict` is its truth value, `as_dict` stores
+  it as a list) and **`season=None`**. The episode number is untouched.
+  `parser.season_conflict_reason` is the one sentence, `"names two seasons
+  (4 and 2)"`. Nyaa's `acceptable` rejects such a release with it right after
+  the kind check (before the absolute reading, which reads a null season as
+  "names none", and before the season check), and `_acceptable_batch` does
+  the same first; the manual release list (FR-A13) therefore shows it as not
+  acceptable with that reason. A pack's member file with such a name maps to no
+  episode (`batch._member_number`), for the same reason. `jobs.match_file` sends a conflicting file to
+  review with the same sentence after gathering candidates, whatever the
+  confidence or the prior; `season_agreement` scores it as the best of its
+  claimed seasons, so the shortlist leads with an entry one of its marks names
+  rather than with the unnumbered first season. The numbered-sequel reading is
+  catalogue-side only and never enters `parse()`, so it cannot conflict there;
+  in Nyaa an explicit mark already outranks it (`release_season`).
 - `library.link.link()` is the single place a file is attached to an
   episode (auto-link and review confirm); it sets `matched` without
   downgrading `preparing`/`ready`. M7 enqueues the transcode right after it.
@@ -3935,7 +3956,7 @@ two together.
 
 - Parser/matcher: corpus of ≥ 200 real release names with expected
   (title_key, episode, season, kind, group, version); assert confidence tiers.
-  `tests/fixtures/release_names.txt` stands at 265 names, 100 % on episode+kind
+  `tests/fixtures/release_names.txt` stands at 269 names, 100 % on episode+kind
   and title_key, with a floor in `test_parser_corpus.py` so the cases added for
   a bug cannot be deleted along with the fix.
 - **Query corpus** (`tests/fixtures/query_corpus.txt`, 2026-09-14): the other
@@ -6024,3 +6045,13 @@ asked*, so `make test` is exactly as fast as it was.
   writes the numbered title literally). Filenames are untouched; relation-less
   rows keep the literal reading. Acceptance fixture 98 → 102 cases, seeded
   auto-links 89 → 95 of 102, precision 100 %.
+- 2026-10-06 (owner incident: VARYG `… S04E11 … (Mairimashita! Iruma-kun 2nd
+  Season, …)` fetched for *Mairimashita! Iruma-kun 2*) — §5.2a: **season marks
+  that disagree.** `ParsedName.conflicting_seasons` (+ `season_conflict`),
+  `SeasonMark.marks`, `parser.season_conflict_reason`; `season` is null on a
+  conflict. Nyaa `acceptable`/`_acceptable_batch` reject with "names two
+  seasons (4 and 2)", `jobs.match_file` sends the file to review with it, and
+  `season_agreement` scores it as its best claimed season for the shortlist;
+  a pack member so named maps to no episode (`batch._member_number`).
+  Release-name corpus 265 → 269 (`conflicting_seasons` is an optional corpus
+  key, asserted `[]` on every line that omits it); query corpus 26 → 27 cases.

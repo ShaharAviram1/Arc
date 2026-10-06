@@ -387,3 +387,17 @@ Solo.Leveling.S02E12.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG.mkv	{"episode": 12, "gro
 [SubsPlease] Mob Psycho 100 - 05 (1080p)	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "mob psycho 100", "version": null}
 [SubsPlease] Steins;Gate 0 - 05 (1080p)	{"episode": 5, "group": "SubsPlease", "kind": "episode", "season": null, "title_key": "steins gate 0", "version": null}
 [HorribleSubs] Darling in the FranXX - 05 [1080p].mkv	{"episode": 5, "group": "HorribleSubs", "kind": "episode", "season": null, "title_key": "darling in the franxx", "version": null}
+# 2026-10-06: a name whose season marks disagree names no season. VARYG
+# uploads Crunchyroll's English title with an `SxxEyy` from Crunchyroll's own
+# season count and the romaji title with *its* season in a parenthetical —
+# "S04E11" beside "2nd Season" — and the parser used to let the later mark
+# win, so Arc fetched four of these as season 2 of "Mairimashita! Iruma-kun 2".
+# Which season the file is cannot be read off the string, so `season` is null
+# and `conflicting_seasons` lists the marks in the order they were read (the
+# `SxxEyy` first); the episode number is kept. Where the marks agree, the
+# same shape is an ordinary season-2 name. The Nyaa half is in
+# query_corpus.txt, the review half in test_match_job.py.
+Welcome to Demon School Iruma kun S04E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)	{"episode": 11, "group": null, "kind": "episode", "season": null, "title_key": "welcome to demon school iruma kun", "version": null, "conflicting_seasons": [4, 2]}
+Welcome to Demon School Iruma kun S04E12 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)	{"episode": 12, "group": null, "kind": "episode", "season": null, "title_key": "welcome to demon school iruma kun", "version": null, "conflicting_seasons": [4, 2]}
+Welcome to Demon School Iruma kun S02E11 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Mairimashita! Iruma-kun 2nd Season, Dual-Audio, Multi-Subs)	{"episode": 11, "group": null, "kind": "episode", "season": 2, "title_key": "welcome to demon school iruma kun", "version": null}
+[Grp] Overlord II S1 - 05 [1080p]	{"episode": 5, "group": "Grp", "kind": "episode", "season": null, "title_key": "overlord", "version": null, "conflicting_seasons": [1, 2]}

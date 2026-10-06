@@ -1716,7 +1716,13 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
       pasted torrents, other-show results being choosable, long requests with
       weak rate limits, orphan torrents on failure and a search/manual race —
       all fixed with tests. Migration f1a6d3c08b52 (`torrents.manual`).
-- Verified 2026-10-06 (orchestrator): full pass server 4371, client 1116, lint
+- [x] **Season marks that disagree are ambiguous** (found on the re-requested
+      trip: `… S04E11 … (Mairimashita! Iruma-kun 2nd Season …)` was taken for
+      season 2 because the later mark won): the parser reports the conflict,
+      the Nyaa filter refuses the release ("names two seasons (4 and 2)"), a
+      pack file so named maps to no episode, and such a file goes to review.
+      Corpora 265→269 and 26→27.
+- Verified 2026-10-06 (orchestrator): full pass server 4393 (after the season-mark fix), client 1116, lint
   clean, build ok. Note: commit 6938fba carried a half-applied `manual_stall`
   hunk without its column; it is completed by this deploy (the stall path was
   the only one affected, and no stall fired in between).
