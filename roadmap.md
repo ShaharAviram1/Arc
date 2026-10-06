@@ -1681,6 +1681,14 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
   Not exercised live (tests only, Reviewer-probed): fetching trip episodes
   from torrents, the pack selection, and the deletion of a trip-only source.
   Deploy carries migrations 2abfab654407 and 811a128415cc.
+- Deployed 2026-10-06 03:22 UTC as 45e9837 (owner: "deploy when its all done
+  and verified"): database backed up first, both migrations applied, head
+  811a128415cc confirmed; `/api/health` clean; `offline.mp4` and `/api/trips`
+  answer 401 without a session; the live bundle carries "Prepare for a trip";
+  the `offline/` data directory appeared; no warnings or errors in the first
+  minutes of logs; Tribunal, Audiosey and SectorWatch answered 200 after
+  Caddy was recreated. The host's `.env` sets no `OFFLINE_*`, so the defaults
+  apply (H.264, 720p, CRF 26). The owner's iPad trip is what remains.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
