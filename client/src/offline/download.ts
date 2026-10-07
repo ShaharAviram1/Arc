@@ -24,8 +24,21 @@
  * {@link BACKOFF_MS} is 1 s, 3 s, 10 s, and after those a steady
  * {@link STEADY_BACKOFF_MS}. The page hears about every retry so it can say
  * something once the quick ones are spent; the loop never gives up on its own.
- * 400 / 401 / 403 / 404 are terminal, and so is a full disk; a 429 waits at
- * least as long as its `Retry-After`.
+ * 400 / 401 / 403 / 404 are terminal; a 429 waits at least as long as its
+ * `Retry-After`.
+ *
+ * **A handle the device closed under us** (owner incident, 2026-10-07: iPadOS
+ * closes a worker's sync access handle when Arc goes to the background, the
+ * iPad locks or the page is suspended, and every write after that throws
+ * `InvalidStateError`). A write, flush or truncate that throws
+ * `InvalidStateError`, `NotAllowedError` or `NoModificationAllowedError`
+ * closes the handle, opens a new one on the same file, reads its size as the
+ * resume offset and tries the chunk once more — the bytes in hand when the
+ * size is still the chunk's start, a fresh request (with the same `If-Range`)
+ * when it moved back. If that fails too, the run ends `paused` with reason
+ * `interrupted`, which the manager resumes by itself when Arc is back on
+ * screen. A full disk (`QuotaExceededError`) ends `paused` with reason `quota`
+ * — never `failed` — and the file is cut back to the chunk boundary.
  *
  * **The terminal message is posted only after the file is closed** (from the
  * `finally`), so a manager that deletes the file on hearing it never races a
@@ -89,21 +102,55 @@ export type FailCode = 'quota' | 'auth' | 'gone' | 'size' | 'error'
 
 export type RestartReason = 'replaced' | 'etag' | 'total' | 'range'
 
+/**
+ * Why the worker paused a run on its own (a pause asked for carries none):
+ * the device closed the file under it (`interrupted`), or the disk is full
+ * (`quota`). Either way the worker that said so is not trusted with another
+ * file: the manager replaces it.
+ */
+export type SuspendReason = 'interrupted' | 'quota'
+
 export type WorkerMessage = (
   | { type: 'progress'; name: string; offset: number; total: number; etag: string | null }
   | { type: 'done'; name: string; offset: number; total: number; etag: string | null }
-  | { type: 'paused'; name: string; offset: number }
+  | {
+      type: 'paused'
+      name: string
+      offset: number
+      /** Set only when the worker stopped by itself; absent for a pause asked for. */
+      reason?: SuspendReason
+      /** The device's own words for it (`InvalidStateError: …`). */
+      detail?: string
+    }
   | { type: 'retrying'; name: string; attempt: number; delay: number; reason: string }
   | { type: 'restarted'; name: string; reason: RestartReason }
-  | { type: 'failed'; name: string; offset: number; code: FailCode; reason: string }
+  | {
+      type: 'failed'
+      name: string
+      offset: number
+      code: FailCode
+      reason: string
+      /** The file could not be written: the worker is replaced before the next download. */
+      write?: boolean
+    }
   /** Another Arc window holds this file's lock and is downloading it. Terminal. */
   | { type: 'busy'; name: string }
+  /**
+   * A download that was waiting its turn in the worker was paused or replaced
+   * before it ever opened the file. Terminal: says only that the worker does
+   * not hold `name` on its account.
+   */
+  | { type: 'released'; name: string }
 ) & { run?: number }
 
 /** The messages after which the worker has let go of the file. */
 export type TerminalMessage = Extract<
   WorkerMessage,
-  { type: 'done' } | { type: 'paused' } | { type: 'failed' } | { type: 'busy' }
+  | { type: 'done' }
+  | { type: 'paused' }
+  | { type: 'failed' }
+  | { type: 'busy' }
+  | { type: 'released' }
 >
 
 export function isTerminal(message: WorkerMessage): message is TerminalMessage {
@@ -111,7 +158,8 @@ export function isTerminal(message: WorkerMessage): message is TerminalMessage {
     message.type === 'done' ||
     message.type === 'paused' ||
     message.type === 'failed' ||
-    message.type === 'busy'
+    message.type === 'busy' ||
+    message.type === 'released'
   )
 }
 
@@ -165,6 +213,21 @@ export function isQuotaError(error: unknown): boolean {
   return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED'
 }
 
+/**
+ * Whether a thrown write, flush, truncate or open is the device having closed
+ * the file under the worker — what iPadOS does when Arc leaves the screen —
+ * rather than anything wrong with the file.
+ */
+export function isStaleHandleError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const name = (error as { name?: unknown }).name
+  return (
+    name === 'InvalidStateError' ||
+    name === 'NotAllowedError' ||
+    name === 'NoModificationAllowedError'
+  )
+}
+
 /** Seconds from a `Retry-After` header, when it is a plain number. */
 function retryAfterMs(response: Response): number {
   const raw = response.headers.get('Retry-After')
@@ -182,24 +245,37 @@ function discard(response: Response, controller: AbortController): void {
   }
 }
 
+/** What the run holds, for the `finally` that closes it and the `catch` that reports it. */
+interface Held {
+  /** The handle open now: replaced when a closed one is re-opened. */
+  handle: SyncHandle | null
+  /** The last chunk boundary the file was known to reach. */
+  offset: number
+}
+
 export async function runDownload(command: StartCommand, deps: DownloadDeps): Promise<void> {
-  let handle: SyncHandle | null = null
+  const held: Held = { handle: null, offset: 0 }
   let terminal: TerminalMessage | null = null
   try {
-    terminal = await download(command, deps, (opened) => {
-      handle = opened
-    })
+    terminal = await download(command, deps, held)
   } catch (error) {
-    terminal = {
-      type: 'failed',
-      name: command.name,
-      offset: 0,
-      code: isQuotaError(error) ? 'quota' : 'error',
-      reason: String(error),
-    }
+    // Anything that escaped the write path (an open, a size, a truncate on a
+    // restart): the same three outcomes as a write.
+    terminal = isQuotaError(error)
+      ? suspended(command.name, held.offset, 'quota', error)
+      : isStaleHandleError(error)
+        ? suspended(command.name, held.offset, 'interrupted', error)
+        : {
+            type: 'failed',
+            name: command.name,
+            offset: held.offset,
+            code: 'error',
+            reason: String(error),
+            write: held.handle !== null,
+          }
   } finally {
     try {
-      ;(handle as SyncHandle | null)?.close()
+      held.handle?.close()
     } catch {
       // Already closed, or it never opened.
     }
@@ -208,10 +284,20 @@ export async function runDownload(command: StartCommand, deps: DownloadDeps): Pr
   }
 }
 
+/** A run the worker stopped by itself: the manager resumes it, on a new worker. */
+function suspended(
+  name: string,
+  offset: number,
+  reason: SuspendReason,
+  error: unknown,
+): TerminalMessage {
+  return { type: 'paused', name, offset, reason, detail: String(error) }
+}
+
 async function download(
   command: StartCommand,
   deps: DownloadDeps,
-  opened: (handle: SyncHandle) => void,
+  held: Held,
 ): Promise<TerminalMessage> {
   const { name, url } = command
   let etag = command.etag
@@ -220,13 +306,16 @@ async function download(
   let restarts = 0
   const chunkBytes = deps.chunkBytes ?? CHUNK_BYTES
 
-  const file = await deps.open(name)
-  opened(file)
+  let file = await deps.open(name)
+  held.handle = file
   if (command.fresh) {
     file.truncate(0)
     file.flush()
   }
   let offset = file.getSize()
+  held.offset = offset
+  /** Set once a closed handle has been re-opened, until a chunk lands again. */
+  let reopened = false
 
   const failed = (code: FailCode, reason: string, at = offset): TerminalMessage => ({
     type: 'failed',
@@ -242,11 +331,84 @@ async function download(
     file.truncate(0)
     file.flush()
     offset = 0
+    held.offset = 0
     total = null
     etag = nextEtag
     deps.post({ type: 'restarted', name, reason })
     if (restarts < MAX_RESTARTS) return null
     return failed('error', 'the server would not resume this download', 0)
+  }
+
+  /** Cut whatever part of a chunk landed back off, so the size stays a chunk boundary. */
+  const cutBack = (): void => {
+    try {
+      file.truncate(offset)
+      file.flush()
+    } catch {
+      // The disk is full, or the handle is gone; the next run resumes from
+      // whatever size the file has, which is a prefix of the same encode.
+    }
+  }
+
+  /** A write that failed for a reason other than a closed handle. */
+  const writeFailed = (error: unknown): TerminalMessage => {
+    cutBack()
+    if (isQuotaError(error)) return suspended(name, offset, 'quota', error)
+    return { type: 'failed', name, offset, code: 'error', reason: String(error), write: true }
+  }
+
+  /**
+   * Write one chunk at `offset`. A handle the device closed is re-opened once
+   * per chunk: `'ok'` when the chunk landed, `'moved'` when the re-opened file
+   * is shorter than `offset` (which now names its size, so the loop fetches
+   * from there), or the run's terminal message.
+   */
+  const writeChunk = async (bytes: Uint8Array): Promise<'ok' | 'moved' | TerminalMessage> => {
+    try {
+      file.write(bytes, { at: offset })
+      file.flush()
+      return 'ok'
+    } catch (error) {
+      if (!isStaleHandleError(error)) return writeFailed(error)
+      if (reopened) {
+        cutBack()
+        return suspended(name, offset, 'interrupted', error)
+      }
+    }
+    reopened = true
+    let size: number
+    try {
+      try {
+        file.close()
+      } catch {
+        // Closed already: that is why we are here.
+      }
+      file = await deps.open(name)
+      held.handle = file
+      size = file.getSize()
+    } catch (error) {
+      return suspended(name, offset, 'interrupted', error)
+    }
+    if (size < offset) {
+      // Less is on disk than the last chunk said: fetch again from there.
+      offset = size
+      held.offset = size
+      return 'moved'
+    }
+    try {
+      if (size > offset) {
+        // Part of the chunk landed before the handle closed: start it again.
+        file.truncate(offset)
+        file.flush()
+      }
+      file.write(bytes, { at: offset })
+      file.flush()
+      return 'ok'
+    } catch (error) {
+      if (!isStaleHandleError(error)) return writeFailed(error)
+      cutBack()
+      return suspended(name, offset, 'interrupted', error)
+    }
   }
 
   const backoff = async (reason: string, atLeast = 0): Promise<void> => {
@@ -395,26 +557,14 @@ async function download(
       continue
     }
 
-    try {
-      file.write(bytes, { at: offset })
-      file.flush()
-    } catch (error) {
-      // Whatever part of the chunk landed is cut off again, so the file's
-      // size stays a chunk boundary the next run can resume from.
-      try {
-        file.truncate(offset)
-        file.flush()
-      } catch {
-        // The disk is full enough that even this failed; the size check on
-        // the next run catches what is left.
-      }
-      return isQuotaError(error)
-        ? failed('quota', 'this device is out of space')
-        : failed('error', String(error))
-    }
+    const written = await writeChunk(bytes)
+    if (written === 'moved') continue
+    if (written !== 'ok') return written
     offset += bytes.byteLength
+    held.offset = offset
     attempt = 0
     restarts = 0
+    reopened = false
     deps.post({ type: 'progress', name, offset, total, etag })
   }
 

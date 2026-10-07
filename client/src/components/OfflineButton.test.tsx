@@ -149,12 +149,12 @@ describe('OfflineButton (FR-S9, owner 2026-10-05)', () => {
   it('marks a failed download, says why, and a tap tries again', async () => {
     const { manager, worker } = await install()
     await manager.start({ episodeId: 9001, url: '/media/9001/episode.mp4' })
-    worker.emit({ type: 'failed', name: FILE, offset: 9, code: 'quota', reason: 'x' })
+    worker.emit({ type: 'failed', name: FILE, offset: 9, code: 'error', reason: 'x' })
     const user = userEvent.setup()
     renderButton()
 
     const failed = screen.getByRole('button', { name: 'Download of episode 1 stopped — try again' })
-    expect(screen.getByRole('alert')).toHaveTextContent(/out of space/)
+    expect(screen.getByRole('alert')).toHaveTextContent(/stopped/)
     await user.click(failed)
     expect(manager.record(9001)?.state).toMatch(/queued|downloading/)
   })

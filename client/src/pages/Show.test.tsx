@@ -1896,15 +1896,21 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
     manager.setOwner(TEST_USER.id)
     setDownloads(manager)
     await manager.start({ episodeId: 9001, url: '/media/9001/episode.mp4' })
-    worker.emit({ type: 'failed', name: 'episode-9001.mp4', offset: 9, code: 'quota', reason: 'x' })
+    worker.emit({
+      type: 'paused',
+      name: 'episode-9001.mp4',
+      offset: 9,
+      reason: 'quota',
+      run: 1,
+    })
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
 
     renderShow()
 
     expect(
-      await screen.findByRole('button', { name: 'Download of episode 1 stopped — try again' }),
+      await screen.findByRole('button', { name: /Download of episode 1 paused at \d+% — resume/ }),
     ).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(/out of space/)
+    expect(screen.getByText(/out of space — free some room/)).toBeInTheDocument()
   })
 
   it('opens the on-device menu for a downloaded episode, with Downloads in it', async () => {

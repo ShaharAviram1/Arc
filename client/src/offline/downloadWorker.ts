@@ -90,6 +90,17 @@ async function locked(command: StartCommand): Promise<void> {
   })
 }
 
+/**
+ * Forget the download waiting its turn, saying so: the manager counts its file
+ * as held until a terminal message for it, and this one never opened it.
+ */
+function dropNext(): void {
+  if (next === null) return
+  // The running file's own terminal message speaks for a name it still holds.
+  if (next.name !== current) post({ type: 'released', name: next.name, run: next.run })
+  next = null
+}
+
 function start(command: StartCommand): void {
   stopped = false
   current = command.name
@@ -115,7 +126,7 @@ function start(command: StartCommand): void {
 self.onmessage = (event: MessageEvent<WorkerCommand>) => {
   const command = event.data
   if (command.cmd === 'pause') {
-    if (next?.name === command.name) next = null
+    if (next?.name === command.name) dropNext()
     if (current === command.name) {
       stopped = true
       wake?.()
@@ -130,6 +141,8 @@ self.onmessage = (event: MessageEvent<WorkerCommand>) => {
     wake?.()
     return
   }
+  // A command waiting already is replaced: it never opened its file.
+  dropNext()
   next = command
   stopped = true
   wake?.()

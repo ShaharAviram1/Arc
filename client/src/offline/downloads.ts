@@ -31,6 +31,22 @@
  * `paused` / `network` is a message, not a stop: the worker keeps retrying and
  * the next chunk that lands puts the record back to `downloading`.
  *
+ * **When the device stops a write** (owner incident, 2026-10-07: a full iPad
+ * fails every write with `InvalidStateError`, and so does a handle iPadOS
+ * closed when Arc left the screen). The worker re-opens the file and tries
+ * the chunk once; if that fails it ends the run `paused` / `interrupted` and
+ * is *retired*: it is terminated before the next download, which runs on a
+ * new one. The record is tried once more straight away on that new worker
+ * (when Arc is on screen; otherwise it waits, paused, for the next nudge). A
+ * second such stop with nothing written in between — or a
+ * `QuotaExceededError` — is read as **the device being out of space**:
+ * `paused` / `quota`, and **the queue stops** (nothing else starts a first
+ * chunk only to fail the same way). Every nudge and every trip auto-keep
+ * tick *probes*: the paused-for-space record is resumed alone, at the head of
+ * the queue; once one of its chunks lands, the hold lifts and the queue flows.
+ * `navigator.storage.estimate()` is never consulted for this — on iPadOS it
+ * reports the browser's allowance, not the iPad's free space.
+ *
  * **One download at a time**, in the order they were asked for.
  *
  * **Records belong to a user.** Each is keyed by (user, episode) and only the
@@ -54,6 +70,7 @@ import { forgetCover, rememberCover } from '@/offline/cache'
 import {
   isTerminal,
   type FailCode,
+  type SuspendReason,
   type WorkerCommand,
   type WorkerMessage,
 } from '@/offline/download'
@@ -62,6 +79,7 @@ import {
   fileNameFor,
   fileSize,
   listEpisodeFiles,
+  deviceName,
   removeFile,
   requestPersistence,
   revokeCurrent,
@@ -74,7 +92,13 @@ export type DownloadState =
 
 export type { CopyVariant }
 
-export type PauseReason = 'by-hand' | 'interrupted' | 'network' | 'elsewhere'
+/**
+ * Why a record is paused: by the viewer; when Arc was closed, the account
+ * changed or the device stopped a write (`interrupted`); waiting for a
+ * connection; another window has it; or the device is out of space (`quota`,
+ * which holds the queue until a probe's write lands).
+ */
+export type PauseReason = 'by-hand' | 'interrupted' | 'network' | 'elsewhere' | 'quota'
 
 /** Failures the manager itself decides, beside the worker's. */
 export type DeviceFailure = 'evicted' | 'unreadable' | 'unprepared'
@@ -136,6 +160,12 @@ export interface DownloadRecord {
   /** Why, in a sentence. */
   message: string | null
   /**
+   * Set on a record paused `interrupted` because the device stopped a write
+   * (not by the viewer, not by a relaunch): the next nudge, and the trip
+   * auto-keep tick, resume it by themselves.
+   */
+  autoResume?: boolean
+  /**
    * True until this record's own first chunk lands: whatever the file held
    * before is not vouched for, and the worker truncates it on the next run.
    */
@@ -193,7 +223,7 @@ export const MESSAGES: Record<DownloadReason, string> = {
   interrupted: 'Paused when Arc was closed or the account changed. Resume to carry on.',
   network: 'Waiting for a connection. It carries on by itself.',
   elsewhere: 'Downloading in another Arc window.',
-  quota: 'This device is out of space. Delete a download, then try again.',
+  quota: `This ${deviceName()} is out of space — free some room and the download continues.`,
   auth: 'Stopped: you are signed out, or this account may not download.',
   gone: 'Stopped: the server no longer has this episode.',
   size: 'The download did not finish cleanly. Try again to fetch the rest.',
@@ -336,6 +366,17 @@ function normalise(record: DownloadRecord): DownloadRecord {
   return record.variant === variant ? record : { ...record, variant }
 }
 
+/** The device stopped a write while Arc was off screen (owner incident, 2026-10-07). */
+export const BACKGROUNDED =
+  'Arc was put in the background while downloading; it resumes when Arc is back on screen.'
+
+/**
+ * Stops a record may have in a row, with nothing written between them, before
+ * Arc reads them as the device being out of space: one on the worker that
+ * hit it (after its own re-open and retry), one more on a new worker.
+ */
+export const STRIKES_FOR_SPACE = 2
+
 const RESTARTED = 'Arc re-encoded this episode, so the download started again.'
 const WORKER_FAILED = 'Arc could not run its downloader on this device.'
 
@@ -469,6 +510,16 @@ export class DownloadManager {
   private readonly notes: KeyStore
 
   private worker: WorkerLike | null = null
+  /**
+   * The worker reported a write it could not make (a closed handle, a full
+   * disk): it is terminated before the next download is handed out, and that
+   * download runs on a new one.
+   */
+  private retired = false
+  /** Device-stopped runs in a row per key, with no chunk landing between. See {@link STRIKES_FOR_SPACE}. */
+  private strikes = new Map<string, number>()
+  /** The paused-for-space record being tried again, alone, while the queue is held. */
+  private probe: string | null = null
   /** Every user's records on this device, by `user:episode`. */
   private all = new Map<string, DownloadRecord>()
   private snapshot: Downloads = EMPTY
@@ -589,6 +640,7 @@ export class DownloadManager {
           state: 'paused',
           reason: 'interrupted',
           message: MESSAGES.interrupted,
+          autoResume: false,
           updated_at: this.stamp(),
         })
         void this.store.put(key, this.all.get(key))
@@ -659,10 +711,14 @@ export class DownloadManager {
           message: MESSAGES.evicted,
           fresh: true,
         }
+      } else if (record.state === 'failed' && record.reason === 'quota') {
+        // Before 2026-10-07 a full device was a failure; it is a pause now.
+        next = { ...record, bytes, state: 'paused', message: MESSAGES.quota }
       } else if (record.state === 'failed') {
         next = { ...record, bytes }
       } else {
-        const reason: PauseReason = record.reason === 'by-hand' ? 'by-hand' : 'interrupted'
+        const reason: PauseReason =
+          record.reason === 'by-hand' || record.reason === 'quota' ? record.reason : 'interrupted'
         next = { ...record, bytes, state: 'paused', reason, message: MESSAGES[reason] }
       }
       // A launch-time record may have been written while this tab was
@@ -813,7 +869,13 @@ export class DownloadManager {
     this.queue = this.queue.filter((queued) => queued !== key)
     // Stop waiting on the server: the server keeps or expires its copy itself.
     this.asking.delete(key)
-    this.patch(key, { state: 'paused', reason: 'by-hand', message: MESSAGES['by-hand'] })
+    if (this.probe === key) this.probe = null
+    this.patch(key, {
+      state: 'paused',
+      reason: 'by-hand',
+      message: MESSAGES['by-hand'],
+      autoResume: false,
+    })
     this.pump()
   }
 
@@ -849,9 +911,37 @@ export class DownloadManager {
       this.nudge()
       return
     }
-    if (!this.queue.includes(key)) this.queue.push(key)
-    this.patch(key, { state: 'queued', reason: null, message: null })
+    if (record.reason === 'quota') {
+      // The probe: tried alone, ahead of everything the space hold kept back.
+      this.probe = key
+      this.queue = [key, ...this.queue.filter((queued) => queued !== key)]
+    } else if (!this.queue.includes(key)) {
+      this.queue.push(key)
+    }
+    this.patch(key, { state: 'queued', reason: null, message: null, autoResume: false })
     this.pump()
+  }
+
+  /**
+   * Resume what the device stopped, never what the viewer paused: a record
+   * paused `interrupted` by a stopped write, and one paused-for-space record
+   * as the probe (its write is the only honest test of free space on iPadOS).
+   * Run on every nudge and every trip auto-keep tick; nothing while Arc is
+   * off screen, where a write would only be stopped again.
+   */
+  resumeSuspended(): void {
+    if (!this.isVisible()) return
+    let probing = this.probe !== null
+    for (const record of Object.values(this.snapshot)) {
+      if (record.state !== 'paused') continue
+      if (keyOfRecord(record) === this.active) continue
+      if (record.reason === 'interrupted' && record.autoResume === true) {
+        this.resume(record.episodeId)
+      } else if (record.reason === 'quota' && !probing) {
+        probing = true
+        this.resume(record.episodeId)
+      }
+    }
   }
 
   /** Take an episode off this device. The server's copy is untouched. */
@@ -904,14 +994,16 @@ export class DownloadManager {
         this.patch(key, { state: 'downloading', reason: null, message: null })
       }
       this.send(this.commandFor(active, active.url))
-      return
-    }
-    // A download another window was doing may be free by now.
-    for (const record of Object.values(this.snapshot)) {
-      if (record.state === 'paused' && record.reason === 'elsewhere') {
-        this.resume(record.episodeId)
+    } else {
+      // A download another window was doing may be free by now.
+      for (const record of Object.values(this.snapshot)) {
+        if (record.state === 'paused' && record.reason === 'elsewhere') {
+          this.resume(record.episodeId)
+        }
       }
     }
+    // What the device stopped carries on (and a space hold is probed).
+    this.resumeSuspended()
     this.pump()
   }
 
@@ -1314,6 +1406,17 @@ export class DownloadManager {
   /** Start the next queued download if nothing is running. */
   private pump(): void {
     if (this.active !== null) return
+    if (this.spaceHeld()) {
+      // Out of space: only the probe may run; everything else waits, queued.
+      const probe = this.probe
+      if (probe !== null && this.queue.includes(probe)) {
+        this.queue = [probe, ...this.queue.filter((queued) => queued !== probe)]
+      } else {
+        this.wantWakeLock = false
+        void this.releaseWakeLock()
+        return
+      }
+    }
     while (this.queue.length > 0) {
       const key = this.queue.shift() ?? ''
       const record = this.all.get(key)
@@ -1331,11 +1434,67 @@ export class DownloadManager {
       this.patch(key, { state: 'downloading', reason: null, message: null })
       this.wantWakeLock = true
       void this.holdWakeLock()
+      // Never hand a download to a worker that just reported a write it
+      // could not make: a new one gets it.
+      if (this.retired && this.worker !== null) this.dropWorker()
       this.send(this.commandFor(record, record.url))
       return
     }
     this.wantWakeLock = false
     void this.releaseWakeLock()
+  }
+
+  /** Whether the signed-in account has a record paused for want of space: the queue is held. */
+  private spaceHeld(): boolean {
+    return Object.values(this.snapshot).some(
+      (record) => record.state === 'paused' && record.reason === 'quota',
+    )
+  }
+
+  /** A chunk of `key` landed: its strikes end, and a probe that worked lifts the space hold. */
+  private wrote(key: string): void {
+    this.strikes.delete(key)
+    if (this.probe !== key) return
+    this.probe = null
+    for (const record of Object.values(this.snapshot)) {
+      if (record.state !== 'paused' || record.reason !== 'quota') continue
+      const other = keyOfRecord(record)
+      if (!this.queue.includes(other)) this.queue.push(other)
+      this.patch(other, { state: 'queued', reason: null, message: null })
+    }
+  }
+
+  /**
+   * The running record's worker stopped by itself (see the class comment):
+   * out of space at once on a full disk, on a failed probe, or on the second
+   * stop in a row; otherwise once more now on a new worker, or — off screen —
+   * paused until Arc is back.
+   */
+  private suspend(key: string, reason: SuspendReason, detail: string | undefined): void {
+    const strikes = (this.strikes.get(key) ?? 0) + 1
+    this.strikes.set(key, strikes)
+    const wasProbe = this.probe === key
+    if (wasProbe) this.probe = null
+    if (reason === 'quota' || wasProbe || strikes >= STRIKES_FOR_SPACE) {
+      this.patch(key, {
+        state: 'paused',
+        reason: 'quota',
+        message: MESSAGES.quota,
+        autoResume: false,
+      })
+      return
+    }
+    if (this.isVisible()) {
+      this.queue = [key, ...this.queue.filter((queued) => queued !== key)]
+      this.patch(key, { state: 'queued', reason: null, message: null, autoResume: false })
+      return
+    }
+    this.patch(key, {
+      state: 'paused',
+      reason: 'interrupted',
+      message: detail === undefined ? BACKGROUNDED : `${BACKGROUNDED} (${detail})`,
+      autoResume: true,
+    })
   }
 
   /** Ask the worker to stop this file; it is *releasing* until the worker says it closed it. */
@@ -1371,15 +1530,7 @@ export class DownloadManager {
    */
   private onWorkerError(worker: WorkerLike, reason: string): void {
     if (this.worker !== worker) return
-    this.worker = null
-    try {
-      worker.terminate()
-    } catch {
-      // Already gone.
-    }
-    // A dead worker holds no file.
-    for (const name of this.releasing) this.settle(name)
-    this.releasing.clear()
+    this.dropWorker()
     const key = this.active
     this.active = null
     this.activeRun = null
@@ -1391,6 +1542,24 @@ export class DownloadManager {
       })
     }
     this.pump()
+  }
+
+  /**
+   * Terminate the worker; the next send boots a new one. A terminated worker
+   * holds no file, so whatever was releasing is released (and a delete
+   * waiting on it runs).
+   */
+  private dropWorker(): void {
+    const worker = this.worker
+    this.worker = null
+    this.retired = false
+    try {
+      worker?.terminate()
+    } catch {
+      // Already gone.
+    }
+    for (const name of this.releasing) this.settle(name)
+    this.releasing.clear()
   }
 
   /** The record a worker message is about: the running one, else the owner's by file. */
@@ -1416,6 +1585,15 @@ export class DownloadManager {
   /** Handle one worker message. Public for the tests; the worker is the only caller. */
   onMessage(message: WorkerMessage): void {
     if (isTerminal(message)) this.settle(message.name)
+    // A queued command the worker dropped unopened: nothing more to learn.
+    if (message.type === 'released') return
+    if (
+      (message.type === 'paused' && message.reason !== undefined) ||
+      (message.type === 'failed' && (message.write === true || message.code === 'quota'))
+    ) {
+      // This worker could not write: it gets no further download.
+      this.retired = true
+    }
     const key = this.keyFor(message.name)
     if (key === null) return
     const record = this.all.get(key)
@@ -1442,6 +1620,7 @@ export class DownloadManager {
           fresh: false,
           ...(running ? { state: 'downloading' as const, reason: null, message: null } : {}),
         })
+        if (running) this.wrote(key)
         break
       case 'restarted':
         this.patch(key, { bytes: 0, total: 0, etag: null, message: RESTARTED })
@@ -1464,6 +1643,8 @@ export class DownloadManager {
         if (running) {
           this.active = null
           this.activeRun = null
+          // A pause nobody asked for: the device stopped the write.
+          if (message.reason !== undefined) this.suspend(key, message.reason, message.detail)
           this.pump()
         }
         break
@@ -1471,6 +1652,17 @@ export class DownloadManager {
         if (!running && record.state !== 'downloading') {
           // The run it ended had already been paused or handed away.
           this.patch(key, { bytes: message.offset })
+          break
+        }
+        if (message.code === 'quota') {
+          // An older worker's word for a full disk: a pause, as now.
+          this.patch(key, { bytes: message.offset })
+          if (running) {
+            this.active = null
+            this.activeRun = null
+          }
+          this.suspend(key, 'quota', message.reason)
+          this.pump()
           break
         }
         this.patch(key, {
@@ -1515,6 +1707,7 @@ export class DownloadManager {
           // A trip copy that has arrived is told to the server (M19 T6).
           ...(record.tripId === undefined ? {} : { confirm: 'pending' as const }),
         })
+        if (running) this.wrote(key)
         if (running) {
           this.active = null
           this.activeRun = null

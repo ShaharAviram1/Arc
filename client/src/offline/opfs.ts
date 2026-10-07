@@ -145,7 +145,30 @@ export function revokeCurrent(): void {
   current = null
 }
 
-/** What the Downloads page shows: the browser's own figures. */
+/**
+ * What to call this device in a sentence: "iPad", "iPhone", else "device".
+ * iPadOS says "Macintosh" in its user agent, so a Mac-looking browser with a
+ * touch screen is taken for an iPad.
+ */
+export function deviceName(): 'iPad' | 'iPhone' | 'device' {
+  try {
+    const agent = navigator.userAgent
+    if (/iPhone|iPod/.test(agent)) return 'iPhone'
+    if (/iPad/.test(agent) || (/Macintosh/.test(agent) && navigator.maxTouchPoints > 1)) {
+      return 'iPad'
+    }
+  } catch {
+    // No navigator: say "device".
+  }
+  return 'device'
+}
+
+/**
+ * What the Downloads page shows: the browser's own figures. On iPadOS these
+ * are the browser's allowance, not the iPad's free space — a full iPad can
+ * still report gigabytes to spare (owner, 2026-10-07) — so they are shown as
+ * what the browser reports, and never decide whether a download may run.
+ */
 export async function estimate(): Promise<{ usage: number; quota: number } | null> {
   try {
     if (typeof navigator.storage?.estimate !== 'function') return null

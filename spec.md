@@ -762,7 +762,20 @@ that the course professor can log in at any time, and the owner uses it daily.
      that did not add up, a file the player would not play, removed by the
      device to free space, any other error), each with its reason in words and
      Resume / Try again. One download runs at a time, in the order asked.
-     A full device surfaces as a failed state that says so, never as a stall.
+     A full device surfaces as a pause that says so ("This iPad is out of
+     space — free some room and the download continues"), never as a stall
+     or a failure, and **holds the queue**: nothing else starts only to fail
+     the same way. Each time Arc comes back on screen or online, and on the
+     trip's minute tick, Arc tries the paused download's next write; once one
+     lands the queue carries on. The browser's storage figures never decide
+     this (on an iPad they can show gigabytes free on a full device), only a
+     write does. A download the device interrupts mid-write (Arc sent to the
+     background, the iPad locked) is retried at once on a fresh writer, or —
+     off screen — paused with "Arc was put in the background while
+     downloading; it resumes when Arc is back on screen" and resumed by
+     itself; the next episode is never handed to a writer that just failed.
+     None of this ever resumes a download paused by hand (owner incident,
+     2026-10-07).
      A downloaded episode whose file the device later removed is shown as
      "Removed by the device to free space — Keep offline again", with Try
      again and Delete, never silently dropped; downloads waiting when the app
@@ -846,7 +859,14 @@ that the course professor can log in at any time, and the owner uses it daily.
      format, a one-line sentence says so instead): how many episodes, from 1
      to whichever is fewer of the server's cap (`trip_max_episodes`, sent on
      the show page) and the episodes aired after the viewer's progress, the range it takes ("Episodes 4–15"), a size labelled as an
-     estimate (about 100 MB an episode), and one action. A refusal is a
+     estimate (about 100 MB an episode) beside what the browser reports free,
+     and one action. When the browser reports room for fewer episodes than
+     the cap (at 110 MB each), the card says "The browser reports room for
+     about N episodes on this iPad (X free of Y). It is an estimate: the
+     iPad's own storage can fill up first." and the stepper stops at N; with
+     no room for one, the action is off (owner, 2026-10-07). The panel of an
+     active trip says prominently when one of its downloads is paused because
+     the device is full, with a link to Downloads. A refusal is a
      sentence: another trip is active (with a link to its show), the server
      is short of disk, nothing has aired after the viewer's progress, more
      episodes than the server allows. While the trip is active its panel on
@@ -2256,3 +2276,14 @@ through the same edge, without the grace period.
   believes the prior for such a file and `match_file` sends it to review with
   "file names season N, the download expected season M", candidates kept.
   Agreeing or unmarked names link with the prior as before.
+- 2026-10-07 (owner incident) — **FR-S9: a write the device refuses is a
+  pause, never a failure, and a full device holds the queue.** On a 21-episode
+  trip the iPad's disk filled while `estimate()` still said 4.7 GB of 32.4 GB;
+  WebKit then failed every write with `InvalidStateError` (as it also does for
+  a file handle closed when Arc leaves the screen), and each following episode
+  failed on its first chunk. Now: re-open and retry once in the worker; once
+  more on a fresh worker; then paused for space with the queue held and
+  probed by writing on every nudge and trip tick. A `QuotaExceededError` is
+  the same pause (the old `failed` / `quota` comes back paused). The trip
+  card's room check caps the stepper by what the browser reports, said as an
+  estimate.

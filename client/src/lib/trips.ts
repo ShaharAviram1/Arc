@@ -20,6 +20,7 @@ import { ApiError, apiFetch } from '@/lib/api'
 import { animeQueryKey, type AnimeDetail, type EpisodeOut } from '@/lib/anime'
 import { errorDetail } from '@/lib/auth'
 import { codecsPlayable, type DownloadRecord, type Downloads } from '@/offline/downloads'
+import { deviceName, estimate } from '@/offline/opfs'
 
 /** Where one trip episode stands on the server (`TripEpisodeOut.phase`). */
 export type TripPhase =
@@ -91,6 +92,41 @@ export function tripEstimateLabel(count: number): string {
   const bytes = count * TRIP_EPISODE_ESTIMATE_BYTES
   if (bytes < 1_000_000_000) return `${String(Math.round(bytes / 1_000_000))} MB`
   return `${(bytes / 1_000_000_000).toFixed(1).replace(/\.0$/, '')} GB`
+}
+
+/**
+ * What the room check reckons one episode needs: the estimate with a margin,
+ * since the browser's figures are themselves an estimate (owner, 2026-10-07).
+ */
+export const TRIP_FIT_BYTES_PER_EPISODE = 110_000_000
+
+/** What the browser reports about Arc's storage (`navigator.storage.estimate()`). */
+export interface StorageRoom {
+  usage: number
+  quota: number
+}
+
+/**
+ * How many trip episodes the browser says there is room for, or `null` when
+ * it says nothing useful. Only ever a cap on the stepper with a sentence:
+ * on iPadOS the figure is the browser's allowance, and a full iPad can still
+ * report gigabytes free, so this never stands in for the write itself.
+ */
+export function tripRoomFor(room: StorageRoom | null): number | null {
+  if (room === null || !(room.quota > 0)) return null
+  const free = Math.max(0, room.quota - room.usage)
+  return Math.floor(free / TRIP_FIT_BYTES_PER_EPISODE)
+}
+
+/** `navigator.storage.estimate()` for the trip card, read when it opens. */
+export function useStorageRoom(enabled: boolean): UseQueryResult<StorageRoom | null, Error> {
+  return useQuery<StorageRoom | null, Error>({
+    queryKey: ['storage', 'estimate'],
+    queryFn: () => estimate(),
+    enabled,
+    staleTime: 0,
+    retry: false,
+  })
 }
 
 /** The codecs the server makes copies in by default, for the device check. */
@@ -365,6 +401,14 @@ export function tripRowStatus(
       case 'preparing':
         return { label: 'Waiting for the copy', tone: 'muted', percent: null, askAgain: false }
       case 'paused':
+        if (record.reason === 'quota') {
+          return {
+            label: `Paused · this ${deviceName()} is out of space`,
+            tone: 'error',
+            percent: null,
+            askAgain: false,
+          }
+        }
         return {
           label: record.reason === 'by-hand' ? 'Paused' : 'Paused · carries on by itself',
           tone: 'muted',

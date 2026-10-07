@@ -145,6 +145,69 @@ describe('Prepare for a trip', () => {
     expect(within(card).getByRole('button', { name: 'Prepare 1 episode' })).toBeEnabled()
   })
 
+  /** What the browser reports for Arc's storage (owner, 2026-10-07). */
+  function browserReports(usage: number, quota: number) {
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      value: {
+        getDirectory: () => Promise.reject(new Error('not in tests')),
+        estimate: () => Promise.resolve({ usage, quota }),
+      },
+    })
+  }
+
+  it('caps the stepper at the room the browser reports, and says it is an estimate', async () => {
+    installManager()
+    // 340 MB free: about 3 episodes at 110 MB each.
+    browserReports(4_700_000_000, 5_040_000_000)
+    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Prepare for a trip' }))
+
+    const card = screen.getByRole('form', { name: 'Prepare for a trip' })
+    expect(await within(card).findByTestId('trip-room')).toHaveTextContent(
+      /The browser reports room for about 3 episodes on this device \(324 MB free of 4\.7 GB\)\. It is an estimate/,
+    )
+    const count = within(card).getByRole('spinbutton', { name: 'Episodes' })
+    expect(count).toHaveAttribute('max', '3')
+    expect(count).toHaveValue(3)
+    expect(within(card).getByText(/the browser reports 324 MB free/)).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Prepare 3 episodes' })).toBeEnabled()
+  })
+
+  it('offers no trip when the browser reports no room for one episode', async () => {
+    installManager()
+    browserReports(5_000_000_000, 5_050_000_000)
+    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Prepare for a trip' }))
+
+    const card = screen.getByRole('form', { name: 'Prepare for a trip' })
+    expect(await within(card).findByTestId('trip-room')).toHaveTextContent(
+      /no room for another episode/,
+    )
+    expect(within(card).getByRole('button', { name: 'Prepare 1 episode' })).toBeDisabled()
+  })
+
+  it('leaves the stepper alone when the browser reports room enough', async () => {
+    installManager()
+    browserReports(4_700_000_000, 32_400_000_000)
+    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Prepare for a trip' }))
+
+    const card = screen.getByRole('form', { name: 'Prepare for a trip' })
+    expect(await within(card).findByText(/the browser reports .* free/)).toBeInTheDocument()
+    expect(within(card).queryByTestId('trip-room')).not.toBeInTheDocument()
+    expect(within(card).getByRole('spinbutton', { name: 'Episodes' })).toHaveAttribute('max', '5')
+  })
+
   it('asks for the chosen count and shows the trip it made', async () => {
     installManager()
     const made = trip([tripEpisode(9002, 2, 'preparing'), tripEpisode(9004, 4, 'searching')])
@@ -279,6 +342,42 @@ describe('the active trip', () => {
     expect(within(panel).getByText(/0 of 5 on this device/)).toBeInTheDocument()
     expect(within(panel).getByText(/downloads run while Arc is open/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Prepare for a trip' })).not.toBeInTheDocument()
+  })
+
+  it('says plainly when a trip download is paused because the device is full', async () => {
+    const record = downloadedRecord(TEST_USER.id, PLAY_INFO, 98_000_000)
+    const harness = managerHarness({
+      initial: [
+        recordEntry({
+          ...record,
+          episodeId: 9002,
+          name: 'episode-9002-o.mp4',
+          variant: 'small',
+          tripId: TRIP_ID,
+          state: 'paused',
+          reason: 'quota',
+          bytes: 8_000_000,
+        }),
+      ],
+    })
+    harness.files.set('episode-9002-o.mp4', 8_000_000)
+    harness.manager.setOwner(TEST_USER.id)
+    await harness.manager.hydrate()
+    setDownloads(harness.manager)
+    api({ [DETAIL]: { body: withTrip() } })
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    const notice = within(panel).getByRole('alert')
+    expect(notice).toHaveTextContent(/out of space — free some room and the download continues/)
+    expect(within(notice).getByRole('link', { name: 'Go to Downloads' })).toHaveAttribute(
+      'href',
+      '/downloads',
+    )
+    expect(within(panel).getByText(/Paused · this device is out of space/)).toBeInTheDocument()
   })
 
   it('reads the device’s own copy first', async () => {

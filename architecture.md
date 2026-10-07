@@ -2135,16 +2135,31 @@ failures, a body that dies mid-read and other statuses back off 1 s, 3 s,
 400 / 401 / 403 / 404 are terminal. A file that is already whole when the
 run starts (another account's copy) is confirmed with one `If-Range` request
 for its last byte before it is `done` — the server authorises this account
-and confirms the encode. A write that throws `QuotaExceededError` truncates
-back to the chunk boundary and fails with `quota`. Done only when the file's
+and confirms the encode. **A write the device refuses** (owner incident,
+2026-10-07): a write, flush or truncate that throws `InvalidStateError`,
+`NotAllowedError` or `NoModificationAllowedError` (`isStaleHandleError`: a
+handle iPadOS closed when Arc left the screen, and also what WebKit throws on
+a full iPad) closes the handle, opens `createSyncAccessHandle()` again on the
+same file, takes its `getSize()` as the offset and retries once — the same
+bytes when the size is still the chunk's start (a partial landing is cut back
+first), a fresh request with the same `If-Range` when it is shorter. A second
+refusal ends the run `paused` with `reason: 'interrupted'` and the device's
+words in `detail`; a `QuotaExceededError` ends it `paused` / `quota`, cut back
+to the chunk boundary. Any other write error is `failed` / `error` with
+`write: true`. The same three outcomes cover an open, size or truncate that
+throws outside the write path (`runDownload`'s catch). Done only when the file's
 size equals the `Content-Range` total (`size` otherwise). **Every terminal
-message (`done`, `paused`, `failed`, `busy`) is posted only after the handle
+message (`done`, `paused`, `failed`, `busy`, `released`) is posted only after the handle
 is closed**, from the `finally`.
 
 **The worker.** One file at a time; a `download` for the running file is a
 nudge (ends a backoff) unless a pause for it is under way, in which case it
 runs again after the file is closed; one for another file stops the current at
-its next chunk and runs after it. Each run holds the Web Lock
+its next chunk and runs after it. A download waiting its turn that is paused
+or replaced before it opens its file is answered with a terminal `released`
+(not for the running file's own name, whose run answers for it), so the
+manager's *releasing* set — and a delete deferred on it — never waits forever
+(2026-10-07). Each run holds the Web Lock
 `arc-download:<file>` (`ifAvailable`, per file name, so per copy); a second
 Arc window gets `busy`. Every
 message carries the manager's `run` id. Vite builds it as an ES worker
@@ -2164,8 +2179,10 @@ payload from `GET /api/episodes/{id}/play` at start (`anime`, `episode`,
 `duration`). States `preparing → queued → downloading → downloaded`, or
 `paused` (`by-hand` |
 `interrupted` | `network` — a message only, the worker keeps retrying |
-`elsewhere`, another window holds the lock, retried on the next nudge) or
-`failed` (`quota` | `auth` | `gone` | `size` | `error` from the worker;
+`elsewhere`, another window holds the lock, retried on the next nudge |
+`quota`, the device is out of space, which holds the queue) or
+`failed` (`auth` | `gone` | `size` | `error` from the worker, and `quota` in
+records from before 2026-10-07, which `hydrate()` brings back paused;
 `evicted` | `unreadable` | `unprepared` decided here), each with a sentence. FIFO queue, one
 active download with a run id; a message whose `run` is not the active one
 is stale and may only update bytes. Screen Wake Lock held while one runs,
@@ -2186,8 +2203,27 @@ re-requested on return to the screen.
 - **Worker errors** (`error`, `messageerror`): the running record fails with
   a sentence, the worker is terminated and dropped (the next send boots a new
   one), held files count as released, and the queue moves on.
+- **A write the device refused** (2026-10-07). A worker that reports one
+  (`paused` with a `reason`, or `failed` with `write: true`) is *retired*:
+  `pump()` terminates it (`dropWorker`, the same path as a worker error, which
+  releases whatever was releasing) before handing out the next download, so
+  that download runs on a new worker. The record itself: `quota` → `paused` /
+  `quota` at once; `interrupted` → while on screen, straight back to the head
+  of the queue on the new worker; off screen, `paused` / `interrupted` with
+  `autoResume` and the "put in the background" sentence. A second device stop
+  with no chunk between (`STRIKES_FOR_SPACE` = 2, counted in memory) is read
+  as **out of space**: `paused` / `quota`. While any record of the account is
+  paused for space, `pump()` starts nothing but the **probe**: the one
+  paused-for-space record resumed (by the viewer, or by `resumeSuspended()`),
+  at the head of the queue. Its first chunk landing lifts the hold (the other
+  space-paused records go back in the queue); its failing puts it straight
+  back. `estimate()` is never consulted for this: on iPadOS it is the
+  browser's allowance, not the iPad's free space.
 - `nudge()` on `visibilitychange` → visible and on `online`; it also asks
-  the server about every record waiting on it.
+  the server about every record waiting on it, and runs
+  `resumeSuspended()` — every `interrupted` record with `autoResume`, and one
+  probe for space; never a record paused by hand, and nothing while the page
+  is hidden. The trip auto-keep pass (`autoKeep`, every 60 s) runs it too.
 
 **The start flow (M19, owner 2026-10-05).** `start({episodeId, url:
 download_url})` loads the `/play` payload (a failure rejects, as before),
@@ -2262,12 +2298,19 @@ pure stepper, refusal and row-status rules), `components/Trip.tsx`
   delivered/expired episode, or `keepTripCopy` for an available one).
 - **Show page.** `TripControl` (chip in the hero's actions, inline card:
   stepper 1..min(`trip_limits.max_episodes` — 50 for an older payload —,
-  aired after `watched_through`), range, estimate
-  `tripEstimateLabel`, refusal sentences, a link to the show that holds the
+  aired after `watched_through`, and — when the browser reports less —
+  `tripRoomFor(estimate())`, free ÷ `TRIP_FIT_BYTES_PER_EPISODE` (110 MB),
+  read by `useStorageRoom` when the card opens, said as the browser's
+  estimate, the action off at 0; 2026-10-07), range, estimate
+  `tripEstimateLabel` beside the free space the browser reports, refusal
+  sentences, a link to the show that holds the
   active trip); hidden with a sentence where OPFS/workers are missing or
   `tripCodecsPlayable` (a ready episode's `offline.codecs`, else
   `avc1.640028`) says no. `TripPanel` above the episodes while `anime.trip`
-  is set: per episode `tripRowStatus` (record first, else phase), Ask again,
+  is set: an alert with `MESSAGES.quota` and a link to Downloads while one
+  of its records is paused for space; per episode `tripRowStatus` (record
+  first, else phase; paused for space reads "Paused · this iPad is out of
+  space"), Ask again,
   Cancel trip with an in-page confirmation; two columns from `md`. Rows: a
   non-ready trip episode's state reads "Trip · <phase>"; a downloaded one
   is playable from the device; somebody else's `trip_only` episode reads
@@ -6071,3 +6114,11 @@ asked*, so `make test` is exactly as fast as it was.
   `match_file` does not auto-link, a file whose explicit season mark disagrees
   with the downloaded entry's season (`prior_season_mismatch`); review reason
   "file names season N, the download expected season M".
+- 2026-10-07 (owner incident) — §5.4d: a write the device refuses
+  (`InvalidStateError` & co — a handle closed in the background, or a full
+  iPad while `estimate()` reported 4.7 of 32.4 GB used) is re-opened and
+  retried once in the worker, then once on a fresh worker; a second stop, or a
+  `QuotaExceededError`, pauses the record for space and holds the queue, probed
+  by a write on every nudge and trip tick. Workers that report a refused write
+  are retired before the next download. The trip card caps its stepper by
+  `estimate()` at 110 MB an episode, worded as the browser's estimate.

@@ -8,6 +8,7 @@ import {
   tripCountMax,
   tripErrorMessage,
   tripEstimateLabel,
+  tripRoomFor,
   tripRangeLabel,
   tripRowStatus,
   type TripEpisode,
@@ -78,6 +79,16 @@ describe('the size estimate', () => {
     expect(tripEstimateLabel(10)).toBe('1 GB')
     expect(tripEstimateLabel(12)).toBe('1.2 GB')
     expect(tripEstimateLabel(50)).toBe('5 GB')
+  })
+})
+
+describe('the room the browser reports (owner, 2026-10-07)', () => {
+  it('counts whole episodes at 110 MB each, and says nothing without figures', () => {
+    expect(tripRoomFor({ usage: 4_700_000_000, quota: 32_400_000_000 })).toBe(251)
+    expect(tripRoomFor({ usage: 0, quota: 219_999_999 })).toBe(1)
+    expect(tripRoomFor({ usage: 6, quota: 5 })).toBe(0)
+    expect(tripRoomFor({ usage: 0, quota: 0 })).toBeNull()
+    expect(tripRoomFor(null)).toBeNull()
   })
 })
 

@@ -21,16 +21,20 @@ import {
   tripEstimateLabel,
   tripRangeLabel,
   tripRefusal,
+  tripRoomFor,
   tripRowStatus,
   useAskAgain,
   useCancelTrip,
   useCreateTrip,
   useCurrentTrip,
+  useStorageRoom,
+  type StorageRoom,
   type Trip,
   type TripEpisode,
   type TripRowStatus,
 } from '@/lib/trips'
-import { downloads } from '@/offline/downloads'
+import { downloads, MESSAGES } from '@/offline/downloads'
+import { deviceName } from '@/offline/opfs'
 import { useDownloads } from '@/offline/useDownloads'
 
 /**
@@ -39,7 +43,11 @@ import { useDownloads } from '@/offline/useDownloads'
  * `TripControl` sits with the show's other actions under the hero: a chip that
  * opens an inline card — how many episodes (1 up to the cap or to what has
  * aired after the viewer's progress, whichever is fewer), which they are, a
- * labelled size estimate, and the one action. A refusal is said in a sentence;
+ * labelled size estimate beside what the browser reports free, and the one
+ * action. When the browser reports room for fewer episodes than the cap, the
+ * card says so — as the browser's estimate, since on iPadOS it can report
+ * room the iPad does not have (owner, 2026-10-07) — and the stepper stops
+ * there; with no room at all the action is off. A refusal is said in a sentence;
  * "another trip is active" links to that show.
  *
  * `TripPanel` replaces it while the viewer's trip on this show is active: per
@@ -128,9 +136,13 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
   // The shell's auto-keep hook keeps this answer fresh; it says whether
   // another show already holds the one trip a viewer may have.
   const { data: current } = useCurrentTrip(true)
+  const { data: room } = useStorageRoom(open)
 
   if (max === 0) return null
-  const chosen = Math.max(1, Math.min(max, count))
+  const roomFor = tripRoomFor(room ?? null)
+  const cap = roomFor === null ? max : Math.max(1, Math.min(max, roomFor))
+  const chosen = Math.max(1, Math.min(cap, count))
+  const noRoom = roomFor === 0
   const elsewhere =
     current !== undefined && current !== null && current.anime_id !== anime.id ? current : null
   const refusal = tripRefusal(create.error)
@@ -177,16 +189,25 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
               <label htmlFor="trip-count" className={LABEL_CLASS}>
                 Episodes
               </label>
-              <Stepper value={chosen} max={max} onChange={setCount} />
+              <Stepper value={chosen} max={cap} onChange={setCount} />
             </div>
             <p className="text-right text-[14px] leading-[1.45] text-[var(--arc-text)] tabular-nums">
               <span data-testid="trip-range">{tripRangeLabel(candidates, chosen)}</span>
               <br />
               <span className="text-[13px] text-[var(--arc-text-muted)]">
                 {`About ${tripEstimateLabel(chosen)} (estimate)`}
+                {room === undefined || room === null || roomFor === null
+                  ? null
+                  : ` · the browser reports ${formatSize(Math.max(0, room.quota - room.usage))} free`}
               </span>
             </p>
           </div>
+
+          {room !== undefined && room !== null && roomFor !== null && roomFor < max ? (
+            <p data-testid="trip-room" className="text-[13px] leading-[1.5] text-[var(--arc-text)]">
+              {roomSentence(roomFor, room)}
+            </p>
+          ) : null}
 
           {elsewhere === null ? null : (
             <p className="text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">
@@ -204,7 +225,7 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="submit"
-              disabled={create.isPending || elsewhere !== null}
+              disabled={create.isPending || elsewhere !== null || noRoom}
               className={buttonClass('primary', 'px-5 text-[14px]')}
             >
               {create.isPending
@@ -245,6 +266,16 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
       ) : null}
     </>
   )
+}
+
+/** What the browser reports, said as its estimate (owner, 2026-10-07). */
+function roomSentence(roomFor: number, room: StorageRoom): string {
+  const device = deviceName()
+  const figures = `${formatSize(Math.max(0, room.quota - room.usage))} free of ${formatSize(room.quota)}`
+  if (roomFor === 0) {
+    return `The browser reports no room for another episode on this ${device} (${figures}). Remove something from Downloads first.`
+  }
+  return `The browser reports room for about ${String(roomFor)} episode${roomFor === 1 ? '' : 's'} on this ${device} (${figures}). It is an estimate: the ${device}'s own storage can fill up first.`
 }
 
 function SuitcaseGlyph() {
@@ -352,6 +383,12 @@ export function TripPanel({ trip }: { trip: Trip }) {
   const cancel = useCancelTrip()
   const [confirming, setConfirming] = useState(false)
   const held = onDeviceCount(trip, records)
+  // A trip download paused because the device is full holds the whole queue:
+  // said at the top of the panel, with the way to make room.
+  const outOfSpace = trip.episodes.some((episode) => {
+    const record = records[episode.episode_id]
+    return record?.state === 'paused' && record.reason === 'quota'
+  })
   const range =
     trip.first_number === trip.last_number
       ? `Episode ${String(trip.first_number)}`
@@ -394,6 +431,21 @@ export function TripPanel({ trip }: { trip: Trip }) {
           </button>
         </div>
       </div>
+
+      {outOfSpace ? (
+        <p
+          role="alert"
+          className="mt-3 rounded-card border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-bg)] p-3 text-[14px] leading-[1.5] text-[var(--arc-error)]"
+        >
+          {MESSAGES.quota}{' '}
+          <Link
+            to="/downloads"
+            className={cx('text-[var(--arc-text)] underline underline-offset-2', FOCUS_RING)}
+          >
+            Go to Downloads
+          </Link>
+        </p>
+      ) : null}
 
       {confirming ? (
         <div

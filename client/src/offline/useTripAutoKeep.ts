@@ -14,6 +14,9 @@
  * - an episode the device already has a record of joins the trip
  *   (`adoptTrip`): a copy already on the device — small or full size — is
  *   confirmed to the server at once; a record paused by hand stays paused;
+ * - a download the device stopped (a write it would not take: Arc left the
+ *   screen, or the iPad is full) is resumed — or, for a full iPad, probed —
+ *   by `resumeSuspended`, never one paused by hand;
  * - and every trip copy the server has not heard about yet is confirmed again.
  *
  * Not for the demo account, nor where the browser cannot keep files (no OPFS
@@ -51,6 +54,9 @@ export async function autoKeep(trip: Trip | null, manager: DownloadManager): Pro
       }
     }
   }
+  // What the device stopped (a closed handle, a full iPad) is tried again on
+  // every tick, never what the viewer paused by hand.
+  manager.resumeSuspended()
   manager.confirmPending()
 }
 

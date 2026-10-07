@@ -1722,6 +1722,18 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
       the Nyaa filter refuses the release ("names two seasons (4 and 2)"), a
       pack file so named maps to no episode, and such a file goes to review.
       Corpora 265→269 and 26→27.
+- [x] **Device writes that fail pause instead of failing** (owner, on the
+      road 2026-10-07: "Episodes 17+ failed download to device" — the iPad's
+      disk was full while the browser still reported 32 GB of allowance, and
+      every write threw `InvalidStateError`): a refused write re-opens the
+      file and retries on a fresh worker; if it still fails the record pauses
+      as "out of space" and holds the queue; a background suspension pauses as
+      "interrupted" and resumes on the next nudge or trip tick; the trip card
+      caps the count by the browser's reported room and says it is only an
+      estimate; a halted download no longer blocks a later delete. Client
+      only; client suite 1138, lint and build clean (orchestrator). Not
+      verifiable without a real iPad: that the second attempt on a full
+      device really pauses rather than loops.
 - Verified 2026-10-06 (orchestrator): full pass server 4393 (after the season-mark fix), client 1116, lint
   clean, build ok. Note: commit 6938fba carried a half-applied `manual_stall`
   hunk without its column; it is completed by this deploy (the stall path was

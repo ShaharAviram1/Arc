@@ -527,14 +527,15 @@ describe('runDownload', () => {
     expect(last(messages)).toMatchObject({ type: 'failed', code: 'size', offset: 0 })
   })
 
-  it('surfaces a full disk as a quota failure and leaves a resumable file', async () => {
+  it('pauses on a full disk (never fails) and leaves a resumable file', async () => {
     const handle = new FakeHandle()
     handle.quotaAt = 15
     const { deps, messages } = harness({ handle })
 
     await runDownload(COMMAND, deps)
 
-    expect(last(messages)).toMatchObject({ type: 'failed', code: 'quota', offset: 10 })
+    expect(last(messages)).toMatchObject({ type: 'paused', reason: 'quota', offset: 10 })
+    expect(messages.some((m) => m.type === 'failed')).toBe(false)
     // The part of the chunk that landed was cut back to the chunk boundary.
     expect(handle.getSize()).toBe(10)
     expect(handle.closed).toBe(true)
@@ -552,5 +553,179 @@ describe('runDownload', () => {
     await runDownload(COMMAND, deps)
 
     expect(last(messages)).toEqual({ type: 'paused', name: COMMAND.name, offset: 10 })
+  })
+})
+
+/**
+ * A handle the device closed under the worker (owner incident, 2026-10-07):
+ * iPadOS closes a worker's sync access handle when Arc leaves the screen, and
+ * a full iPad fails every write the same way. One file on "disk", any number
+ * of handles opened on it in turn.
+ */
+class FakeDisk {
+  bytes = new Uint8Array(0)
+  handles: StaleHandle[] = []
+  /** How many writes, across handles, throw `InvalidStateError` before one lands. */
+  staleWrites = 0
+  /** Bytes of a failing write that land before it throws. */
+  partial = 0
+  /** What the file shrinks to when it is next opened, as if flushes were lost. */
+  shrinkOnOpen: number | null = null
+
+  open = (): Promise<SyncHandle> => {
+    if (this.shrinkOnOpen !== null && this.handles.length > 0) {
+      this.bytes = this.bytes.slice(0, this.shrinkOnOpen)
+      this.shrinkOnOpen = null
+    }
+    const handle = new StaleHandle(this)
+    this.handles.push(handle)
+    return Promise.resolve(handle)
+  }
+}
+
+class StaleHandle implements SyncHandle {
+  closed = false
+  private readonly disk: FakeDisk
+
+  constructor(disk: FakeDisk) {
+    this.disk = disk
+  }
+
+  getSize(): number {
+    return this.disk.bytes.byteLength
+  }
+
+  write(data: Uint8Array, options: { at: number }): number {
+    if (this.closed || this.disk.staleWrites > 0) {
+      this.disk.staleWrites -= 1
+      if (this.disk.partial > 0) this.put(data.subarray(0, this.disk.partial), options.at)
+      this.closed = true
+      throw new DOMException('failed to write to file', 'InvalidStateError')
+    }
+    this.put(data, options.at)
+    return data.byteLength
+  }
+
+  private put(data: Uint8Array, at: number): void {
+    const end = at + data.byteLength
+    if (end > this.disk.bytes.byteLength) {
+      const next = new Uint8Array(end)
+      next.set(this.disk.bytes)
+      this.disk.bytes = next
+    }
+    this.disk.bytes.set(data, at)
+  }
+
+  truncate(size: number): void {
+    if (this.closed) throw new DOMException('closed', 'InvalidStateError')
+    this.disk.bytes = this.disk.bytes.slice(0, size)
+  }
+
+  flush(): void {
+    if (this.closed) throw new DOMException('closed', 'InvalidStateError')
+  }
+
+  close(): void {
+    this.closed = true
+  }
+}
+
+describe('runDownload with a handle the device closed', () => {
+  function staleHarness(disk: FakeDisk, file = content(25)) {
+    const fetch = rangeServer(() => ({ bytes: file, etag: '"a"' }))
+    const { deps, messages } = harness({ fetch })
+    deps.open = disk.open
+    return { deps, messages, fetch, file }
+  }
+
+  it('re-opens the file, retries the chunk and finishes with the right bytes', async () => {
+    const disk = new FakeDisk()
+    const { deps, messages, file } = staleHarness(disk)
+    // The second chunk's write is refused once, after 3 of its bytes landed.
+    let writes = 0
+    const open = disk.open
+    deps.open = async () => {
+      const handle = await open()
+      const write = handle.write.bind(handle)
+      handle.write = (data, options) => {
+        writes += 1
+        if (writes === 2) {
+          disk.staleWrites = 1
+          disk.partial = 3
+        }
+        return write(data, options)
+      }
+      return handle
+    }
+
+    await runDownload(COMMAND, deps)
+
+    expect(disk.bytes).toEqual(file)
+    expect(disk.handles).toHaveLength(2)
+    expect(disk.handles.every((handle) => handle.closed)).toBe(true)
+    expect(last(messages)).toMatchObject({ type: 'done', offset: 25, total: 25 })
+  })
+
+  it('pauses as interrupted when the re-opened file refuses the chunk too', async () => {
+    const disk = new FakeDisk()
+    disk.staleWrites = Number.POSITIVE_INFINITY
+    const { deps, messages } = staleHarness(disk)
+
+    await runDownload(COMMAND, deps)
+
+    expect(last(messages)).toMatchObject({
+      type: 'paused',
+      reason: 'interrupted',
+      offset: 0,
+      detail: expect.stringMatching(/InvalidStateError/) as unknown,
+    })
+    expect(messages.some((m) => m.type === 'failed')).toBe(false)
+    // Opened once, re-opened once, and let go of.
+    expect(disk.handles).toHaveLength(2)
+    expect(disk.handles.every((handle) => handle.closed)).toBe(true)
+  })
+
+  it('fetches the chunk again when the re-opened file is shorter than the offset', async () => {
+    const disk = new FakeDisk()
+    const { deps, messages, fetch, file } = staleHarness(disk)
+    let writes = 0
+    const open = disk.open
+    deps.open = async () => {
+      const handle = await open()
+      const write = handle.write.bind(handle)
+      handle.write = (data, options) => {
+        writes += 1
+        if (writes === 2) {
+          disk.staleWrites = 1
+          disk.shrinkOnOpen = 4
+        }
+        return write(data, options)
+      }
+      return handle
+    }
+
+    await runDownload(COMMAND, deps)
+
+    const ranges = fetch.mock.calls.map(
+      ([, init]) => (init.headers as Record<string, string>).Range,
+    )
+    expect(ranges).toEqual(['bytes=0-9', 'bytes=10-19', 'bytes=4-13', 'bytes=14-23', 'bytes=24-33'])
+    // The same validator on the fetch after the re-open.
+    expect((fetch.mock.calls[2]?.[1].headers as Record<string, string>)['If-Range']).toBe('"a"')
+    expect(disk.bytes).toEqual(file)
+    expect(last(messages)).toMatchObject({ type: 'done', offset: 25 })
+  })
+
+  it('fails a write that throws anything else, and says the file could not be written', async () => {
+    const handle = new FakeHandle()
+    handle.write = () => {
+      throw new Error('disk on fire')
+    }
+    const { deps, messages } = harness({ handle })
+
+    await runDownload(COMMAND, deps)
+
+    expect(last(messages)).toMatchObject({ type: 'failed', code: 'error', write: true })
+    expect(handle.closed).toBe(true)
   })
 })

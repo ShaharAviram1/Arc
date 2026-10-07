@@ -116,28 +116,33 @@ describe('DownloadManager', () => {
     expect(manager.record(9001)?.state).toBe('downloading')
   })
 
-  it('turns a full disk into a failed state that says so', async () => {
-    const { manager, worker } = await started([9001, 9002])
+  it('turns a full disk into a pause that says so, and holds the queue', async () => {
+    const { manager, worker, workers } = await started([9001, 9002])
 
     worker.emit({
-      type: 'failed',
+      type: 'paused',
       name: NAME_1,
       offset: 800,
-      code: 'quota',
-      reason: 'this device is out of space',
+      reason: 'quota',
+      detail: 'QuotaExceededError',
+      run: 1,
     })
 
     expect(manager.record(9001)).toMatchObject({
-      state: 'failed',
+      state: 'paused',
       reason: 'quota',
       bytes: 800,
       message: MESSAGES.quota,
     })
-    // The queue does not stall behind it.
-    expect(manager.record(9002)?.state).toBe('downloading')
+    // Nothing else tries a first chunk only to fail the same way.
+    expect(manager.record(9002)?.state).toBe('queued')
+    expect(workers).toHaveLength(1)
 
+    // Try again still works: it is the probe, run alone on a new worker.
     manager.resume(9001)
-    expect(manager.record(9001)?.state).toBe('queued')
+    expect(manager.record(9001)?.state).toBe('downloading')
+    expect(workers).toHaveLength(2)
+    expect(worker.terminated).toBe(true)
   })
 
   it('says a re-encode restarted the download', async () => {
