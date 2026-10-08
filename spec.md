@@ -942,7 +942,15 @@ that the course professor can log in at any time, and the owner uses it daily.
      and "Kept" when kept. An un-mark before the removal cancels it; an
      un-mark after it changes nothing on the device (the episode simply
      offers Keep offline again). Downloading an episode already watched keeps
-     it until it is watched again (to the mark).
+     it until it is watched again (to the mark). A completion the device
+     never heard of as it happened — made before this rule shipped, or on
+     another device — counts too (owner, 2026-10-08): at launch, at sign-in
+     and on every reconnect or trip tick while online (at most once every ten
+     minutes), the device asks the server which of its copies' episodes the
+     account has completed, and a copy whose completion is no older than the
+     copy is marked watched and leaves by the same rules; one completed before
+     the copy was kept is a rewatch and stays. The server saying "not
+     completed" never clears a mark, and a Kept copy is not asked about.
 
 ### 4.6 Watch tracking and list states
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
@@ -2362,3 +2370,10 @@ through the same edge, without the grace period.
   ready, so a position synced from the plane never came back. Now ready **or**
   delivered to the viewer's device and not released; the card says "On this
   device". Ready to watch and Catch up are unchanged.
+- 2026-10-08 (owner) — **FR-S9 item 9 catches up on completions made
+  elsewhere.** The `watched` mark came only from a completion acknowledged
+  live, so copies of episodes completed before the rule shipped, or on
+  another device, never left. The device now asks the server (new read
+  `GET /api/progress/completed`) at launch, sign-in and each reconnect / trip
+  tick, at most every ten minutes, and marks a copy whose completion is no
+  older than the copy (an older one is a rewatch download and stays).

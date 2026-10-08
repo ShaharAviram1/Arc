@@ -2509,6 +2509,23 @@ its cleanup leaves) or the outbox still holds a mark or un-mark for it
 `setRemoveWatched`, read in `hydrate()`); `keep` is a record field
 (`setKeep`). Downloads shows the switch, and while it is on a Keep chip per
 row and `watchedNote()`'s "Watched · removing soon" / "Kept".
+*Catching up* (owner, 2026-10-08): the live signal misses completions made
+before this build or on another device, so `manager.syncWatched()` asks the
+server. It runs at the end of `hydrate()`, from `setOwner(user)`, and from
+`resumeSuspended()` (every nudge — back on screen, back online — and every
+`autoKeep` tick), deduped in flight, only while `offlineNow()` is false, and
+at most once per `WATCHED_SYNC_MS` (10 min) per account (a request that found
+no network clears the stamp so the next trigger retries). It sends the signed-in
+account's records that are neither `watched` nor `keep` to
+`GET /api/progress/completed?episode_ids=…` (`COMPLETED_BATCH` = 200 ids a
+request, so any number of shows cost one request), and through `watchedChain`
+marks `watched` each answered record whose `completed_at` is **≥ the record's
+`created_at`** — a copy kept after the episode was finished is a rewatch and
+stays (FR-S9 item 9's last sentence) — unless a `noteWatched` for that
+record arrived while the request was out (a per-key announcement counter), so
+a stale "completed" never overrides a live un-mark. Absence from the answer
+never clears a mark. Anything marked is followed by the usual pass, so the
+outbox (`queuedFor`), the player and `keep` still hold it.
 
 **What is remembered where:**
 
@@ -3848,6 +3865,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready`, `offline_only` (false). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0) |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
+| `GET /api/progress/completed?episode_ids=…` | any (own rows) | FR-S9 item 9 (owner, 2026-10-08): `{completed: [{episode_id, completed_at}]}` — the caller's own `watch_progress` rows with `completed` among the ids (`completed_at`, or `updated_at` for a row older than that column), ordered by id; an unknown id or a list-only watched episode is simply absent. 1..200 repeated `episode_ids` (each 1..2⁶³−1), else 422. A read: no writes. The device marks its copies watched from it (§5.4d "Catching up") |
 | `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
 | `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released" |
@@ -6266,3 +6284,12 @@ asked*, so `make test` is exactly as fast as it was.
   `trip_episodes` row of the caller's own trip (any trip state);
   `ContinueWatchingEntry.on_device` marks those rows and the card says "On
   this device". No schema change; Ready to watch and Catch up unchanged.
+- 2026-10-08 (owner: copies of episodes completed before the build, or on
+  another device, never left) — §5.4d **Catching up**: `syncWatched()` asks the
+  new read-only `GET /api/progress/completed` (caller's own completion rows,
+  ≤ 200 ids) at hydrate, sign-in, every nudge and `autoKeep` tick while online,
+  at most every 10 min per account, and marks `watched` a record whose
+  `completed_at ≥ created_at` (an older completion is a rewatch download and
+  stays). The Show payload was not used: its `watched` also counts list
+  progress and carries no time, so it cannot tell a rewatch download from a
+  leftover. No schema change, no new dependency.

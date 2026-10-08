@@ -122,4 +122,37 @@ class ProgressOut(BaseModel):
     list_progress: int | None = None
 
 
-__all__ = ["EpisodeRef", "PlayInfo", "ProgressIn", "ProgressOut"]
+#: The most episode ids one ``GET /api/progress/completed`` may ask about.
+MAX_COMPLETED_IDS = 200
+
+
+class CompletedEpisode(BaseModel):
+    """One of the caller's completed episodes, and when it was completed."""
+
+    episode_id: int
+    #: ``watch_progress.completed_at`` (set once, cleared by an un-mark), or
+    #: the row's ``updated_at`` for a completion older than that column.
+    completed_at: datetime
+
+
+class CompletedOut(BaseModel):
+    """``GET /api/progress/completed`` — which of the asked episodes the caller has completed.
+
+    Only the caller's own completion rows: an episode watched on the list's
+    word alone (FR-W5's ``progress`` source) has no row and is not here. The
+    device uses it to mark its copies of episodes completed elsewhere, or
+    before it learnt to listen (FR-S9 item 9, owner 2026-10-08).
+    """
+
+    completed: list[CompletedEpisode]
+
+
+__all__ = [
+    "MAX_COMPLETED_IDS",
+    "CompletedEpisode",
+    "CompletedOut",
+    "EpisodeRef",
+    "PlayInfo",
+    "ProgressIn",
+    "ProgressOut",
+]

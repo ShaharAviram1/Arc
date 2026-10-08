@@ -1286,3 +1286,80 @@ async def test_the_play_answer_says_when_the_position_was_written(
     body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
     assert body["resume_position"] == pytest.approx(488.0)
     assert datetime.fromisoformat(body["resume_at"]) == written
+
+
+# --- /progress/completed (FR-S9 item 9, 2026-10-08) -----------------------------
+
+
+async def test_completed_lists_only_the_callers_completed_rows(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    other = await add_user(api_factory, "other.completer@arc.test", "other-password")
+    anime_id, ids = await add_show(api_factory, anilist_id=950901, ready=(1, 2, 3, 4))
+    await set_progress(api_factory, user, ids[1], position_s=DURATION, completed=True)
+    await set_progress(api_factory, user, ids[2], position_s=300.0)
+    await set_progress(api_factory, other, ids[3], position_s=DURATION, completed=True)
+    # Watched on the list's word alone: no completion row, not answered.
+    await follow(api_factory, user, anime_id, progress=4)
+    jobs_before = len(await wants_jobs(api_factory))
+
+    response = await client.get(
+        "/api/progress/completed",
+        params=[("episode_ids", ids[n]) for n in (1, 2, 3, 4)] + [("episode_ids", 999_999_999)],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "completed": [
+            {"episode_id": ids[1], "completed_at": NOW.isoformat().replace("+00:00", "Z")}
+        ]
+    }
+    # A read: nothing written.
+    entry = await entry_of(api_factory, user, anime_id)
+    assert entry is not None and entry.progress == 4
+    assert len(await wants_jobs(api_factory)) == jobs_before
+
+
+async def test_completed_falls_back_to_updated_at_for_an_old_row(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    _anime_id, ids = await add_show(api_factory, anilist_id=950902)
+    async with api_factory() as session:
+        session.add(
+            WatchProgress(
+                user_id=user.id,
+                episode_id=ids[11],
+                position_s=DURATION,
+                duration_s=DURATION,
+                completed=True,
+                completed_at=None,
+            )
+        )
+        await session.commit()
+    row = await progress_of(api_factory, user, ids[11])
+    assert row is not None
+
+    body = (await client.get("/api/progress/completed", params={"episode_ids": ids[11]})).json()
+
+    assert [item["episode_id"] for item in body["completed"]] == [ids[11]]
+    assert datetime.fromisoformat(body["completed"][0]["completed_at"]) == row.updated_at
+
+
+async def test_completed_bounds_the_ids(client: AsyncClient) -> None:
+    assert (await client.get("/api/progress/completed")).status_code == 422
+    too_many = [("episode_ids", n) for n in range(1, 202)]
+    assert (await client.get("/api/progress/completed", params=too_many)).status_code == 422
+    assert (
+        await client.get("/api/progress/completed", params={"episode_ids": 0})
+    ).status_code == 422
+    assert (
+        await client.get("/api/progress/completed", params={"episode_ids": "x"})
+    ).status_code == 422
+    exactly = [("episode_ids", n) for n in range(1, 201)]
+    assert (await client.get("/api/progress/completed", params=exactly)).status_code == 200
+
+
+async def test_completed_needs_a_session(api_app: FastAPI) -> None:
+    async with api_transport(api_app) as anon:
+        response = await anon.get("/api/progress/completed", params={"episode_ids": 1})
+        assert response.status_code == 401

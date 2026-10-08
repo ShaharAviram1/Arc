@@ -151,6 +151,9 @@ export function managerHarness(
     notes: memoryStore(),
     // Nothing waits in the outbox unless a test says so.
     queuedFor: () => Promise.resolve(false),
+    // The server knows of no completion unless a test says so; always reachable.
+    loadCompleted: () => Promise.resolve([]),
+    isOnline: () => true,
     ...options,
   })
   return { manager, worker, workers, store, files, removed, covers, revokes }

@@ -99,6 +99,15 @@ export interface PlayInfo {
   from_device?: boolean
 }
 
+/**
+ * One of the caller's completed episodes, from `GET /api/progress/completed`
+ * (FR-S9 item 9): when its completion row was made.
+ */
+export interface CompletedEpisode {
+  episode_id: number
+  completed_at: string
+}
+
 /** What every progress write answers with (FR-S4). */
 export interface ProgressResult {
   completed: boolean

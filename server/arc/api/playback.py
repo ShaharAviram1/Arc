@@ -3,6 +3,7 @@
 * ``GET  /api/episodes/{id}/play`` — everything the player opens with.
 * ``POST /api/progress`` — where the user has got to, every ten seconds.
 * ``POST``/``DELETE /api/episodes/{id}/watched`` — the manual mark and its undo.
+* ``GET  /api/progress/completed`` — which of some episodes the caller has completed.
 
 Thin, as routers here are: the rules — what "watched" means, what it costs a
 list entry, which episodes are worth resuming — all live in
@@ -44,17 +45,26 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
+from sqlalchemy import select
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
-from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep
+from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, EpisodeId, SessionDep, SettingsDep
 from arc.api.episode_extras import episode_extras, renditions_for
 from arc.api.media_stream import playlist_url
-from arc.api.playback_schemas import EpisodeRef, PlayInfo, ProgressIn, ProgressOut
+from arc.api.playback_schemas import (
+    MAX_COMPLETED_IDS,
+    CompletedEpisode,
+    CompletedOut,
+    EpisodeRef,
+    PlayInfo,
+    ProgressIn,
+    ProgressOut,
+)
 from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, WatchProgress
 from arc.services.catalog import episodes_for
 from arc.services.catalog.airing import aired_through, out_of_order
@@ -359,6 +369,43 @@ async def unmark(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) 
             },
         )
     return ProgressOut(completed=False, newly_completed=False, list_progress=outcome.list_progress)
+
+
+@router.get(
+    "/api/progress/completed",
+    response_model=CompletedOut,
+    summary="Which of these episodes the caller has completed (FR-S9 item 9)",
+)
+async def completed_episodes(
+    user: CurrentUser,
+    session: SessionDep,
+    episode_ids: Annotated[
+        list[Annotated[int, Field(ge=MIN_ID, le=MAX_ID)]],
+        Query(min_length=1, max_length=MAX_COMPLETED_IDS),
+    ],
+) -> CompletedOut:
+    """The caller's own completion rows among ``episode_ids``, and when each was made.
+
+    A read and nothing else: no row is written, no list entry touched. An id
+    the caller has no completed row for (or that names no episode) is simply
+    absent. The device marks its downloaded copies watched from this answer
+    when a completion was never announced to it live (FR-S9 item 9).
+    """
+    rows = await session.execute(
+        select(WatchProgress.episode_id, WatchProgress.completed_at, WatchProgress.updated_at)
+        .where(
+            WatchProgress.user_id == user.id,
+            WatchProgress.episode_id.in_(set(episode_ids)),
+            WatchProgress.completed.is_(True),
+        )
+        .order_by(WatchProgress.episode_id)
+    )
+    return CompletedOut(
+        completed=[
+            CompletedEpisode(episode_id=episode_id, completed_at=completed_at or updated_at)
+            for episode_id, completed_at, updated_at in rows.all()
+        ]
+    )
 
 
 __all__ = ["BAD_JSON", "EPISODE_NOT_FOUND", "NOT_PLAYABLE", "now", "router"]

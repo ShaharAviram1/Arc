@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { REMOVE_WATCHED_KEY, watchedNote, type DownloadRecord } from '@/offline/downloads'
+import { ApiError } from '@/lib/api'
+import {
+  COMPLETED_BATCH,
+  REMOVE_WATCHED_KEY,
+  WATCHED_SYNC_MS,
+  watchedNote,
+  type DownloadRecord,
+} from '@/offline/downloads'
 import { Outbox, type Send } from '@/offline/outbox'
 import { memoryStore, type KeyStore } from '@/offline/store'
 import { wireWatchedRemoval } from '@/offline/useDownloads'
@@ -272,5 +279,213 @@ describe('the outbox tells the manager (wireWatchedRemoval)', () => {
     })
     leave()
     unwire()
+  })
+})
+
+/**
+ * Completions the device never heard of live (before this build, or on
+ * another device) are asked of the server (owner, 2026-10-08).
+ */
+describe('catching up on completions made elsewhere', () => {
+  const AFTER = '2026-10-05T09:00:00Z' // after downloadedRecord's created_at
+  const BEFORE = '2026-10-01T09:00:00Z'
+
+  function otherShow(userId: number, episodeId: number): DownloadRecord {
+    return {
+      ...downloadedRecord(userId),
+      episodeId,
+      animeId: 4242,
+      name: `episode-${String(episodeId)}.mp4`,
+    }
+  }
+
+  it('marks and removes, at launch, a copy the server says was completed after it was kept', async () => {
+    const loadCompleted = vi.fn((ids: number[]) =>
+      Promise.resolve(ids.includes(9001) ? [{ episode_id: 9001, completed_at: AFTER }] : []),
+    )
+    const { manager, removed } = await launch(
+      [downloadedRecord(ALICE), downloadedRecord(ALICE, PLAY_INFO_EPISODE_2)],
+      { loadCompleted },
+    )
+    await manager.syncWatched()
+
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+    expect(manager.record(9001)).toBeUndefined()
+    expect(removed).toEqual(['episode-9001.mp4'])
+    // Not completed: untouched.
+    expect(manager.record(9002)).toMatchObject({ state: 'downloaded' })
+    expect(manager.record(9002)?.watched).toBeUndefined()
+  })
+
+  it('leaves a copy kept after the episode was finished (a rewatch)', async () => {
+    const loadCompleted = vi.fn(() => Promise.resolve([{ episode_id: 9001, completed_at: BEFORE }]))
+    const { manager, removed } = await launch([downloadedRecord(ALICE)], { loadCompleted })
+    await manager.syncWatched()
+
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+    expect(manager.record(9001)?.watched).toBeUndefined()
+    expect(removed).toEqual([])
+  })
+
+  it('does not ask about, or touch, a copy kept by hand or already marked', async () => {
+    const loadCompleted = vi.fn((ids: number[]) =>
+      Promise.resolve(ids.map((id) => ({ episode_id: id, completed_at: AFTER }))),
+    )
+    const { manager, removed } = await launch(
+      [
+        { ...downloadedRecord(ALICE), keep: true },
+        watched(downloadedRecord(ALICE, PLAY_INFO_EPISODE_2)),
+      ],
+      { loadCompleted, notes: memoryStore([[REMOVE_WATCHED_KEY, false]]) },
+    )
+    await manager.syncWatched()
+
+    // One kept, one already marked: nothing to ask.
+    expect(loadCompleted).not.toHaveBeenCalled()
+    expect(manager.record(9001)?.watched).toBeUndefined()
+    expect(manager.record(9002)?.watched).toBe(true)
+    expect(removed).toEqual([])
+  })
+
+  it('a kept copy stays when the server reports it completed', async () => {
+    const loadCompleted = vi.fn(() =>
+      Promise.resolve([
+        { episode_id: 9001, completed_at: AFTER },
+        { episode_id: 9002, completed_at: AFTER },
+      ]),
+    )
+    const { manager, removed } = await launch(
+      [{ ...downloadedRecord(ALICE), keep: true }, downloadedRecord(ALICE, PLAY_INFO_EPISODE_2)],
+      { loadCompleted },
+    )
+    await manager.syncWatched()
+
+    expect(loadCompleted).toHaveBeenCalledWith([9002])
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', keep: true })
+    expect(manager.record(9001)?.watched).toBeUndefined()
+    expect(removed).toEqual(['episode-9002.mp4'])
+  })
+
+  it('asks nothing offline, changes nothing, and asks once back online', async () => {
+    let online = false
+    const loadCompleted = vi.fn(() => Promise.resolve([{ episode_id: 9001, completed_at: AFTER }]))
+    const { manager, removed } = await launch([downloadedRecord(ALICE)], {
+      loadCompleted,
+      isOnline: () => online,
+    })
+    await manager.syncWatched()
+    manager.resumeSuspended()
+    await manager.syncWatched()
+
+    expect(loadCompleted).not.toHaveBeenCalled()
+    expect(manager.record(9001)?.watched).toBeUndefined()
+    expect(removed).toEqual([])
+
+    online = true
+    manager.resumeSuspended()
+    await manager.syncWatched()
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+    expect(removed).toEqual(['episode-9001.mp4'])
+  })
+
+  it('asks at most once per ten minutes per account, and again after', async () => {
+    let clock = Date.parse('2026-10-05T12:00:00Z')
+    const loadCompleted = vi.fn(() => Promise.resolve([]))
+    const { manager } = await launch([downloadedRecord(ALICE)], {
+      loadCompleted,
+      now: () => clock,
+    })
+    await manager.syncWatched()
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+
+    clock += WATCHED_SYNC_MS - 1
+    manager.resumeSuspended()
+    await manager.syncWatched()
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+
+    clock += 1
+    manager.resumeSuspended()
+    await manager.syncWatched()
+    expect(loadCompleted).toHaveBeenCalledTimes(2)
+  })
+
+  it('asks again at the next trigger when the request found no network', async () => {
+    const loadCompleted = vi
+      .fn<(ids: number[]) => Promise<{ episode_id: number; completed_at: string }[]>>()
+      .mockRejectedValueOnce(new ApiError(503, null))
+      .mockResolvedValue([])
+    const { manager } = await launch([downloadedRecord(ALICE)], { loadCompleted })
+    await manager.syncWatched()
+    await manager.syncWatched()
+
+    expect(loadCompleted).toHaveBeenCalledTimes(2)
+  })
+
+  it('asks once for every show’s copies, and only the signed-in account’s', async () => {
+    const loadCompleted = vi.fn(() => Promise.resolve([]))
+    await launch(
+      [
+        downloadedRecord(ALICE),
+        downloadedRecord(ALICE, PLAY_INFO_EPISODE_2),
+        otherShow(ALICE, 9100),
+        otherShow(ALICE, 9101),
+        otherShow(BOB, 9102),
+      ],
+      { loadCompleted },
+    ).then(({ manager }) => manager.syncWatched())
+
+    expect(loadCompleted).toHaveBeenCalledTimes(1)
+    expect([...(loadCompleted.mock.calls[0] as unknown as [number[]])[0]].sort()).toEqual([
+      9001, 9002, 9100, 9101,
+    ])
+  })
+
+  it('splits more than the server’s cap into batches', async () => {
+    const many = Array.from({ length: COMPLETED_BATCH + 1 }, (_, i) => otherShow(ALICE, 10_000 + i))
+    const loadCompleted = vi.fn<(ids: number[]) => Promise<never[]>>(() => Promise.resolve([]))
+    const { manager } = await launch(many, { loadCompleted })
+    await manager.syncWatched()
+
+    expect(loadCompleted.mock.calls.map(([ids]) => ids.length)).toEqual([COMPLETED_BATCH, 1])
+  })
+
+  it('never clears a live mark, and a live un-mark during the request wins', async () => {
+    let answer: (value: { episode_id: number; completed_at: string }[]) => void = () => undefined
+    const loadCompleted = vi.fn(
+      () =>
+        new Promise<{ episode_id: number; completed_at: string }[]>((resolve) => {
+          answer = resolve
+        }),
+    )
+    const notes = memoryStore([[REMOVE_WATCHED_KEY, false]])
+    const { manager } = await launch(
+      [watched(downloadedRecord(ALICE)), downloadedRecord(ALICE, PLAY_INFO_EPISODE_2)],
+      { loadCompleted, notes },
+    )
+    const pending = manager.syncWatched()
+    await vi.waitFor(() => {
+      expect(loadCompleted).toHaveBeenCalledWith([9002])
+    })
+    // The viewer un-marks 9002 while the stale answer is on its way.
+    await manager.noteWatched(ALICE, 9002, false)
+    answer([{ episode_id: 9002, completed_at: AFTER }])
+    await pending
+
+    // Server said nothing of 9001: its live mark stays.
+    expect(manager.record(9001)?.watched).toBe(true)
+    expect(manager.record(9002)?.watched).toBeUndefined()
+  })
+
+  it('a completion still queued in the outbox holds the copy', async () => {
+    const loadCompleted = vi.fn(() => Promise.resolve([{ episode_id: 9001, completed_at: AFTER }]))
+    const queuedFor = vi.fn(() => Promise.resolve(true))
+    const { manager, removed } = await launch([downloadedRecord(ALICE)], {
+      loadCompleted,
+      queuedFor,
+    })
+    await manager.syncWatched()
+
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', watched: true })
+    expect(removed).toEqual([])
   })
 })

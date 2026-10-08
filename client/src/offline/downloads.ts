@@ -68,7 +68,13 @@
  * so a session that just completed waits until the player is left; never for
  * a record kept by hand (`keep`), with the device's switch off, or while a
  * mark or un-mark for the episode waits in the outbox. Any un-mark clears
- * `watched`.
+ * `watched`. Completions the device never heard of live (made before this
+ * build, or on another device) are caught up by {@link DownloadManager.syncWatched}:
+ * at launch, at sign-in and on every nudge or auto-keep tick while online —
+ * at most once per {@link WATCHED_SYNC_MS} per account — the server is asked
+ * which of the account's unmarked records it holds a completion for, and a
+ * record is marked when that completion is no older than the record (a copy
+ * kept *after* an episode was finished is a rewatch, and stays).
  *
  * **A file is never touched while the worker may hold it.** From the moment a
  * pause is sent until the worker's terminal message for that file (which the
@@ -80,7 +86,7 @@
 
 import { apiFetch, ApiError, isUnreachable } from '@/lib/api'
 import type { OfflineCopyOut } from '@/lib/anime'
-import type { PlayInfo } from '@/lib/playback'
+import type { CompletedEpisode, PlayInfo } from '@/lib/playback'
 import { forgetCover, rememberCover } from '@/offline/cache'
 import {
   isTerminal,
@@ -100,6 +106,7 @@ import {
   revokeCurrent,
   type CopyVariant,
 } from '@/offline/opfs'
+import { offlineNow } from '@/offline/network'
 import { outbox } from '@/offline/outbox'
 import { openStore, type KeyStore } from '@/offline/store'
 
@@ -360,6 +367,19 @@ export const REMOVE_WATCHED_KEY = 'remove-watched'
 /** How often watched copies are looked for while Arc is open, beside the other triggers. */
 export const REMOVE_WATCHED_MS = 60 * 60_000
 
+/** How often, at most, the server is asked which kept episodes were completed elsewhere. */
+export const WATCHED_SYNC_MS = 10 * 60_000
+
+/** The most episode ids one `GET /api/progress/completed` carries (the server's cap). */
+export const COMPLETED_BATCH = 200
+
+function defaultLoadCompleted(episodeIds: number[]): Promise<CompletedEpisode[]> {
+  const query = episodeIds.map((id) => `episode_ids=${String(id)}`).join('&')
+  return apiFetch<{ completed: CompletedEpisode[] }>(`/api/progress/completed?${query}`).then(
+    (body) => body.completed,
+  )
+}
+
 /** Whether a mark or un-mark for this episode still waits in the outbox, from its own store. */
 async function defaultQueuedFor(userId: number, episodeId: number): Promise<boolean> {
   const records = await outbox().all()
@@ -487,6 +507,10 @@ export interface ManagerOptions {
    * the outbox: a watched copy is not removed until it has synced.
    */
   queuedFor?: (userId: number, episodeId: number) => Promise<boolean>
+  /** `GET /api/progress/completed`: which of these episodes the signed-in account completed, and when. */
+  loadCompleted?: (episodeIds: number[]) => Promise<CompletedEpisode[]>
+  /** Whether Arc can reach its server now (`offlineNow`, observed). */
+  isOnline?: () => boolean
 }
 
 function defaultWorker(): WorkerLike {
@@ -568,6 +592,8 @@ export class DownloadManager {
   private readonly releaseDelivered: (tripId: number, episodeId: number) => Promise<unknown>
   private readonly notes: KeyStore
   private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
+  private readonly loadCompleted: (episodeIds: number[]) => Promise<CompletedEpisode[]>
+  private readonly isOnline: () => boolean
 
   /** "Remove episodes once watched", this device's switch. On until it is turned off. */
   private removeWatchedOn = true
@@ -577,6 +603,12 @@ export class DownloadManager {
   private watchedChain: Promise<void> = Promise.resolve()
   /** A pass of {@link removeWatched} in flight, so two triggers make one. */
   private removing: Promise<void> | null = null
+  /** Announcements per `user:episode`, so a server answer read before one never overrides it. */
+  private watchedNotes = new Map<string, number>()
+  /** When each account last asked the server about completions ({@link syncWatched}). */
+  private syncedAt = new Map<number, number>()
+  /** A {@link syncWatched} in flight, so two triggers make one. */
+  private syncing: Promise<void> | null = null
 
   private worker: WorkerLike | null = null
   /**
@@ -642,6 +674,8 @@ export class DownloadManager {
     this.releaseDelivered = options.releaseDelivered ?? defaultReleaseDelivered
     this.notes = options.notes ?? openStore('player')
     this.queuedFor = options.queuedFor ?? defaultQueuedFor
+    this.loadCompleted = options.loadCompleted ?? defaultLoadCompleted
+    this.isOnline = options.isOnline ?? (() => !offlineNow())
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -724,6 +758,8 @@ export class DownloadManager {
       }
       // Whatever of this account waits on the server asks now.
       this.poll()
+      // And completions made elsewhere mark this account's copies.
+      void this.syncWatched()
     }
     this.pump()
   }
@@ -807,6 +843,7 @@ export class DownloadManager {
     this.poll()
     this.confirmPending()
     await this.passWatched()
+    void this.syncWatched()
   }
 
   /** Remove every episode file no record names: the orphans of an interrupted delete. */
@@ -1003,6 +1040,8 @@ export class DownloadManager {
    */
   resumeSuspended(): void {
     if (!this.isVisible()) return
+    // Completions made elsewhere are caught up on the same beat (rate limited).
+    void this.syncWatched()
     let probing = this.probe !== null
     for (const record of Object.values(this.snapshot)) {
       if (record.state !== 'paused') continue
@@ -1479,6 +1518,8 @@ export class DownloadManager {
    * own); a record made after the announcement is not marked.
    */
   noteWatched(userId: number, episodeId: number, watched: boolean): Promise<void> {
+    const noted = keyOf(userId, episodeId)
+    this.watchedNotes.set(noted, (this.watchedNotes.get(noted) ?? 0) + 1)
     const run = this.watchedChain.then(async () => {
       await this.hydrate()
       const key = keyOf(userId, episodeId)
@@ -1488,6 +1529,74 @@ export class DownloadManager {
     })
     this.watchedChain = run.catch(() => undefined)
     return this.watchedChain
+  }
+
+  /**
+   * Catch up on completions the outbox never announced (owner, 2026-10-08):
+   * ones made before this build, or on another device. While online, and at
+   * most once per {@link WATCHED_SYNC_MS} per account, the signed-in
+   * account's records not yet `watched` (nor kept) are sent to
+   * `GET /api/progress/completed`, {@link COMPLETED_BATCH} ids a request —
+   * one request for any number of shows. A record is marked `watched` when
+   * the server holds a completion of it **no older than the record**: a copy
+   * kept after the episode was finished is a rewatch, not a leftover. "Not
+   * completed" never clears a mark, and an announcement that arrived while
+   * the request was out wins over its answer. Anything marked goes through
+   * the usual pass (the outbox, the player and `keep` still hold it). Never
+   * rejects.
+   */
+  syncWatched(): Promise<void> {
+    this.syncing ??= this.syncWatchedOnce().finally(() => {
+      this.syncing = null
+    })
+    return this.syncing
+  }
+
+  private async syncWatchedOnce(): Promise<void> {
+    await this.hydrate()
+    const owner = this.owner
+    if (owner === null || !this.isOnline()) return
+    const last = this.syncedAt.get(owner)
+    const at = this.now()
+    if (last !== undefined && at - last < WATCHED_SYNC_MS) return
+    const asked = Object.values(this.snapshot).filter(
+      (record) => record.watched !== true && record.keep !== true,
+    )
+    this.syncedAt.set(owner, at)
+    if (asked.length === 0) return
+    const notesBefore = new Map(
+      asked.map((record) => [keyOfRecord(record), this.watchedNotes.get(keyOfRecord(record)) ?? 0]),
+    )
+    const completed = new Map<number, number>()
+    try {
+      for (let start = 0; start < asked.length; start += COMPLETED_BATCH) {
+        const ids = asked.slice(start, start + COMPLETED_BATCH).map((record) => record.episodeId)
+        for (const item of await this.loadCompleted(ids)) {
+          completed.set(item.episode_id, Date.parse(item.completed_at))
+        }
+      }
+    } catch (error) {
+      // No network after all: ask again at the next trigger rather than in ten minutes.
+      if (isUnreachable(error)) this.syncedAt.delete(owner)
+      return
+    }
+    let marked = false
+    const apply = this.watchedChain.then(() => {
+      if (this.owner !== owner) return
+      for (const [episodeId, completedAt] of completed) {
+        const key = keyOf(owner, episodeId)
+        const record = this.all.get(key)
+        if (record === undefined || record.watched === true || record.keep === true) continue
+        if ((this.watchedNotes.get(key) ?? 0) !== notesBefore.get(key)) continue
+        const kept = Date.parse(record.created_at)
+        if (Number.isNaN(completedAt) || completedAt < kept) continue
+        this.patch(key, { watched: true })
+        marked = true
+      }
+    })
+    this.watchedChain = apply.catch(() => undefined)
+    await this.watchedChain
+    if (marked) await this.passWatched()
   }
 
   /**
