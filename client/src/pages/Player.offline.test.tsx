@@ -1,10 +1,16 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { routes } from '@/app/router'
 import { createQueryClient } from '@/lib/queryClient'
-import { recallPosition, rememberPosition, rememberUser } from '@/offline/cache'
+import {
+  noteServerPosition,
+  recallPosition,
+  recallServerPosition,
+  rememberPosition,
+  rememberUser,
+} from '@/offline/cache'
 import { setDownloads, type DownloadRecord } from '@/offline/downloads'
 import { resetNetwork } from '@/offline/network'
 import { Outbox, setOutbox } from '@/offline/outbox'
@@ -28,8 +34,9 @@ function install(records: DownloadRecord[], blobUrl?: (name: string) => Promise<
   return harness
 }
 
-function renderPlayer(episodeId = 9001) {
-  const router = createMemoryRouter(routes, { initialEntries: [`/watch/${String(episodeId)}`] })
+function renderPlayer(at: number | string = 9001) {
+  const path = typeof at === 'number' ? `/watch/${String(at)}` : at
+  const router = createMemoryRouter(routes, { initialEntries: [path] })
   render(
     <QueryClientProvider client={createQueryClient()}>
       <RouterProvider router={router} />
@@ -306,6 +313,213 @@ describe('the player and a downloaded episode (FR-S9)', () => {
   })
 })
 
+describe('resume from the newer position, online or offline (FR-S2, 2026-10-08)', () => {
+  const EARLIER = new Date('2026-10-08T08:00:00Z')
+  const LATER = new Date('2026-10-08T09:00:00Z')
+  const ONLINE = {
+    'GET /api/auth/me': { body: TEST_USER },
+    'GET /api/episodes/9001/play': { body: PLAY_INFO },
+    'POST /api/progress': {
+      body: { completed: false, newly_completed: false, list_progress: null },
+    },
+  }
+
+  beforeEach(() => {
+    // A clean outbox: one left from another test would hold this episode's
+    // progress as still waiting, which is a rule of its own.
+    setOutbox(
+      new Outbox({ store: memoryStore(), persistent: () => Promise.resolve(true), locks: null }),
+    )
+  })
+
+  async function opened(video: HTMLVideoElement): Promise<void> {
+    await act(async () => {
+      fireEvent.loadedMetadata(video)
+      await Promise.resolve()
+    })
+  }
+
+  /** The stream's element: hls.js attaches it, so it never gets a `src`. */
+  async function streamVideo(): Promise<HTMLVideoElement> {
+    const video = await waitFor(() => {
+      const found = document.querySelector('video')
+      if (found === null) throw new Error('no video yet')
+      return found
+    })
+    equip(video)
+    return video
+  }
+
+  it("online, compares with the server's own timestamp: the device written later wins", async () => {
+    await rememberPosition(TEST_USER.id, 9001, 1000, 1436.8, LATER)
+    mockApi({
+      ...ONLINE,
+      'GET /api/episodes/9001/play': {
+        body: { ...PLAY_INFO, resume_at: EARLIER.toISOString() },
+      },
+    })
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(1000)
+    expect(await screen.findByText('Resumed from 16:40')).toBeInTheDocument()
+  })
+
+  it("online, compares with the server's own timestamp: the server written later wins", async () => {
+    await rememberPosition(TEST_USER.id, 9001, 1000, 1436.8, EARLIER)
+    mockApi({
+      ...ONLINE,
+      'GET /api/episodes/9001/play': { body: { ...PLAY_INFO, resume_at: LATER.toISOString() } },
+    })
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(754)
+    expect(await screen.findByText('Resumed from 12:34')).toBeInTheDocument()
+  })
+
+  it('online, plays the device copy from the device position when it is newer', async () => {
+    // The server holds 12:34 — what this iPad saw it hold before it went on
+    // watching with no network, up to 16:40.
+    await noteServerPosition(TEST_USER.id, 9001, 754, 1436.8, EARLIER)
+    await rememberPosition(TEST_USER.id, 9001, 1000, 1436.8, LATER)
+    mockApi(ONLINE)
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(1000)
+    expect(await screen.findByText('Resumed from 16:40')).toBeInTheDocument()
+  })
+
+  it('online, takes the server position when another device moved it', async () => {
+    await noteServerPosition(TEST_USER.id, 9001, 300, 1436.8, EARLIER)
+    await rememberPosition(TEST_USER.id, 9001, 400, 1436.8, LATER)
+    mockApi(ONLINE)
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(754)
+    expect(await screen.findByText('Resumed from 12:34')).toBeInTheDocument()
+    // And the server's position is what this device has now seen it hold.
+    expect(await recallServerPosition(TEST_USER.id, 9001)).toMatchObject({ position_s: 754 })
+  })
+
+  it('online, a streamed episode resumes from the device too when it is newer', async () => {
+    await noteServerPosition(TEST_USER.id, 9001, 754, 1436.8, EARLIER)
+    await rememberPosition(TEST_USER.id, 9001, 900, 1436.8, LATER)
+    mockApi(ONLINE)
+    install([])
+
+    renderPlayer()
+    const video = await streamVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(900)
+    expect(await screen.findByText('Resumed from 15:00')).toBeInTheDocument()
+  })
+
+  it('offline, resumes from the device position', async () => {
+    await rememberUser(TEST_USER)
+    await noteServerPosition(TEST_USER.id, 9001, 900, 1436.8, LATER)
+    await rememberPosition(TEST_USER.id, 9001, 488, 1436.8, EARLIER)
+    install([downloadedRecord(TEST_USER.id)])
+    noNetwork()
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(488)
+    expect(await screen.findByText('Resumed from 8:08')).toBeInTheDocument()
+  })
+
+  it('does not resume an episode the device finished, whatever the server held', async () => {
+    await noteServerPosition(TEST_USER.id, 9001, 754, 1436.8, EARLIER)
+    await rememberPosition(TEST_USER.id, 9001, 1430, 1436.8, LATER)
+    mockApi(ONLINE)
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(0)
+    expect(screen.queryByText(/Resumed from/)).not.toBeInTheDocument()
+  })
+
+  it('a trip-only device copy with a finite length resumes, though the server knows none', async () => {
+    await noteServerPosition(TEST_USER.id, 9001, null, 0, EARLIER)
+    await rememberPosition(TEST_USER.id, 9001, 488, 1470, LATER)
+    const tripOnly = {
+      ...PLAY_INFO,
+      duration: 0,
+      offline_only: true,
+      playlist_url: null,
+      resume_position: null,
+    }
+    mockApi({ ...ONLINE, 'GET /api/episodes/9001/play': { body: tripOnly } })
+    const record = downloadedRecord(TEST_USER.id, tripOnly)
+    install([record])
+
+    renderPlayer()
+    const video = await deviceVideo(1470)
+    await opened(video)
+
+    expect(video.currentTime).toBe(488)
+    expect(await screen.findByText('Resumed from 8:08')).toBeInTheDocument()
+  })
+
+  it('writes the device position while streaming, not only from the device copy', async () => {
+    mockApi(ONLINE)
+    install([])
+
+    renderPlayer()
+    const video = await streamVideo()
+    await opened(video)
+    video.currentTime = 600
+    fireEvent.timeUpdate(video)
+    fireEvent.pause(video)
+
+    await waitFor(async () => {
+      expect(await recallPosition(TEST_USER.id, 9001)).toMatchObject({
+        position_s: 600,
+        updated_at: expect.any(String) as unknown,
+      })
+    })
+    // The report the server took is what it now holds.
+    await waitFor(async () => {
+      expect(await recallServerPosition(TEST_USER.id, 9001)).toMatchObject({ position_s: 600 })
+    })
+  })
+
+  it("Downloads' Play opens the episode at the device position", async () => {
+    await rememberUser(TEST_USER)
+    await rememberPosition(TEST_USER.id, 9001, 488, 1436.8)
+    install([downloadedRecord(TEST_USER.id)])
+    noNetwork()
+
+    renderPlayer('/downloads')
+    fireEvent.click(await screen.findByRole('link', { name: /^Play / }))
+    const video = await deviceVideo()
+    await opened(video)
+
+    expect(video.currentTime).toBe(488)
+    expect(await screen.findByText('Resumed from 8:08')).toBeInTheDocument()
+  })
+})
+
 describe('the offline control in the player (FR-S9, owner 2026-10-05)', () => {
   const STREAMING = {
     'GET /api/auth/me': { body: TEST_USER },
@@ -425,5 +639,31 @@ describe('the offline control in the player (FR-S9, owner 2026-10-05)', () => {
     })
     expect(screen.getByRole('link', { name: 'Back to show' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /offline|on this device/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('a watched copy and the player (owner, 2026-10-08)', () => {
+  it('is not removed while its episode is open, and goes once the player is left', async () => {
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/episodes/9001/play': { body: PLAY_INFO },
+      'POST /api/progress': {
+        body: { completed: true, newly_completed: true, list_progress: 1 },
+      },
+    })
+    pretendOpfs()
+    const { manager, removed } = install([downloadedRecord(TEST_USER.id)])
+
+    renderPlayer()
+    await deviceVideo()
+    // The server accepts the completion mid-session.
+    await manager.noteWatched(TEST_USER.id, 9001, true)
+    await manager.removeWatched()
+    expect(removed).toEqual([])
+    expect(manager.record(9001)?.watched).toBe(true)
+
+    cleanup()
+    await manager.removeWatched()
+    expect(removed).toEqual(['episode-9001.mp4'])
   })
 })

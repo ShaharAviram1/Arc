@@ -1,13 +1,19 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Artwork, buttonClass, cx, EmptyState, FOCUS_RING, RowGroup } from '@/components/ui'
+import { Artwork, buttonClass, Chip, cx, EmptyState, FOCUS_RING, RowGroup } from '@/components/ui'
 import { useMe } from '@/lib/auth'
 import { formatSize } from '@/lib/review'
 import { useCancelTrip, useCurrentTrip } from '@/lib/trips'
 import { coverUrl } from '@/offline/cache'
-import { COPY_NOTE, downloads, SCREEN_NOTE, type DownloadRecord } from '@/offline/downloads'
+import {
+  COPY_NOTE,
+  downloads,
+  SCREEN_NOTE,
+  watchedNote,
+  type DownloadRecord,
+} from '@/offline/downloads'
 import { canDownloadInApp, estimate, persisted } from '@/offline/opfs'
-import { useDownloads } from '@/offline/useDownloads'
+import { useDownloads, useRemoveWatched } from '@/offline/useDownloads'
 
 /**
  * The episodes kept on this device (spec FR-S9, §5 page table).
@@ -32,6 +38,12 @@ import { useDownloads } from '@/offline/useDownloads'
  * their way, the rows as ever, and — while the trip is the account's active
  * one and the server can be reached — Cancel trip, confirmed in the page. A
  * trip copy the server has not yet heard arrived says so quietly on its row.
+ *
+ * **Watched copies leave by themselves** (owner, 2026-10-08): the switch
+ * "Remove episodes once watched" (on by default, per device) and a Keep
+ * toggle per row that exempts one episode. A row whose completion the server
+ * has accepted says "Watched · removing soon" until the next pass takes it;
+ * a kept one says "Kept".
  */
 
 const LEDE = 'Episodes kept inside Arc on this device. They play with no connection.'
@@ -66,6 +78,35 @@ const STATE_LABEL: Record<DownloadRecord['state'], string> = {
   failed: 'Stopped',
 }
 
+const REMOVE_WATCHED_HELP =
+  'Once Arc has your watch of an episode, its copy leaves this device. Episodes you keep stay.'
+
+function RemoveWatchedSwitch() {
+  const on = useRemoveWatched()
+  return (
+    <label className="flex items-start gap-3 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-4">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={on}
+        aria-describedby="remove-watched-help"
+        className="mt-0.5 h-5 w-5 shrink-0 accent-[var(--arc-focus)]"
+        onChange={(event) => {
+          downloads().setRemoveWatched(event.target.checked)
+        }}
+      />
+      <span className="min-w-0">
+        <span className="block text-[15px] font-medium text-[var(--arc-text)]">
+          Remove episodes once watched
+        </span>
+        <span id="remove-watched-help" className="block text-[13px] text-[var(--arc-text-muted)]">
+          {REMOVE_WATCHED_HELP}
+        </span>
+      </span>
+    </label>
+  )
+}
+
 /** A remembered poster, as a blob URL; `null` until read, or when there is none. */
 function useCover(userId: number, animeId: number): string | null {
   const [url, setUrl] = useState<string | null>(null)
@@ -96,6 +137,8 @@ function DownloadRow({
   onCancel: () => void
 }) {
   const manager = downloads()
+  const removeWatched = useRemoveWatched()
+  const note = watchedNote(record, removeWatched)
   const cover = useCover(record.userId, record.animeId)
   const { anime, episode } = record.snapshot
   const percent = percentOf(record)
@@ -143,6 +186,9 @@ function DownloadRow({
             {preparing ? null : ` · ${COPY_NOTE[record.variant]}`}
             {done && record.confirm === 'pending' ? ' · telling Arc it arrived' : null}
           </p>
+          {note === null ? null : (
+            <p className="text-[13px] text-[var(--arc-text-muted)]">{note}</p>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-2 pl-[62px] sm:pl-0">
           {done ? (
@@ -176,6 +222,18 @@ function DownloadRow({
               {record.state === 'failed' ? 'Try again' : 'Resume'}
             </button>
           )}
+          {removeWatched ? (
+            <Chip
+              active={record.keep === true}
+              aria-label={`Keep ${name} after watching`}
+              className="px-4 text-[13px]"
+              onClick={() => {
+                manager.setKeep(record.episodeId, record.keep !== true)
+              }}
+            >
+              Keep
+            </Chip>
+          ) : null}
           <button
             type="button"
             aria-label={`Delete ${name}`}
@@ -452,6 +510,7 @@ export function Downloads() {
       </p>
 
       <div className="mt-7 flex max-w-[1080px] flex-col gap-6">
+        {items.length === 0 ? null : <RemoveWatchedSwitch />}
         {items.length === 0 ? (
           <EmptyState
             message={canDownloadInApp() ? EMPTY_MESSAGE : UNSUPPORTED}

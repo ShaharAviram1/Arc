@@ -33,6 +33,10 @@ from arc.models import (
     OfflineId,
     Rendition,
     Torrent,
+    Trip,
+    TripEpisode,
+    TripEpisodeState,
+    TripState,
     User,
     WatchProgress,
 )
@@ -825,6 +829,173 @@ async def test_another_users_progress_is_not_on_my_continue_watching(
     await start_watching(api_factory, other, episode)
 
     assert (await home(client))["continue_watching"] == []
+
+
+# --- Continue watching: the copy on the caller's device (FR-A12) -------------
+
+
+async def deliver(
+    factory: SessionFactory,
+    user: User,
+    episode: Episode,
+    *,
+    released: bool = False,
+    trip_state: TripState = TripState.ACTIVE,
+) -> None:
+    """A trip of ``user``'s holding ``episode``, confirmed on their device.
+
+    The episode stays ``not_wanted`` with no rendition — a trip-only episode's
+    only copy is the one on the device (§5.4e).
+    """
+    async with factory() as session:
+        trip = Trip(
+            user_id=user.id,
+            anime_id=episode.anime_id,
+            first_number=episode.number,
+            last_number=episode.number,
+            count=1,
+            state=trip_state,
+            deadline_at=NOW + timedelta(days=14),
+            ended_at=None if trip_state is TripState.ACTIVE else NOW,
+        )
+        session.add(trip)
+        await session.flush()
+        session.add(
+            TripEpisode(
+                trip_id=trip.id,
+                episode_id=episode.id,
+                state=TripEpisodeState.DELIVERED,
+                available_at=NOW - timedelta(days=2),
+                delivered_at=NOW - timedelta(days=1),
+                released_at=NOW if released else None,
+            )
+        )
+        await session.commit()
+
+
+async def test_an_episode_watched_from_the_device_copy_is_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Owner, 2026-10-08: watched half-way offline, back online, the position
+    synced — and Watch Now had nothing. A delivered, unreleased trip copy is
+    somewhere to resume from, so the row is offered and says where."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910090)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=8)
+    episode = await episode_number(api_factory, anime_id, 9)
+    await deliver(api_factory, user, episode)
+    await start_watching(
+        api_factory, user, episode, position_s=488.0, duration_s=1470.0, ready=False
+    )
+
+    rows = (await home(client))["continue_watching"]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["episode"]["id"] == episode.id
+    assert row["episode"]["state"] == "not_wanted"
+    assert row["episode"]["rendition"] is None
+    assert row["on_device"] is True
+    assert row["position_s"] == pytest.approx(488.0)
+    assert row["duration_s"] == pytest.approx(1470.0)
+
+
+async def test_the_device_copy_counts_whatever_the_trip_has_become(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The copy outlives the trip: an ended trip's delivered row still counts."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910091)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await deliver(api_factory, user, episode, trip_state=TripState.FINISHED)
+    await start_watching(api_factory, user, episode, ready=False)
+
+    rows = (await home(client))["continue_watching"]
+
+    assert [row["on_device"] for row in rows] == [True]
+
+
+async def test_a_released_device_copy_is_not_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The device deleted its copy: nothing left anywhere to resume."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910092)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await deliver(api_factory, user, episode, released=True)
+    await start_watching(api_factory, user, episode, ready=False)
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_a_device_copy_watched_past_the_mark_is_not_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The shelf's end rules are the same for a device copy as for a stream."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910093)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await deliver(api_factory, user, episode)
+    await start_watching(
+        api_factory,
+        user,
+        episode,
+        position_s=1400.0,
+        duration_s=1470.0,
+        completed=True,
+        ready=False,
+    )
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_another_users_device_copy_does_not_put_my_episode_on_the_shelf(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """My position on an episode somebody else carried away: not resumable by me."""
+    other = await add_user(api_factory, "traveller@arc.test", "other-password")
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910094)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await deliver(api_factory, other, episode)
+    await start_watching(api_factory, user, episode, ready=False)
+
+    assert (await home(client))["continue_watching"] == []
+
+
+async def test_a_ready_episode_on_my_device_is_an_ordinary_stream_row(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Ready streams from any browser, so the row is unchanged: no device label,
+    one row (not one per trip)."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910095)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    episode = await episode_number(api_factory, anime_id, 2)
+    await deliver(api_factory, user, episode, trip_state=TripState.FINISHED)
+    await deliver(api_factory, user, episode)
+    await start_watching(api_factory, user, episode)
+
+    rows = (await home(client))["continue_watching"]
+
+    assert len(rows) == 1
+    assert rows[0]["on_device"] is False
+    assert rows[0]["episode"]["rendition"] is not None
+
+
+async def test_a_device_copy_is_neither_ready_to_watch_nor_missing_from_behind(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Ready to watch is about what the server streams; Catch up counts aired
+    episodes past the list progress whatever their file — a delivered one is
+    unwatched like any other, not missing."""
+    anime_id = await airing_show(api_factory, title="Trip Show", anilist_id=910096)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=3)
+    episode = await episode_number(api_factory, anime_id, 4)
+    await deliver(api_factory, user, episode)
+
+    body = await home(client)
+
+    assert body["ready_to_watch"] == []
+    assert [row["behind"] for row in body["behind"]] == [4]
 
 
 async def test_a_watched_episode_is_marked_on_the_new_this_week_card(

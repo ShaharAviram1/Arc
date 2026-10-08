@@ -607,6 +607,90 @@ class TestAFileNamingAnotherSeasonThanItsDownload:
         assert (episode.anime_id, episode.number) == (anime.id, 11)
 
 
+class TestAnAbsolutelyNumberedDownload:
+    """2026-10-08: Arc's own absolute-numbered download is linked, not reviewed.
+
+    Production: ``[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13`` was
+    fetched for episode 1 of the *2nd Season* (13 = 1 + the first season's 12)
+    and went to review because the first season's "episode 13" was counted as a
+    competing show. Real matcher, real rows: the offset is worked out from the
+    cached prequel exactly as the downloader works it out.
+    """
+
+    NAME = "[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13 (1080p) [4AD12C5A].mkv"
+
+    async def _pair(self, session: AsyncSession) -> tuple[Anime, Anime]:
+        first = Anime(
+            anilist_id=163142,
+            title_romaji="Kikansha no Mahou wa Tokubetsu desu",
+            title_english="A Returner's Magic Should be Special",
+            format="TV",
+            episodes=12,
+            status="FINISHED",
+            season_year=2023,
+            relations=[{"relation_type": "SEQUEL", "anilist_id": 182283, "mal_id": None}],
+        )
+        second = Anime(
+            anilist_id=182283,
+            title_romaji="Kikansha no Mahou wa Tokubetsu desu 2nd Season",
+            title_english="A Returner's Magic Should be Special Season 2",
+            format="TV",
+            episodes=12,
+            status="RELEASING",
+            season_year=2026,
+            relations=[{"relation_type": "PREQUEL", "anilist_id": 163142, "mal_id": None}],
+        )
+        session.add_all([first, second])
+        await session.flush()
+        return first, second
+
+    async def test_the_prior_and_the_arithmetic_agree_so_it_links(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        _, second = await self._pair(db_session)
+        media_file = await add_file(db_session, tmp_path, self.NAME)
+
+        await run_match(db_session, library_settings, media_file.id, expected=[second.id, 1])
+
+        assert media_file.review_state is ReviewState.AUTO
+        episode = await db_session.get(Episode, media_file.episode_id or 0)
+        assert episode is not None
+        assert (episode.anime_id, episode.number) == (second.id, 1)
+        assert media_file.match_confidence is not None
+        assert media_file.match_confidence >= library_settings.match_auto_threshold
+        assert media_file.match_candidates is not None
+        best = media_file.match_candidates[0]
+        assert best["absolute"] is True
+        assert "absolute numbering agrees with the download" in best["reasons"]
+
+    async def test_without_the_prior_it_still_goes_to_review(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        catalog: CatalogService,
+        tmp_path: Path,
+    ) -> None:
+        """Pinned: today's answer, unchanged. Nothing says which reading Arc meant."""
+        first, second = await self._pair(db_session)
+        media_file = await add_file(db_session, tmp_path, self.NAME)
+
+        await run_match(db_session, library_settings, media_file.id)
+
+        assert media_file.review_state is ReviewState.PENDING
+        assert media_file.episode_id is None
+        assert media_file.match_candidates is not None
+        shown = {
+            (item["anime_id"], item["episode_number"])
+            for item in media_file.match_candidates
+            if "anime_id" in item
+        }
+        assert {(first.id, 13), (second.id, 1)} <= shown
+
+
 class TestTheTitleBar:
     """The second bar the handler applies: ``MATCH_MIN_TITLE_FOR_AUTO``."""
 

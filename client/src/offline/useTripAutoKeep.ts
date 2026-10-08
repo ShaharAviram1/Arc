@@ -17,7 +17,8 @@
  * - a download the device stopped (a write it would not take: Arc left the
  *   screen, or the iPad is full) is resumed — or, for a full iPad, probed —
  *   by `resumeSuspended`, never one paused by hand;
- * - and every trip copy the server has not heard about yet is confirmed again.
+ * - every trip copy the server has not heard about yet is confirmed again;
+ * - and watched copies leave the device (`removeWatched`, owner 2026-10-08).
  *
  * Not for the demo account, nor where the browser cannot keep files (no OPFS
  * or no workers); nothing runs while nobody is signed in.
@@ -58,6 +59,8 @@ export async function autoKeep(trip: Trip | null, manager: DownloadManager): Pro
   // every tick, never what the viewer paused by hand.
   manager.resumeSuspended()
   manager.confirmPending()
+  // Watched copies leave on this tick too (owner, 2026-10-08).
+  await manager.removeWatched()
 }
 
 /** Whether this account on this browser keeps trips at all. */

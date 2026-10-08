@@ -198,6 +198,12 @@ export interface ContinueWatchingEntry {
   episode: EpisodeOut
   position_s: number
   duration_s: number | null
+  /**
+   * The episode is on the shelf because the viewer's device holds its trip
+   * copy (FR-A12): the server cannot stream it, the player plays that copy.
+   * False on every `ready` row (owner, 2026-10-08).
+   */
+  on_device: boolean
 }
 
 /** Which of the two questions produced a failure row (FR-W6). */

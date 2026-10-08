@@ -343,3 +343,57 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     })
   })
 })
+
+describe('watched copies leave by themselves (owner, 2026-10-08)', () => {
+  it('labels a watched row and a kept one, and Keep exempts an episode', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    const { manager, removed } = install([
+      { ...downloadedRecord(TEST_USER.id, PLAY_INFO), watched: true },
+      { ...downloadedRecord(TEST_USER.id, PLAY_INFO_EPISODE_2), keep: true },
+    ])
+    // Episode 1 is open in the player, so the launch pass leaves it for now.
+    const leave = manager.enterPlayer(9001)
+    const user = userEvent.setup()
+
+    renderApp()
+
+    expect(await screen.findByText('Watched · removing soon')).toBeInTheDocument()
+    expect(screen.getByText('Kept')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: `Keep ${TITLE} episode 2 after watching` }),
+    ).toHaveAttribute('aria-pressed', 'true')
+
+    const keep = screen.getByRole('button', { name: `Keep ${TITLE} episode 1 after watching` })
+    expect(keep).toHaveAttribute('aria-pressed', 'false')
+    await user.click(keep)
+    expect(manager.record(9001)?.keep).toBe(true)
+    expect(screen.getAllByText('Kept')).toHaveLength(2)
+
+    leave()
+    await manager.removeWatched()
+    expect(removed).toEqual([])
+  })
+
+  it('turns removal off for this device with the switch, which hides Keep', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    const { manager } = install([downloadedRecord(TEST_USER.id)])
+    const user = userEvent.setup()
+
+    renderApp()
+
+    const toggle = await screen.findByRole('switch', { name: /Remove episodes once watched/ })
+    expect(toggle).toBeChecked()
+    expect(
+      screen.getByRole('button', { name: `Keep ${TITLE} episode 1 after watching` }),
+    ).toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(manager.getRemoveWatched()).toBe(false)
+    expect(toggle).not.toBeChecked()
+    expect(
+      screen.queryByRole('button', { name: `Keep ${TITLE} episode 1 after watching` }),
+    ).not.toBeInTheDocument()
+  })
+})

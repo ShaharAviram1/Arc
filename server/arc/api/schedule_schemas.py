@@ -343,6 +343,11 @@ class ContinueWatchingEntry(BaseModel):
     #: duration is null for a row written before the player knew it.
     position_s: float = 0.0
     duration_s: float | None = None
+    #: The episode is on this shelf because the caller's device holds its trip
+    #: copy (FR-A12) — it is not ``ready`` on the server, so the card says "On
+    #: this device" and the player plays that copy (owner, 2026-10-08). False
+    #: on every ``ready`` row, trip or no trip.
+    on_device: bool = False
 
     @classmethod
     def from_row(
@@ -381,6 +386,7 @@ class ContinueWatchingEntry(BaseModel):
             ),
             position_s=row.position_s,
             duration_s=row.duration_s,
+            on_device=row.on_device,
         )
 
 

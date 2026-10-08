@@ -1734,6 +1734,21 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
       only; client suite 1138, lint and build clean (orchestrator). Not
       verifiable without a real iPad: that the second attempt on a full
       device really pauses rather than loops.
+- [x] **From the road, 2026-10-08** (owner on an iPad): (1) a file in Review —
+      `… Kikansha no Mahou wa Tokubetsu desu - 13` fetched by the absolute
+      rule for S2E1 — had been capped as ambiguous because its own prequel
+      counted as a rival show; a prequel offered a number past its finished
+      count no longer caps, a prior corroborated by the absolute arithmetic
+      auto-links, and a number past a finished show's count never auto-links
+      (review instead). (2) Device copies are removed once watched AND the
+      completion has reached the server (switch on Downloads, per-episode
+      Keep; owner: "shouldn't downloaded episodes be automatically deleted
+      once watched?"). (3) The player resumes from the newer of the device's
+      and the server's position (`PlayInfo.resume_at`; "Is there no continue
+      watching from the same spot for local videos?"). (4) Watch Now's
+      Continue watching lists episodes only the device holds, marked "On this
+      device" ("no watch back in the Home Screen with time"). Verified
+      (orchestrator): server 4433, client 1194, lint clean, build ok.
 - Verified 2026-10-06 (orchestrator): full pass server 4393 (after the season-mark fix), client 1116, lint
   clean, build ok. Note: commit 6938fba carried a half-applied `manual_stall`
   hunk without its column; it is completed by this deploy (the stall path was

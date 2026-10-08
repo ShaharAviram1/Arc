@@ -157,6 +157,18 @@ describe('autoKeep', () => {
     })
   })
 
+  it('takes a watched copy off the device on the tick (owner, 2026-10-08)', async () => {
+    const { manager, removed } = await managerWith([downloadedRecord(USER)])
+    const leave = manager.enterPlayer(9001)
+    await manager.noteWatched(USER, 9001, true)
+    await autoKeep(null, manager)
+    expect(removed).toEqual([])
+
+    leave()
+    await autoKeep(null, manager)
+    expect(removed).toEqual(['episode-9001.mp4'])
+  })
+
   it('does nothing for a trip that has ended, or with nobody signed in', async () => {
     const { manager, worker } = await managerWith()
     await autoKeep(trip([tripEpisode(9001, 1, 'available')], 'cancelled'), manager)

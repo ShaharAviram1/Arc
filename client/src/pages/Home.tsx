@@ -636,6 +636,8 @@ interface EpisodeItem {
   episode: EpisodeOut
   position: number | null
   duration: number | null
+  /** Resumable only from the trip copy on the viewer's device (FR-A12). */
+  onDevice: boolean
 }
 
 /** Whole minutes left, or null when nothing knows how long the episode is. */
@@ -659,6 +661,7 @@ function continueWatching(home: HomePage): EpisodeItem[] {
     episode: entry.episode,
     position: entry.position_s,
     duration: entry.duration_s,
+    onDevice: entry.on_device,
   }))
 }
 
@@ -679,6 +682,7 @@ function readyToWatch(home: HomePage): EpisodeItem[] {
     episode: entry.episode,
     position: null,
     duration: null,
+    onDevice: false,
   }))
 }
 
@@ -687,6 +691,9 @@ function readyToWatch(home: HomePage): EpisodeItem[] {
  * — the Ready shelf's own heading already says the episode is ready, and
  * repeating it on every tile is noise. "In progress" is the honest middle
  * case: started, but nothing ever recorded how long the episode runs.
+ * "On this device" closes a line whose only copy is the viewer's trip copy
+ * (FR-A12, owner 2026-10-08): the server cannot stream it, so the card says
+ * where it will play from.
  */
 function tileLine(item: EpisodeItem): string {
   const parts = [`Episode ${String(item.episode.number)}`]
@@ -694,6 +701,7 @@ function tileLine(item: EpisodeItem): string {
 
   if (left !== null) parts.push(`${String(left)} min left`)
   else if (item.position !== null) parts.push('In progress')
+  if (item.onDevice) parts.push('On this device')
 
   return parts.join(' · ')
 }

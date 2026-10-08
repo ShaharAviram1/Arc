@@ -55,6 +55,21 @@
  * accounts that keep the same copy of an episode share its bytes, and it is
  * deleted only when the last record naming it goes.
  *
+ * **A watched copy leaves by itself** (owner, 2026-10-08). Once the server
+ * has accepted this account's completion of an episode — the one signal is
+ * the outbox's `announceWatched(…, true)`: an online report at or past the
+ * mark answered `completed`, the mark-watched call answered, or a replayed
+ * completion came back `applied`; never a completion still queued — the
+ * record is marked `watched`, and {@link DownloadManager.removeWatched} takes
+ * it off the device through {@link DownloadManager.remove} (the file, the
+ * record, a trip's release call). It runs at launch, on every trip auto-keep
+ * tick, hourly, and after every flush of the outbox that reached the server;
+ * never for the episode open in the player ({@link DownloadManager.enterPlayer}),
+ * so a session that just completed waits until the player is left; never for
+ * a record kept by hand (`keep`), with the device's switch off, or while a
+ * mark or un-mark for the episode waits in the outbox. Any un-mark clears
+ * `watched`.
+ *
  * **A file is never touched while the worker may hold it.** From the moment a
  * pause is sent until the worker's terminal message for that file (which the
  * worker posts only after closing it) the name is *releasing*; a delete in
@@ -85,6 +100,7 @@ import {
   revokeCurrent,
   type CopyVariant,
 } from '@/offline/opfs'
+import { outbox } from '@/offline/outbox'
 import { openStore, type KeyStore } from '@/offline/store'
 
 export type DownloadState =
@@ -144,6 +160,14 @@ export interface DownloadRecord {
    * then `done`.
    */
   confirm?: 'pending' | 'done'
+  /**
+   * The server has accepted this account's completion of the episode (see
+   * the class comment): the copy is removed at the next pass unless `keep`.
+   * Cleared by an un-mark. Absent on records from before 2026-10-08.
+   */
+  watched?: boolean
+  /** Kept by hand: never removed for being watched. Absent means false. */
+  keep?: boolean
   /**
    * The small copy vanished from the server mid-download (a 404) and the
    * server was asked again by itself. Once per record until a download next
@@ -245,6 +269,18 @@ export const COPY_NOTE: Record<CopyVariant, string> = {
   full: 'full size',
 }
 
+/**
+ * A Downloads row's word on what happens to it once watched (owner,
+ * 2026-10-08); `null` when there is nothing to say (the switch is off, or the
+ * episode is neither kept nor watched).
+ */
+export function watchedNote(record: DownloadRecord, removeWatched: boolean): string | null {
+  if (!removeWatched) return null
+  if (record.keep === true) return 'Kept'
+  if (record.watched === true) return 'Watched · removing soon'
+  return null
+}
+
 /** How often a `preparing` record asks the server, while the page is on screen. */
 export const POLL_MS = 20_000
 
@@ -317,6 +353,24 @@ function declineKey(userId: number, tripId: number, episodeId: number): string {
 }
 
 const DECLINE_PREFIX = 'trip-skip:'
+
+/** The device's "Remove episodes once watched" switch, in IndexedDB `player`. Absent means on. */
+export const REMOVE_WATCHED_KEY = 'remove-watched'
+
+/** How often watched copies are looked for while Arc is open, beside the other triggers. */
+export const REMOVE_WATCHED_MS = 60 * 60_000
+
+/** Whether a mark or un-mark for this episode still waits in the outbox, from its own store. */
+async function defaultQueuedFor(userId: number, episodeId: number): Promise<boolean> {
+  const records = await outbox().all()
+  return records.some(
+    (record) =>
+      record.user_id === userId &&
+      record.episode_id === episodeId &&
+      record.problem === undefined &&
+      record.kind !== 'position',
+  )
+}
 
 function defaultIsVisible(): boolean {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
@@ -428,6 +482,11 @@ export interface ManagerOptions {
    * the auto-keep hook does not fetch them again (IndexedDB `player`).
    */
   notes?: KeyStore
+  /**
+   * Whether a mark or un-mark of this episode by this account still waits in
+   * the outbox: a watched copy is not removed until it has synced.
+   */
+  queuedFor?: (userId: number, episodeId: number) => Promise<boolean>
 }
 
 function defaultWorker(): WorkerLike {
@@ -508,6 +567,16 @@ export class DownloadManager {
   ) => Promise<unknown>
   private readonly releaseDelivered: (tripId: number, episodeId: number) => Promise<unknown>
   private readonly notes: KeyStore
+  private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
+
+  /** "Remove episodes once watched", this device's switch. On until it is turned off. */
+  private removeWatchedOn = true
+  /** Episodes open in the player, with how many players hold each. Never removed for being watched. */
+  private playing = new Map<number, number>()
+  /** Watched marks applied in the order they were announced. */
+  private watchedChain: Promise<void> = Promise.resolve()
+  /** A pass of {@link removeWatched} in flight, so two triggers make one. */
+  private removing: Promise<void> | null = null
 
   private worker: WorkerLike | null = null
   /**
@@ -572,6 +641,7 @@ export class DownloadManager {
     this.confirmDelivered = options.confirmDelivered ?? defaultConfirmDelivered
     this.releaseDelivered = options.releaseDelivered ?? defaultReleaseDelivered
     this.notes = options.notes ?? openStore('player')
+    this.queuedFor = options.queuedFor ?? defaultQueuedFor
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -682,6 +752,7 @@ export class DownloadManager {
     try {
       for (const [key, value] of await this.notes.entries<unknown>()) {
         if (key.startsWith(DECLINE_PREFIX) && value === true) this.declined.add(key)
+        if (key === REMOVE_WATCHED_KEY) this.removeWatchedOn = value !== false
       }
     } catch {
       // Nothing remembered: the hook may offer a removed trip episode again.
@@ -735,6 +806,7 @@ export class DownloadManager {
     }
     this.poll()
     this.confirmPending()
+    await this.passWatched()
   }
 
   /** Remove every episode file no record names: the orphans of an interrupted delete. */
@@ -1018,9 +1090,13 @@ export class DownloadManager {
     const onOnline = () => {
       this.nudge()
     }
+    const hourly = setInterval(() => {
+      void this.removeWatched()
+    }, REMOVE_WATCHED_MS)
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
     return () => {
+      clearInterval(hourly)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
     }
@@ -1374,6 +1450,112 @@ export class DownloadManager {
         settled(confirmIsFinal(error))
       },
     )
+  }
+
+  /* --- Watched copies leave by themselves (owner, 2026-10-08) ------------------------ */
+
+  /** Whether this device removes watched copies ("Remove episodes once watched"). */
+  getRemoveWatched = (): boolean => this.removeWatchedOn
+
+  /** Turn the device's switch on or off; remembered in IndexedDB `player`. */
+  setRemoveWatched(on: boolean): void {
+    if (this.removeWatchedOn === on) return
+    this.removeWatchedOn = on
+    void this.notes.put(REMOVE_WATCHED_KEY, on).catch(() => undefined)
+    this.emit()
+  }
+
+  /** Keep this episode whether it is watched or not (`true`), or let it go once watched. */
+  setKeep(episodeId: number, keep: boolean): void {
+    const record = this.snapshot[episodeId]
+    if (record === undefined || (record.keep === true) === keep) return
+    this.patch(keyOfRecord(record), { keep })
+  }
+
+  /**
+   * The outbox's `announceWatched`: `true` when the server accepted this
+   * account's completion of the episode, `false` for an un-mark. Marks this
+   * account's record only (another account's copy of the episode is its
+   * own); a record made after the announcement is not marked.
+   */
+  noteWatched(userId: number, episodeId: number, watched: boolean): Promise<void> {
+    const run = this.watchedChain.then(async () => {
+      await this.hydrate()
+      const key = keyOf(userId, episodeId)
+      const record = this.all.get(key)
+      if (record === undefined || (record.watched === true) === watched) return
+      this.patch(key, { watched })
+    })
+    this.watchedChain = run.catch(() => undefined)
+    return this.watchedChain
+  }
+
+  /**
+   * The player has this episode open: it is not removed for being watched
+   * until every player holding it is left. Returns the function that leaves.
+   */
+  enterPlayer(episodeId: number): () => void {
+    this.playing.set(episodeId, (this.playing.get(episodeId) ?? 0) + 1)
+    let left = false
+    return () => {
+      if (left) return
+      left = true
+      const count = (this.playing.get(episodeId) ?? 1) - 1
+      if (count <= 0) this.playing.delete(episodeId)
+      else this.playing.set(episodeId, count)
+    }
+  }
+
+  /** Whether {@link removeWatched} would take this record off the device at its next pass. */
+  willRemove(record: DownloadRecord): boolean {
+    return this.removeWatchedOn && record.watched === true && record.keep !== true
+  }
+
+  /**
+   * Take every watched copy of the signed-in account off this device (see
+   * the class comment for which). Never rejects.
+   */
+  async removeWatched(): Promise<void> {
+    await this.hydrate()
+    await this.passWatched()
+  }
+
+  private passWatched(): Promise<void> {
+    this.removing ??= this.removeEachWatched().finally(() => {
+      this.removing = null
+    })
+    return this.removing
+  }
+
+  private async removeEachWatched(): Promise<void> {
+    const owner = this.owner
+    if (owner === null) return
+    for (const record of Object.values(this.snapshot)) {
+      if (!this.willRemove(record) || this.playing.has(record.episodeId)) continue
+      let queued: boolean
+      try {
+        queued = await this.queuedFor(owner, record.episodeId)
+      } catch {
+        // The outbox could not be read: keep the copy until it can.
+        continue
+      }
+      if (queued) continue
+      // Anything may have moved during the read.
+      const current = this.snapshot[record.episodeId]
+      if (
+        this.owner !== owner ||
+        current === undefined ||
+        !this.willRemove(current) ||
+        this.playing.has(record.episodeId)
+      ) {
+        continue
+      }
+      try {
+        await this.remove(record.episodeId)
+      } catch {
+        // Tried again at the next pass.
+      }
+    }
   }
 
   /* --- The worker --------------------------------------------------------------- */

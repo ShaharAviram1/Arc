@@ -9,6 +9,8 @@ restated, so the card the player renders above the video is the same
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
@@ -69,6 +71,12 @@ class PlayInfo(BaseModel):
     offline_only: bool = False
     #: Where to seek on open, or null for the beginning (FR-S2).
     resume_position: float | None = None
+    #: When the caller's position for this episode was last written — the
+    #: ``watch_progress`` row's ``updated_at`` (a synced offline report carries
+    #: the device's moment), or null when there is no row. The client compares
+    #: it with the position kept on the device and opens at the newer one
+    #: (FR-S2, FR-S9; 2026-10-08).
+    resume_at: datetime | None = None
     previous: EpisodeRef | None = None
     next: EpisodeRef | None = None
 

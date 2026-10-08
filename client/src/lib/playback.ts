@@ -21,7 +21,14 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 import { ApiError, apiFetch, isOffline, isUnreachable } from '@/lib/api'
-import { recallPosition, type LocalPosition } from '@/offline/cache'
+import {
+  noteServerPosition,
+  positionWrittenAt,
+  recallPosition,
+  recallServerPosition,
+  type LocalPosition,
+  type ServerPosition,
+} from '@/offline/cache'
 import {
   downloadedNeighbours,
   downloads,
@@ -29,7 +36,7 @@ import {
   type DownloadRecord,
   type Downloads,
 } from '@/offline/downloads'
-import { outbox, type Outbox } from '@/offline/outbox'
+import { crossesCompletion, outbox, type Outbox } from '@/offline/outbox'
 import { pendingWatched } from '@/offline/useOutbox'
 import { animeQueryKey, ANIME_QUERY_KEY, type AnimeSummary, type EpisodeOut } from '@/lib/anime'
 import { HOME_QUERY_KEY } from '@/lib/schedule'
@@ -75,6 +82,13 @@ export interface PlayInfo {
   offline_only?: boolean
   /** Seconds to resume from, or null when there is nothing to resume. */
   resume_position: number | null
+  /**
+   * When the server's position was written (ISO; the `watch_progress` row's
+   * `updated_at`), or null with no row. Compared with the device's position
+   * (`newerResume`, 2026-10-08). Absent from a server older than that, where
+   * the device's `srv:` record stands in.
+   */
+  resume_at?: string | null
   previous: EpisodeRef | null
   next: EpisodeRef | null
   /**
@@ -174,6 +188,81 @@ function refOf(record: DownloadRecord | null): EpisodeRef | null {
   }
 }
 
+/** A recorded length when there is one, else the length this device last played. */
+function knownDuration(recorded: number, local: LocalPosition | null): number {
+  if (Number.isFinite(recorded) && recorded > 0) return recorded
+  return local !== null && Number.isFinite(local.duration_s) && local.duration_s > 0
+    ? local.duration_s
+    : 0
+}
+
+/** The server's FR-S2 filter (`arc.services.playback.progress.resume_position`). */
+function serverResumeOf(position: number | null, duration: number): number | null {
+  if (position === null || !Number.isFinite(position) || position <= RESUME_MIN_SECONDS) return null
+  if (duration > 0 && position >= RESUME_MAX_FRACTION * duration) return null
+  return position
+}
+
+/** Two positions closer than this are the same write read back. */
+const SAME_POSITION_S = 0.5
+
+/**
+ * Whose position the player opens at, online: the server's or this device's
+ * (FR-S2, FR-S9; owner 2026-10-08, "is there no continue watching from the
+ * same spot for local videos?"). Pure.
+ *
+ * The newer one wins:
+ *
+ * 1. No local position → the server's.
+ * 2. Something for this episode is still waiting in the outbox (watched with
+ *    no network, not synced yet) → the device's: the server has not heard it.
+ * 3. The server says when its position was written (`resume_at`, the
+ *    `watch_progress` row's `updated_at`): the device's wins iff it was
+ *    written later, or the server has no row (`null`).
+ *
+ * **Fallback, for a server older than `resume_at`** (field absent): "newer" is
+ * worked out from what this device knows instead.
+ *
+ * 4. The server's position is still the one this device last saw it hold
+ *    (`seen`: the answer it last opened with, or its last accepted report or
+ *    synced item), and the device wrote a position after it saw that → the
+ *    device's: nobody else has moved the server since, and the device has.
+ * 5. Otherwise — the server's moved (another device watched it), the device
+ *    has not watched since it last looked, or the device has never looked
+ *    (`seen` null) → the server's.
+ *
+ * Offline there is no server answer; the device's position is used outright
+ * ({@link offlinePlayInfo}).
+ */
+export function newerResume(
+  serverResume: number | null,
+  serverDuration: number,
+  local: LocalPosition | null,
+  seen: ServerPosition | null,
+  queued: boolean,
+  serverAt?: string | null,
+): 'device' | 'server' {
+  if (local === null) return 'server'
+  if (queued) return 'device'
+  if (serverAt === null) return 'device'
+  if (serverAt !== undefined) {
+    const at = Date.parse(serverAt)
+    if (Number.isFinite(at)) return positionWrittenAt(local) > at ? 'device' : 'server'
+  }
+  if (seen === null) return 'server'
+  const expected = serverResumeOf(
+    seen.position_s,
+    serverDuration > 0 ? serverDuration : seen.duration_s,
+  )
+  const unchanged =
+    expected === null
+      ? serverResume === null
+      : serverResume !== null && Math.abs(serverResume - expected) <= SAME_POSITION_S
+  if (!unchanged) return 'server'
+  const seenAt = Date.parse(seen.at)
+  return positionWrittenAt(local) > (Number.isFinite(seenAt) ? seenAt : 0) ? 'device' : 'server'
+}
+
 /**
  * The player's payload rebuilt from a download, for when the server cannot
  * answer (FR-S9). Pure: everything it needs is passed in.
@@ -181,6 +270,9 @@ function refOf(record: DownloadRecord | null): EpisodeRef | null {
  * - **Resume** is the last position watched *on this device*: the server's
  *   is unreachable, and the device's is the newest the viewer can have made
  *   anyway, since nothing else could have reached this iPad meanwhile.
+ * - **Duration** is the snapshot's, or — for a trip-only episode, whose
+ *   snapshot has none (the server had no rendition to measure) — the length
+ *   the device's player last saw, so the resume has a ceiling to check.
  * - **Previous / next** are the nearest *downloaded* episodes of the show,
  *   the only ones that can play — never a link to one that cannot.
  * - **Watched** is what the download saw, overridden by a mark or un-mark
@@ -206,7 +298,7 @@ export function offlinePlayInfo(
     episode,
     anime: record.snapshot.anime,
     playlist_url: null,
-    duration: record.snapshot.duration,
+    duration: knownDuration(record.snapshot.duration, local),
     resume_position: local === null ? null : local.position_s,
     previous: refOf(previous),
     next: refOf(next),
@@ -249,6 +341,16 @@ export interface PlayInfoDeps {
   fetch: (episodeId: number) => Promise<PlayInfo>
   manager: DownloadManager
   recall: (userId: number, episodeId: number) => Promise<LocalPosition | null>
+  /** What this device last knew the server to hold ({@link newerResume}). */
+  recallSeen: (userId: number, episodeId: number) => Promise<ServerPosition | null>
+  noteSeen: (
+    userId: number,
+    episodeId: number,
+    position: number | null,
+    duration: number,
+  ) => Promise<void>
+  /** Whether anything for this episode is still waiting in the outbox. */
+  queued: (userId: number, episodeId: number) => boolean
   pending: () => ReadonlyMap<number, boolean>
 }
 
@@ -257,6 +359,12 @@ function defaultPlayInfoDeps(): PlayInfoDeps {
     fetch: (episodeId) => apiFetch<PlayInfo>(`/api/episodes/${String(episodeId)}/play`),
     manager: downloads(),
     recall: recallPosition,
+    recallSeen: recallServerPosition,
+    noteSeen: noteServerPosition,
+    queued: (userId, episodeId) =>
+      outbox()
+        .getSnapshot()
+        .pending.some((record) => record.user_id === userId && record.episode_id === episodeId),
     pending: () => pendingWatched(outbox().getSnapshot().pending),
   }
 }
@@ -266,6 +374,11 @@ function defaultPlayInfoDeps(): PlayInfoDeps {
  * longer has a rendition (retention removed it) — the payload rebuilt from
  * this account's download of the episode. Anything else, and any episode not
  * downloaded, fails exactly as before.
+ *
+ * Online, the resume position is the newer of the server's and this device's
+ * ({@link newerResume}), for every episode — streamed or played from the
+ * device — and the duration falls back to the one this device last played
+ * when the server has none (a trip-only episode, M19).
  */
 export async function loadPlayInfo(
   episodeId: number,
@@ -283,11 +396,47 @@ export async function loadPlayInfo(
     const local = await deps.recall(owner, episodeId)
     return offlinePlayInfo(record, deps.manager.getSnapshot(), local, deps.pending())
   }
+  await deps.manager.whenHydrated()
+  answer = await withDevicePosition(answer, episodeId, deps)
   const neighbourMissing =
     answer.previous === null || !answer.previous.ready || answer.next === null || !answer.next.ready
   if (!neighbourMissing) return answer
-  await deps.manager.whenHydrated()
   return withDeviceNeighbours(answer, deps.manager.getSnapshot())
+}
+
+/** The server's answer with {@link newerResume}'s position in it. Never throws. */
+async function withDevicePosition(
+  answer: PlayInfo,
+  episodeId: number,
+  deps: PlayInfoDeps,
+): Promise<PlayInfo> {
+  const owner = deps.manager.ownerId
+  if (owner === null) return answer
+  try {
+    const [local, seen] = await Promise.all([
+      deps.recall(owner, episodeId),
+      deps.recallSeen(owner, episodeId),
+    ])
+    const duration = knownDuration(answer.duration, local)
+    const winner = newerResume(
+      answer.resume_position,
+      duration,
+      local,
+      seen,
+      deps.queued(owner, episodeId),
+      answer.resume_at,
+    )
+    if (winner === 'device' && local !== null) {
+      // `seen` is left as it was: the server still holds what it said then,
+      // and the device's position is still the newer one until it is sent.
+      return { ...answer, duration, resume_position: local.position_s }
+    }
+    await deps.noteSeen(owner, episodeId, answer.resume_position, duration)
+    return duration === answer.duration ? answer : { ...answer, duration }
+  } catch {
+    // A device store that cannot be read is no reason not to play.
+    return answer
+  }
 }
 
 function isStatus404(error: unknown): boolean {
@@ -351,7 +500,19 @@ export async function sendProgress(
   // Remembered so the exit beacon past the mark queues nothing: the server
   // has already said this episode is done (B1, 2026-10-05).
   const owner = box.recordingAs
+  // The server now holds this position: what the next open compares with (2026-10-08).
+  if (owner !== null) {
+    noteServerPosition(owner, body.episode_id, body.position_s, body.duration_s).catch(
+      () => undefined,
+    )
+  }
   if (owner !== null && result.completed) box.noteCompleted(owner, body.episode_id, true)
+  // The server accepted a completion at this viewing: a report at or past the
+  // mark that it answered `completed`. A report early in a rewatch of an
+  // episode completed long ago answers `completed` too, and is not one.
+  if (owner !== null && result.completed && crossesCompletion(body.position_s, body.duration_s)) {
+    box.announceWatched(owner, body.episode_id, true)
+  }
   return result
 }
 
@@ -374,7 +535,10 @@ export async function sendWatched(
     return { completed: watched, newly_completed: false, list_progress: null, queued: true }
   }
   const owner = box.recordingAs
-  if (owner !== null) box.noteCompleted(owner, episodeId, watched)
+  if (owner !== null) {
+    box.noteCompleted(owner, episodeId, watched)
+    box.announceWatched(owner, episodeId, watched)
+  }
   return result
 }
 

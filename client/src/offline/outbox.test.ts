@@ -14,6 +14,8 @@ import {
   type SyncResponse,
 } from '@/offline/outbox'
 import { memoryStore, type KeyStore } from '@/offline/store'
+import { recallServerPosition } from '@/offline/cache'
+import { notePositionApplied } from '@/offline/useOutbox'
 
 const ALICE = 1
 const BOB = 2
@@ -451,5 +453,67 @@ describe('Outbox', () => {
     await box.recordPosition(ALICE, EP, 100, DURATION)
 
     expect(box.getSnapshot()).toMatchObject({ persistent: false, waiting: 1 })
+  })
+})
+
+describe('announcing what a replay settled (owner, 2026-10-08)', () => {
+  async function replay(status: ItemStatus, record: (box: Outbox) => Promise<void>) {
+    const { box } = make(answering(() => status))
+    const heard: [number, number, boolean][] = []
+    box.onWatched((user, episode, watched) => heard.push([user, episode, watched]))
+    await record(box)
+    heard.length = 0
+    await box.flush()
+    return heard
+  }
+
+  it('an applied completion is an accepted watch', async () => {
+    expect(await replay('applied', (box) => box.recordCompletion(ALICE, EP))).toEqual([
+      [ALICE, EP, true],
+    ])
+  })
+
+  it('an applied position past the mark is one too; one before it is not', async () => {
+    expect(
+      await replay('applied', (box) =>
+        box.recordPosition(ALICE, EP, 1300, DURATION, { completion: false }),
+      ),
+    ).toEqual([[ALICE, EP, true]])
+    expect(await replay('applied', (box) => box.recordPosition(ALICE, EP, 60, DURATION))).toEqual(
+      [],
+    )
+  })
+
+  it('a stale completion (un-marked later) and a retried one say nothing', async () => {
+    expect(await replay('stale', (box) => box.recordCompletion(ALICE, EP))).toEqual([])
+    expect(await replay('retry', (box) => box.recordCompletion(ALICE, EP))).toEqual([])
+  })
+
+  it('an applied un-mark is an un-mark', async () => {
+    expect(await replay('applied', (box) => box.recordUnmark(ALICE, EP))).toEqual([
+      [ALICE, EP, false],
+    ])
+  })
+})
+
+describe('a synced position is what the server now holds (FR-S2, 2026-10-08)', () => {
+  it('tells onApplied of applied records only, and the resume rule notes the position', async () => {
+    const heard: [string, number | undefined][] = []
+    const { box } = make(answering((item) => (item.kind === 'position' ? 'applied' : 'stale')))
+    box.onApplied((record) => {
+      heard.push([record.kind, record.position_s])
+      notePositionApplied(record)
+    })
+    await box.recordPosition(ALICE, EP, 488, DURATION, { completion: false })
+    await box.recordUnmark(ALICE, EP)
+    await box.flush()
+
+    expect(heard).toEqual([['position', 488]])
+    await vi.waitFor(async () => {
+      expect(await recallServerPosition(ALICE, EP)).toMatchObject({
+        position_s: 488,
+        duration_s: DURATION,
+      })
+    })
   })
 })

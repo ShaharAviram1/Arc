@@ -227,6 +227,9 @@ function failed(record: OutboxRecord, reason: string) {
       : undefined
 }
 
+/** `announceWatched`'s listener: `watched` is true only for a completion the server accepted. */
+export type WatchedListener = (userId: number, episodeId: number, watched: boolean) => void
+
 export interface OutboxOptions {
   store?: KeyStore
   send?: Send
@@ -265,6 +268,8 @@ export class Outbox {
   private readonly flushListeners = new Set<(outcome: FlushOutcome) => void>()
   /** `user:episode` the server has answered `completed: true` for, this page. */
   private readonly completed = new Set<string>()
+  private readonly watchedListeners = new Set<WatchedListener>()
+  private readonly appliedListeners = new Set<(record: OutboxRecord) => void>()
 
   constructor(options: OutboxOptions = {}) {
     this.store = options.store ?? openStore('outbox')
@@ -295,6 +300,40 @@ export class Outbox {
     const key = `${String(userId)}:${String(episodeId)}`
     if (completed) this.completed.add(key)
     else this.completed.delete(key)
+  }
+
+  /**
+   * Tell whoever listens ({@link onWatched}) that this account's watched state
+   * for the episode moved: `true` **only** when the server has accepted a
+   * completion (an online report at or past the mark answered `completed`,
+   * the mark-watched call answered, or a replayed completion came back
+   * `applied`), `false` for any un-mark — the server's or one still queued
+   * here. Never `true` for a completion that is still in the queue. This is
+   * the one signal the download manager removes a watched copy on (FR-S9,
+   * owner 2026-10-08).
+   */
+  announceWatched(userId: number, episodeId: number, watched: boolean): void {
+    for (const listener of this.watchedListeners) listener(userId, episodeId, watched)
+  }
+
+  /** Called on every {@link announceWatched}. Returns an unsubscribe. */
+  onWatched(listener: WatchedListener): () => void {
+    this.watchedListeners.add(listener)
+    return () => {
+      this.watchedListeners.delete(listener)
+    }
+  }
+
+  /**
+   * Called with every record the server answered `applied` — the moment the
+   * server holds what it carries. The player's resume rule notes a position
+   * here (FR-S2, 2026-10-08). Returns an unsubscribe.
+   */
+  onApplied(listener: (record: OutboxRecord) => void): () => void {
+    this.appliedListeners.add(listener)
+    return () => {
+      this.appliedListeners.delete(listener)
+    }
   }
 
   knownCompleted(userId: number, episodeId: number): boolean {
@@ -360,6 +399,7 @@ export class Outbox {
   /** The explicit un-mark, pressed with no connection (FR-S4). */
   async recordUnmark(userId: number, episodeId: number): Promise<void> {
     this.noteCompleted(userId, episodeId, false)
+    this.announceWatched(userId, episodeId, false)
     await this.add('unmark', userId, episodeId, this.now().toISOString())
     await this.refresh()
   }
@@ -506,6 +546,10 @@ export class Outbox {
         // Atomic: a newer sample coalesced in since the send has another id
         // and is not deleted.
         if (await this.store.deleteIf(key, record.id)) removed += 1
+        if (result.status === 'applied') {
+          this.announceApplied(record)
+          for (const listener of this.appliedListeners) listener(record)
+        }
       } else if (result.status === 'rejected') {
         // Kept under a key of its own first, then taken off the pending key —
         // so a crash in between leaves it twice, never nowhere.
@@ -521,6 +565,27 @@ export class Outbox {
       }
     }
     return { removed, rejected }
+  }
+
+  /**
+   * A record the server applied: a completion, or a position past the mark
+   * (which completes the episode exactly as an online report would), is an
+   * accepted completion; an un-mark is an un-mark. `stale` says nothing
+   * certain — a stale completion means the user took the mark back later —
+   * so it announces nothing.
+   */
+  private announceApplied(record: OutboxRecord): void {
+    if (record.kind === 'completion') {
+      this.announceWatched(record.user_id, record.episode_id, true)
+    } else if (record.kind === 'unmark') {
+      this.announceWatched(record.user_id, record.episode_id, false)
+    } else if (
+      record.position_s !== undefined &&
+      record.duration_s !== undefined &&
+      crossesCompletion(record.position_s, record.duration_s)
+    ) {
+      this.announceWatched(record.user_id, record.episode_id, true)
+    }
   }
 
   private async add(

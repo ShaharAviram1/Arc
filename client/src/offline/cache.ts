@@ -10,7 +10,9 @@
  *   network is not mistaken for a sign-out, and whose data this device holds.
  * - `payloads` — the last good Watch Now payload and every show page opened.
  * - `player` — the last position watched on this device, per (user, episode),
- *   which is what an offline resume seeks to.
+ *   which is what an offline resume seeks to and what an online one prefers
+ *   when it is newer; and the position this device last knew the server to
+ *   hold, which is how "newer" is told (2026-10-08).
  * - `covers` — a poster blob per show with a downloaded episode; the art lives
  *   on another origin, which is as unreachable offline as the API.
  *
@@ -149,10 +151,30 @@ export async function withRemembered<T>(key: string, load: () => Promise<T>): Pr
 
 /* --- The last position on this device ----------------------------------------- */
 
+/**
+ * The last position watched on this device, per (user, episode), whatever the
+ * source — the stream or the device's copy — and whether or not the network
+ * was there. It is what an offline resume seeks to, and online it is weighed
+ * against the server's (FR-S2, FR-S9, 2026-10-08: `newerResume` in
+ * `lib/playback.ts`).
+ */
 export interface LocalPosition {
   position_s: number
   duration_s: number
+  /** When it was written. The record's first field for this; always written. */
   at: string
+  /**
+   * The same moment under the name the resume rule reads (2026-10-08).
+   * Optional: records written before then carry `at` only, which
+   * {@link positionWrittenAt} falls back to.
+   */
+  updated_at?: string
+}
+
+/** When a local position was written, in ms since the epoch; 0 when unreadable. */
+export function positionWrittenAt(local: LocalPosition): number {
+  const parsed = Date.parse(local.updated_at ?? local.at)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function positionKey(userId: number, episodeId: number): string {
@@ -164,12 +186,15 @@ export async function rememberPosition(
   episodeId: number,
   position: number,
   duration: number,
+  now: Date = new Date(),
 ): Promise<void> {
   if (!Number.isFinite(position) || position < 0) return
+  const stamp = now.toISOString()
   await positions().put(positionKey(userId, episodeId), {
     position_s: position,
     duration_s: Number.isFinite(duration) ? duration : 0,
-    at: new Date().toISOString(),
+    at: stamp,
+    updated_at: stamp,
   } satisfies LocalPosition)
 }
 
@@ -178,6 +203,50 @@ export async function recallPosition(
   episodeId: number,
 ): Promise<LocalPosition | null> {
   return (await positions().get<LocalPosition>(positionKey(userId, episodeId))) ?? null
+}
+
+/**
+ * What this device last knew the server to hold for the episode, and when it
+ * learned it (2026-10-08). Learned from three places only: the play answer it
+ * opened with (when the server's position was the one used), a progress report
+ * the server accepted, and an outbox item the server applied. `position_s` is
+ * null when the play answer had nothing to resume.
+ *
+ * The play answer carries no timestamp, so this is how the client tells "the
+ * server's position is still the one this device last saw, and the device has
+ * watched since" (the device's is newer) from "something else moved it"
+ * (another device: the server's is newer).
+ */
+export interface ServerPosition {
+  position_s: number | null
+  duration_s: number
+  at: string
+}
+
+function serverKey(userId: number, episodeId: number): string {
+  return `srv:${String(userId)}:${String(episodeId)}`
+}
+
+export async function noteServerPosition(
+  userId: number,
+  episodeId: number,
+  position: number | null,
+  duration: number,
+  now: Date = new Date(),
+): Promise<void> {
+  if (position !== null && (!Number.isFinite(position) || position < 0)) return
+  await positions().put(serverKey(userId, episodeId), {
+    position_s: position,
+    duration_s: Number.isFinite(duration) && duration > 0 ? duration : 0,
+    at: now.toISOString(),
+  } satisfies ServerPosition)
+}
+
+export async function recallServerPosition(
+  userId: number,
+  episodeId: number,
+): Promise<ServerPosition | null> {
+  return (await positions().get<ServerPosition>(serverKey(userId, episodeId))) ?? null
 }
 
 /* --- Posters ---------------------------------------------------------------- */

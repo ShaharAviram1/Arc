@@ -1447,6 +1447,37 @@ trip's `pending` episodes, and only episodes with nothing landed
   confidence, candidates kept. A file with no mark, or the entry's own, is
   unchanged. Pack members already refuse another season in
   `batch._member_number` and do not read the prior there.
+- **A prequel is not a rival of its own sequel's absolute reading**
+  (2026-10-08, FR-L4; `[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13`
+  fetched for the *2nd Season* ep 1 went to review at 0.942 vs the prequel's
+  ep 13 at 0.895). Two pieces, both in `matcher.py`:
+  (1) `prequel_map(pool)` = `{later id: {earlier id: count | None}}` over the
+  one-hop `PREQUEL`/`SEQUEL` edges inside the pool (either end of the edge),
+  `count` being the earlier entry's `episodes` only when it is `FINISHED`.
+  `rank(…, prequels=)` passes it to `confidence_of`, where a runner-up within
+  `AMBIGUITY_MARGIN` is skipped rather than capping when
+  `same_number_in_chain(best, other)`: `other` is `best`'s direct prequel,
+  non-absolute, with a larger number, and either its count is known, the
+  number is past it and `best`'s episode is exactly the remainder, or its count
+  is unknown and `best` is a believed prior. Any other show in the margin
+  still caps. (2) `match()` computes `prior_offset(session, prior row)` —
+  `nyaa.absolute_offset` with a cache resolver, the very arithmetic that
+  accepted the download (finished, counted chain, multi-hop) — and
+  `corroborated_prior(parsed, prior, episode, offset)` re-scores the prior
+  with the file's season set to `entry_season(prior)` (as `offset_candidates`
+  does) when the file names no season, no conflict, no fraction, kind
+  episode/unknown, and `parsed.episode == episode + offset`; the result is
+  `absolute=True` with the reason `absolute numbering agrees with the
+  download` and wins the `(anime, episode)` dedupe. It is `None` (the prior
+  scores as before) for anything else, including a title the prior gate does
+  not believe. No prior and no agreement: unchanged — the Kikansha file with no
+  prior still goes to review (prequel ep 13 first, the offset in the margin).
+  Acceptance unchanged (seeded 95/102 auto, cold 83/102, precision 100 %).
+  Same day: `_score` sets `Scored.beyond_count` (reason `episode N is past the
+  finished show's M`) when a non-movie episode number exceeds the `episodes` of
+  a `FINISHED` candidate, and `confidence_of` caps such a *best* candidate at
+  `AMBIGUOUS_CEILING` — kept in the shortlist, never auto-linked. An airing
+  show keeps the one-past stale-cache allowance.
 - `library.link.link()` is the single place a file is attached to an
   episode (auto-link and review confirm); it sets `matched` without
   downgrading `preparing`/`ready`. M7 enqueues the transcode right after it.
@@ -1847,6 +1878,16 @@ codec strings — what the API and retention import), `media/offline.py` (the
   excludes it) and the FR-S4 advance has put the next number above
   `list_entries.progress`. Nothing else reads the shelf's rule: completion
   still drives the MAL push, the once-only list advance, and the watched marks.
+  **The episode must be playable somewhere** (owner, 2026-10-08): `ready`,
+  **or** the caller has a `trip_episodes` row of one of *their* trips with
+  `delivered_at` set and `released_at` null, whatever the trip's state — a
+  correlated `EXISTS` in the same query, so an episode in two of the caller's
+  trips is still one row. Those non-ready rows carry
+  `ContinueWatchingEntry.on_device = true` (false on every `ready` row) and
+  the card reads "On this device"; `/watch/{id}` plays the device copy.
+  Ready to watch and Catch up are unchanged: the first is about what the
+  server streams, the second counts aired episodes above list progress
+  whatever their file.
   The query no longer matches migration 3's `completed = false` predicate, so
   it is served by the full `(user_id, updated_at)` index instead.
 
@@ -2402,8 +2443,72 @@ episode is this account's `downloaded` record, the payload is rebuilt by
 `offlinePlayInfo`: the snapshot, `playlist_url: ''`, `from_device: true`,
 resume from the device's own last position (IndexedDB `player`, key
 `pos:<user>:<episode>`, written every 5 s while playing and on pause, seek
-and end), previous / next = the nearest downloaded episodes, and `watched`
-overridden by a queued outbox mark. A 500 or any other error fails as before.
+and end — for **every** source, stream or file, `{position_s, duration_s, at,
+updated_at}`; `positionWrittenAt` reads `updated_at ?? at`, so records from
+before 2026-10-08 still count), duration = the snapshot's or, when that is 0
+(a trip-only episode), the device position's `duration_s`, previous / next =
+the nearest downloaded episodes, and `watched` overridden by a queued outbox
+mark. A 500 or any other error fails as before.
+
+**Resume online is the newer position** (owner, 2026-10-08: "is there no
+continue watching from the same spot for local videos?"). Until then an
+answered `/play` was used as is, so a position made on the device and not yet
+on the server (watched with no network, the outbox not flushed yet) was
+ignored the moment the server answered. Now `loadPlayInfo` runs every answer
+through `withDevicePosition` → `newerResume(server resume, duration, local,
+seen, queued, resume_at)` (pure). `PlayInfo.resume_at` (server,
+`api/playback.py`) is the caller's `watch_progress.updated_at` for the episode,
+null with no row (a synced offline report carries the device's moment). The
+rule: no local position → server; anything for the episode still pending in
+the outbox → device; otherwise the device wins iff its `updated_at` is later
+than `resume_at`, or `resume_at` is null. **Fallback, only when `resume_at` is
+absent (a server older than 2026-10-08):** the device keeps `seen` — what it
+last knew the server to hold, IndexedDB `player` key `srv:<user>:<episode>`,
+`{position_s | null, duration_s, at}`, written by `noteServerPosition` from
+three places: the `/play` answer when the server's position was used, every
+`POST /api/progress` the server answered (`sendProgress`), and every outbox
+`position` item the server `applied` (`Outbox.onApplied` →
+`notePositionApplied`, wired in `useOutboxSession`) — and the device wins when
+the server's resume equals `seen` run through the server's own FR-S2 filter
+(±0.5 s; null = null) **and** the local position was written after `seen.at`;
+anything else (the server moved: another device; the device has not watched
+since it last looked; no `seen`) → server. When the device wins, `seen` is left alone (the server still holds
+what it said). Offline is unchanged: the device's position. A device
+position at or past 95 % that wins means no seek (`shouldResume`), so an
+episode finished offline never reopens at the server's older spot. The
+duration falls back to the local `duration_s` when the server has none (a
+trip-only episode). The "Resumed from m:ss" notice and the end logic are
+untouched; `onReady` still measures `shouldResume` against the element's
+finite duration first, then the payload's. A device store that cannot be read
+leaves the server's answer. Downloads' Play is a plain link to `/watch/<id>`,
+so it goes through the same path.
+
+**Watched copies leave by themselves** (owner, 2026-10-08; FR-S9 item 9).
+*The one signal* is `Outbox.announceWatched(user, episode, watched)`,
+listened to with `onWatched`: `true` only when the server has accepted a
+completion — `sendProgress` got `completed: true` for a report at or past
+FR-S4's mark (`crossesCompletion`; an early report of a rewatch also answers
+`completed` and is not one), `sendWatched(…, true)` was answered, or
+`settle()` saw `applied` for a replayed `completion` (or a replayed position
+past the mark); `false` for any un-mark, answered, replayed or still queued
+(`recordUnmark`). A `stale` completion (un-marked later) and anything still
+queued announce nothing. `useDownloadsSession` wires it
+(`wireWatchedRemoval`): an announcement → `manager.noteWatched` (sets or
+clears `watched` on **this account's** `<user>:<episode>` record only,
+serialised, after `hydrate()`; a record made after the announcement is not
+marked); every flush that reached the server (`onFlushed`) →
+`removeWatched()`. A pass (`removeWatched`, one at a time) also runs at the
+end of `hydrate()`, on every `autoKeep` tick and hourly from `listen()`; it
+takes off the device, through the ordinary `remove()` (file, record, cover,
+trip `DELETE …/delivered` and decline), every record of the signed-in account
+with `watched` and not `keep`, while the device switch is on, unless the
+episode is open in a player (`enterPlayer(id)` from `PlayerView`, counted,
+its cleanup leaves) or the outbox still holds a mark or un-mark for it
+(`queuedFor`, read from the outbox's store). The switch is
+`remove-watched` in IndexedDB `player` (absent = on; `getRemoveWatched` /
+`setRemoveWatched`, read in `hydrate()`); `keep` is a record field
+(`setKeep`). Downloads shows the switch, and while it is on a Keep chip per
+row and `watchedNote()`'s "Watched · removing soon" / "Kept".
 
 **What is remembered where:**
 
@@ -2412,7 +2517,9 @@ overridden by a queued outbox mark. A 500 or any other error fails as before.
 | OPFS | `episode-<id>.mp4` (full), `episode-<id>-o.mp4` (small copy) | the episode file, one per copy | on delete (last record holding that name, after the worker lets go); orphans at launch |
 | IndexedDB `downloads` | `<user>:<episode>` | the download record + snapshot | on delete |
 | IndexedDB `player` | `pos:<user>:<episode>` | last position on this device | never (per user) |
+| IndexedDB `player` | `srv:<user>:<episode>` | the position this device last knew the server to hold, and when (resume rule's fallback when `/play` has no `resume_at`, 2026-10-08) | never (per user) |
 | IndexedDB `player` | `trip-skip:<user>:<trip>:<episode>` | a trip episode deleted from the device by hand (M19 T6) | "Ask again" |
+| IndexedDB `player` | `remove-watched` | this device's "Remove episodes once watched" switch (`false` = off; absent = on) | never |
 | IndexedDB `payloads` | `home`, `anime:<id>` | last good Watch Now / show page, stamped with the owner whose request it was | sign-out, session loss, any account signing in that does not own them |
 | IndexedDB `covers` | `u<user>:anime:<id>` | poster blob (cross-origin `fetch`, best effort) | with that user's last download of the show |
 | IndexedDB `session` | `user`, `data_owner`, `logout_pending` | the signed-in user, whose payloads these are, a sign-out not yet sent | `user`/`data_owner` on sign-out or session loss; `logout_pending` once the server has it or on a new sign-in |
@@ -2537,7 +2644,9 @@ worker).
   `episode_extras`, and **never true on a `ready` episode**, which streams
   whoever's trip also covers it). No new episode state: a trip-only episode
   is never `ready`, never has an HLS rendition, so `/media/{id}/index.m3u8`
-  and Home never offer it, and `/play` answers it only `offline_only` to a
+  never serves it and Home's Ready to watch never offers it (Continue
+  watching does, to the user whose device holds it, once they have a position
+  on it — §5.4 continue-watching bullet, 2026-10-08), and `/play` answers it only `offline_only` to a
   user whose trip holds it (part 2) — unless an admin forces one through the
   manual re-encode route (FR-P5), which is an explicit admin action and makes
   it an ordinary ready episode. The linker also asks
@@ -3718,7 +3827,7 @@ Mutating requests must carry an allowed `Origin`.
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: on a browse 7 undated days (0 = Monday in the user's timezone); on the current season 7–13 days each with a local `date` (Monday of this week to today + 6) holding only the shows airing that date (any season, via `airing_between`; `last_episode` when two of a show's air that date), finished shows only on dates an episode of theirs aired and otherwise in `ended`, not-yet-started ones in `unscheduled` with `starts_on` (2026-10-04); entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every weekly-format show with an air time on its dates, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
-| `GET /api/home` | any | `continue_watching` (started > 10 s, not completed, episode ready, newest first, max 20), `ready_to_watch` (episodes in state `ready` on a watching/planned/**on-hold** list, with no `watch_progress` row past `RESUME_MIN_S` = 10 s and none completed, and a number above the entry's progress — FR-W5 read backwards; ordered by `renditions.ready_at DESC NULLS LAST, episodes.id DESC`, max `READY_LIMIT` = 20; **any air date**, which is the point: it was the client filtering `new_this_week` until 2026-09-17, so a ready episode of a show that stopped airing a fortnight ago could not reach the page), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8). Since M16 it also answers `failures` (FR-W6, §5.4b): the caller's **own** stopped episodes (a live want on an episode that is `failed` or `unavailable`) and their own failed `mal_write_log` rows, newest first across both, capped at 20 — two queries plus the transcode-job lookup only where something is `failed`, each row a `key` + `AnimeSummary` + one trimmed sentence rather than an `EpisodeOut`. Here rather than on a route of its own so §5.9's invalidation of this query carries it |
+| `GET /api/home` | any | `continue_watching` (started ≥ 30 s and short of the completion mark and of the last three minutes; episode `ready` **or** held on the caller's device — a delivered, unreleased `trip_episodes` row of their own trip, which sets the row's `on_device`; newest first, max 20), `ready_to_watch` (episodes in state `ready` on a watching/planned/**on-hold** list, with no `watch_progress` row past `RESUME_MIN_S` = 10 s and none completed, and a number above the entry's progress — FR-W5 read backwards; ordered by `renditions.ready_at DESC NULLS LAST, episodes.id DESC`, max `READY_LIMIT` = 20; **any air date**, which is the point: it was the client filtering `new_this_week` until 2026-09-17, so a ready episode of a show that stopped airing a fortnight ago could not reach the page), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8). Since M16 it also answers `failures` (FR-W6, §5.4b): the caller's **own** stopped episodes (a live want on an episode that is `failed` or `unavailable`) and their own failed `mal_write_log` rows, newest first across both, capped at 20 — two queries plus the transcode-job lookup only where something is `failed`, each row a `key` + `AnimeSummary` + one trimmed sentence rather than an `EpisodeOut`. Here rather than on a route of its own so §5.9's invalidation of this query carries it |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
@@ -3736,7 +3845,7 @@ Mutating requests must carry an allowed `Origin`.
 | `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row (trip bookkeeping only; the window never skipped-delivered since 2026-10-06); idempotent |
 | `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4 → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
 | `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), previous/next refs with `ready`, `offline_only` (false). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0) |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready`, `offline_only` (false). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0) |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
@@ -6122,3 +6231,38 @@ asked*, so `make test` is exactly as fast as it was.
   by a write on every nudge and trip tick. Workers that report a refused write
   are retired before the next download. The trip card caps its stepper by
   `estimate()` at 110 MB an episode, worded as the browser's estimate.
+- 2026-10-08 (owner) — §5.4d **Watched copies leave by themselves**
+  (FR-S9 item 9). The signal is `Outbox.announceWatched` (server-accepted
+  completions only; any un-mark clears), persisted as `watched` on the
+  account's own download record; `removeWatched()` removes through `remove()`
+  at `hydrate()`, on the `autoKeep` tick, hourly and after each landed flush,
+  skipping `keep`, the episode open in the player (`enterPlayer`) and episodes
+  with a queued mark/un-mark. Switch `remove-watched` in IndexedDB `player`.
+  No schema or server change, no new dependency.
+- 2026-10-08 (owner incident: `Kikansha no Mahou wa Tokubetsu desu - 13`
+  fetched by the absolute rule went to review) — §5.2a: `confidence_of` no
+  longer counts the best candidate's direct prequel, offered the literal
+  reading of the number the best one offsets, as a competing show
+  (`prequel_map`, `same_number_in_chain`); a prior whose file carries exactly
+  `episode + nyaa.absolute_offset` and names no season is re-scored with the
+  season neutralised and marked absolute (`corroborated_prior`,
+  `prior_offset`). No schema change, no new dependency. And a best candidate
+  whose episode is past a finished show's count (`Scored.beyond_count`) is
+  capped below the auto threshold.
+- 2026-10-08 (owner) — §5.4d: resume (FR-S2, FR-S9) opens at the **newer** of the server's and
+  the device's position, online too — before, an answered `/play` ignored the
+  device's position, so offline watching not yet synced resumed from the
+  server's older spot. `/play` has no timestamp, so the device keeps
+  `srv:<user>:<episode>` (what it last knew the server to hold) and
+  `newerResume` decides (§5.4d). Same day (owner decision): `PlayInfo` gains
+  `resume_at` (the row's `updated_at`, null with no row) and the rule compares
+  timestamps; the `srv:` record is only the fallback for a server without the
+  field. No schema change.
+- 2026-10-08 (owner, from the iPad) — **Continue watching includes episodes
+  the caller's device holds.** "Watched offline … came back online, no watch
+  back in the Home Screen": `continue_watching` required `episodes.state =
+  ready`, and a trip-only episode is never ready, so a synced position on one
+  never surfaced. The query now also accepts a delivered, unreleased
+  `trip_episodes` row of the caller's own trip (any trip state);
+  `ContinueWatchingEntry.on_device` marks those rows and the card says "On
+  this device". No schema change; Ready to watch and Catch up unchanged.

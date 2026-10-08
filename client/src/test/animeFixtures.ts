@@ -635,6 +635,7 @@ export const CONTINUE_FRIEREN: ContinueWatchingEntry = {
   episode: airedEpisode({ id: 9201, number: 5 }),
   position_s: 754,
   duration_s: 1436,
+  on_device: false,
 }
 
 export const HOME_PAGE_CONTINUE: HomePage = {

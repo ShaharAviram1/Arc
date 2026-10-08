@@ -82,7 +82,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, false, func, literal_column, or_, select, update
+from sqlalchemy import and_, exists, false, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,6 +92,8 @@ from arc.models import (
     EpisodeState,
     ListEntry,
     ListStatus,
+    Trip,
+    TripEpisode,
     UpdatedBy,
     WatchProgress,
 )
@@ -675,6 +677,10 @@ class ContinueRow:
     position_s: float
     duration_s: float | None
     completed: bool = False
+    #: The episode is here because the caller's device holds its trip copy
+    #: (FR-A12), not because the server can stream it: it is not ``ready``,
+    #: and the caller has a delivered, unreleased ``trip_episodes`` row on it.
+    on_device: bool = False
 
 
 async def continue_watching(
@@ -686,8 +692,15 @@ async def continue_watching(
     is the saved position and nothing else. Three conditions, each excluding a
     different kind of noise: at least :data:`CONTINUE_MIN_POSITION_S` in (a
     player that was open for four seconds started nothing), short of the end
-    (below), and the episode still ``ready`` (retention deletes renditions, and
-    a row offering to resume a file that is gone is worse than no row).
+    (below), and the episode still playable somewhere — ``ready`` (retention
+    deletes renditions, and a row offering to resume a file that is gone is
+    worse than no row), **or held on the caller's device**: a ``trip_episodes``
+    row of one of *their* trips with ``delivered_at`` set and ``released_at``
+    null, whatever the trip's state (FR-A12, owner 2026-10-08). A trip-only
+    episode is ``not_wanted`` with no rendition by design, so before this an
+    episode watched half-way on a plane never came back to Watch Now once the
+    position synced. Those rows carry ``on_device`` so the card can say where
+    the copy is; the player plays the device copy as it always has.
 
     **Short of the end is two rules, and the first of them to bite wins**
     (FR-W1, owner 2026-09-17, from production). An episode leaves the shelf
@@ -724,8 +737,21 @@ async def continue_watching(
     show page's watched marks.
     """
     duration = WatchProgress.duration_s
+    # A correlated EXISTS rather than a join: one episode can sit in several of
+    # the caller's trips (one ended, one active), and a join would repeat the
+    # row. Still one query for the shelf.
+    delivered = exists(
+        select(TripEpisode.episode_id)
+        .join(Trip, Trip.id == TripEpisode.trip_id)
+        .where(
+            TripEpisode.episode_id == Episode.id,
+            Trip.user_id == user_id,
+            TripEpisode.delivered_at.is_not(None),
+            TripEpisode.released_at.is_(None),
+        )
+    )
     rows = await session.execute(
-        select(Anime, Episode, WatchProgress)
+        select(Anime, Episode, WatchProgress, delivered.label("delivered"))
         .join(Episode, Episode.id == WatchProgress.episode_id)
         .join(Anime, Anime.id == Episode.anime_id)
         .where(
@@ -747,7 +773,7 @@ async def continue_watching(
                     WatchProgress.position_s <= duration - CONTINUE_TAIL_S,
                 ),
             ),
-            Episode.state == EpisodeState.READY,
+            or_(Episode.state == EpisodeState.READY, delivered),
         )
         # The episode id breaks ties: two rows written in the same transaction
         # share a timestamp, and an order that is not total is an order that
@@ -762,8 +788,12 @@ async def continue_watching(
             position_s=progress.position_s,
             duration_s=progress.duration_s,
             completed=progress.completed,
+            # Only where the delivery is the reason the row is here: a
+            # ``ready`` episode streams from any browser, and labelling it
+            # "On this device" on a desktop would be wrong.
+            on_device=bool(on_device) and episode.state is not EpisodeState.READY,
         )
-        for anime, episode, progress in rows.all()
+        for anime, episode, progress, on_device in rows.all()
     ]
 
 

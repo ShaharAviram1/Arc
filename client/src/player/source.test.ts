@@ -3,11 +3,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/lib/api'
 import {
   loadPlayInfo,
+  newerResume,
   offlinePlayInfo,
   sendProgress,
   type PlayInfo,
   type PlayInfoDeps,
 } from '@/lib/playback'
+import type { LocalPosition } from '@/offline/cache'
 import { Outbox } from '@/offline/outbox'
 import { memoryStore } from '@/offline/store'
 import { chooseSource, useLocalCopy } from '@/player/source'
@@ -29,6 +31,9 @@ function deps(overrides: Partial<PlayInfoDeps> & Pick<PlayInfoDeps, 'manager'>):
   return {
     fetch: () => Promise.reject(new TypeError('Load failed')),
     recall: () => Promise.resolve(null),
+    recallSeen: () => Promise.resolve(null),
+    noteSeen: () => Promise.resolve(),
+    queued: () => false,
     pending: () => new Map(),
     ...overrides,
   }
@@ -126,7 +131,209 @@ describe('loadPlayInfo', () => {
   })
 })
 
+/** A local position written at `at` (ISO), with or without the new field. */
+function local(position: number, at: string, legacy = false): LocalPosition {
+  return legacy
+    ? { position_s: position, duration_s: 1436.8, at }
+    : { position_s: position, duration_s: 1436.8, at, updated_at: at }
+}
+
+describe('resume online: the newer of the server and the device (FR-S2, 2026-10-08)', () => {
+  const T0 = '2026-10-08T08:00:00.000Z'
+  const T1 = '2026-10-08T09:00:00.000Z'
+
+  it('takes the device position when the server still holds what the device last saw it hold', async () => {
+    const { manager } = await downloadedManager()
+    const noteSeen = vi.fn(() => Promise.resolve())
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 200 }),
+        recall: () => Promise.resolve(local(488, T1)),
+        recallSeen: () => Promise.resolve({ position_s: 200, duration_s: 1436.8, at: T0 }),
+        noteSeen,
+      }),
+    )
+    expect(info.resume_position).toBe(488)
+    // The server still holds 200: what it was seen holding is left alone.
+    expect(noteSeen).not.toHaveBeenCalled()
+  })
+
+  it('takes the device position while its progress still waits in the outbox', async () => {
+    const { manager } = await downloadedManager()
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: null }),
+        recall: () => Promise.resolve(local(488, T1)),
+        queued: (userId, episodeId) => userId === USER && episodeId === 9001,
+      }),
+    )
+    expect(info.resume_position).toBe(488)
+  })
+
+  it('takes the server position when another device moved it', async () => {
+    const { manager } = await downloadedManager()
+    const noteSeen = vi.fn(() => Promise.resolve())
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 900 }),
+        recall: () => Promise.resolve(local(488, T1)),
+        recallSeen: () => Promise.resolve({ position_s: 488, duration_s: 1436.8, at: T0 }),
+        noteSeen,
+      }),
+    )
+    expect(info.resume_position).toBe(900)
+    expect(noteSeen).toHaveBeenCalledWith(USER, 9001, 900, PLAY_INFO.duration)
+  })
+
+  it('takes the server position when the device has not watched since it last looked', async () => {
+    const { manager } = await downloadedManager()
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 900 }),
+        recall: () => Promise.resolve(local(488, T0)),
+        recallSeen: () => Promise.resolve({ position_s: 900, duration_s: 1436.8, at: T1 }),
+      }),
+    )
+    expect(info.resume_position).toBe(900)
+  })
+
+  it('a device position past the end wins as "start from the beginning"', async () => {
+    const { manager } = await downloadedManager()
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 488 }),
+        recall: () => Promise.resolve(local(1420, T1)),
+        recallSeen: () => Promise.resolve({ position_s: 488, duration_s: 1436.8, at: T0 }),
+      }),
+    )
+    // The player's `shouldResume` turns this into no seek at all.
+    expect(info.resume_position).toBe(1420)
+  })
+
+  it("fills a trip-only episode's missing duration from the device", async () => {
+    const { manager } = await downloadedManager()
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () =>
+          Promise.resolve({ ...PLAY_INFO, duration: 0, offline_only: true, playlist_url: null }),
+        recall: () => Promise.resolve(local(300, T1)),
+        queued: () => true,
+      }),
+    )
+    expect(info).toMatchObject({ duration: 1436.8, resume_position: 300 })
+  })
+
+  it('still plays when the device store cannot be read', async () => {
+    const { manager } = await downloadedManager()
+    const info = await loadPlayInfo(
+      9001,
+      deps({
+        manager,
+        fetch: () => Promise.resolve(PLAY_INFO),
+        recall: () => Promise.reject(new Error('IndexedDB is gone')),
+      }),
+    )
+    expect(info.resume_position).toBe(PLAY_INFO.resume_position)
+  })
+
+  describe("with the server's timestamp (`resume_at`)", () => {
+    it("takes the device position when it was written after the server's", async () => {
+      const { manager } = await downloadedManager()
+      const info = await loadPlayInfo(
+        9001,
+        deps({
+          manager,
+          fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 200, resume_at: T0 }),
+          recall: () => Promise.resolve(local(488, T1)),
+        }),
+      )
+      expect(info.resume_position).toBe(488)
+    })
+
+    it("takes the server position when it was written after the device's", async () => {
+      const { manager } = await downloadedManager()
+      const info = await loadPlayInfo(
+        9001,
+        deps({
+          manager,
+          fetch: () => Promise.resolve({ ...PLAY_INFO, resume_position: 900, resume_at: T1 }),
+          recall: () => Promise.resolve(local(488, T0)),
+          // The fallback would have said "device": the timestamp overrules it.
+          recallSeen: () => Promise.resolve({ position_s: 900, duration_s: 1436.8, at: T0 }),
+        }),
+      )
+      expect(info.resume_position).toBe(900)
+    })
+
+    it('takes the device position when the server has no row at all', () => {
+      expect(newerResume(null, 1436.8, local(488, T0), null, false, null)).toBe('device')
+    })
+
+    it('still takes the device position while its progress waits in the outbox', () => {
+      expect(newerResume(900, 1436.8, local(488, T0), null, true, T1)).toBe('device')
+    })
+
+    it('reads a legacy device record by its `at`', () => {
+      expect(newerResume(900, 1436.8, local(488, T1, true), null, false, T0)).toBe('device')
+    })
+  })
+
+  describe('fallback for a server without `resume_at`: the `srv:` record', () => {
+    it('is used only when the field is absent', () => {
+      const seen = { position_s: 300, duration_s: 1436.8, at: T0 }
+      expect(newerResume(300, 1436.8, local(500, T1), seen, false)).toBe('device')
+      expect(newerResume(300, 1436.8, local(500, T1), seen, false, '2026-10-08T10:00:00Z')).toBe(
+        'server',
+      )
+    })
+  })
+
+  describe('newerResume', () => {
+    const seenAt = (position: number | null, at = T0) => ({
+      position_s: position,
+      duration_s: 1436.8,
+      at,
+    })
+
+    it('is the server with nothing on the device, or nothing known about the server', () => {
+      expect(newerResume(300, 1436.8, null, seenAt(300), true)).toBe('server')
+      expect(newerResume(300, 1436.8, local(500, T1), null, false)).toBe('server')
+    })
+
+    it('reads a record written before `updated_at` existed by its `at`', () => {
+      expect(newerResume(300, 1436.8, local(500, T1, true), seenAt(300), false)).toBe('device')
+      expect(newerResume(300, 1436.8, local(500, T0, true), seenAt(300, T1), false)).toBe('server')
+    })
+
+    it('compares what the server answers through its own FR-S2 filter', () => {
+      // Seen at 1420 of 1436.8 (past 95 %): the server answers null for it.
+      expect(newerResume(null, 1436.8, local(500, T1), seenAt(1420), false)).toBe('device')
+      // Seen holding nothing; the server now has a position: someone else.
+      expect(newerResume(700, 1436.8, local(500, T1), seenAt(null), false)).toBe('server')
+    })
+  })
+})
+
 describe('offlinePlayInfo', () => {
+  it('falls back to the length last played on the device for a trip-only episode', () => {
+    const record = downloadedRecord(USER)
+    const tripOnly = { ...record, snapshot: { ...record.snapshot, duration: 0 } }
+    const info = offlinePlayInfo(tripOnly, { 9001: tripOnly }, local(300, '2026-10-08T09:00:00Z'))
+    expect(info).toMatchObject({ duration: 1436.8, resume_position: 300 })
+  })
+
   it('shows a mark still waiting in the outbox', () => {
     const record = downloadedRecord(USER)
     const info = offlinePlayInfo(record, { 9001: record }, null, new Map([[9001, true]]))

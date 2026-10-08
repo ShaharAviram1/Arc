@@ -24,6 +24,7 @@ import {
   type PlayInfo,
 } from '@/lib/playback'
 import { rememberPosition } from '@/offline/cache'
+import { downloads } from '@/offline/downloads'
 import { useOffline } from '@/offline/network'
 import { useDownload } from '@/offline/useDownloads'
 import { HlsVideo } from '@/player/HlsVideo'
@@ -175,8 +176,9 @@ const FILE_UNREADABLE =
 
 /**
  * How often, at most, the position is written to the device while playing
- * (FR-S9). It is what an offline resume seeks to; pause, seek and the end write
- * it at once.
+ * (FR-S9), streamed or from the device's copy. It is what an offline resume
+ * seeks to, and online it wins over the server's when it is the newer one
+ * (FR-S2, 2026-10-08); pause, seek and the end write it at once.
  */
 const LOCAL_POSITION_EVERY_MS = 5000
 
@@ -696,6 +698,9 @@ function PlayerView({ id }: { id: number }) {
    */
   const local = useLocalCopy(id)
   const localRecord = useDownload(id)
+  // A watched copy is never removed while its episode is open here (owner,
+  // 2026-10-08): it waits until the player is left.
+  useEffect(() => downloads().enterPlayer(id), [id])
   const offline = useOffline()
   const { data: me } = useMe()
   const userId = me?.id ?? null
@@ -849,14 +854,17 @@ function PlayerView({ id }: { id: number }) {
   }, [])
 
   /**
-   * The last position on this device, per (user, episode) — what an offline
-   * resume uses, since the server's is out of reach (FR-S9). Fire and forget.
+   * The last position on this device, per (user, episode), for every source —
+   * what an offline resume uses, and what an online one prefers when it is
+   * newer than the server's (FR-S2, FR-S9). Fire and forget. Until `/me` has
+   * answered, the account whose downloads are loaded is the one signed in.
    */
   const keepPosition = useCallback(
     (nextPosition: number, duration: number) => {
-      if (userId === null) return
+      const owner = userId ?? downloads().ownerId
+      if (owner === null) return
       lastLocalSaveRef.current = Date.now()
-      void rememberPosition(userId, id, nextPosition, duration)
+      void rememberPosition(owner, id, nextPosition, duration)
     },
     [id, userId],
   )

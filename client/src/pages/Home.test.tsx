@@ -1023,6 +1023,25 @@ describe('Watch Now shelves', () => {
     expect(progressWidth(tile)).toBeUndefined()
   })
 
+  it('says when the only copy to resume is the trip copy on this device (FR-A12)', async () => {
+    const episode = { ...CONTINUE_FRIEREN.episode, state: 'not_wanted' as const, rendition: null }
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...HOME_PAGE_CONTINUE,
+          continue_watching: [{ ...CONTINUE_FRIEREN, episode, on_device: true }],
+        },
+      },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'Continue watching' })
+    const tile = within(shelf('Continue watching')).getAllByRole('link')[0] as HTMLElement
+    expect(within(tile).getByText('Episode 5 · 11 min left · On this device')).toBeInTheDocument()
+    // Opens the player as any resume does; the player picks the device copy.
+    expect(tile).toHaveAttribute('href', `/watch/${String(episode.id)}`)
+    expect(progressWidth(tile)).toMatch(/^52\.5/)
+  })
+
   it('renders the "Ready to watch" shelf the server decides', async () => {
     renderHome({
       'GET /api/home': {

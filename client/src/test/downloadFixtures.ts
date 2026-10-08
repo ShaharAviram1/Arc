@@ -149,6 +149,8 @@ export function managerHarness(
     confirmDelivered: () => Promise.resolve(null),
     releaseDelivered: () => Promise.resolve(null),
     notes: memoryStore(),
+    // Nothing waits in the outbox unless a test says so.
+    queuedFor: () => Promise.resolve(false),
     ...options,
   })
   return { manager, worker, workers, store, files, removed, covers, revokes }

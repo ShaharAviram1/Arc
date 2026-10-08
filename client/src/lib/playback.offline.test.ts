@@ -176,3 +176,58 @@ describe('the exit report after finishing online (B1, 2026-10-05)', () => {
     expect(outbox.knownCompleted(USER, EP)).toBe(false)
   })
 })
+
+describe('what the server accepted, announced for the downloads (owner, 2026-10-08)', () => {
+  function answering(completed: boolean) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(() =>
+        Promise.resolve(jsonResponse({ completed, newly_completed: false, list_progress: null })),
+      ),
+    )
+  }
+
+  it('announces a completion only for a report at or past the mark the server answered completed', async () => {
+    const outbox = box()
+    const heard: [number, number, boolean][] = []
+    outbox.onWatched((user, episode, watched) => heard.push([user, episode, watched]))
+
+    answering(true)
+    // Early in a rewatch of an episode completed long ago: not a new watch.
+    await sendProgress({ episode_id: EP, position_s: 60, duration_s: 1420 }, outbox)
+    expect(heard).toEqual([])
+    await sendProgress({ episode_id: EP, position_s: 1290, duration_s: 1420 }, outbox)
+    expect(heard).toEqual([[USER, EP, true]])
+
+    answering(false)
+    await sendProgress({ episode_id: EP, position_s: 1300, duration_s: 1420 }, outbox)
+    expect(heard).toHaveLength(1)
+  })
+
+  it('announces the mark and the un-mark the server answered', async () => {
+    const outbox = box()
+    const heard: boolean[] = []
+    outbox.onWatched((_user, _episode, watched) => heard.push(watched))
+    answering(true)
+    await sendWatched(EP, true, outbox)
+    answering(false)
+    await sendWatched(EP, false, outbox)
+    expect(heard).toEqual([true, false])
+  })
+
+  it('announces no completion that only reached the outbox, but does announce an un-mark', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new TypeError('Load failed'))),
+    )
+    const outbox = box()
+    const heard: boolean[] = []
+    outbox.onWatched((_user, _episode, watched) => heard.push(watched))
+
+    await sendProgress({ episode_id: EP, position_s: 1300, duration_s: 1420 }, outbox)
+    await sendWatched(EP, true, outbox)
+    expect(heard).toEqual([])
+    await sendWatched(EP, false, outbox)
+    expect(heard).toEqual([false])
+  })
+})

@@ -543,7 +543,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   Auto-link additionally requires the title itself to match closely (exact
   normalised title, or similarity above a configurable floor) — a strong
   overall score built on a loose title is still a guess. Movie files match
-  as episode 1 of a movie entry.
+  as episode 1 of a movie entry. **A file and its own prequel are not two
+  shows** (owner incident, 2026-10-08): when the runner-up is the best
+  candidate's direct prequel offered the *literal* reading of the number the
+  best one offsets — 13 on a finished 12-episode season, beside episode 1 of
+  its sequel — it is the absolute-numbering rule arguing with itself and does
+  not count as ambiguity. If the prequel's count is unknown (still airing),
+  only a download's own prior decides it. And a download's prior whose file
+  carries exactly the absolute number (the prior's episode plus the episodes
+  before its entry, the arithmetic that fetched it) and names no season is
+  confirmed by it: the missing season is not held against it, and the reasons
+  say "absolute numbering agrees with the download". With no prior and no such
+  agreement the file goes to review as before. **An episode past a finished
+  show's count never auto-links to that show** (2026-10-08): episode 13 of a
+  finished 12-episode season does not exist, so it is shown for review but not
+  linked; a sequel's offset reading that explains the number is the answer.
 - FR-L5 For unsure cases an LLM may be asked to propose the most likely
   candidate with a one-line reason; the proposal is shown in the review
   queue, never auto-applied.
@@ -625,7 +639,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   interrupting playback; if even muted playback is refused, the existing play
   button is the answer and no error is shown, because nothing went wrong.
 - FR-S2 Resume: on open, the player seeks to the user's last position if it
-  is > 10 s and < 95 % of duration. The "Resumed from M:SS" notice auto-hides
+  is > 10 s and < 95 % of duration. The last position is the **newer** of the
+  server's and this device's (owner, 2026-10-08): progress watched on the
+  device and not yet synced, or newer than what the server holds, wins; a
+  position another device moved on the server since this one last saw it wins
+  over the device's; offline, the device's is used. The "Resumed from M:SS" notice auto-hides
   after five seconds; Dismiss closes it sooner.
 - FR-S3 Progress is reported every 10 s while playing and on pause/seek/close.
 - FR-S4 An episode counts as **watched** when position ≥ 90 % of duration.
@@ -796,7 +814,10 @@ that the course professor can log in at any time, and the owner uses it daily.
      Autoplay, resume, the end-of-episode moments and progress reporting are
      FR-S1–S5 unchanged; progress made with no network goes through FR-S8's
      queue and reaches Arc and MyAnimeList on reconnect by FR-S8's rules.
-     Offline, resume uses the last position watched on this device, and
+     The position is kept on the device for every episode, streamed or
+     played from the device, and resume uses the newer of it and the
+     server's (FR-S2, 2026-10-08). Offline, resume uses the last position
+     watched on this device, and
      previous / next lead to the nearest downloaded episodes of the show.
      When neither the file nor the download knows the episode's length, the
      player does not seek to a stored position.
@@ -901,6 +922,27 @@ that the course professor can log in at any time, and the owner uses it daily.
      prepared for streaming as usual (owner, 2026-10-06): its row becomes an
      ordinary ready row, and the copy on the device still plays and still
      shows as on this device.
+  9. **A watched copy leaves the device by itself** (owner, 2026-10-08).
+     Once an episode is watched (FR-S4) **and the server has accepted that
+     completion** — an online report at or past the mark the server answered
+     as completed, the mark-watched control answered, or a completion queued
+     offline (FR-S8) that the replay applied — the device copy is removed,
+     exactly as Delete would: the file and the record go, a trip episode's
+     deletion is told to the server (and the trip does not fetch it again),
+     and the storage figures update. A completion still waiting in the queue
+     does not count: the file stays until it syncs; a stale replay (the user
+     un-marked it later) does not count either. The removal happens at
+     launch, on every trip tick, hourly, and after each sync that reached the
+     server — never while that episode is open in the player (a session that
+     just completed waits until the player is left), and only for the
+     signed-in account's own copy. The Downloads page has a per-device switch
+     **Remove episodes once watched** (on by default) and, while it is on, a
+     **Keep** toggle on every row that exempts that episode; a row says
+     "Watched · removing soon" between the server's answer and the removal,
+     and "Kept" when kept. An un-mark before the removal cancels it; an
+     un-mark after it changes nothing on the device (the episode simply
+     offers Keep offline again). Downloading an episode already watched keeps
+     it until it is watched again (to the mark).
 
 ### 4.6 Watch tracking and list states
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
@@ -914,7 +956,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   an episode may still be *resumed* into its last minutes, because the viewer
   chose it, but Arc will not *offer* a credits roll as something left to watch.
   What takes its place is the next episode, under Ready to watch, which the
-  FR-S4 advance has just made eligible. Home also shows **Behind on** (followed airing shows with unwatched
+  FR-S4 advance has just made eligible. The episode must be **playable
+  somewhere**: ready on the server, **or held on the viewer's own device** as
+  a trip copy (FR-A12) they have not deleted — such a card says "On this
+  device" and resumes from that copy (owner, 2026-10-08). Home also shows **Behind on** (followed airing shows with unwatched
   aired episodes), and **New this week** (episodes that aired in the last 7
   days for followed shows). As shelved since M15
   those are Continue watching, Catch up, and This week plus **Ready to watch**:
@@ -1175,7 +1220,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk, review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
 | How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
-| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). Reached from the account menu (not for the demo account) and from the offline line on every page |
+| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). The switch **Remove episodes once watched** (per device, on by default) and, while it is on, a **Keep** toggle per row; a row reads "Watched · removing soon" or "Kept" (FR-S9 item 9, owner 2026-10-08). Reached from the account menu (not for the demo account) and from the offline line on every page |
 
 Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
 sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
@@ -2287,3 +2332,33 @@ through the same edge, without the grace period.
   the same pause (the old `failed` / `quota` comes back paused). The trip
   card's room check caps the stepper by what the browser reports, said as an
   estimate.
+- 2026-10-08 (owner) — **FR-S9 item 9: a watched copy leaves the device by
+  itself.** Once the server has accepted the episode's completion (an online
+  answer, or a replayed completion `applied`; never one still queued, never a
+  `stale` one) the copy is removed through the ordinary delete — at launch,
+  on the trip tick, hourly and after each sync that reached the server, never
+  while the episode is open in the player. A per-device switch on Downloads
+  (on by default) and a per-episode Keep exempt it. Client only.
+- 2026-10-08 (owner incident: `[SubsPlease] Kikansha no Mahou wa Tokubetsu
+  desu - 13`, fetched by the absolute rule for episode 1 of the *2nd Season*,
+  went to review because its own prequel's "episode 13" sat within the
+  ambiguity margin) — **FR-L4: a prequel's literal reading of the same number
+  is not a competing show**, and a prior the absolute arithmetic agrees with
+  is confirmed (no season penalty). No prior and no agreement: unchanged.
+  Also: a literal episode past a **finished** show's count (`Scored.beyond_count`)
+  never auto-links to it — review instead (it had auto-linked "episode 13" of
+  a finished 12-episode season when the sequel's count was unknown).
+- 2026-10-08 (owner, on an iPad: "Is there no continue watching from the
+  same spot for local videos?") — **FR-S2 / FR-S9: resume opens at the newer
+  of the server's and the device's last position**, online as well as
+  offline. Before, an answered play request ignored the device's position, so
+  progress watched offline and not yet synced resumed from the server's older
+  spot. The play answer now says when the server's position was written
+  (`resume_at`), and the newer write wins.
+- 2026-10-08 (owner, from an iPad: "watched offline, came back online, no
+  watch back in the Home Screen with time") — **FR-W1: Continue watching
+  also lists an episode the viewer's device holds as a trip copy.** A
+  trip-only episode is never ready on the server, and the shelf asked for
+  ready, so a position synced from the plane never came back. Now ready **or**
+  delivered to the viewer's device and not released; the card says "On this
+  device". Ready to watch and Catch up are unchanged.

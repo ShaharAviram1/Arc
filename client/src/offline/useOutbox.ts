@@ -14,7 +14,19 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ANIME_QUERY_KEY } from '@/lib/anime'
 import { HOME_QUERY_KEY } from '@/lib/schedule'
 import { offlineNow, subscribeNetwork, watchNetwork } from '@/offline/network'
+import { noteServerPosition } from '@/offline/cache'
 import { outbox, startFlushing, type OutboxRecord, type OutboxSnapshot } from '@/offline/outbox'
+
+/** A `position` record the server applied: remember that it holds it now. */
+export function notePositionApplied(record: OutboxRecord): void {
+  if (record.kind !== 'position' || record.position_s === undefined) return
+  noteServerPosition(
+    record.user_id,
+    record.episode_id,
+    record.position_s,
+    record.duration_s ?? 0,
+  ).catch(() => undefined)
+}
 
 /** Point the outbox at the signed-in account and keep it flushing. */
 export function useOutboxSession(userId: number | null): void {
@@ -24,6 +36,9 @@ export function useOutboxSession(userId: number | null): void {
     box.setOwner(userId)
     if (userId === null) return undefined
     const unwatch = watchNetwork()
+    // A synced position is what the server now holds: the next open of the
+    // episode compares with it (FR-S2, 2026-10-08).
+    const unapplied = box.onApplied(notePositionApplied)
     const stop = startFlushing(box, { subscribe: subscribeNetwork, offline: offlineNow })
     // Records the server took change ticks and list numbers it renders.
     const unflushed = box.onFlushed((outcome) => {
@@ -32,6 +47,7 @@ export function useOutboxSession(userId: number | null): void {
       void client.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
     })
     return () => {
+      unapplied()
       unflushed()
       stop()
       unwatch()

@@ -75,6 +75,7 @@ two cases where that is a wrong automatic link are guarded separately:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -188,6 +189,22 @@ EPISODIC_FORMATS = frozenset({"TV", "TV_SHORT", "ONA", "OVA"})
 
 #: Relation types that continue a story, for the absolute-numbering rule.
 SEQUEL_RELATIONS = frozenset({"SEQUEL"})
+#: The same edge seen from the other end.
+PREQUEL_RELATIONS = frozenset({"PREQUEL"})
+#: The only status whose ``episodes`` is a fact rather than an announcement —
+#: the same rule the downloader's absolute arithmetic keeps
+#: (:data:`~arc.services.acquisition.nyaa.ABSOLUTE_FINISHED_STATUS`).
+FINISHED = "FINISHED"
+
+#: The reason a believed prior carries when the file's number is the prior's
+#: episode plus the episodes before its entry (2026-10-08): the download was
+#: accepted by the absolute reading, and the file says the same thing.
+ABSOLUTE_AGREES = "absolute numbering agrees with the download"
+
+#: ``later anime_id → {earlier anime_id: its trusted episode count, or None}``
+#: for the one-hop ``PREQUEL``/``SEQUEL`` edges inside a candidate pool. See
+#: :func:`prequel_map`.
+Prequels = Mapping[int, Mapping[int, int | None]]
 
 #: The episode number a movie file is linked as. A film is one part of one
 #: show, so it is episode 1 of it — the same row every other file gets, which
@@ -332,6 +349,11 @@ class Scored:
     #: True when this is the episode Arc was downloading *and* the title
     #: agreed enough for that to be believed (:data:`PRIOR_MIN_TITLE`).
     prior: bool = False
+    #: True when :attr:`episode_number` is past the count of a show that has
+    #: **finished** airing (2026-10-08): that episode does not exist, so this
+    #: candidate may be shown for review but never auto-linked
+    #: (:func:`confidence_of`).
+    beyond_count: bool = False
 
     def title_is_close(self, minimum: float) -> bool:
         """Whether the title alone is good enough to link on (FR-L4).
@@ -744,6 +766,16 @@ def _score(
             reasons.append("expected episode for this download, but the title disagrees")
     if penalty:
         reasons.append(f"absolute numbering (-{penalty:.2f})")
+    beyond = (
+        parsed.kind != "movie"
+        and episode_number is not None
+        and (candidate.status or "").upper() == FINISHED
+        and candidate.episodes is not None
+        and candidate.episodes > 0
+        and episode_number > candidate.episodes
+    )
+    if beyond:
+        reasons.append(f"episode {episode_number} is past the finished show's {candidate.episodes}")
     return Scored(
         anime_id=candidate.anime_id,
         episode_number=episode_number,
@@ -753,30 +785,81 @@ def _score(
         title=title,
         exact_title=exact_title,
         prior=believed,
+        beyond_count=beyond,
     )
 
 
-def confidence_of(candidates: list[Scored]) -> float:
+def same_number_in_chain(best: Scored, other: Scored, prequels: Prequels | None) -> bool:
+    """Whether ``other`` is the literal reading of the number ``best`` offsets.
+
+    2026-10-08: ``[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13`` was
+    downloaded for episode 1 of the *2nd Season*, by the absolute rule (13 is
+    episode 1 after season one's 12). The matcher put that answer first and the
+    prequel's "episode 13" second — and capped the confidence because the
+    runner-up was "a different show". It is not a different claim about the
+    title: it is the absolute-numbering rule arguing with itself across one
+    ``PREQUEL`` edge, which is the same-show ambiguity :func:`confidence_of`
+    already resolves by ordering.
+
+    Only when ``other`` is ``best``'s direct prequel, offered as the *literal*
+    reading of a number larger than ``best``'s, and one of:
+
+    * the prequel's count is **known** (finished airing, see :func:`prequel_map`)
+      and the literal number is past it, with ``best``'s episode exactly the
+      remainder — the literal reading is impossible and the offset is exact;
+    * the prequel's count is **unknown** and ``best`` is a believed prior:
+      nothing contradicts the offset reading, and Arc's own record of what it
+      asked for is the evidence that decides it. Without the prior the cap
+      stands, exactly as before.
+    """
+    if not prequels:
+        return False
+    earlier = prequels.get(best.anime_id) or {}
+    if other.anime_id not in earlier or other.absolute:
+        return False
+    ours, theirs = best.episode_number, other.episode_number
+    if ours is None or theirs is None or theirs <= ours:
+        return False
+    count = earlier[other.anime_id]
+    if count is None:
+        return best.prior
+    return theirs > count and ours == theirs - count
+
+
+def confidence_of(candidates: list[Scored], prequels: Prequels | None = None) -> float:
     """The best score, reduced when a *different show* is nearly as good.
 
     The runner-up only counts if it is another anime: two episode numbers on
     the same show are the absolute-numbering rule arguing with itself, and
     that ambiguity is about the number, not about the title, so it is resolved
-    by ordering rather than by sending the file to review.
+    by ordering rather than by sending the file to review. The same holds
+    across one ``PREQUEL`` edge when the runner-up is the literal reading of
+    the very number the best one offsets (:func:`same_number_in_chain`,
+    2026-10-08); ``prequels`` is what says which candidates those are.
+
+    A best candidate whose episode is past a finished show's count
+    (:attr:`Scored.beyond_count`, 2026-10-08) is capped as well: "episode 13"
+    of a finished 12-episode season does not exist, so linking it is a guess.
+    It stays in the shortlist for a person; when a sequel's offset reading
+    explains the number, that reading is the one that can link.
     """
     if not candidates:
         return 0.0
     best = candidates[0]
+    if best.beyond_count:
+        return min(best.score, AMBIGUOUS_CEILING)
     for other in candidates[1:]:
         if other.anime_id == best.anime_id:
             continue
         if best.score - other.score < AMBIGUITY_MARGIN:
+            if same_number_in_chain(best, other, prequels):
+                continue
             return min(best.score, AMBIGUOUS_CEILING)
         break
     return best.score
 
 
-def rank(scored: list[Scored], *, minimum: float) -> MatchResult:
+def rank(scored: list[Scored], *, minimum: float, prequels: Prequels | None = None) -> MatchResult:
     """Order, deduplicate and cut a list of scored candidates.
 
     Deduplication is on ``(anime_id, episode_number)`` rather than on
@@ -794,7 +877,7 @@ def rank(scored: list[Scored], *, minimum: float) -> MatchResult:
         seen.add(key)
         unique.append(item)
     kept = [item for item in unique if item.score >= minimum][:MAX_CANDIDATES]
-    return MatchResult(candidates=tuple(kept), confidence=confidence_of(kept))
+    return MatchResult(candidates=tuple(kept), confidence=confidence_of(kept, prequels))
 
 
 # --- Candidate generation (the thin async half) -----------------------------
@@ -913,6 +996,140 @@ async def search_candidates(
     return await upsert_summaries(session, page.results[:limit])
 
 
+def _related(
+    relation: dict[str, Any],
+    by_anilist: Mapping[int, Candidate],
+    by_mal: Mapping[int, Candidate],
+) -> Candidate | None:
+    """The pool candidate a relation edge points at, or ``None``.
+
+    An edge carries external ids, AniList's first. One that is not a number is
+    a malformed blob, and answers ``None`` rather than raising.
+    """
+    for key, index in (("anilist_id", by_anilist), ("mal_id", by_mal)):
+        value = relation.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            found = index.get(int(value))
+        except TypeError, ValueError:
+            continue
+        if found is not None:
+            return found
+    return None
+
+
+def prequel_map(pool: list[Candidate]) -> dict[int, dict[int, int | None]]:
+    """Which candidates in the pool directly precede which, and by how much.
+
+    ``{later: {earlier: count}}``, read from either end of the edge — a
+    ``PREQUEL`` on the later entry or a ``SEQUEL`` on the earlier one — since a
+    summary row may carry only one of them. ``count`` is the earlier entry's
+    ``episodes`` when it has **finished airing** and ``None`` otherwise: an
+    airing season's total is an announcement, the same reason the downloader's
+    absolute arithmetic declines it. One hop only, as :func:`offset_candidates`.
+    """
+    by_anilist = {c.anilist_id: c for c in pool if c.anilist_id is not None}
+    by_mal = {c.mal_id: c for c in pool if c.mal_id is not None}
+
+    def trusted(candidate: Candidate) -> int | None:
+        if (candidate.status or "").upper() != FINISHED:
+            return None
+        return candidate.episodes if candidate.episodes and candidate.episodes > 0 else None
+
+    found: dict[int, dict[int, int | None]] = {}
+    for candidate in pool:
+        for relation in candidate.relations:
+            kind = str(relation.get("relation_type") or "").upper()
+            other = _related(relation, by_anilist, by_mal)
+            if other is None or other.anime_id == candidate.anime_id:
+                continue
+            if kind in PREQUEL_RELATIONS:
+                later, earlier = candidate, other
+            elif kind in SEQUEL_RELATIONS:
+                later, earlier = other, candidate
+            else:
+                continue
+            found.setdefault(later.anime_id, {})[earlier.anime_id] = trusted(earlier)
+    return found
+
+
+def corroborated_prior(
+    parsed: ParsedName, prior: Candidate, episode: int, offset: int | None
+) -> Scored | None:
+    """The prior, re-scored, when the file's own number *is* the absolute reading.
+
+    ``offset`` is the number of episodes before the prior's entry, by the same
+    arithmetic that accepted the download
+    (:func:`~arc.services.acquisition.nyaa.absolute_offset`). When the file
+    names no season and its number is exactly ``episode + offset`` — 13 for
+    episode 1 after a 12-episode first season — the download and the filename
+    agree, and the file's silence about the season is the *property* of
+    absolute numbering rather than a claim that this is season one. So the
+    prior is scored with that silence neutralised, as :func:`offset_candidates`
+    does, marked :attr:`Scored.absolute`, and carries :data:`ABSOLUTE_AGREES`
+    (2026-10-08).
+
+    ``None`` whenever anything else is true: no offset, another number, a
+    file that names a season (or several), a fraction, a batch, or a prior the
+    title does not let the scorer believe. The prior then scores as it always
+    did, so this can only ever *confirm* the episode Arc asked for.
+    """
+    if not offset or offset <= 0 or parsed.episode is None:
+        return None
+    if parsed.kind not in {"episode", "unknown"} or parsed.episode_fraction is not None:
+        return None
+    if parsed.season is not None or parsed.season_conflict:
+        return None
+    if parsed.episode != episode + offset:
+        return None
+    as_if = replace(parsed, season=entry_season(prior))
+    scored = score(as_if, prior, episode=episode, prior=True)
+    if not scored.prior:
+        return None
+    return replace(scored, reasons=(*scored.reasons, ABSOLUTE_AGREES), absolute=True)
+
+
+async def prior_offset(session: AsyncSession, row: Anime) -> int | None:
+    """Episodes before ``row``'s entry, by the downloader's own arithmetic.
+
+    The rows are read from the cache by AniList id, then MAL id, exactly as the
+    search does it (``acquisition.jobs._prequel_offset``); a prequel Arc has not
+    cached makes the rule decline, and so does anything malformed — this only
+    ever adds a confirmation, so declining is always safe.
+    """
+    # Imported here: ``nyaa`` imports the parser, which loads this package.
+    from arc.services.acquisition.nyaa import absolute_offset
+
+    def _id(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int | str):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    async def resolve(anilist_id: int | None, mal_id: int | None) -> Anime | None:
+        found: Anime | None = None
+        anilist = _id(anilist_id)
+        if anilist is not None:
+            found = await session.scalar(select(Anime).where(Anime.anilist_id == anilist))
+        mal = _id(mal_id)
+        if found is None and mal is not None:
+            found = await session.scalar(select(Anime).where(Anime.mal_id == mal))
+        return found
+
+    try:
+        return await absolute_offset(row, resolve)
+    except Exception:  # noqa: BLE001 - a bad relation blob only withholds a confirmation
+        log.warning(
+            "could not work out an absolute offset for a prior",
+            extra={"anime_id": row.id},
+            exc_info=True,
+        )
+        return None
+
+
 def offset_candidates(parsed: ParsedName, pool: list[Candidate]) -> list[Scored]:
     """Absolute-numbering answers, one per (candidate, sequel) pair.
 
@@ -1023,10 +1240,21 @@ async def match(
         scored.append(score(parsed, candidate, episode=episode, prior=is_prior))
 
     scored.extend(offset_candidates(parsed, candidates))
-    return rank(scored, minimum=minimum)
+
+    if has_prior and expected is not None:
+        prior_row = pool.rows[expected[0]]
+        prior_candidate = next(c for c in candidates if c.anime_id == expected[0])
+        confirmed = corroborated_prior(
+            parsed, prior_candidate, expected[1], await prior_offset(session, prior_row)
+        )
+        if confirmed is not None:
+            scored.append(confirmed)
+
+    return rank(scored, minimum=minimum, prequels=prequel_map(candidates))
 
 
 __all__ = [
+    "ABSOLUTE_AGREES",
     "ABSOLUTE_PENALTY",
     "AMBIGUITY_MARGIN",
     "AMBIGUOUS_CEILING",
@@ -1051,6 +1279,7 @@ __all__ = [
     "candidate_part",
     "candidate_season",
     "confidence_of",
+    "corroborated_prior",
     "entry_season",
     "episode_plausibility",
     "file_season_disagrees",
@@ -1060,9 +1289,12 @@ __all__ = [
     "offset_candidates",
     "part_factor",
     "prior_season_mismatch",
+    "prior_offset",
     "prior_season_reason",
+    "prequel_map",
     "rank",
     "score",
+    "same_number_in_chain",
     "search_candidates",
     "season_agreement",
     "season_in_title",

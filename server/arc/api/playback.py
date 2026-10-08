@@ -180,6 +180,7 @@ async def play(
         offline_only=offline_only,
         duration=duration,
         resume_position=resume_position(progress, duration or None),
+        resume_at=progress.updated_at if progress is not None else None,
         previous=previous,
         next=following,
     )

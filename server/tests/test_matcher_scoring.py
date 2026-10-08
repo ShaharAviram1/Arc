@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from arc.services.library.matcher import (
+    ABSOLUTE_AGREES,
     ABSOLUTE_PENALTY,
     AMBIGUITY_MARGIN,
     AMBIGUOUS_CEILING,
@@ -26,11 +27,14 @@ from arc.services.library.matcher import (
     MatchResult,
     Scored,
     confidence_of,
+    corroborated_prior,
     entry_season,
     episode_plausibility,
     format_agreement,
     offset_candidates,
+    prequel_map,
     rank,
+    same_number_in_chain,
     score,
     season_agreement,
     season_in_title,
@@ -788,3 +792,227 @@ class TestThePriorNeedsTheSeason:
         assert entry_season(first) == 1
         assert score(parse("[G] Mairimashita! Iruma-kun S1 - 11.mkv"), first, prior=True).prior
         assert not score(parse("[G] Mairimashita! Iruma-kun S2 - 11.mkv"), first, prior=True).prior
+
+
+class TestTheAbsoluteReadingOfAPrior:
+    """A download fetched by the absolute rule is not its prequel's rival (2026-10-08).
+
+    Production: ``[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13`` was
+    downloaded for episode 1 of the *2nd Season* — 13 is episode 1 after the
+    first season's 12, which is how SubsPlease numbers a continuing show. The
+    prior scored 0.942, the first season's "episode 13" 0.895, and the cap for
+    "a different show within the margin" sent Arc's own download to review.
+    """
+
+    NAME = "[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 13 (1080p) [4AD12C5A].mkv"
+    S1 = 676
+    S2 = 283
+
+    def pair(
+        self,
+        *,
+        first_status: str = "FINISHED",
+        first_episodes: int | None = 12,
+        second_episodes: int | None = 12,
+    ) -> list[Candidate]:
+        first = Candidate(
+            anime_id=self.S1,
+            anilist_id=163142,
+            titles=(
+                "Kikansha no Mahou wa Tokubetsu desu",
+                "A Returner's Magic Should be Special",
+            ),
+            format="TV",
+            episodes=first_episodes,
+            status=first_status,
+            season_year=2023,
+            relations=({"relation_type": "SEQUEL", "anilist_id": 182283},),
+        )
+        second = Candidate(
+            anime_id=self.S2,
+            anilist_id=182283,
+            titles=(
+                "Kikansha no Mahou wa Tokubetsu desu 2nd Season",
+                "A Returner's Magic Should be Special Season 2",
+            ),
+            format="TV",
+            episodes=second_episodes,
+            status="RELEASING",
+            season_year=2026,
+            relations=({"relation_type": "PREQUEL", "anilist_id": 163142},),
+        )
+        return [first, second]
+
+    def result(
+        self, pool: list[Candidate], *, prior: bool, offset: int | None = None
+    ) -> MatchResult:
+        """What :func:`~arc.services.library.matcher.match` assembles, without a database."""
+        parsed = parse(self.NAME)
+        scored: list[Scored] = []
+        for candidate in pool:
+            is_prior = prior and candidate.anime_id == self.S2
+            scored.append(score(parsed, candidate, episode=1 if is_prior else None, prior=is_prior))
+        scored.extend(offset_candidates(parsed, pool))
+        if prior:
+            second = next(c for c in pool if c.anime_id == self.S2)
+            confirmed = corroborated_prior(parsed, second, 1, offset)
+            if confirmed is not None:
+                scored.append(confirmed)
+        return rank(scored, minimum=MINIMUM, prequels=prequel_map(pool))
+
+    def test_the_production_case_auto_links_with_the_reason(self) -> None:
+        result = self.result(self.pair(), prior=True, offset=12)
+        best = result.best
+        assert best is not None
+        assert (best.anime_id, best.episode_number) == (self.S2, 1)
+        assert best.absolute and best.prior
+        assert ABSOLUTE_AGREES in best.reasons
+        assert "season 1.00" in best.reasons, "a file numbered absolutely names no season"
+        assert result.confidence >= AUTO
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_the_impossible_literal_reading_caps_nothing_even_unconfirmed(self) -> None:
+        """Without the arithmetic confirmation the prior is 0.942 against 0.895.
+
+        That was production's result. The prequel's episode 13 does not exist
+        on a finished twelve-episode season and is exactly the remainder of the
+        best's episode 1, so it is the same number read twice, not a rival.
+        """
+        result = self.result(self.pair(), prior=True, offset=None)
+        best = result.best
+        assert best is not None and (best.anime_id, best.episode_number) == (self.S2, 1)
+        assert ABSOLUTE_AGREES not in best.reasons
+        runner_up = result.candidates[1]
+        assert (runner_up.anime_id, runner_up.episode_number) == (self.S1, 13)
+        assert best.score - runner_up.score < AMBIGUITY_MARGIN
+        assert confidence_of(list(result.candidates)) == AMBIGUOUS_CEILING, "the old answer"
+        assert result.confidence == best.score
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_no_prior_still_goes_to_review(self) -> None:
+        """Pinned: today's answer. The literal reading leads and the offset is in the margin."""
+        result = self.result(self.pair(), prior=False)
+        best = result.best
+        assert best is not None and (best.anime_id, best.episode_number) == (self.S1, 13)
+        assert result.confidence == AMBIGUOUS_CEILING
+        assert not result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_an_unknown_prequel_count_is_decided_by_the_prior(self) -> None:
+        """An airing prequel's count is an announcement: only the prior decides."""
+        pool = self.pair(first_status="RELEASING", first_episodes=None)
+        assert prequel_map(pool) == {self.S2: {self.S1: None}}
+        result = self.result(pool, prior=True)
+        best = result.best
+        assert best is not None and (best.anime_id, best.episode_number) == (self.S2, 1)
+        assert ABSOLUTE_AGREES not in best.reasons, "no arithmetic to agree with"
+        assert confidence_of(list(result.candidates)) == AMBIGUOUS_CEILING, "the old answer"
+        assert result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_an_unknown_prequel_count_without_a_prior_is_still_capped(self) -> None:
+        """No prior, so nothing corroborates the offset reading: the cap stands."""
+        best = Scored(self.S2, 1, 0.94, absolute=True)
+        literal = Scored(self.S1, 13, 0.92)
+        prequels = {self.S2: {self.S1: None}}
+        assert not same_number_in_chain(best, literal, prequels)
+        assert confidence_of([best, literal], prequels) == AMBIGUOUS_CEILING
+
+    def test_without_a_prior_an_airing_prequel_keeps_todays_literal_answer(self) -> None:
+        """Pinned: today's answer. Episode 13 of a show still airing with no count is literal."""
+        pool = self.pair(first_status="RELEASING", first_episodes=None)
+        result = self.result(pool, prior=False)
+        best = result.best
+        assert best is not None and (best.anime_id, best.episode_number) == (self.S1, 13)
+        assert not best.absolute
+
+    def test_a_number_past_a_finished_count_never_auto_links(self) -> None:
+        """No prior, sequel count unknown: the offset trails, the literal leads.
+
+        Until 2026-10-08 this auto-linked episode 13 of a finished 12-episode
+        season at 0.895 — an episode that does not exist. It stays first in the
+        shortlist for a person, and the confidence is capped.
+        """
+        result = self.result(self.pair(second_episodes=None), prior=False)
+        best = result.best
+        assert best is not None and (best.anime_id, best.episode_number) == (self.S1, 13)
+        assert best.beyond_count
+        assert "episode 13 is past the finished show's 12" in best.reasons
+        assert best.score >= AUTO
+        assert result.confidence == AMBIGUOUS_CEILING
+        assert not result.auto_links(AUTO, min_title=MIN_TITLE)
+
+    def test_a_number_inside_the_count_is_not_beyond_it(self) -> None:
+        parsed = parse("[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 12 (1080p).mkv")
+        assert not score(parsed, self.pair()[0]).beyond_count
+
+    def test_an_airing_show_past_its_count_is_not_beyond_it(self) -> None:
+        """An airing show's count is an announcement; the stale-cache allowance stays."""
+        pool = self.pair(first_status="RELEASING", first_episodes=12)
+        assert not score(parse(self.NAME), pool[0]).beyond_count
+
+    def test_a_different_show_in_the_margin_still_caps(self) -> None:
+        prequels = {self.S2: {self.S1: 12}}
+        best = Scored(self.S2, 1, 0.94, prior=True)
+        stranger = Scored(999, 13, 0.92)
+        assert confidence_of([best, Scored(self.S1, 13, 0.93), stranger], prequels) == (
+            AMBIGUOUS_CEILING
+        )
+
+    @pytest.mark.parametrize(
+        ("ours", "theirs", "count"),
+        [
+            (2, 13, 12),  # the remainder is 1, not 2: two different numbers
+            (1, 5, 12),  # 5 exists on the prequel: a real rival
+            (1, 13, 13),  # 13 exists on a 13-episode prequel
+        ],
+    )
+    def test_a_chain_runner_up_that_is_not_the_same_number_still_caps(
+        self, ours: int, theirs: int, count: int
+    ) -> None:
+        prequels = {self.S2: {self.S1: count}}
+        best = Scored(self.S2, ours, 0.94, prior=True)
+        literal = Scored(self.S1, theirs, 0.92)
+        assert confidence_of([best, literal], prequels) == AMBIGUOUS_CEILING
+
+    def test_only_the_prequel_direction_counts(self) -> None:
+        """A sequel's literal reading is never the same number as a prequel's."""
+        prequels = {self.S2: {self.S1: 12}}
+        best = Scored(self.S1, 1, 0.94, prior=True)
+        sequel = Scored(self.S2, 13, 0.92)
+        assert confidence_of([best, sequel], prequels) == AMBIGUOUS_CEILING
+
+    def test_prequel_map_reads_either_end_of_the_edge(self) -> None:
+        first, second = self.pair()
+        assert prequel_map([first, replace_relations(second)]) == {self.S2: {self.S1: 12}}
+        assert prequel_map([replace_relations(first), second]) == {self.S2: {self.S1: 12}}
+        assert prequel_map([replace_relations(first), replace_relations(second)]) == {}
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[SubsPlease] Kikansha no Mahou wa Tokubetsu desu S2 - 13 (1080p).mkv",
+            "[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 12 (1080p).mkv",
+            "[SubsPlease] Kikansha no Mahou wa Tokubetsu desu - 12.5 (1080p).mkv",
+            "[SubsPlease] Totally Different Show - 13 (1080p).mkv",
+        ],
+    )
+    def test_the_confirmation_needs_the_exact_absolute_reading(self, name: str) -> None:
+        """A season mark, another number, a recap or another title confirm nothing."""
+        second = self.pair()[1]
+        assert corroborated_prior(parse(name), second, 1, 12) is None
+
+    def test_no_offset_confirms_nothing(self) -> None:
+        second = self.pair()[1]
+        assert corroborated_prior(parse(self.NAME), second, 1, None) is None
+
+
+def replace_relations(candidate: Candidate) -> Candidate:
+    """The candidate with its relation edges dropped."""
+    return Candidate(
+        anime_id=candidate.anime_id,
+        anilist_id=candidate.anilist_id,
+        titles=candidate.titles,
+        format=candidate.format,
+        episodes=candidate.episodes,
+        status=candidate.status,
+        season_year=candidate.season_year,
+    )

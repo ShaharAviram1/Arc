@@ -1263,3 +1263,26 @@ async def test_another_users_completion_is_not_on_my_show_page(
     detail = (await client.get(f"/api/anime/{anime_id}")).json()
 
     assert all(row["watched"] is False for row in detail["episodes"])
+
+
+async def test_the_play_answer_says_when_the_position_was_written(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """``resume_at`` is the row's ``updated_at``, null with no row (FR-S2, 2026-10-08).
+
+    The client opens at the newer of this and the position on the device.
+    """
+    _anime_id, ids = await add_show(api_factory, anilist_id=950020, ready=(11, 12))
+
+    fresh = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+    assert fresh["resume_at"] is None
+
+    await set_progress(api_factory, user, ids[11], position_s=488.0)
+    async with api_factory() as session:
+        row = await session.get(WatchProgress, (user.id, ids[11]))
+        assert row is not None
+        written = row.updated_at
+
+    body = (await client.get(f"/api/episodes/{ids[11]}/play")).json()
+    assert body["resume_position"] == pytest.approx(488.0)
+    assert datetime.fromisoformat(body["resume_at"]) == written
