@@ -1868,7 +1868,20 @@ owner's word.
       the MAL guard matrix; TARGETDURATION fixed at 8 for Safari's seekable
       lag; orchestrator: rebased onto T5, full server suite on the merged
       tree 4894 passed, ruff/format/mypy(arc) clean; merged 0f9eda3.
-- [ ] T7: Player, part 2: live playback (client)
+- [x] T7: Player, part 2: live playback (client) — verified 2026-10-14:
+      Validator FAIL → PASS with a real Playwright WebKit run on both the
+      hls.js and native-Safari paths (starts at 0 not the edge; the front
+      bar advances; a seek past the front waits and jumps; no reload across
+      adoption; 13 adversarial Vitest cases); fixed: a stale element duration
+      after adoption could complete early (now the expected duration holds
+      until the element reports ≥ 90 % of it), native Safari back-seeks near
+      the front were dropped (seeks now follow the further of the seekable
+      range and the playhead), device copies show no live UI, pending resume
+      reports the target, a target past the real end resolves to the end;
+      orchestrator: rebased onto T6 (FR-P8 server and client parts merged by
+      hand), client 1335, eslint/tsc/prettier clean; merged fcc71b6. Small
+      call: the live few-seeders line uses a fixed threshold of 3. Still owed:
+      the owner's real-iPad check.
 - [x] T8: Delete after watching, pins, disk-floor eviction — verified
       2026-10-13: Validator PASS (11 adversarial pg cases incl. a disk that
       never moves and a stuck client) and Reviewer (no blockers; four
