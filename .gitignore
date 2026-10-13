@@ -38,3 +38,6 @@ data/
 
 # personal notes and drafts (never committed)
 notes/
+
+# Claude Code agent worktrees
+.claude/worktrees/

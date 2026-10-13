@@ -64,12 +64,16 @@ directly. Anything with logic goes through a Writer.
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
 - **Acquisition:** only the next N unwatched episodes of shows a user is
-  watching or has planned, a single first episode a user explicitly asked
-  to sample (FR-A8), and the next X aired unwatched episodes of one show a user
-  explicitly asked for as a trip (FR-A12: at most `trip_max_episodes`, one trip
-  per user at a time). Never fetch whole seasons otherwise; imported list
-  entries stay dormant until touched in Arc (FR-A9), and never more than K
-  shows per user at once (FR-A10; a trip does not count).
+  watching or has planned (plus one more once the user is halfway through
+  the first, and skipping an episode already sitting unwatched on one of the
+  user's devices — FR-A1, M20), an episode inside that window the user
+  explicitly pressed play on (FR-A14), a single first episode a user
+  explicitly asked to sample (FR-A8), and the next X aired unwatched episodes
+  of one show a user explicitly asked for as a trip (FR-A12: at most
+  `trip_max_episodes`, one trip per user at a time). Never fetch whole
+  seasons otherwise; imported list entries stay dormant until touched in Arc
+  (FR-A9), and never more than K shows per user at once (FR-A10; a trip, the
+  halfway prefetch and a demanded episode do not count).
 - **Media routes** require a session. Paths are derived from ids, never from
   user input.
 - **Hosting is undecided.** Do not assume a provider; keep everything to a

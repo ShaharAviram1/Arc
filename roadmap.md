@@ -1816,7 +1816,16 @@ owner's word.
 - [ ] T5: Device reporting and play-on-demand UI (client, non-live)
 - [ ] T6: Progressive remux on a growing file (server)
 - [ ] T7: Player, part 2: live playback (client)
-- [ ] T8: Delete after watching, pins, disk-floor eviction
+- [x] T8: Delete after watching, pins, disk-floor eviction — verified
+      2026-10-13: Validator PASS (11 adversarial pg cases incl. a disk that
+      never moves and a stuck client) and Reviewer (no blockers; four
+      should-fixes: a later completion no longer cuts another user's drop
+      grace short, the floor never evicts an episode played in the last 30
+      min, hold (c) has a 30-min floor even at grace 0, the preview shows
+      floor evictions) all fixed and re-run; orchestrator: 141 retention/pin/
+      migration tests, Writer's full runs server 4571 / client 1216, lints
+      clean, one alembic head 911eca1dfc62; merged e9a74b9. Small calls:
+      floor order by last played, serving hold capped at 6 h.
 - [ ] T9: Remembered release and seeder warning
 - [ ] T10: Integration and DoD pass
 - DoD: each task Writer → Validator (→ Reviewer where the plan says) →
