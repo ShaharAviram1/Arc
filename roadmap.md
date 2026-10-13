@@ -1904,7 +1904,22 @@ owner's word.
       after caf1811e8ee6), full server suite on the merged tree 4781 passed,
       client 1243, lints and whole-package mypy clean; merged 1f6868a.
       Small calls: REMEMBER_DAYS 180; the remembered-but-unfinished rule.
-- [ ] T10: Integration and DoD pass
+- [x] T10: Integration and DoD pass — verified 2026-10-14 (orchestrator ran
+      the flow test and the migration tests: 30 passed in 13 s; make lint
+      clean): tests/slow/test_m20_flow.py drives demand → sequential add →
+      live EVENT playlist with cues → adoption with exactly one ffmpeg →
+      ready on the same URLs → completion with exactly one MAL write →
+      deletion after the grace leaving an evicted row → re-demand re-adds
+      the same hash with zero Nyaa calls, all with the real ffmpeg; alembic
+      one head 244fbc2111f9, head → a7d2e5c9f318 → head clean; docs
+      reconciled (one FR-P8, remux-by-default wording, §10 test layers,
+      deploy README env table + WORKER_CONCURRENCY=3). Branch head: full
+      server suite 4897, client 1335, make lint clean.
+- **Status 2026-10-14:** all eleven tasks verified and merged on
+  `m20-on-demand`. Left: the owner's real-iPad check (Safari cue rendering,
+  live play, pending seeks) and the merge to main + deploy on the owner's
+  word (set WORKER_CONCURRENCY=3 in the production .env, then resume
+  acquisition).
 - DoD: each task Writer → Validator (→ Reviewer where the plan says) →
   orchestrator verification; suites green; lint clean; alembic single head;
   manual iPad check for T7; deployed from branch m20-on-demand after merge to
