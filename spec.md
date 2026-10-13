@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-09-18. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-10-13. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -17,6 +17,14 @@ pick.
 The client is the face: continue watching, what you are behind on, the
 seasonal schedule, a show page, an in-browser player, search/add, and (phase
 2) recommendations, match review, and admin.
+
+**Arc is a cache in front of the indexer rather than a collection** (owner's
+product decision, 2026-10-13, M20). It keeps one episode ready per watcher —
+the next one, plus the one after once they are half-way through it — fetches
+just in time, skips what a user's device already holds, and fetches on demand
+when somebody presses play on an episode their window covers. Two users a few
+episodes apart on one show may cause the episodes between them to be fetched,
+deleted and fetched again; that cost is accepted.
 
 The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9), so
 that the course professor can log in at any time, and the owner uses it daily.
@@ -142,17 +150,26 @@ that the course professor can log in at any time, and the owner uses it daily.
 ### 4.2 Acquisition (Nyaa via qBittorrent)
 - FR-A1 For each user and each show in status `watching` or `planned` **whose
   entry is not dormant** (FR-A9), the server keeps the next **N** unwatched
-  episodes available (N configurable by admin, default 1; M20 adds one more
-  at the halfway mark, see FR-A1 as revised by M20 T4), counted from that
-  user's furthest watched episode. For airing shows, the newest aired episode
-  is fetched on its air day. Nothing outside this window is fetched, and no
-  more of it at once than FR-A10's per-user cap allows — the two exceptions
-  being a sample (FR-A8) and a trip (FR-A12), each something a user asked for
-  explicitly. An episode a device of the user already holds from a trip
-  (FR-A12) is **not** left out of the window (owner, 2026-10-06: "what if I
-  downloaded the episode for a trip, never watched it on the iPad, and then
-  wanna watch it on my Mac?"): inside the next N it is fetched and prepared
-  for streaming like any other unwatched episode.
+  episodes available (N configurable by admin, **default 1**, owner
+  2026-10-13), counted from that user's furthest watched episode. For airing
+  shows, the newest aired episode is fetched on its air day. **Halfway
+  prefetch** (M20): while the user's position on the first episode of the
+  window is at least 50 % and below the 90 % completion mark (FR-S4), the
+  window reaches one episode further (`p+1 … p+N+1`), if that episode has
+  aired. It is computed from list and watch progress and stored nowhere, so it
+  is still "the next unwatched episodes"; crossing 50 % triggers the
+  recompute (FR-S4). The prefetched episode is outside FR-A10's cap, like a
+  sample: it is fetched even while the show waits for a slot and never makes
+  the show take one. **Device skip** (M20, owner 2026-10-13, reversing the
+  2026-10-06 rule that such an episode was "not left out"): an episode a device
+  of the user holds unwatched — a delivered, unreleased trip copy (FR-A12) or a
+  download the device reported within the last 14 days (FR-A15) — is left out
+  of that user's window, and the window does **not** slide past it to a later
+  episode; the halfway prefetch skips the same way. Watching such an episode on
+  another device is play on demand (FR-A14). Nothing outside this window is
+  fetched, and no more of it at once than FR-A10's per-user cap allows — the
+  exceptions being a sample (FR-A8), a trip (FR-A12) and a demanded episode
+  (FR-A14), each something a user asked for explicitly.
 - FR-A2 Wants from all users are merged: an episode is fetched once even if
   several users want it.
 - FR-A3 Release selection uses ranked, admin-editable rules:
@@ -388,6 +405,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   refused by it. **A trip (FR-A12) never counts either** (owner, 2026-10-05):
   its episodes hold no slot and are never refused one, and an episode wanted
   only by a trip does not stop a show's own window from waiting for a slot.
+  **A demanded episode (FR-A14) never counts either and is never refused**,
+  like a sample: it is fetched while its show waits for a slot, holds none,
+  and the show goes on waiting for the rest of its window. **Nor does FR-A1's
+  halfway prefetch** (M20): the extra episode never makes a show hungry for a
+  slot or an occupant of one, and is fetched even while the show waits, so the
+  show a user is watching right now keeps its next episode when K is full.
 - FR-A11 A batch taken under FR-A4's exception — or preferred for a trip
   (FR-A4's trip amendment, FR-A12) — is held as **one** torrent
   record with no episode of its own and one file record per file, each carrying
@@ -443,10 +466,13 @@ that the course professor can log in at any time, and the owner uses it daily.
   records the episode as delivered — repeats change nothing, and a copy
   re-made meanwhile is still accepted; a confirmation arriving after the
   episode expired on an ended trip, or after a cancel, is recorded but
-  gives no right to fetch the copy again. The device's copy does not
-  change what the user's window wants (FR-A1): an episode both on the device
-  and among the next N is prepared for streaming as usual; the device saying
-  it deleted its copy is recorded for the trip only. The device may ask for a
+  gives no right to fetch the copy again. **The device's copy does change
+  what the user's window wants** (FR-A1's device skip, M20, owner
+  2026-10-13, reversing 2026-10-06): a delivered episode the device has not
+  released is left out of the user's window and is not fetched or prepared
+  for streaming on its account; pressing play on it on another device fetches
+  it on demand (FR-A14). The device saying it deleted its copy (released)
+  brings the episode back into the window. The device may ask for a
   delivered or expired episode **again** while the trip is active, which puts
   it back in the trip and fetches or re-makes the copy by the ordinary paths.
   A trip-only episode's copy can be fetched only by a user whose trip holds
@@ -502,6 +528,48 @@ that the course professor can log in at any time, and the owner uses it daily.
   release you chose stalled". Every choice is logged with the user, the
   episode or trip and the info hash. Nothing here touches a list entry or
   MyAnimeList.
+- FR-A14 **Play on demand** (M20, owner 2026-10-13). Pressing play on an
+  episode that is not ready asks the server to fetch it now, at the top of
+  the search queue. Allowed only for an episode the user's window covers
+  **before** the device skip and the slot cap — the next N and, once the user
+  is actually half-way through the first of them, the halfway prefetch; an
+  episode a device holds is demandable only when it falls inside that reach
+  (a Keep-offline copy of an episode further ahead is not) — or one they
+  already want for another reason (a sample, a trip episode, a window row; an
+  earlier demand does not justify itself); anything else is refused with a
+  sentence (owner Q5: no fetch outside the window). The want is marked
+  demanded: it is kept wanted even when a device holds the episode and even
+  when the show waits for a slot (FR-A10), and it is **re-checked on every
+  reconciliation**: it ends when the episode leaves that covered set — the
+  user watched past it, rewound below half-way, N was lowered, the show left
+  watching/planned — or as FR-T2 and FR-W4 end any want. A demanded episode
+  that is a trip's but outside the window stays the trip's (small copy only)
+  and ends with the trip. A demand on an episode that is already ready does
+  nothing. A download already in flight is moved to the top of the torrent
+  client's queue. Refused, with a sentence, while acquisition is paused or
+  held for disk space (FR-T6) — but only for an episode that still has to be
+  fetched. Open to every account, **the demo one included** (it streams):
+  the demo account may therefore demand window episodes of the demo list
+  beyond its K (owner-approved). While the episode is on its way, opening it
+  in the player answers *pending* with its state, download percentage and
+  seeders instead of "not found" — also when a device of the user holds its
+  trip copy (the demand is the "watch it on the Mac" case, so *pending*
+  outranks *offline only*). The player's next-episode reference says whether
+  the next episode can be fetched this way **now**, on the user's real
+  progress — exactly what a demand would accept — so it turns true once the
+  user passes the halfway mark. Nothing here touches a list entry or
+  MyAnimeList.
+- FR-A15 **Device holdings** (M20, owner 2026-10-13). A device reports the
+  episodes it holds as downloads the user has not watched, as a whole set
+  that replaces what that device reported before; the device is named by a
+  UUID it generates (a label, never a path). A report counts for **14 days**
+  (owner Q12) and is renewed each time the device reports, so a wiped or lost
+  device stops affecting the window on its own; each report also deletes the
+  user's reports older than that. At most **10 devices** per user are kept,
+  the one that reported longest ago removed first (a small call, 2026-10-13:
+  a browser that clears its storage mints a new device id). The server uses
+  the set only for FR-A1's device skip, together with delivered trip copies
+  (FR-A12). Refused for the demo account, which has no downloads.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -652,7 +720,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode number is greater than current progress, and enqueues a MAL sync.
   If the show is not on the user's list, watching it adds it as Watching
   (the act of watching is the user's choice); status is never changed
-  automatically beyond FR-W5's auto-complete.
+  automatically beyond FR-W5's auto-complete. **Crossing 50 %** (M20) is
+  bookkeeping too: a progress report — live, or replayed from a device that
+  watched offline (FR-S8) — that moves the position across half the duration,
+  upwards, triggers a recompute of the acquisition window so FR-A1's halfway
+  prefetch takes effect; it touches no list entry and writes nothing to MAL.
   **Un-marking** an episode (revised by the owner 2026-09-13, superseding the
   2026-09-07 clarification) is a user-originated event: it clears the
   completion row and, when the user's list progress *equals* that episode's
@@ -1377,7 +1449,9 @@ through the same edge, without the grace period.
   episodes of one show after the user's progress, at most 50, one trip at a
   time, asked for explicitly. Nor is FR-A13's manual release choice: it only
   redirects an episode or a trip the user has already asked for to another
-  release, and a pack is still taken only for the user's wanted files.) A
+  release, and a pack is still taken only for the user's wanted files. Nor is
+  FR-A14's play on demand: it fetches only an episode the user's window
+  already covers.) A
   "save the MP4 to Files" link is out too (owner, 2026-10-05).
 - Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
   at play time.
@@ -2454,3 +2528,28 @@ through the same edge, without the grace period.
   (owner Q14). FR-T4: preview reasons in hours, the held episodes, the floor
   evictions while under the floor, and pinned bytes per show on the disk
   view. New table `show_pins`.
+- 2026-10-13 (owner, M20 T4) — **Arc is a cache in front of the indexer
+  rather than a collection** (§1), the owner's product decision. **FR-A1:
+  halfway prefetch and the device skip; this reverses the 2026-10-06 call**
+  that an episode a device holds from a trip is "not left out" of the window.
+  Binge-watching trip copies on the iPad had the box re-fetch and re-encode
+  episodes the iPad already held; now a delivered, unreleased trip copy, or a
+  download the device reported in the last 14 days (new **FR-A15**), is
+  skipped, without the window sliding past it. **New FR-A14 play on demand**
+  for episodes the window covers (owner Q5), which bypasses the skip and the
+  slot cap and never counts against K (FR-A10). FR-A12's "the device's copy
+  does not change what the window wants" is reversed to match. FR-S4: crossing
+  50 % triggers the reconciler; a replayed offline sample does too, which is
+  how the window catches up on reconnect (owner Q1).
+- 2026-10-13 (review of M20 T4) — **FR-A14 tightened**: a demanded want is
+  re-checked against the covered set on every reconciliation (it ends when
+  the episode leaves it, not only when watched past); an earlier demand no
+  longer licenses another; a demanded trip episode outside the window stays
+  the trip's; a held episode is demandable only inside the window's reach;
+  *pending* outranks *offline only* on play; `next.fetchable` is measured on
+  real progress, so it never promises a fetch a demand would refuse; a
+  demand on a ready episode does nothing; the demo account may demand beyond
+  its K (owner-approved). **FR-A1/FR-A10: the halfway prefetch is outside the
+  slot cap**, like a sample (a small call, flagged to the owner). **FR-A15:**
+  a report purges the user's expired rows, and at most 10 devices per user are
+  kept (small call).

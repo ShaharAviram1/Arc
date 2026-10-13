@@ -108,6 +108,13 @@ from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pendi
 #: thing anybody watches for.
 COMPLETION_FRACTION = 0.90
 
+#: The halfway prefetch (FR-A1, FR-S4, M20): a report that carries the user's
+#: position across this fraction of the episode, upwards, queues a
+#: reconciliation, and the reconciler wants one more episode for as long as
+#: the user sits between this and :data:`COMPLETION_FRACTION`. Half-way, so a
+#: well-seeded release lands and is prepared before the credits.
+PREFETCH_FRACTION = 0.5
+
 #: Resume only past this much (FR-S2): a few seconds in is the beginning, and
 #: dropping a user thirty seconds into a cold open they have not seen is worse
 #: than starting them at zero.
@@ -156,6 +163,29 @@ def is_completed(position_s: float, duration_s: float) -> bool:
     return position_s / duration_s >= COMPLETION_FRACTION
 
 
+def crosses_prefetch(
+    old_position_s: float | None,
+    old_duration_s: float | None,
+    position_s: float,
+    duration_s: float,
+) -> bool:
+    """Whether this report moved the user across :data:`PREFETCH_FRACTION` upwards.
+
+    The "old" values are the row as it was before the report (``None`` when
+    there was no row). Only the crossing counts, not every report above the
+    line, so a player reporting every ten seconds past the middle queues one
+    reconciliation rather than one a report. A row with no usable duration
+    counts as below the line: the first report that can be measured is the
+    one that crosses. A rewind and a second crossing queue another, which is
+    harmless — the reconciler is idempotent and the job is deduplicated.
+    """
+    if duration_s <= 0 or position_s / duration_s < PREFETCH_FRACTION:
+        return False
+    if old_position_s is None or old_duration_s is None or old_duration_s <= 0:
+        return True
+    return old_position_s / old_duration_s < PREFETCH_FRACTION
+
+
 def resume_position(row: WatchProgress | None, duration_s: float | None) -> float | None:
     """Where the player should open, or ``None`` for the beginning (FR-S2).
 
@@ -196,6 +226,13 @@ class ProgressOutcome:
     completed: bool
     newly_completed: bool
     list_progress: int | None = None
+    #: The row's position and duration before this report, or ``None`` when
+    #: there was no row (read from the upsert's own ``RETURNING old.…``).
+    previous_position_s: float | None = None
+    previous_duration_s: float | None = None
+    #: Whether this report crossed :data:`PREFETCH_FRACTION` upwards, and so
+    #: queued a reconciliation for the halfway prefetch (M20).
+    prefetch: bool = False
 
 
 async def record_progress(
@@ -264,7 +301,7 @@ async def record_progress(
         },
     )
 
-    completed, was_completed = (
+    completed, was_completed, old_position, old_duration = (
         await session.execute(
             upsert.returning(
                 WatchProgress.completed,
@@ -275,9 +312,23 @@ async def record_progress(
                 # has no construct for the alias yet; the column is spelled by
                 # hand and nothing user-supplied goes near it.
                 func.coalesce(literal_column("old.completed"), false()).label("was_completed"),
+                # The same re-read, for the halfway crossing (M20): NULL on
+                # the insert half, which is "no row before".
+                literal_column("old.position_s").label("old_position_s"),
+                literal_column("old.duration_s").label("old_duration_s"),
             )
         )
     ).one()
+    previous_position = None if old_position is None else float(old_position)
+    previous_duration = None if old_duration is None else float(old_duration)
+
+    # The halfway prefetch (FR-A1, M20): the reconciler wants one more episode
+    # while the user is past the middle of the first one in their window, and
+    # this is the moment that becomes true. Deduplicated on the job type, so a
+    # report and a completion in one binge cost one reconciliation.
+    prefetch = crosses_prefetch(previous_position, previous_duration, position_s, duration_s)
+    if prefetch:
+        await enqueue_compute_wants(session)
 
     # Play is one of FR-A9's touches, and it is a touch from the *first*
     # report rather than from the one that crosses 90 %: somebody watching
@@ -290,7 +341,13 @@ async def record_progress(
 
     newly_completed = bool(completed) and not bool(was_completed)
     if not newly_completed:
-        return ProgressOutcome(completed=bool(completed), newly_completed=False)
+        return ProgressOutcome(
+            completed=bool(completed),
+            newly_completed=False,
+            previous_position_s=previous_position,
+            previous_duration_s=previous_duration,
+            prefetch=prefetch,
+        )
 
     progress = await _advance_list(session, user_id=user_id, episode=episode, now=at)
     # The acquisition window is a function of the list entry (FR-A1, FR-W4), so
@@ -298,7 +355,14 @@ async def record_progress(
     # one in the look-ahead is now wanted. Deduplicated on the job type, so a
     # binge costs one reconciliation rather than one per episode.
     await enqueue_compute_wants(session)
-    return ProgressOutcome(completed=True, newly_completed=True, list_progress=progress)
+    return ProgressOutcome(
+        completed=True,
+        newly_completed=True,
+        list_progress=progress,
+        previous_position_s=previous_position,
+        previous_duration_s=previous_duration,
+        prefetch=prefetch,
+    )
 
 
 async def _activate_entry(

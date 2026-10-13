@@ -124,6 +124,12 @@ class Want(Base):
     trip: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    #: When the user last pressed play on this episode before it was ready
+    #: (FR-A14, M20). A demanded want is wanted even when a device of the user
+    #: holds the episode (FR-A15) and even when the show is waiting for a slot
+    #: (FR-A10), and it never occupies a slot. Null for every other want; it
+    #: goes with the row when the user watches past the episode.
+    demanded_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
 class Torrent(Base):

@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from alembic import command
 from arc.models import (
     EPISODE_FILE_INDEX,
+    HOLDINGS_USER_REPORTED_INDEX,
     IN_PROGRESS_INDEX,
     OFFLINE_SEARCH_INDEX,
     ONE_ACTIVE_TRIP_INDEX,
@@ -550,3 +551,51 @@ def test_show_pins_is_a_cascading_pair(pg_engine: AsyncEngine, test_database_url
     assert pk == "PRIMARY KEY (user_id, anime_id)"
     assert user_fk is not None and "ON DELETE CASCADE" in user_fk
     assert anime_fk is not None and "ON DELETE CASCADE" in anime_fk
+
+
+def _columns(url: str, table: str) -> dict[str, tuple[str, str]]:
+    """``column → (data_type, is_nullable)`` for one table, from the catalogue."""
+
+    async def run() -> dict[str, tuple[str, str]]:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT column_name, data_type, is_nullable "
+                        "FROM information_schema.columns WHERE table_name = :table"
+                    ),
+                    {"table": table},
+                )
+                return {str(row[0]): (str(row[1]), str(row[2])) for row in found.all()}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_wants_demanded_at_is_a_nullable_timestamp(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``wants.demanded_at`` (FR-A14, M20): null for every want made before it."""
+    columns = _columns(test_database_url, "wants")
+
+    assert columns["demanded_at"] == ("timestamp with time zone", "YES")
+
+
+def test_device_holdings_is_keyed_per_device_and_indexed_per_user_report(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``device_holdings`` (FR-A15, M20): the shape the reconciler and the PUT rely on."""
+    columns = _columns(test_database_url, "device_holdings")
+
+    assert columns == {
+        "user_id": ("bigint", "NO"),
+        "device_id": ("character varying", "NO"),
+        "episode_id": ("bigint", "NO"),
+        "reported_at": ("timestamp with time zone", "NO"),
+    }
+    primary = _index_definition(test_database_url, "device_holdings", "pk_device_holdings")
+    assert primary is not None and "(user_id, device_id, episode_id)" in primary
+    lookup = _index_definition(test_database_url, "device_holdings", HOLDINGS_USER_REPORTED_INDEX)
+    assert lookup is not None and "(user_id, reported_at)" in lookup

@@ -420,10 +420,14 @@ async def test_release_keeps_a_copy_confirmed_within_the_hour(
     assert offline_path_for(settings, episode.id).exists()
 
 
-async def test_a_delivered_episode_stays_in_the_window(
+async def test_a_delivered_episode_leaves_the_window_until_released(
     db_session: AsyncSession, settings: Settings
 ) -> None:
-    """Owner, 2026-10-06: on the iPad is not watched; the Mac still streams it."""
+    """M20 (owner 2026-10-13), reversing 2026-10-06: the iPad's copy is not re-fetched.
+
+    The Mac streams it only by pressing play (FR-A14); the device releasing
+    its copy puts it back in the window.
+    """
     rows = await show(db_session, 985009)
     user, trip = await trip_with_copies(db_session, settings, rows, "deliver-win@arc.test", count=2)
     anime = await db_session.get(Anime, rows[0].anime_id)
@@ -433,24 +437,32 @@ async def test_a_delivered_episode_stays_in_the_window(
         db_session, user=user, trip_id=trip.id, episode_id=rows[0].id, etag=None, now=now()
     )
 
+    async def live() -> dict[int, Want]:
+        return {
+            want.episode_id: want
+            for want in (
+                await db_session.scalars(
+                    select(Want).where(Want.user_id == user.id, Want.dropped_at.is_(None))
+                )
+            ).all()
+        }
+
     await compute_wants(db_session)
 
-    live = {
-        want.episode_id: want
-        for want in (
-            await db_session.scalars(
-                select(Want).where(Want.user_id == user.id, Want.dropped_at.is_(None))
-            )
-        ).all()
-    }
-    assert rows[0].id in live and not live[rows[0].id].trip, "wanted for streaming"
+    assert rows[0].id not in await live(), "held on the device: skipped"
     await db_session.refresh(rows[0])
-    assert rows[0].state is EpisodeState.WANTED, "fetched again by the ordinary path"
-    # Releasing the device copy is trip bookkeeping only.
+    assert rows[0].state is not EpisodeState.WANTED, "not fetched again"
+
     await release_delivered(
         db_session, user=user, trip_id=trip.id, episode_id=rows[0].id, now=now()
     )
     assert (await row_of(db_session, trip, rows[0])).released_at is not None
+    await compute_wants(db_session)
+
+    wants = await live()
+    assert rows[0].id in wants and not wants[rows[0].id].trip, "back in the window"
+    await db_session.refresh(rows[0])
+    assert rows[0].state is EpisodeState.WANTED, "fetched again by the ordinary path"
 
 
 async def test_an_episode_in_a_window_and_a_trip_keeps_its_source_and_rendition(

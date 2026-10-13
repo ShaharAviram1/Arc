@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -61,11 +62,13 @@ from arc.api.playback_schemas import (
     CompletedEpisode,
     CompletedOut,
     EpisodeRef,
+    PendingOut,
     PlayInfo,
     ProgressIn,
     ProgressOut,
 )
-from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, WatchProgress
+from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, Want, WatchProgress
+from arc.services.acquisition.wants import coverable
 from arc.services.catalog import episodes_for
 from arc.services.catalog.airing import aired_through, out_of_order
 from arc.services.playback.progress import (
@@ -101,22 +104,38 @@ async def _episode(session: SessionDep, episode_id: int) -> Episode:
 
 
 def _neighbours(
-    episodes: list[Episode], episode: Episode
+    episodes: list[Episode], episode: Episode, *, fetchable: Collection[int] = frozenset()
 ) -> tuple[EpisodeRef | None, EpisodeRef | None]:
     """The rows either side of ``episode`` in number order (FR-S5).
 
     By position in the list rather than by ``number ± 1``: episode numbering
     has gaps — recaps, a 5.5, a season that starts at 13 — and "the next row"
-    is what a person means by the next episode.
+    is what a person means by the next episode. ``fetchable`` is the caller's
+    on-demand set (FR-A14), for :attr:`EpisodeRef.fetchable`.
     """
     numbers = [row.number for row in episodes]
     try:
         index = numbers.index(episode.number)
     except ValueError:  # pragma: no cover - the episode came from this list
         return None, None
-    previous = EpisodeRef.from_episode(episodes[index - 1]) if index > 0 else None
-    following = EpisodeRef.from_episode(episodes[index + 1]) if index + 1 < len(episodes) else None
+
+    def ref(row: Episode) -> EpisodeRef:
+        return EpisodeRef.from_episode(
+            row, fetchable=row.state is not EpisodeState.READY and row.id in fetchable
+        )
+
+    previous = ref(episodes[index - 1]) if index > 0 else None
+    following = ref(episodes[index + 1]) if index + 1 < len(episodes) else None
     return previous, following
+
+
+async def _live_want(session: SessionDep, user_id: int, episode_id: int) -> Want | None:
+    """The caller's live want on this episode, if any (FR-A14's pending answer)."""
+    return await session.scalar(
+        select(Want).where(
+            Want.user_id == user_id, Want.episode_id == episode_id, Want.dropped_at.is_(None)
+        )
+    )
 
 
 @router.get(
@@ -128,24 +147,56 @@ def _neighbours(
 async def play(
     episode_id: EpisodeId, user: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> PlayInfo:
-    """404 unless the episode is ``ready`` — or is the caller's trip episode.
+    """404 unless the episode is ``ready``, the caller's trip episode, or wanted by the caller.
 
     "Not ready" and "no such episode" are one answer on purpose: an episode
-    that is still downloading has nothing to play, and the show page is where
-    a user learns why — this endpoint's job is to open a player or not.
+    that nobody asked for has nothing to play, and the show page is where a
+    user learns why — this endpoint's job is to open a player or not.
 
-    The one exception is a trip episode (FR-A12, M19 T4): an episode that is
+    The first exception is a trip episode (FR-A12, M19 T4): an episode that is
     not ready but on which the caller holds a ``pending`` or ``delivered``
     trip row lives on their device. It is answered with ``offline_only`` and
     no ``playlist_url``, the resume position and the neighbours as usual, so
-    the player can open the device's copy. Everyone else keeps the 404.
+    the player can open the device's copy.
+
+    The second is play on demand (FR-A14, M20): an episode that is not ready
+    but on which the caller has a live want — the window's, or one they made
+    by pressing play (``POST /api/episodes/{id}/demand``) — is answered 200
+    with ``pending`` (state, download progress, seeders) and no
+    ``playlist_url``. The player polls until the URL arrives. Everyone else
+    keeps the 404.
+
+    A demanded want outranks the trip branch: an episode the caller pressed
+    play on is answered ``pending`` even when a device of theirs holds its trip
+    copy (the "watch it on the Mac" case).
+
+    ``next.fetchable`` says whether the caller could demand the next episode
+    **now**, on their real progress — exactly what ``demand`` would accept, so
+    the client never offers a fetch it would be refused. Before the halfway
+    mark the next one is usually not yet covered; the player re-reads this
+    route, so it flips once the user passes 50 %. It is false for a ready
+    neighbour (nothing to fetch) and is not worked out while this episode is
+    itself pending.
     """
     episode = await session.get(Episode, episode_id)
     if episode is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
-    offline_only = episode.state is not EpisodeState.READY
-    if offline_only and not await holds_trip_episode(session, user.id, episode.id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
+    not_ready = episode.state is not EpisodeState.READY
+    offline_only = False
+    waiting = False
+    if not_ready:
+        want = await _live_want(session, user.id, episode.id)
+        if want is not None and want.demanded_at is not None:
+            # The user pressed play on this one (FR-A14) — typically on the Mac
+            # while the iPad holds the trip copy — so the wait is the answer,
+            # not "offline only".
+            waiting = True
+        elif await holds_trip_episode(session, user.id, episode.id):
+            offline_only = True
+        elif want is not None:
+            waiting = True
+        else:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
 
     anime = await session.get(Anime, episode.anime_id)
     if anime is None:  # pragma: no cover - a foreign key guarantees this
@@ -162,12 +213,26 @@ async def play(
     # read, on a route that already does four.
     entry = await session.get(ListEntry, (user.id, episode.anime_id))
     duration = rendition.duration if rendition is not None and rendition.duration else 0.0
-    if offline_only and progress is not None and progress.duration_s:
-        # No rendition to measure: the length the device's player last reported.
+    if not_ready and progress is not None and progress.duration_s:
+        # No rendition to measure: the length a player last reported.
         duration = progress.duration_s
 
     at = now()
     previous, following = _neighbours(siblings, episode)
+    # ``fetchable`` costs a one-user plan, and the pending player polls this
+    # route every few seconds: so it is worked out only when a neighbour exists
+    # that is not ready, and not while this episode is itself still pending.
+    if not waiting and any(ref is not None and not ref.ready for ref in (previous, following)):
+        fetchable = await coverable(session, user.id, now=at)
+        previous, following = _neighbours(siblings, episode, fetchable=fetchable)
+    pending: PendingOut | None = None
+    if waiting:
+        release = extras.torrents.get(episode.id)
+        pending = PendingOut(
+            state=episode.state,
+            progress=release.progress if release is not None else None,
+            seeders=release.torrent.seeders if release is not None else None,
+        )
     return PlayInfo(
         episode=EpisodeOut.from_episode(
             episode,
@@ -186,8 +251,9 @@ async def play(
             trip_only=episode.id in extras.trip_only,
         ),
         anime=AnimeSummary.from_anime(anime),
-        playlist_url=None if offline_only else playlist_url(episode.id),
+        playlist_url=None if not_ready else playlist_url(episode.id),
         offline_only=offline_only,
+        pending=pending,
         duration=duration,
         resume_position=resume_position(progress, duration or None),
         resume_at=progress.updated_at if progress is not None else None,

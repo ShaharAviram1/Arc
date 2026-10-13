@@ -192,6 +192,9 @@ async def release_delivered(
             "trip episode released by the device",
             extra={"trip_id": trip.id, "episode_id": episode_id, "user_id": user.id},
         )
+        # The episode leaves the user's device-held set, so the window may want
+        # it again (FR-A1's device skip, M20).
+        await enqueue_compute_wants(session)
     await session.flush()
     return row
 

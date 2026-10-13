@@ -18,6 +18,8 @@ from arc.api import (
     auth,
     catalog,
     catalogue,
+    demand,
+    devices,
     events,
     health,
     home,
@@ -221,6 +223,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(trips.router)
     app.include_router(manual_release.router)
     app.include_router(playback.router)
+    app.include_router(demand.router)
+    app.include_router(devices.router)
     app.include_router(sync.router)
     app.include_router(mal.router)
     app.include_router(recs.router)

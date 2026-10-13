@@ -28,21 +28,45 @@ class EpisodeRef(BaseModel):
 
     ``ready`` is derived from ``state`` and sent anyway, so the client can
     decide whether to offer "next episode" without repeating the rule.
+
+    ``fetchable`` is play on demand's half (FR-A14, M20): the caller may
+    press play on this episode and have Arc fetch it, because their window
+    covers it **now**, on their real progress (the halfway prefetch counts
+    once they are actually past 50 %; the player re-reads ``/play``, so the
+    flag flips then). It is what ``demand`` accepts. Always false for a ready
+    episode (it needs no fetch) and while the episode being played is itself
+    pending: the client offers Next when the episode is ready **or** fetchable.
     """
 
     id: int
     number: int
     state: EpisodeState
     ready: bool
+    fetchable: bool = False
 
     @classmethod
-    def from_episode(cls, episode: Episode) -> EpisodeRef:
+    def from_episode(cls, episode: Episode, *, fetchable: bool = False) -> EpisodeRef:
         return cls(
             id=episode.id,
             number=episode.number,
             state=episode.state,
             ready=episode.state is EpisodeState.READY,
+            fetchable=fetchable,
         )
+
+
+class PendingOut(BaseModel):
+    """An episode the caller wants that is not ready yet (FR-A14, M20).
+
+    What the player shows while it waits: "Searching", "Downloading 43 % · 12
+    seeders", "Preparing". ``progress`` is 0..1 from the download (the file's
+    own share for a pack), null before anything has been reported; ``seeders``
+    is the release's count when it was chosen, null before there is one.
+    """
+
+    state: EpisodeState
+    progress: float | None = None
+    seeders: int | None = None
 
 
 class PlayInfo(BaseModel):
@@ -58,7 +82,8 @@ class PlayInfo(BaseModel):
     anime: AnimeSummary
     #: ``/media/{episode_id}/index.m3u8`` — derived from the id, never from
     #: anything on disk (spec §7). Sent rather than assumed so the client has
-    #: one place to read it from. ``null`` exactly when ``offline_only``.
+    #: one place to read it from. ``null`` exactly when ``offline_only`` or
+    #: ``pending`` is set.
     playlist_url: str | None
     #: The rendition's own duration in seconds. ``0`` only for a ``ready``
     #: episode whose rendition row somehow carries no duration, and for an
@@ -69,6 +94,10 @@ class PlayInfo(BaseModel):
     #: holding a pending or delivered trip row on it. The player opens the
     #: device's copy, or says to keep it offline first.
     offline_only: bool = False
+    #: Set when the episode is not ready but the caller wants it (FR-A14,
+    #: M20): it is being searched for, downloaded or prepared, and the player
+    #: polls this route until ``playlist_url`` arrives. Null otherwise.
+    pending: PendingOut | None = None
     #: Where to seek on open, or null for the beginning (FR-S2).
     resume_position: float | None = None
     #: When the caller's position for this episode was last written — the
@@ -152,6 +181,7 @@ __all__ = [
     "CompletedEpisode",
     "CompletedOut",
     "EpisodeRef",
+    "PendingOut",
     "PlayInfo",
     "ProgressIn",
     "ProgressOut",

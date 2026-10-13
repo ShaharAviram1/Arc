@@ -511,9 +511,10 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `show_pins` | user_id (FK CASCADE) + anime_id (FK CASCADE) (PK pair), created_at. A user's "Keep files" on a show (FR-T8, M20 T8, revision `911eca1dfc62`): delete after watching skips every episode of a show with **any** row here; only the floor eviction (§5.7) may still remove them. Written only by `services/pins.py` (`INSERT … ON CONFLICT DO NOTHING` / `DELETE`, both idempotent). No index beyond the key: a few rows per user, read whole once an hour |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
-| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list), trip (bool NOT NULL DEFAULT false, M19 T3, revision `811a128415cc` — true when the row exists **only** because of a trip, FR-A12: no window and no sample asked for it. **Rewritten by `compute_wants` on every run**, so it is the last reconciliation's answer; an episode whose live wants are all `trip` is *trip-only*, §5.4e) |
+| `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list), trip (bool NOT NULL DEFAULT false, M19 T3, revision `811a128415cc` — true when the row exists **only** because of a trip, FR-A12: no window and no sample asked for it. **Rewritten by `compute_wants` on every run**, so it is the last reconciliation's answer; an episode whose live wants are all `trip` is *trip-only*, §5.4e), demanded_at (TIMESTAMPTZ NULL, M20 T4, revision `603a536051f9`: the user pressed play on this episode before it was ready, FR-A14 — the row is kept wanted despite the device skip and the slot cap, never occupies a slot, and goes with the row when the user watches past the episode; written only by `services/acquisition/demand.py`) |
+| `device_holdings` | user_id (FK users CASCADE), device_id (VARCHAR(36), the device's own UUIDv4 in canonical form — a label, never a path), episode_id (FK episodes CASCADE), reported_at (TIMESTAMPTZ NOT NULL). PK `(user_id, device_id, episode_id)`; index `ix_device_holdings_user_id_reported_at` (the reconciler's lookup and the TTL purge). M20 T4 (FR-A15), revision `603a536051f9`. The unwatched downloads one device reported, **replaced whole** on each `PUT /api/devices/{device_id}/holdings` (every row restamped, under an advisory lock on (user, device)); read by the reconciler's device skip for `DEVICE_HOLDING_DAYS` (14) after `reported_at` and no longer. Each report also deletes the user's rows older than that and keeps at most `MAX_DEVICES` (10) devices per user, oldest report evicted first |
 | `trips` | id, user_id (FK CASCADE), anime_id (FK CASCADE), first_number, last_number, count (how many aired episodes it took, ≤ what was asked), state (`active` \| `finished` \| `cancelled` \| `expired`, varchar enum, default `active`), created_at, deadline_at (`created_at + trip_copy_days`), ended_at. Partial unique index `ux_trips_one_active_per_user` on `user_id WHERE state = 'active'` — one active trip per user, held by the database as well as by `create_trip`. M19 T3 (FR-A12), revision `811a128415cc`, which also seeds `trip_max_episodes` (50) and `trip_copy_days` (14) |
-| `trip_episodes` | trip_id + episode_id (PK, both FK CASCADE), state (`pending` \| `delivered` \| `expired` \| `cancelled`, default `pending`), available_at (copy first ready for this trip — the start of the `trip_copy_days` clock; stamped by the copy hook and by `create_trip` when a copy already exists), delivered_at (device confirmed; M19 T4 writes it — set and with released_at null it takes the episode out of that user's window), released_at (device deleted its copy; T4). Index `ix_trip_episodes_episode_id`. "Available" is not a state: it is `pending` with a ready copy |
+| `trip_episodes` | trip_id + episode_id (PK, both FK CASCADE), state (`pending` \| `delivered` \| `expired` \| `cancelled`, default `pending`), available_at (copy first ready for this trip — the start of the `trip_copy_days` clock; stamped by the copy hook and by `create_trip` when a copy already exists), delivered_at (device confirmed; M19 T4 writes it — set and with released_at null, the episode is in that user's device-held set and the window skips it, without sliding past it; M20 T4, FR-A1/FR-A15, reversing 2026-10-06), released_at (device deleted its copy; T4 — the episode is back in the window from the next reconciliation). Index `ix_trip_episodes_episode_id`. "Available" is not a state: it is `pending` with a ready copy |
 | `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, **manual (bool NOT NULL DEFAULT false, revision `f1a6d3c08b52`: a person chose this release by hand, FR-A13)**, added_at, completed_at |
 | `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
@@ -532,10 +533,16 @@ stores — which rows a reader has dismissed — lives in that browser's
 
 ### 5.1 Acquisition
 1. Scheduler job `compute_wants` (every 15 min and on any list/progress
-   change): for each `list_entries` row in watching/planned, take the user's
-   furthest completed episode number `p`; want episodes `p+1 … p+N` that
-   have aired (or air today). Upsert into `wants`. Remove wants for shows now
-   dropped/completed. Apply rule FR-T2 (drop stale wants).
+   change, and when a progress report crosses 50 %): for each `list_entries`
+   row in watching/planned, take the user's furthest completed episode number
+   `p`; want episodes `p+1 … p+N` that have aired (or air today) — N defaults
+   to 1 since M20 — and `p+N+1` too while the user's `watch_progress` on the
+   first of them is in `[0.5, 0.9)` (the halfway prefetch, `_halfway`), minus
+   the episodes a device of the user holds (`_device_held`: delivered,
+   unreleased trip copies ∪ `device_holdings` reported in the last 14 days),
+   **without** sliding past them. Add the user's live demanded wants (FR-A14)
+   whatever the skip and the slot cap say. Upsert into `wants`. Remove wants
+   for shows now dropped/completed. Apply rule FR-T2 (drop stale wants).
 2. For each episode with ≥1 active want and state `not_wanted`/`unavailable`
    (retry due) → state `wanted`, enqueue `search_release`.
 3. `search_release`: build Nyaa RSS queries (romaji + english title, episode
@@ -551,13 +558,60 @@ stores — which rows a reader has dismissed — lives in that browser's
 Trips (FR-A12, M19 T3) enter this flow at step 1 and nowhere else: the
 reconciler adds every `pending` row of an `active` trip to `desired` (like a
 sample), marks the rows nothing else asked for `wants.trip`, starts their
-searches at priority 160 (behind the window's 150), and skips an episode a
-device of the user already holds when it builds the user's window. The rest —
+searches at priority 160 (behind the window's 150). Once a trip copy is
+delivered and not released, the user's window skips that episode (M20 T4,
+FR-A1's device skip, reversing the owner's 2026-10-06 "not left out"); the
+device releasing it brings it back. The rest —
 search, download, match — is unchanged; a torrent taken only for trip-only
 episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
 §5.4e has the whole of it.
 
 ### 5.1a Acquisition as built (M6)
+- **M20 window rules (T4, owner 2026-10-13).** All in
+  `services/acquisition/wants.py`, all computed per reconciliation and stored
+  nowhere except the demand stamp. `window(…, held, prefetch)` stays pure:
+  candidates `p+1 … p+N(+1)` that have aired, minus `held` (episode ids), and
+  the reach is **not** extended past a held one — a binge from the iPad must
+  not make the server fetch beyond the device's last episode. `_plan_wants`
+  reads `_device_held(session, users)` (`trips.rules.delivered_to` ∪
+  `device_holdings` with `reported_at` within `DEVICE_HOLDING_DAYS` = 14) and
+  `_halfway(session, pairs)` (the `watch_progress` row on each (user, show)'s
+  first candidate, `0.5 ≤ position/duration < 0.9`), and keeps the window
+  **before** the skip in `_Plan.covers` — the set play on demand may ask for
+  (`coverable(user)` = covers ∪ the user's own live wants that are not
+  demanded-only — sample, trip or window rows; measured on real progress).
+  The halfway prefetch's episode (`p+N+1`) is outside the slot cap: it is not
+  counted when deciding whether the show is hungry or an occupant (so
+  `_live_wants` returns occupants per episode), and a show held by the cap
+  still contributes it to `desired`. `compute_wants` takes `lock_wants`
+  (`pg_advisory_xact_lock(WANTS_LOCK_KEY)`, shared with `demand()`), records
+  `planned_at`, and adds `_demanded_wants` — live rows with `demanded_at`
+  whose episode is in `plan.covers`, re-checked every run — to `desired`
+  after the plan, so a demanded episode beats both the skip and the slot cap
+  and ends once it leaves the covered set; a demanded trip or sample row
+  outside it stays the trip's / sample's (its `trip` flag kept). `_reconcile`
+  never deletes or shelves a live row whose `demanded_at` is later than
+  `planned_at` (the second guard behind the lock). `_live_wants` counts a
+  demanded row as live (not hungry) but never as an occupant, like a sample.
+  `_start_searches` starts a demanded episode's
+  search at `DEMAND_PRIORITY` (100). The trigger for the prefetch is
+  `playback.progress.record_progress`: its upsert also returns
+  `old.position_s`/`old.duration_s`, and an upward crossing of
+  `PREFETCH_FRACTION` (0.5) queues `compute_wants` (deduplicated on the type);
+  the offline replay (`playback/sync.py`) goes through the same function.
+  `services/acquisition/demand.py` is the press on play: a `ready` episode
+  returns at once (nothing written); otherwise take `lock_wants`, refuse
+  unless the episode is in `coverable`, refuse while paused / storage-held
+  when the episode still needs fetching (`not_wanted`/`unavailable`/`wanted`/
+  `searching`), upsert the want (`INSERT … ON CONFLICT DO UPDATE` with
+  `demanded_at = now` and the drop cleared, so two presses cannot collide),
+  `start_search(priority=100, retry_now=True)` and raise a pending search's
+  priority to 100, `qbit_top` when downloading, `compute_wants` queued.
+  `services/acquisition/holdings.py` takes an advisory lock on
+  (`HOLDINGS_LOCK_KEY`, `hashtext(user:device)`), replaces one device's rows
+  (unknown episode ids dropped), deletes the user's rows older than 14 days,
+  keeps at most `MAX_DEVICES` (10) devices per user (oldest report evicted),
+  and queues `compute_wants` when anything changed.
 - **Dormant imports (FR-A9, 2026-09-13).** Before the window there is a
   question of whether the entry counts at all. A `watching`/`planned` entry
   with `list_entries.activated_at IS NULL` whose show is not `RELEASING` is
@@ -2670,11 +2724,13 @@ worker).
   FR-T2 drop older than the trip. `_live_wants` leaves trip rows out of both
   `occupied` (FR-A10: never a slot) and `live` (so a show whose window episode
   only a trip wants is still *hungry* and competes for a slot — the window
-  cannot take a trip's episode over without one). The window does **not**
-  skip episodes delivered to the user (owner, 2026-10-06; it did until then):
-  a delivered episode among the next N is wanted for streaming like any
-  other. `trips.rules.delivered_to` is asked only by `create_trip`, which
-  passes over episodes a device already holds. `_drop_stale` excludes trip rows and every key an active trip
+  cannot take a trip's episode over without one). The window **skips**
+  episodes delivered to the user and not released (M20 T4, owner 2026-10-13,
+  reversing 2026-10-06's "not left out"), without sliding past them;
+  `trips.rules.delivered_to` is asked by `create_trip`, which passes over
+  episodes a device already holds, and by the reconciler's `_device_held`
+  (§5.1a). Playing a delivered episode on another device is a demand
+  (FR-A14). `_drop_stale` excludes trip rows and every key an active trip
   waits on. `transcode_priority` ignores trip wants. FR-A6 unchanged.
   `_start_searches` reads `bool_and(trip)` per episode: a trip-only episode
   searches at 160, and one whose copy is `ready` is **not searched at all**
@@ -3966,10 +4022,12 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/trips/current` | any | the caller's active `TripOut`, or `null`. The show payload carries the same object as `trip` when the caller's active trip is on that show, and every `EpisodeOut` carries `trip_only` (one grouped query per page, every caller) |
 | `DELETE /api/trips/{id}` | owner only (anybody else's or an unknown id: 404 `trip not found`) | cancel (§5.4e) → 204; a cancelled trip again → 204; a finished/expired one → 409 `trip_not_active` |
 | `POST /api/trips/{id}/episodes/{eid}/delivered` | owner only (anybody else's trip, an unknown id or an episode not in the trip: 404) | M19 T4: body `{etag?}` (≤ 200 chars, extra keys 422) → **204**. The device holds the copy: a `pending` row (or an `expired` one of an active trip) goes `delivered`; a `cancelled` row or an ended trip's `expired` row only gets `delivered_at` (no fetch right back); `delivered_at` stamped first time and again after a release (`released_at` cleared); a differing ETag logged; queues `offline_settle` at +1 h and `compute_wants` on a change; repeats are no-ops (§5.4e part 2) |
-| `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row (trip bookkeeping only; the window never skipped-delivered since 2026-10-06); idempotent |
+| `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row, which puts the episode back in the caller's window from the next reconciliation (M20 T4: a delivered, unreleased episode is skipped); idempotent |
 | `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4 → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
 | `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready`, `offline_only` (false). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0) |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want |
+| `POST /api/episodes/{id}/demand` | any, demo included | M20 T4 (FR-A14): press play on a not-ready episode → **202 `{state}`**. **409** `{detail: {code, message}}` with `not_in_window` (not in the caller's `coverable` set), `acquisition_paused` or `storage_held` (only while the episode still needs fetching). 404 unknown episode. A `ready` episode answers 202 `{state: ready}` and writes nothing. Otherwise, under the shared wants lock, upserts the want with `demanded_at`, starts/raises the search to priority 100, `qbit_top` if downloading, queues `compute_wants`. Origin required |
+| `PUT /api/devices/{device_id}/holdings` | any but demo (403 `demo_account`) | M20 T4 (FR-A15): body `{episode_ids: [id…]}` (≤ 500, extra keys 422) **replaces** that device's set → **204**. `device_id` must parse as a version-4 UUID (else 422) and is stored canonical, so two spellings are one device; ids naming no episode are dropped; the user's rows older than 14 days are purged and at most 10 devices kept (oldest report evicted); a change queues `compute_wants`. Origin required |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `GET /api/progress/completed?episode_ids=…` | any (own rows) | FR-S9 item 9 (owner, 2026-10-08): `{completed: [{episode_id, completed_at}]}` — the caller's own `watch_progress` rows with `completed` among the ids (`completed_at`, or `updated_at` for a row older than that column), ordered by id; an unknown id or a list-only watched episode is simply absent. 1..200 repeated `episode_ids` (each 1..2⁶³−1), else 422. A read: no writes. The device marks its copies watched from it (§5.4d "Catching up") |
@@ -4027,6 +4085,11 @@ Mutating requests must carry an allowed `Origin`.
 - MAL tokens and any stored secrets encrypted at rest; app secrets via env.
 - Media directories not served statically; paths derived from ids, never
   from user input.
+- The device id a client sends (`PUT /api/devices/{device_id}/holdings`, M20)
+  is a **label, never a path**: it is parsed as a UUIDv4 and stored in its
+  canonical form in `device_holdings.device_id`, and nothing builds a file
+  name, directory or URL from it. It identifies a device only within the
+  caller's own rows (the key includes `user_id`).
 - qBittorrent Web UI bound to the internal Docker network only.
 
 ## 8. Deployment
@@ -6404,3 +6467,29 @@ asked*, so `make test` is exactly as fast as it was.
   (`copyable`, `remux_args`, `media/subtitles.py`; §5.3c).
 - 2026-10-13 — M20 T0: look_ahead_n default 1 (prod row migrated 2 → 1), watched_grace_hours (6) and min_seeders_warn (3) added; behaviour lands in T4/T8/T9. Revision `a7d2e5c9f318` (`seed_m20_settings`, data only, on `f1a6d3c08b52`).
 - 2026-10-13 (owner, M20 T8) — **Delete after watching, pins, floor eviction** (§4, §5.7, §5b; spec FR-T1/T4/T5/T6/T8). Retention's grace follows the anchor's kind: `watched_grace_hours` after a watch, G days after a drop or for a never-wanted file. Four holds (pin by anyone, partial watch within D, play within the grace, copy sent within 10 min) keep an episode past its grace and are listed by the preview (`retention_plan().held`). Every anchor's own deadline must pass (a completion cannot cut a drop's G short). Hold (c) is at least 30 minutes; hold (d) lapses 6 h after the deadline. Under the disk floor the hourly sweep evicts least recently watched first (`floor_evictions`; order `max(last_played, last_completed)`, then `last_dropped`, then file age — orchestrator's call after review), ignoring grace and pins, never a live want / encode / copy being sent / pending trip copy / partial watch within 24 h / play within 30 min (re-asked before each delete), one commit each, until floor + 1 GiB; dry run honoured without double counting. The plan is `retention/floor.floor_plan`, shared with the preview's `floor[]`. New table `show_pins` (revision `911eca1dfc62` on `a7d2e5c9f318`), `services/pins.py`, `api/pins.py`; `pinned` on the show payload and `pinned[]` on the disk view. `SERVED_TOUCH_SECONDS` 3600 → 300 so the 10-minute copy hold sees a download in progress. No new dependency.
+- 2026-10-13 — M20 T4 (owner): window rules, server side. **Reverses the
+  2026-10-06 call** that the window keeps an episode a device holds from a
+  trip: `window(…, held, prefetch)` skips device-held episodes (delivered,
+  unreleased trip copies ∪ `device_holdings` within 14 days) without sliding
+  past them, and reaches `p+N+1` while the user is in `[0.5, 0.9)` of the
+  first window episode; `record_progress` queues `compute_wants` on the upward
+  50 % crossing (`RETURNING old.position_s, old.duration_s`). Play on demand:
+  `wants.demanded_at`, `services/acquisition/demand.py`,
+  `POST /api/episodes/{id}/demand` (only what `coverable` allows — window ∪
+  prefetch ∪ device-held ∪ own wants, owner Q5), search priority 100, never a
+  slot. `device_holdings` + `PUT /api/devices/{device_id}/holdings` (replace,
+  UUIDv4, demo 403). `/play` answers `pending` for a wanted, not-ready episode
+  and `fetchable` on the neighbour refs. Fixed the §4 `trip_episodes` row and
+  the §5.1 trips paragraph, which already described a skip the code did not
+  do (C3). Revision `603a536051f9` (`wants_demanded_device_holdings`, on
+  `a7d2e5c9f318`). No new dependency.
+- 2026-10-13 — M20 T4 review fixes: demanded wants re-checked against
+  `plan.covers` every run (a demanded trip row outside it keeps its `trip`
+  flag); `lock_wants` advisory lock shared by `compute_wants` and `demand()`
+  plus a `planned_at` guard in `_reconcile`; the demand upserts
+  (`ON CONFLICT DO UPDATE`); holdings take a (user, device) advisory lock,
+  purge the user's expired rows and keep ≤ 10 devices; the halfway prefetch
+  is outside the slot cap (occupancy is now per episode); `/play` computes
+  `fetchable` only when needed, on real progress, and a demanded want
+  outranks the trip branch. `device_holdings` loses the unused `etag` column
+  and is indexed `(user_id, reported_at)` (same revision, not yet deployed).

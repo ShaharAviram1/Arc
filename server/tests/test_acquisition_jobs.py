@@ -8,7 +8,6 @@ of a handler does to the database, to the client and to the queue.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -99,18 +98,6 @@ from tests.acquisition_helpers import (
 )
 
 pytestmark = pytest.mark.pg
-
-
-@pytest.fixture
-async def db_session(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
-    """The shared session with N pinned at 2, the window these tests were written for.
-
-    ``look_ahead_n`` defaults to 1 since M20 (owner 2026-10-13); the tests here
-    are about what the window does, not its default, and a test that sets N
-    itself still wins. The default-N case is in ``tests/test_m20_settings.py``.
-    """
-    await set_setting(db_session, "look_ahead_n", 2)
-    yield db_session
 
 
 FEED = read_fixture("search_frieren_07.xml")
@@ -2401,7 +2388,7 @@ async def test_the_compute_wants_handler_reconciles(
     )
 
     wants = (await db_session.scalars(select(Want.episode_id))).all()
-    assert set(wants) == {rows[3].id, rows[4].id}
+    assert set(wants) == {rows[3].id}, "the default window: the one next episode (M20)"
 
 
 # --- Batch support with selective download (FR-A4, FR-A11, 2026-09-18) ------

@@ -9,6 +9,10 @@ position sample and for a completion, and
 FR-S4, the MyAnimeList write log and the "never lowers except on an explicit
 un-mark" guard hold here by construction rather than by a second copy of them.
 There is no other road to MyAnimeList in this module, and there must never be.
+The halfway prefetch (M20) comes the same way: a replayed sample that carries
+the position across 50 % queues the reconciliation exactly as a live report
+does, which is how a device that watched offline catches its window up on
+reconnect (owner, 2026-10-13).
 
 **Why a replayed completion is user-originated.** It is a record that this
 user watched this episode to the completion mark (or pressed "mark watched")

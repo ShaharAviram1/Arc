@@ -104,6 +104,11 @@ COMPUTE_WANTS_PRIORITY = 120
 #: qBittorrent call, so a burst of them is what actually starves the queue.
 SEARCH_RELEASE_PRIORITY = 150
 
+#: Ahead of every other search (FR-A14, M20): somebody pressed play on this
+#: episode and is looking at a "searching" player. The default priority,
+#: so it also sorts ahead of the reconciliation itself.
+DEMAND_PRIORITY = 100
+
 #: Last of all. The policy is written once a day and once at start-up, and the
 #: torrent that would seed in the meantime is stopped by ``poll_qbit`` anyway —
 #: so there is nothing this should be in front of.
@@ -154,6 +159,7 @@ async def enqueue_compute_wants(session: AsyncSession) -> Job:
 __all__ = [
     "COMPUTE_WANTS",
     "COMPUTE_WANTS_PRIORITY",
+    "DEMAND_PRIORITY",
     "POLL_QBIT",
     "POLL_QBIT_PRIORITY",
     "QBIT_CANCEL",

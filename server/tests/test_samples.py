@@ -9,7 +9,6 @@ it fifteen minutes later.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -56,22 +55,13 @@ from arc.services.catalog.airing import FINISHED, RELEASING
 from arc.services.jobs.queue import DEDUPE_FIELD
 from arc.services.tmdb.names import TMDB_ENRICH
 from arc.services.tmdb.names import dedupe_key as tmdb_dedupe_key
-from tests.acquisition_helpers import make_anime, make_entry, make_episodes, make_user, set_setting
+from tests.acquisition_helpers import make_anime, make_entry, make_episodes, make_user
 from tests.tmdb_mock import API_KEY
 
 pytestmark = pytest.mark.pg
 
-
-@pytest.fixture
-async def db_session(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
-    """The shared session with N pinned at 2, the window these tests were written for.
-
-    ``look_ahead_n`` defaults to 1 since M20 (owner 2026-10-13); the tests here
-    are about what the window does, not its default, and a test that sets N
-    itself still wins. The default-N case is in ``tests/test_m20_settings.py``.
-    """
-    await set_setting(db_session, "look_ahead_n", 2)
-    yield db_session
+# The window here is the default N = 1 (M20, owner 2026-10-13): a followed
+# show's window is the one next episode.
 
 
 #: A deployment with a TMDB key, and one without. ``request_sample`` reads
@@ -366,7 +356,7 @@ async def test_cancelling_leaves_an_episode_somebody_else_still_wants(
     await db_session.refresh(rows[0])
     assert rows[0].state is EpisodeState.WANTED
     assert result.released == 0
-    assert await live_wants(db_session, watcher.id) == {rows[0].id, rows[1].id}
+    assert await live_wants(db_session, watcher.id) == {rows[0].id}
 
 
 # --- compute_wants over samples ---------------------------------------------
@@ -458,7 +448,7 @@ async def test_a_sample_on_a_watched_show_is_governed_by_the_window(
 
     assert await db_session.get(Want, (user.id, rows[0].id)) is None
     assert result.removed == 1
-    assert await live_wants(db_session, user.id) == {rows[1].id, rows[2].id}
+    assert await live_wants(db_session, user.id) == {rows[1].id}
 
 
 async def test_a_sample_in_the_window_of_a_followed_show_is_left_live(
@@ -475,7 +465,7 @@ async def test_a_sample_in_the_window_of_a_followed_show_is_left_live(
 
     await compute_wants(db_session)
 
-    assert await live_wants(db_session, user.id) == {rows[0].id, rows[1].id}
+    assert await live_wants(db_session, user.id) == {rows[0].id}
     want = await db_session.get(Want, (user.id, rows[0].id))
     assert want is not None and want.sample is True, "still the user's own request"
 
@@ -715,7 +705,7 @@ async def test_watching_a_sample_of_an_unlisted_show_hands_it_to_the_window(
 
     assert await db_session.get(Want, (user.id, rows[0].id)) is None, "deleted, not tombstoned"
     assert result.removed == 1
-    assert await live_wants(db_session, user.id) == {rows[1].id, rows[2].id}
+    assert await live_wants(db_session, user.id) == {rows[1].id}
 
 
 # --- What the routes do to the episode, there and then ----------------------
@@ -822,7 +812,7 @@ async def test_cancelling_leaves_an_episode_another_user_wants(
     await cancel_sample(db_session, user_id=sampler.id, anime_id=anime.id, now=now())
 
     assert (await episode_states(db_session, anime.id))[1] is EpisodeState.WANTED
-    assert await live_wants(db_session, watcher.id) == {rows[0].id, rows[1].id}
+    assert await live_wants(db_session, watcher.id) == {rows[0].id}
 
 
 async def test_cancelling_stops_a_download_nobody_else_wants(db_session: AsyncSession) -> None:

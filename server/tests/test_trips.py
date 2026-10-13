@@ -85,7 +85,7 @@ from arc.services.trips.create import (
     create_trip,
     pick_episodes,
 )
-from arc.services.trips.deliver import confirm_delivered
+from arc.services.trips.deliver import confirm_delivered, release_delivered
 from arc.services.trips.hooks import trip_copy_ready
 from arc.services.trips.names import TRIP_RELEASE, TRIP_SEARCH_PRIORITY, copy_priority
 from arc.services.trips.phase import PhaseFacts, trip_phase
@@ -113,7 +113,10 @@ async def db_session(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
 
     ``look_ahead_n`` defaults to 1 since M20 (owner 2026-10-13); the tests here
     are about what the window does, not its default, and a test that sets N
-    itself still wins. The default-N case is in ``tests/test_m20_settings.py``.
+    itself still wins. Kept at 2 because these tests are about a trip
+    overlapping a window of two (trip-only beyond it, a delivered episode
+    skipped without the window sliding). The default N = 1 is in
+    ``tests/test_window_m20.py``.
     """
     await set_setting(db_session, "look_ahead_n", 2)
     yield db_session
@@ -538,10 +541,14 @@ async def test_a_sample_and_a_trip_on_the_same_episode(
     assert wants[rows[1].id].drop_reason == REASON_TRIP_ENDED
 
 
-async def test_the_window_keeps_delivered_episodes(
+async def test_the_window_skips_delivered_episodes(
     db_session: AsyncSession, settings: Settings
 ) -> None:
-    """Owner, 2026-10-06: an episode on the iPad may be watched on the Mac."""
+    """M20 (owner 2026-10-13), reversing 2026-10-06: the iPad's copy is not re-fetched.
+
+    The window (N = 2 here) leaves the delivered episode out and does not
+    slide on to episode 3; the device releasing its copy brings it back.
+    """
     anime, rows = await show(db_session, 980031)
     user = await make_user(db_session, "trip-delivered@arc.test")
     await make_entry(db_session, user, anime, progress=0)
@@ -554,8 +561,15 @@ async def test_the_window_keeps_delivered_episodes(
 
     await compute_wants(db_session)
 
+    assert set(await wants_of(db_session, user)) == {rows[0].id}, "held, and no slide to 3"
+
+    await release_delivered(
+        db_session, user=user, trip_id=trip.id, episode_id=rows[1].id, now=now()
+    )
+    await compute_wants(db_session)
+
     wants = await wants_of(db_session, user)
-    assert set(wants) == {rows[0].id, rows[1].id}, "the window's two, delivered or not"
+    assert set(wants) == {rows[0].id, rows[1].id}, "released: back in the window"
     assert not wants[rows[1].id].trip, "wanted for streaming"
 
 

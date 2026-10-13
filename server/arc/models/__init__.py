@@ -17,6 +17,7 @@ from arc.models.acquisition import (
     Want,
 )
 from arc.models.anime import Anime, Episode
+from arc.models.devices import HOLDINGS_USER_REPORTED_INDEX, DeviceHolding
 from arc.models.enums import (
     EpisodeState,
     JobStatus,
@@ -58,6 +59,7 @@ __all__ = [
     "DEFAULT_PRIORITY",
     "DEFAULT_SETTINGS",
     "EPISODE_FILE_INDEX",
+    "HOLDINGS_USER_REPORTED_INDEX",
     "IN_PROGRESS_INDEX",
     "KIND_EPISODE_PREDICATE",
     "OFFLINE_SEARCH_INDEX",
@@ -68,6 +70,7 @@ __all__ = [
     "WANTED_CLAIM_INDEX",
     "Anime",
     "Base",
+    "DeviceHolding",
     "Episode",
     "EpisodeState",
     "Invite",

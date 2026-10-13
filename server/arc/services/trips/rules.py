@@ -122,10 +122,13 @@ async def delivered_to(
 
     Delivered (``delivered_at`` set) and not released (``released_at`` null),
     whatever the trip's own state. A new trip passes over these (the device
-    has them already). The user's streaming window does **not** (owner,
-    2026-10-06): an episode on the iPad may still be watched on the Mac.
-    ``delivered_at`` is set by the device's confirmation and ``released_at``
-    by its "I deleted it" (:mod:`arc.services.trips.deliver`).
+    has them already), and so, since M20, does the user's streaming window
+    (FR-A15, owner 2026-10-13, reversing the 2026-10-06 "not left out"): the
+    reconciler's device skip reads this beside ``device_holdings``. Watching
+    one on the Mac is play on demand (FR-A14). ``delivered_at`` is set by the
+    device's confirmation and ``released_at`` by its "I deleted it"
+    (:mod:`arc.services.trips.deliver`), which brings the episode back into
+    the window.
     """
     statement = (
         select(Trip.user_id, TripEpisode.episode_id)

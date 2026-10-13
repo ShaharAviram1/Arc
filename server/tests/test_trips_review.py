@@ -72,7 +72,8 @@ async def db_session(db_session: AsyncSession) -> AsyncIterator[AsyncSession]:
 
     ``look_ahead_n`` defaults to 1 since M20 (owner 2026-10-13); the tests here
     are about what the window does, not its default, and a test that sets N
-    itself still wins. The default-N case is in ``tests/test_m20_settings.py``.
+    itself still wins. Kept at 2 because the held-show cases need a window with
+    one ready and one hungry episode, which a window of one cannot hold.
     """
     await set_setting(db_session, "look_ahead_n", 2)
     yield db_session

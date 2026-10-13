@@ -238,8 +238,22 @@ async def test_play_carries_the_playlist_url_the_duration_and_the_neighbours(
     assert body["episode"]["number"] == 11
     assert body["episode"]["watched"] is False
     assert body["anime"]["title"]["preferred"] == "Play Show"
-    assert body["previous"] == {"id": ids[10], "number": 10, "state": "wanted", "ready": False}
-    assert body["next"] == {"id": ids[12], "number": 12, "state": "ready", "ready": True}
+    # Nobody follows the show here, so neither neighbour can be fetched on
+    # demand (FR-A14); the fetchable cases are in tests/test_demand.py.
+    assert body["previous"] == {
+        "id": ids[10],
+        "number": 10,
+        "state": "wanted",
+        "ready": False,
+        "fetchable": False,
+    }
+    assert body["next"] == {
+        "id": ids[12],
+        "number": 12,
+        "state": "ready",
+        "ready": True,
+        "fetchable": False,
+    }
 
 
 async def test_play_carries_the_episode_title_and_still(
