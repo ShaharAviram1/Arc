@@ -1821,7 +1821,16 @@ owner's word.
       (migration caf1811e8ee6 after 603a536051f9), full server suite on the
       merged tree 4716 passed + 1 merge-induced test-helper clash fixed and
       re-run (28 migration tests), lints clean; merged 87ff43f.
-- [ ] T3: Player, part 1: subtitle track, safe duration, start position
+- [x] T3: Player, part 1: subtitle track, safe duration, start position —
+      verified 2026-10-13: Validator PASS (8 adversarial Vitest cases; every
+      duration call site in Player passes the live flag; the C8 case proven:
+      a live element reporting 300 s never completes before 0.9 × the
+      server's 1440 s); follow-ups done (not-ready → subtitles null on both
+      branches, memoised preference); orchestrator: client 1238, playback/
+      demand/remux-stream tests 148, eslint/tsc/prettier/ruff clean, mypy on
+      the whole package clean (after a one-line fix to T4's _live_want,
+      1d4974b); merged d90a181. Real Safari cue rendering is left to the
+      T7 iPad check.
 - [x] T4: Window rules: N = 1, halfway prefetch, device-copy skip, play on demand (server)
       — verified 2026-10-13: Validator conditional PASS (11 adversarial pg cases;
       repeated demands cannot walk a season; cross-user isolation) and Reviewer
