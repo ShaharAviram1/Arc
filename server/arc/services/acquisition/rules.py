@@ -101,6 +101,14 @@ MIN_FREE_KEY: Final[str] = "min_free_gb"
 #: the pause decides whether a new search runs.
 BATCH_FALLBACK_KEY: Final[str] = "batch_fallback"
 
+#: Fewer seeders than this on a fetch raises the "few seeders" notice on the
+#: show (FR-A16, M20 T9). 0 never warns.
+MIN_SEEDERS_WARN_KEY: Final[str] = "min_seeders_warn"
+
+#: Ceiling on the seeder warning. A hundred: a swarm that large is never the
+#: one that disappears, so a higher figure would warn on every fetch.
+MAX_MIN_SEEDERS_WARN: Final[int] = 100
+
 #: Hard ceiling on N, whatever the table says. N is admin-editable, and an
 #: admin who types 200 has asked Arc to torrent a whole show — which FR-A1
 #: exists to forbid ("Nothing outside this window is fetched").
@@ -194,7 +202,7 @@ async def _values(session: AsyncSession, keys: list[str]) -> dict[str, Any]:
 def _whole_number(stored: Any, *, key: str, ceiling: int) -> int:
     """One stored count, type-checked, floored at 0 and clamped at ``ceiling``.
 
-    The shared body of the three numeric readers here. Lenient on purpose: a
+    The shared body of the numeric readers here. Lenient on purpose: a
     hand-edited row of the wrong type, or a negative one, reads as the default
     with a warning rather than raising — the write path
     (:func:`arc.services.settings.validate`) is where a mistake can still be
@@ -320,6 +328,16 @@ async def min_free_gb(session: AsyncSession) -> int:
     """
     stored = (await _values(session, [MIN_FREE_KEY])).get(MIN_FREE_KEY)
     return _whole_number(stored, key=MIN_FREE_KEY, ceiling=MAX_MIN_FREE_GB)
+
+
+async def min_seeders_warn(session: AsyncSession) -> int:
+    """Seeders below which a fetch warns on the show (FR-A16, M20 T9).
+
+    Lenient and clamped like the other counts here: a missing or mangled row
+    reads as the default (3) with a warning; 0 is returned as 0, "never warn".
+    """
+    stored = (await _values(session, [MIN_SEEDERS_WARN_KEY])).get(MIN_SEEDERS_WARN_KEY)
+    return _whole_number(stored, key=MIN_SEEDERS_WARN_KEY, ceiling=MAX_MIN_SEEDERS_WARN)
 
 
 async def min_free_bytes(session: AsyncSession) -> int:
@@ -448,8 +466,10 @@ __all__ = [
     "LOOK_AHEAD_KEY",
     "MAX_LOOK_AHEAD",
     "MAX_MIN_FREE_GB",
+    "MAX_MIN_SEEDERS_WARN",
     "MAX_SLOT_CAP",
     "MIN_FREE_KEY",
+    "MIN_SEEDERS_WARN_KEY",
     "OVERRIDE_PREFIX",
     "PAUSED_KEY",
     "RULE_KEYS",
@@ -463,6 +483,7 @@ __all__ = [
     "look_ahead_n",
     "min_free_bytes",
     "min_free_gb",
+    "min_seeders_warn",
     "override_key",
     "set_paused",
     "slot_cap_k",

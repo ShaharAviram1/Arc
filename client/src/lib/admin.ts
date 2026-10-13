@@ -122,6 +122,11 @@ export interface SettingsValues {
   slot_cap_k: number
   grace_days_g: number
   unwatched_days_d: number
+  /**
+   * Hours a watched episode's files survive the last completion under M20's
+   * delete-after-watching rule (FR-T1, M20 T8): 0..168, 0 = at the next hourly sweep.
+   */
+  watched_grace_hours: number
   /** The storage floor in whole GB (spec §4.9 FR-T6); 0 turns the guard off. */
   min_free_gb: number
   sub_lang: string
@@ -143,6 +148,8 @@ export interface SettingsValues {
   trip_copy_days: number
   /** Fewest Nyaa seeders a pack needs before a trip prefers it to singles (FR-A12): 1..500. */
   trip_pack_min_seeders: number
+  /** Fewer seeders than this on a fetch warns on the show (FR-A16, M20 T9): 0..100, 0 = never. */
+  min_seeders_warn: number
 }
 
 export type SettingsKey = keyof SettingsValues
@@ -176,7 +183,9 @@ export const NUMBER_BOUNDS: Record<
   | 'slot_cap_k'
   | 'grace_days_g'
   | 'unwatched_days_d'
+  | 'watched_grace_hours'
   | 'min_free_gb'
+  | 'min_seeders_warn'
   | 'offline_idle_days'
   | 'trip_max_episodes'
   | 'trip_copy_days'
@@ -192,9 +201,13 @@ export const NUMBER_BOUNDS: Record<
   slot_cap_k: { min: 0, max: 50 },
   grace_days_g: { min: 0, max: 365 },
   unwatched_days_d: { min: 0, max: 365 },
+  // M20: `MAX_WATCHED_GRACE_HOURS` = 168, a week; 0 is "at the next hourly sweep".
+  watched_grace_hours: { min: 0, max: 168 },
   // `MAX_MIN_FREE_GB` = 1000: a terabyte of reserve is a mistyped figure, not
   // a policy, and the reader clamps at the same number.
   min_free_gb: { min: 0, max: 1000 },
+  // M20: `MAX_MIN_SEEDERS_WARN` = 100; 0 never warns.
+  min_seeders_warn: { min: 0, max: 100 },
   // M19: at least a day each; a trip takes at most `TRIP_MAX_EPISODES_CEILING` = 50.
   offline_idle_days: { min: 1, max: 365 },
   trip_max_episodes: { min: 1, max: 50 },

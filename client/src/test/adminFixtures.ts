@@ -98,10 +98,11 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   preferred_groups: [],
   preferred_resolution: '1080p',
   fallback_resolution: '720p',
-  look_ahead_n: 2,
+  look_ahead_n: 1,
   slot_cap_k: 5,
   grace_days_g: 7,
   unwatched_days_d: 21,
+  watched_grace_hours: 6,
   min_free_gb: 10,
   sub_lang: 'en',
   audio_lang: 'ja',
@@ -111,6 +112,7 @@ export const SETTINGS_DEFAULTS: SettingsValues = {
   trip_max_episodes: 50,
   trip_copy_days: 14,
   trip_pack_min_seeders: 10,
+  min_seeders_warn: 3,
 }
 
 /** What this server actually holds: three of them moved off the default. */

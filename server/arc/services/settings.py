@@ -62,6 +62,7 @@ from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import (
     MAX_LOOK_AHEAD,
     MAX_MIN_FREE_GB,
+    MAX_MIN_SEEDERS_WARN,
     MAX_SLOT_CAP,
     OVERRIDE_PREFIX,
     PAUSED_KEY,
@@ -69,6 +70,7 @@ from arc.services.acquisition.rules import (
     set_paused,
 )
 from arc.services.catalog import preferred_title
+from arc.services.retention.rules import MAX_WATCHED_GRACE_HOURS
 from arc.services.trips.names import TRIP_MAX_EPISODES_CEILING, TRIP_PACK_MIN_SEEDERS_CEILING
 
 log = logging.getLogger(__name__)
@@ -222,6 +224,10 @@ _VALIDATORS: Final[dict[str, Any]] = {
     "slot_cap_k": lambda value: _bounded_int(value, low=0, high=MAX_SLOT_CAP),
     "grace_days_g": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "unwatched_days_d": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
+    # Hours after the last completion before a watched episode's files go
+    # (FR-T1, M20). 0 is legal and means "at the next hourly sweep"; a week is
+    # the ceiling, past which the day-counted G is the setting that was meant.
+    "watched_grace_hours": lambda value: _bounded_int(value, low=0, high=MAX_WATCHED_GRACE_HOURS),
     "acquisition_paused": _boolean,
     # The batch fallback (FR-A11). A plain boolean like the pause above, and
     # validated here for the same reason: the reader is lenient about a
@@ -248,6 +254,10 @@ _VALIDATORS: Final[dict[str, Any]] = {
     "trip_pack_min_seeders": lambda value: _bounded_int(
         value, low=1, high=TRIP_PACK_MIN_SEEDERS_CEILING
     ),
+    # Fewest seeders a fetch may find before the show is told "few seeders"
+    # (FR-A16, M20). 0 is legal and means "never warn"; the ceiling is the one
+    # the reader clamps at.
+    "min_seeders_warn": lambda value: _bounded_int(value, low=0, high=MAX_MIN_SEEDERS_WARN),
     "sub_lang": _language,
     "audio_lang": _language,
 }

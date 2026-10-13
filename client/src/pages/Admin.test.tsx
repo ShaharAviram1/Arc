@@ -437,8 +437,8 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     expect(screen.getByText('SubsPlease')).toBeInTheDocument()
     expect(screen.getByText('Erai-raws')).toBeInTheDocument()
 
-    // The defaults are hints, not values: N's default is 2 while it holds 3.
-    expect(screen.getByText('Default: 2')).toBeInTheDocument()
+    // The defaults are hints, not values: N's default is 1 (M20) while it holds 3.
+    expect(within(fieldOf('Look-ahead N')).getByText('Default: 1')).toBeInTheDocument()
     expect(screen.getByText('Default: none')).toBeInTheDocument()
 
     // The overrides are listed, and not editable until M16.
@@ -493,7 +493,7 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
       within(fieldOf('Look-ahead N')).getByRole('button', { name: 'Reset to default' }),
     )
 
-    expect(screen.getByLabelText('Look-ahead N')).toHaveValue(2)
+    expect(screen.getByLabelText('Look-ahead N')).toHaveValue(1)
     expect(screen.getByText('1 unsaved change')).toBeInTheDocument()
   })
 
@@ -575,6 +575,42 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
       expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
     })
     expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ trip_pack_min_seeders: 20 })
+  })
+
+  it("shows M20's two rules with their bounds and saves them (FR-T1, FR-A16)", async () => {
+    const { fetchMock } = await openRules()
+
+    const grace = screen.getByLabelText('Delete after watching (hours)')
+    expect(grace).toHaveValue(6)
+    // MAX_WATCHED_GRACE_HOURS, a week; 0 is "at the next hourly sweep".
+    expect(grace).toHaveAttribute('min', '0')
+    expect(grace).toHaveAttribute('max', '168')
+    expect(
+      within(fieldOf('Delete after watching (hours)')).getByText(/Allowed: 0–168\./),
+    ).toBeVisible()
+
+    const seeders = screen.getByLabelText('Few seeders warning (below)')
+    expect(seeders).toHaveValue(3)
+    // MAX_MIN_SEEDERS_WARN; 0 never warns.
+    expect(seeders).toHaveAttribute('min', '0')
+    expect(seeders).toHaveAttribute('max', '100')
+    expect(
+      within(fieldOf('Few seeders warning (below)')).getByText(/Allowed: 0–100\./),
+    ).toBeVisible()
+
+    expect(within(fieldOf('Look-ahead N')).getByText(/halfway through it/)).toBeVisible()
+
+    fireEvent.change(grace, { target: { value: '0' } })
+    fireEvent.change(seeders, { target: { value: '5' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({
+      watched_grace_hours: 0,
+      min_seeders_warn: 5,
+    })
   })
 
   it('saves the per-user slot cap like any other rule (FR-A10)', async () => {

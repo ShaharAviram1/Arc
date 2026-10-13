@@ -120,6 +120,100 @@ def _fetch_settings(url: str) -> dict[str, Any]:
     return asyncio.run(run())
 
 
+def _execute(url: str, sql: str, params: dict[str, Any] | None = None) -> None:
+    async def run() -> None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(sql), params or {})
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+#: The revision before ``seed_m20_settings``, and that revision itself.
+BEFORE_M20_SEED = "f1a6d3c08b52"
+M20_SEED = "a7d2e5c9f318"
+M20_KEYS = ("watched_grace_hours", "min_seeders_warn")
+
+
+def _set_look_ahead(url: str, value: int) -> None:
+    _execute(
+        url,
+        "UPDATE settings SET value = CAST(:value AS jsonb) WHERE key = 'look_ahead_n'",
+        {"value": str(value)},
+    )
+
+
+@pytest.mark.parametrize(("before", "after"), [(2, 1), (3, 3), (1, 1), (0, 0)])
+def test_the_m20_seed_moves_look_ahead_only_from_2(
+    pg_engine: AsyncEngine, test_database_url: str, before: int, after: int
+) -> None:
+    """Owner Q9 (2026-10-13): N moves 2 → 1 only where it is still the seed."""
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, BEFORE_M20_SEED)
+        assert not set(M20_KEYS) & set(_fetch_settings(test_database_url))
+        _set_look_ahead(test_database_url, before)
+
+        command.upgrade(config, M20_SEED)
+
+        seeded = _fetch_settings(test_database_url)
+        assert seeded["look_ahead_n"] == after
+        assert seeded["watched_grace_hours"] == 6
+        assert seeded["min_seeders_warn"] == 3
+    finally:
+        command.upgrade(config, "head")
+        _set_look_ahead(test_database_url, int(DEFAULT_SETTINGS["look_ahead_n"]))
+
+
+def test_the_m20_seed_keeps_values_set_by_hand(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``ON CONFLICT DO NOTHING``: a row already there keeps its value."""
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, BEFORE_M20_SEED)
+        _execute(
+            test_database_url,
+            "INSERT INTO settings (key, value) VALUES "
+            "('watched_grace_hours', '24'::jsonb), ('min_seeders_warn', '0'::jsonb)",
+        )
+
+        command.upgrade(config, M20_SEED)
+
+        seeded = _fetch_settings(test_database_url)
+        assert seeded["watched_grace_hours"] == 24
+        assert seeded["min_seeders_warn"] == 0
+    finally:
+        command.upgrade(config, "head")
+        for key in M20_KEYS:
+            _execute(
+                test_database_url,
+                "UPDATE settings SET value = CAST(:value AS jsonb) WHERE key = :key",
+                {"key": key, "value": str(DEFAULT_SETTINGS[key])},
+            )
+
+
+@pytest.mark.parametrize(("before", "after"), [(1, 2), (3, 3), (2, 2)])
+def test_the_m20_seed_downgrade_restores_2_only_where_1(
+    pg_engine: AsyncEngine, test_database_url: str, before: int, after: int
+) -> None:
+    config = alembic_config(test_database_url)
+    try:
+        _set_look_ahead(test_database_url, before)
+
+        command.downgrade(config, BEFORE_M20_SEED)
+
+        seeded = _fetch_settings(test_database_url)
+        assert seeded["look_ahead_n"] == after
+        assert not set(M20_KEYS) & set(seeded)
+    finally:
+        command.upgrade(config, "head")
+        _set_look_ahead(test_database_url, int(DEFAULT_SETTINGS["look_ahead_n"]))
+
+
 def test_migrations_round_trip(pg_engine: AsyncEngine, test_database_url: str) -> None:
     """head → base → head. A downgrade that does not work is not a downgrade."""
     config = alembic_config(test_database_url)
@@ -146,11 +240,13 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 16
+    assert len(seeded) == 18
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
-    assert seeded["look_ahead_n"] == 2
+    # N is 1 since M20 (owner 2026-10-13): the initial migration seeds 2 and
+    # ``seed_m20_settings`` moves a row still at 2 to 1.
+    assert seeded["look_ahead_n"] == 1
     assert seeded["grace_days_g"] == 7
     assert seeded["unwatched_days_d"] == 21
     assert seeded["preferred_resolution"] == "1080p"
@@ -177,6 +273,10 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     # And the trip pack's seeder floor (owner incident 2026-10-06): a pack Nyaa
     # lists with fewer than ten seeders is not preferred to singles.
     assert seeded["trip_pack_min_seeders"] == 10
+    # And M20's two rules (FR-D2): six hours' grace after watching, and a
+    # warning below three seeders.
+    assert seeded["watched_grace_hours"] == 6
+    assert seeded["min_seeders_warn"] == 3
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:

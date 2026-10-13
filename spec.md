@@ -142,7 +142,8 @@ that the course professor can log in at any time, and the owner uses it daily.
 ### 4.2 Acquisition (Nyaa via qBittorrent)
 - FR-A1 For each user and each show in status `watching` or `planned` **whose
   entry is not dormant** (FR-A9), the server keeps the next **N** unwatched
-  episodes available (N configurable by admin, default 2), counted from that
+  episodes available (N configurable by admin, default 1; M20 adds one more
+  at the halfway mark, see FR-A1 as revised by M20 T4), counted from that
   user's furthest watched episode. For airing shows, the newest aired episode
   is fetched on its air day. Nothing outside this window is fetched, and no
   more of it at once than FR-A10's per-user cap allows — the two exceptions
@@ -1144,7 +1145,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
   no search at all — a later want is served from the same pack.
 - FR-T4 Admin can see disk usage and manually delete or re-fetch.
-- FR-T5 All of G, D, N are admin-configurable.
+- FR-T5 All of G, D, N are admin-configurable, and so is M20's
+  delete-after-watching grace `watched_grace_hours` (default 6, 0..168; the
+  rule itself lands with M20 T8).
 - FR-T6 Acquisition holds itself while free space on the data volume is below
   an admin-set floor (default 10 GB): reconciliation, ingest and playback
   continue, no new search starts; it resumes on its own when space is freed.
@@ -1186,7 +1189,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   owner incident 2026-10-06). The small copy's encode settings (FR-P6:
   `OFFLINE_CODEC`, `OFFLINE_HEIGHT`, `OFFLINE_CRF`, `OFFLINE_PRESET`,
   `OFFLINE_AUDIO_BITRATE`) are the operator's, in the environment, like the
-  transcode's.
+  transcode's. M20 (owner 2026-10-13) adds two more, editable now and acted
+  on later in M20: `watched_grace_hours` (default 6, 0..168, 0 = at the next
+  hourly sweep) — the grace in hours after the last completion before a
+  watched episode's files are deleted (FR-T1 as revised by M20 T8); and
+  `min_seeders_warn` (default 3, 0..100, 0 = never) — below this many seeders
+  a fetch warns on the show (FR-A16, written with M20 T9).
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
@@ -2377,3 +2385,8 @@ through the same edge, without the grace period.
   `GET /api/progress/completed`) at launch, sign-in and each reconnect / trip
   tick, at most every ten minutes, and marks a copy whose completion is no
   older than the copy (an older one is a rewatch download and stays).
+- 2026-10-13 (owner, M20 T0) — **N defaults to 1** (FR-A1; the production row
+  is migrated 2 → 1 only where it is still exactly 2, owner Q9), and FR-D2 /
+  FR-T5 gain `watched_grace_hours` (6) and `min_seeders_warn` (3). Settings
+  only; the halfway prefetch, delete-after-watching and the seeder warning land
+  in M20 T4, T8 and T9.

@@ -1749,10 +1749,80 @@ seasons" for a bounded, explicitly requested trip (FR-A12).
       Continue watching lists episodes only the device holds, marked "On this
       device" ("no watch back in the Home Screen with time"). Verified
       (orchestrator): server 4433, client 1194, lint clean, build ok.
+      (5) Follow-up the same day ("Will it remove the already watched
+      episodes?"): the device reconciles its unmarked copies against
+      `GET /api/progress/completed` on launch, sign-in and reconnect (at most
+      once per 10 min), marking a copy watched only when the completion is no
+      older than the copy, so a deliberate re-download of a finished episode
+      stays; Keep and a queued outbox entry still block removal. Verified
+      (orchestrator): affected server tests 203, client 1205, lint clean,
+      build ok; deployed 2026-10-08 as 8557e3c (head f1a6d3c08b52, four
+      sites 200, endpoint 401 anonymously).
 - Verified 2026-10-06 (orchestrator): full pass server 4393 (after the season-mark fix), client 1116, lint
   clean, build ok. Note: commit 6938fba carried a half-applied `manual_stall`
   hunk without its column; it is completed by this deploy (the stall path was
   the only one affected, and no stall fired in between).
+
+### M20 — On-demand playback: remux, just-in-time fetching, delete after watching
+Owner decisions of 2026-10-13 (design note `notes/design/m20-on-demand-remux-plan.md`,
+plan `notes/design/m20-implementation-plan.md`). After a binge from trip copies
+made the box re-download and fully encode five episodes already on the iPad,
+the owner changed how Arc thinks about storage and timing: the streamed
+rendition **copies the source's video and converts only the audio, with text
+subtitles (WebVTT) instead of burn-in** (burn-in stays as the fallback for
+sources Safari cannot play); **one episode is ready per watcher** (N = 1) plus
+**one more fetched at the halfway mark** of the current one; an episode's
+files are **deleted after everyone who wanted it has watched it**, after a
+grace in hours, unless the user **pins** the show; and the look-ahead **skips
+an episode already sitting unwatched on one of the user's devices**, which
+another device can still fetch on demand. Trips and small offline copies are
+unchanged.
+
+Every open question in the plan's §4 was approved with its recommendation:
+play on demand only for window-covered episodes (window ∪ prefetch ∪
+device-held; item 5); playing before the match only when the in-flight name
+pre-matches at the auto-link threshold (FR-L4 exception, item 6); no
+full-size file for a rendition with text subtitles (FR-S7 stays for burn-in,
+item 7); about 2.8 GB held per episode for hours, with the source-free small
+copy deferred to M20.1 (item 8); the production `look_ahead_n` row moved
+2 → 1 only where it is still 2 (item 9); Keep offline on a not-ready episode
+only inside the window (item 10); `WORKER_CONCURRENCY` 3 on production (item
+13); floor eviction may take pinned shows and episodes in grace,
+least-recently-watched first, never anything with a live want (item 14);
+sequential download for all streaming singles (item 15). The small calls
+approved with them: the prefetch while watching offline catches up on
+reconnect; `watched_grace_hours` 6 (0..168); a pin keeps source and rendition;
+EVENT playlists with a server `EXT-X-START` and a manual Chrome and iPad
+check; the ASS filtering heuristics of T1; a 14-day device-holding TTL; the
+seeder warning on the first fetch as well as on a re-fetch; pins refused for
+the demo account; deploy while acquisition is paused and resume on the
+owner's word.
+
+- [x] T0: Settings, roadmap section and seed migration — verified 2026-10-13
+      (orchestrator): migration a7d2e5c9f318 read by hand (constants only, ON
+      CONFLICT insert, 2 → 1 guarded both ways), single alembic head, 64 settings
+      and migration tests, Writer's full runs server 4541 / client 1206 (client
+      re-run by the orchestrator), make lint clean. No separate Validator: a
+      data-only task the orchestrator checked line by line (small call).
+- [x] T1: Pure media helpers: copyability probe, remux arguments, ASS/SRT → WebVTT
+      — verified 2026-10-13: Validator PASS with 16 adversarial cases and a real
+      ffmpeg 9 run of the generated vector (VOD from a file, EVENT from stdin)
+      on two library episodes; its two findings (fixed EVENT TARGETDURATION,
+      SRT tag stripper) fixed and re-checked; 56 tests, ruff/format/mypy clean;
+      committed aa54283.
+- [ ] T2: `remux` job for complete files, VOD subtitle rendition, burn-in fallback
+- [ ] T3: Player, part 1: subtitle track, safe duration, start position
+- [ ] T4: Window rules: N = 1, halfway prefetch, device-copy skip, play on demand (server)
+- [ ] T5: Device reporting and play-on-demand UI (client, non-live)
+- [ ] T6: Progressive remux on a growing file (server)
+- [ ] T7: Player, part 2: live playback (client)
+- [ ] T8: Delete after watching, pins, disk-floor eviction
+- [ ] T9: Remembered release and seeder warning
+- [ ] T10: Integration and DoD pass
+- DoD: each task Writer → Validator (→ Reviewer where the plan says) →
+  orchestrator verification; suites green; lint clean; alembic single head;
+  manual iPad check for T7; deployed from branch m20-on-demand after merge to
+  main on the owner's word.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator

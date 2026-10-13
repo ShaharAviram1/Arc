@@ -29,8 +29,11 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         "preferred_groups": [],
         "preferred_resolution": "1080p",
         "fallback_resolution": "720p",
-        # N — how many unwatched episodes ahead to keep (FR-A1).
-        "look_ahead_n": 2,
+        # N — how many unwatched episodes ahead to keep (FR-A1). One since M20
+        # (owner 2026-10-13): one episode ready per watcher, with one more
+        # fetched once the current one is half watched (M20 T4). The initial
+        # migration seeded 2; ``seed_m20_settings`` moves a row still at 2.
+        "look_ahead_n": 1,
         # K — how many shows one user may have fetching at once (FR-A10).
         # 0 means *unlimited*, which is the opposite of what 0 means for N
         # above. Five is what one disk and qBittorrent's handful of download
@@ -42,6 +45,11 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # D — days a ready episode may sit unwatched before the want is
         # dropped (FR-T2).
         "unwatched_days_d": 21,
+        # Hours an episode's files survive after the last completion by
+        # everyone who wanted it, under M20's delete-after-watching rule
+        # (FR-T1, owner 2026-10-13; behaviour in M20 T8). 0 means "at the next
+        # hourly sweep"; six covers a rewatch the same evening.
+        "watched_grace_hours": 6,
         # The acquisition kill switch. False on a fresh install: Arc acquires
         # by default, and this is the admin's brake for the day a list import
         # or a rule change asks for more than the machine (or the tracker)
@@ -87,6 +95,10 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # a 16 GB pack listed with four seeders and sat at 0 % while well
         # seeded singles existed. Ten: a pack that many people hold finishes.
         "trip_pack_min_seeders": 10,
+        # Fewer seeders than this on a fetch raises a "few seeders, pin this
+        # show if you want to keep it" notice on the show (FR-A16, owner
+        # 2026-10-13; behaviour in M20 T9). 0 never warns.
+        "min_seeders_warn": 3,
         "sub_lang": "en",
         "audio_lang": "ja",
         # No "max_transcodes" here: the ffmpeg concurrency cap is a property of

@@ -80,7 +80,9 @@ const NUMBER_FIELDS: {
   {
     key: 'look_ahead_n',
     label: 'Look-ahead N',
-    help: 'How many unwatched episodes ahead to keep for each show a user is watching (FR-A1).',
+    help:
+      'How many unwatched episodes ahead to keep for each show a user is watching, plus one ' +
+      'more once you are halfway through it (M20) (FR-A1).',
   },
   {
     key: 'slot_cap_k',
@@ -101,12 +103,26 @@ const NUMBER_FIELDS: {
     help: 'How long a ready episode may sit unwatched before its want is dropped (FR-T2).',
   },
   {
+    key: 'watched_grace_hours',
+    label: 'Delete after watching (hours)',
+    help:
+      'Once everyone who wanted an episode has finished it, its files are kept this many hours ' +
+      'and then deleted, unless the show is pinned. 0 means at the next hourly sweep (FR-T1, M20).',
+  },
+  {
     key: 'min_free_gb',
     label: 'Free space floor (GB)',
     help:
       'Below this much free space on the data volume acquisition holds itself: nothing new is ' +
       'searched for, downloads and playback carry on, and it resumes on its own when retention ' +
       'frees room. 0 turns the guard off (FR-T6).',
+  },
+  {
+    key: 'min_seeders_warn',
+    label: 'Few seeders warning (below)',
+    help:
+      'A fetch that finds fewer seeders than this says so on the show, so it can be pinned ' +
+      'before its files are deleted. 0 never warns (FR-A16, M20).',
   },
   {
     key: 'offline_idle_days',
