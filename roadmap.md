@@ -1851,7 +1851,23 @@ owner's word.
       1279, server show/demand/catalogue/playback/migration tests 228,
       eslint/tsc/prettier/ruff/mypy clean; merged f539a7a. Small call:
       opening the player on a pending episode counts as a demand.
-- [ ] T6: Progressive remux on a growing file (server)
+- [x] T6: Progressive remux on a growing file (server) — verified
+      2026-10-14: Reviewer (one blocker: the completion guard switched off
+      when the MKV header had no duration — fixed, a live remux now refuses
+      such a head and the guard refuses instead; plus pad-file alignment,
+      first-segment timestamp probe, head doubling to 64 MiB, drain timeout,
+      no serving before the first segment, .new/.old swap on restart,
+      remux never deletes under a running live job, idle cap 12, the
+      /demand gate moved out of the request path); Validator FAIL → PASS: a
+      real end-to-end live remux (real ffmpeg, stubbed qBittorrent at 8 MiB
+      per 0.5 s over a cloned episode, 25 playlist fetches, adoption in
+      0.39 s with no second ffmpeg, 36 requests across adoption with zero
+      404s) first showed EMPTY live subtitles (ffmpeg buffered the whole ASS
+      until exit) — fixed with -flush_packets 1 and a slow test proving the
+      file grows mid-run; 12 adversarial pg cases incl. a hidden pad file and
+      the MAL guard matrix; TARGETDURATION fixed at 8 for Safari's seekable
+      lag; orchestrator: rebased onto T5, full server suite on the merged
+      tree 4894 passed, ruff/format/mypy(arc) clean; merged 0f9eda3.
 - [ ] T7: Player, part 2: live playback (client)
 - [x] T8: Delete after watching, pins, disk-floor eviction — verified
       2026-10-13: Validator PASS (11 adversarial pg cases incl. a disk that
