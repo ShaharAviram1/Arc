@@ -96,6 +96,7 @@ everything else in the file has a working default.
 | `GEMINI_BASE_URL`, `OPENROUTER_BASE_URL` | blank | Endpoint overrides (a proxy, a regional host). Blank uses the provider's default. |
 | `ANTHROPIC_API_KEY` | phase 2 | **Only** for an `anthropic` chain entry and for match suggestions (`LLM_MATCH_SUGGESTIONS=true`). A Gemini deployment leaves it blank. |
 | `MAX_TRANSCODES` | ≤ vCPU/2 | Host capacity, not a rule. |
+| `WORKER_CONCURRENCY` | `3` | **Production must set 3** (owner, 2026-10-13; the code default stays 2): with `MAX_TRANSCODES=1` and one live remux running for as long as its download does, 3 leaves a slot for the remux and the short jobs. See [Worker capacity](#worker-capacity). |
 | `ARC_DATA_DIR` | `/mnt/HC_Volume_<id>/arc_data` | Absolute path of an existing directory on the data disk, owned by `PUID:PGID`. When set, `make` adds `deploy/docker-compose.host.yml`, which binds the `arc_data` volume there; unset keeps a plain named volume on the root disk. Fixed once the volume exists (see the note in that file). |
 
 Arc checks this list itself at startup: in production the api and the worker
@@ -341,14 +342,21 @@ a batch-backed episode's own file while leaving the torrent in the client.
 
 ### Worker capacity
 
-Four environment variables decide what one worker does at once. All four are
-read by `arc/config.py`, so they change with a restart of the `worker` service
-and nothing else.
+These environment variables decide what one worker does at once, and how it
+prepares an episode (M20 added the remux and live-remux ones; see
+`.env.example`). All of them are read by `arc/config.py`, so they change with a
+restart of the `worker` service and nothing else.
 
 | Key | Default | What it bounds |
 |---|---|---|
-| `WORKER_CONCURRENCY` | 2 | Jobs of **any** type claimed at once. |
+| `WORKER_CONCURRENCY` | 2 (**production sets 3**, owner 2026-10-13) | Jobs of **any** type claimed at once. A remux can only be taken past a full encode group when this is larger than `MAX_TRANSCODES`, and a live remux holds its slot for as long as its download runs — hence 3 in production. |
 | `MAX_TRANSCODES` | 2 (≤ vCPU/2 on this host, so `1`) | ffmpeg encodes at once. The claim loop will not take a transcode while it is already running this many, so an encode waiting for a slot never holds a concurrency slot the short jobs need. |
+| `MAX_REMUXES` | 2 | Remuxes at once (M20, FR-P3): video copied, audio converted only when not AAC, about 20 s of one core per episode. A cap of its own, separate from `MAX_TRANSCODES`. |
+| `REMUX_AUDIO_BITRATE` | `160k` | The AAC stereo bitrate a remux converts non-AAC audio to (FLAC, Opus, AC-3). AAC audio is copied. |
+| `REMUX_TIMEOUT_SECONDS` | 600 | How long one remux's ffmpeg may run before it is killed and the job retried. |
+| `MAX_LIVE_REMUXES` | 1 | Progressive remuxes of a download in progress at once (M20, FR-P8): its own cap group, since one runs as long as its download does. |
+| `LIVE_IDLE_MINUTES` | 10 | How long a live remux waits with no download progress before it stops ffmpeg (the stream stays playable up to there) and tries again five minutes later. |
+| `LIVE_HEAD_BYTES` | 8388608 (8 MiB) | Contiguous bytes from the file's start that must be downloaded before the live remux probes it (the Matroska header and first cluster). At least 1 MiB. |
 | `WORKER_DRAIN_TIMEOUT` | 10 s | The shutdown grace: how long in-flight jobs get on `SIGTERM` before they are cancelled and put back on the queue. **It must stay below the worker container's `stop_grace_period` (15 s)** — Docker's `SIGKILL` lands at the end of that grace whatever the drain is doing, and a row killed mid-drain stays `running` under a dead lock. A test pins the two together. |
 | `WORKER_STALE_AFTER` | 7200 s | When a `running` job whose worker died is requeued **by age**. It bounds silence, not work: a transcode pushes its lock forward while it encodes, which is why the three-hour ffmpeg timeout may exceed it. A worker *restart* no longer waits for it — the next worker reclaims by identity at start-up. |
 

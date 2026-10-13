@@ -13,7 +13,7 @@
 | ORM / migrations | SQLAlchemy 2.x (async) + Alembic | Standard, typed models, migration history. |
 | Database | PostgreSQL 18 | Multi-user, concurrent API + worker processes, JSONB for parse results and rec runs. |
 | Background jobs | Postgres-backed job table + dedicated worker process (same codebase) | No Redis to run. Jobs are rows claimed with `SELECT … FOR UPDATE SKIP LOCKED`. Scheduler runs inside the worker (APScheduler). |
-| Media prep | ffmpeg / ffprobe (subprocess) | Transcode to H.264/AAC HLS with burned-in subtitles. |
+| Media prep | ffmpeg / ffprobe (subprocess) | Remux to fMP4 HLS (video copied, AAC audio, WebVTT subtitles) by default; transcode to H.264/AAC with burned-in subtitles as the fallback (M20). |
 | Torrent client | qBittorrent (sidecar container) via Web API | Battle-tested, own debug UI, category/save-path control. |
 | Catalogue | AniList GraphQL API (no auth) | Titles, relations, airing schedule, cover art. |
 | List sync | MyAnimeList API v2 (OAuth 2.0 PKCE) | Where users' lists live. |
@@ -566,6 +566,9 @@ stores — which rows a reader has dismissed — lives in that browser's
    and episode number equals; rank by rules; pick top; write `torrents`; add
    to qBittorrent with category `arc` and save path `/data/downloads/<episode
    id>/`; state `downloading`. No candidate → schedule retry per FR-A6.
+   Since M20 a remembered (evicted) single is re-added before any query
+   (FR-A6, M20 T9), and every streaming single is added sequentially, first
+   and last pieces first (§5.3d).
 4. `poll_qbit` (every 60 s): sync progress; on completion → state
    `downloaded`, ingest the largest video file (`library.ingest_file`, called
    inline) and enqueue `match_file` for the row it wrote.
@@ -1705,6 +1708,10 @@ owner 2026-10-13).**
   identically whether or not a suggestion exists.
 
 ### 5.3 Transcode
+Since M20 this is the **burn-in fallback** (FR-P7): a copyable source is
+remuxed instead (§5.3c), and a download somebody is watching is remuxed as
+it arrives (§5.3d).
+
 1. `transcode` (priority = how soon a user will reach it): choose subtitle
    track (configured language, prefer ASS over SRT), choose audio track
    (Japanese default). Run
@@ -4939,6 +4946,32 @@ two together.
   fallback for fast runs.
 - Media: ffmpeg invoked on a 5-second fixture in a dedicated test marked
   `slow`; mocked elsewhere.
+- **M20 (on-demand playback) in four layers.** (1) **Pure tables**, no
+  database and no ffmpeg: the copyability verdict and the remux arguments
+  over recorded ffprobe fixtures (`tests/media/test_remux_plan.py`), ASS/SRT →
+  WebVTT and the segment/playlist cutters (`tests/media/test_subtitles.py`),
+  the download front, the gated reader and the live playlist re-emission
+  (`tests/media/test_live_pure.py`), and the window, prefetch, device-skip and
+  grace rules as functions of their inputs. (2) **Handler tests against
+  Postgres with a fake ffmpeg** (`tests/media_helpers.py`,
+  `tests/live_helpers.py`: executable stand-ins first on `PATH` that record
+  their argv and write plausible output) and the qBittorrent stub's `pieceStates`/
+  `properties`: `test_remux_jobs.py`, `test_remux_races.py`,
+  `test_live_jobs.py`, `test_live_stream.py`, `test_live_review.py`,
+  `test_window_m20*.py`, `test_demand_api.py`, `test_retention_m20.py`,
+  `test_remembered_release.py`. (3) **Real-ffmpeg `slow` tests** on a
+  library episode cloned with `cp -c` into the test's own `DATA_DIR`
+  (skipped when there is none): `test_remux_slow.py` (a whole remux) and
+  `test_live_slow.py` (a growing MKV through the front gate, deterministic
+  restarts, subtitles flushed mid-run). (4) **The end-to-end flow**,
+  `tests/slow/test_m20_flow.py` (`slow` + `pg`, about 10 s): qBittorrent and
+  Nyaa stubbed, ffmpeg and the matcher real, the worker's own `run_job` per
+  step — window (N = 1) → demand → sequential add → a live EVENT playlist
+  with cues fetched through the API → adoption with no second ffmpeg →
+  completion (the first MAL write and job, and none before) → deletion at
+  `watched_grace_hours = 0` with the torrent row kept as `evicted` → a
+  re-demand re-adding the same hash with no Nyaa request. Real Safari/iPad
+  playback stays a manual check.
 - Recommendations: every backend is behind a `RecsModel` protocol and is a
   fake everywhere except `server/tests/recs_eval`, whose `live` test calls
   whichever provider `RECS_PROVIDER` names (and skips when that provider has

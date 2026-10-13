@@ -58,8 +58,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   airing schedule), and a state machine (see §6).
 - **MediaFile** — a downloaded source file on disk, linked to an Episode once
   matched. Holds parse results and match confidence.
-- **Rendition** — the browser-ready, transcoded output for an Episode (HLS
-  playlist plus segments, subtitles burned in). One per episode.
+- **Rendition** — the browser-ready output for an Episode (HLS playlist plus
+  segments): a remux with a WebVTT subtitle track by default, or a burn-in
+  transcode as the fallback (FR-P1, FR-P7). One per episode.
 - **User**, **Invite**, **Session**.
 - **ListEntry** — (user, anime) → status, progress (episodes watched), score,
   source of last change (arc / mal), MAL sync state.
@@ -722,9 +723,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   last resort (owner, 2026-09-18). A track with no language tag counts as
   "not English". Every choice below the first rule is noted on the job, naming
   the language and the rule that produced it, because the rendition is the
-  only copy kept and a dub burned in is only discoverable by ear.
+  only copy kept and a dub in it is only discoverable by ear.
 - FR-P3 Preparation is scheduled to finish before the user is likely to ask:
-  new downloads are transcoded immediately; the job queue prioritises
+  new downloads are prepared (remuxed, or transcoded as the fallback)
+  immediately; the job queue prioritises
   episodes users are closest to reaching. **Small offline copies (FR-P6) come
   after every transcode** (M19, owner 2026-10-05): preparing an episode for
   streaming is what somebody is waiting on, a copy is for later. A copy asked
@@ -753,7 +755,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   scaled up), H.264 by default (HEVC selectable by the operator,
   `OFFLINE_CODEC`), CRF 26, AAC stereo at 96 kbit/s, arranged so a player can
   start it before the last byte arrives, and with **the same subtitle and audio
-  tracks burned in as the rendition** (FR-P2) — drawn after the picture is
+  tracks as the rendition** (FR-P2), the subtitles burned in — drawn after the picture is
   scaled, so the text is as sharp at 720p as it was meant to be. About a
   quarter the size of the full-size file (≈100 MB for a 24-minute episode
   measured on the owner's sources). It is made from the source the server
@@ -815,9 +817,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   second remux (the player's URLs do not change). The live remux restarts from
   the file's first byte whenever it starts, and its output is the same each
   time. One live remux at a time per worker (`MAX_LIVE_REMUXES`, 1).
-- FR-P8 **Playing while downloading — what the viewer sees** (M20 T7, the
-  client part; the server part — the progressive remux, the EVENT playlist,
-  the `live` numbers on `/play` — is T6's). While `/play` carries `live` and
+
+  **What the viewer sees** (M20 T7). While `/play` carries `live` and
   the download has not ended, the player:
   1. measures the episode by the server's **expected duration**, never the
      media element's (FR-S4), so the bar, the clocks, the end overlay and every
@@ -947,7 +948,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   option, not needed") — the "Save file" control is gone; the route and the
   payload's `download_url` stay because the in-app downloader uses them. The
   file is exactly
-  what the player streams — the prepared rendition with subtitles burned in —
+  what the player streams — the prepared rendition (a burn-in one, or a
+  remux with no text track: see the end of this item) —
   joined into one file on the fly, so nothing is re-encoded and nothing extra
   is stored. It is named after the show and the episode number
   (`Frieren - 12.mp4`), from Arc's own data, never from the request. The
@@ -1528,8 +1530,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   owner incident 2026-10-06). The small copy's encode settings (FR-P6:
   `OFFLINE_CODEC`, `OFFLINE_HEIGHT`, `OFFLINE_CRF`, `OFFLINE_PRESET`,
   `OFFLINE_AUDIO_BITRATE`) are the operator's, in the environment, like the
-  transcode's. M20 (owner 2026-10-13) adds two more, editable now and acted
-  on later in M20: `watched_grace_hours` (default 6, 0..168, 0 = at the next
+  transcode's. M20 (owner 2026-10-13) adds two more: `watched_grace_hours` (default 6, 0..168, 0 = at the next
   hourly sweep) — the grace in hours after the last completion before a
   watched episode's files are deleted (FR-T1 as revised by M20 T8); and
   `min_seeders_warn` (default 3, 0..100, 0 = never) — below this many seeders
