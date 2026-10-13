@@ -535,3 +535,18 @@ def test_wants_trip_is_not_null_and_defaults_false(
             await engine.dispose()
 
     assert asyncio.run(run()) == ("boolean", "NO", "false")
+
+
+def test_show_pins_is_a_cascading_pair(pg_engine: AsyncEngine, test_database_url: str) -> None:
+    """``show_pins`` (FR-T8, M20 T8): the pair is the key and both keys cascade.
+
+    A second pin is the same row, and a deleted account or show takes its pins
+    with it. The round trip above covers the downgrade.
+    """
+    pk = _check_constraint(test_database_url, "show_pins", "pk_show_pins")
+    user_fk = _check_constraint(test_database_url, "show_pins", "fk_show_pins_user_id_users")
+    anime_fk = _check_constraint(test_database_url, "show_pins", "fk_show_pins_anime_id_anime")
+
+    assert pk == "PRIMARY KEY (user_id, anime_id)"
+    assert user_fk is not None and "ON DELETE CASCADE" in user_fk
+    assert anime_fk is not None and "ON DELETE CASCADE" in anime_fk

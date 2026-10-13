@@ -96,9 +96,11 @@ STORAGE_HELD: Final[str] = "storage_held"
 MAX_USER_REQUEST_COPIES: Final[int] = 10
 MAX_HOST_REQUEST_COPIES: Final[int] = 30
 
-#: How often ``last_served_at`` may be written. Hourly: the idle rule counts in
-#: days, and a resuming download makes dozens of range requests a minute.
-SERVED_TOUCH_SECONDS: Final[float] = 3600.0
+#: How often ``last_served_at`` may be written. Every five minutes: a resuming
+#: download makes dozens of range requests a minute, so the stamp is
+#: throttled, but retention's "a device is downloading it right now" hold (M20
+#: T8, ten minutes) needs a stamp that a download in progress keeps fresh.
+SERVED_TOUCH_SECONDS: Final[float] = 300.0
 
 
 class CopyUnavailable(LookupError):
@@ -437,15 +439,20 @@ async def request_copy(
 
 
 #: On (owner, 2026-10-06; kept a constant so it can be turned off): touch a
-#: **non-ready** (trip) copy's ``last_served_at`` every five minutes rather
-#: than hourly, so the trip settle can tell a download still running
+#: **non-ready** (trip) copy's ``last_served_at`` every five minutes, so the
+#: trip settle can tell a download still running
 #: (:data:`~arc.services.trips.settle.SETTLE_WAITS_FOR_FETCH`).
 TRIP_TOUCH_ENABLED: bool = True
 TRIP_TOUCH_SECONDS: Final[float] = 300.0
 
 
 def touch_interval(episode: Episode) -> float:
-    """Seconds between two ``last_served_at`` writes for this episode's copy."""
+    """Seconds between two ``last_served_at`` writes for this episode's copy.
+
+    Since M20 T8 the two intervals coincide (five minutes each: retention's
+    "copy being sent" hold needs the ready copy's stamp as fresh as a trip's).
+    The branch is kept so the trip interval can still be changed on its own.
+    """
     if TRIP_TOUCH_ENABLED and episode.state is not EpisodeState.READY:
         return TRIP_TOUCH_SECONDS
     return SERVED_TOUCH_SECONDS

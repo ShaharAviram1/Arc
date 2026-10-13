@@ -871,8 +871,9 @@ async def offline_copy(
     The demo account is refused before anything is looked up. Then the copy
     must exist and be ``ready``, and :func:`~arc.services.media.copies.
     may_fetch_copy` must say this caller may have it; every other answer is
-    the router's one 404. ``last_served_at`` is touched at most hourly, for
-    the idle rule (``offline_idle_days``), and only when bytes go out.
+    the router's one 404. ``last_served_at`` is touched at most every five
+    minutes, for the idle rule (``offline_idle_days``) and retention's "copy
+    being sent" hold (M20 T8), and only when bytes go out.
     """
     if user.is_demo:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
@@ -935,7 +936,7 @@ def _sends_bytes(request: Request, response: Response, size: int | None) -> bool
     (400/416): only those count as the copy being *fetched* for the idle rule.
     The range is judged the way :func:`~arc.services.media.download.
     parse_range` judges it, which is close enough to Starlette's that the
-    disagreement can only ever cost one hourly touch.
+    disagreement can only ever cost one five-minute touch.
     """
     if request.method != "GET" or response.status_code != status.HTTP_200_OK:
         return False

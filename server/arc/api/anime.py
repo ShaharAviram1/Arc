@@ -105,6 +105,7 @@ from arc.services.catalog.offline.search import offline_search
 from arc.services.jobs import enqueue
 from arc.services.mal.names import is_linked
 from arc.services.mal.writelog import SyncState, sync_state
+from arc.services.pins import is_pinned
 from arc.services.playback.progress import completed_episode_ids
 from arc.services.settings import read_override
 from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
@@ -427,6 +428,8 @@ async def detail(
         slots=slots,
         tmdb_mapped=tmdb_mapped,
         override=None if override is None else OverrideOut.build(override),
+        # The caller's own "Keep files" (FR-T8): one primary-key lookup.
+        pinned=await is_pinned(session, user_id=user.id, anime_id=anime.id),
     )
 
 

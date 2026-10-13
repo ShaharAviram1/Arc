@@ -523,6 +523,12 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
    * admin's `trip_max_episodes`. Optional on the wire for an older payload.
    */
   trip_limits?: { max_episodes: number } | null
+  /**
+   * Whether the viewer has pinned this show: "Keep files" (FR-T8, M20). The
+   * sweep keeps a show's files after watching if *anyone* has pinned it.
+   * Optional on the wire so a payload from before M20 parses as unpinned.
+   */
+  pinned?: boolean
 }
 
 /**
@@ -1421,6 +1427,27 @@ export function useCancelSample(animeId: number): UseMutationResult<null, Error,
     mutationFn: () => apiFetch<null>(`/api/anime/${animeId}/sample`, { method: 'DELETE' }),
     onSuccess: () => {
       refreshAfterSample(client, animeId, null)
+    },
+  })
+}
+
+/**
+ * Pin or unpin a show: "Keep files" (FR-T8). `PUT`/`DELETE
+ * /api/anime/{id}/pin`, both idempotent and answering 204. The cached show is
+ * patched on success so the toggle flips without waiting for a refetch.
+ */
+export function useSetPinned(animeId: number): UseMutationResult<null, Error, boolean> {
+  const client = useQueryClient()
+
+  return useMutation<null, Error, boolean>({
+    mutationFn: (pinned) =>
+      apiFetch<null>(`/api/anime/${String(animeId)}/pin`, {
+        method: pinned ? 'PUT' : 'DELETE',
+      }),
+    onSuccess: (_result, pinned) => {
+      client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
+        current === undefined ? current : { ...current, pinned },
+      )
     },
   })
 }

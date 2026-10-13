@@ -303,6 +303,23 @@ export interface RetentionDisk {
     total: number
   }
   episodes_retained: number
+  /**
+   * Every pinned show and what its retained episodes hold, largest first
+   * (FR-T8, M20). Optional on the wire so a payload from before M20 parses.
+   */
+  pinned?: PinnedShow[]
+}
+
+/** One pinned show on the disk view (`PinnedShowOut`, FR-T8). */
+export interface PinnedShow {
+  anime_id: number
+  anime_title: string
+  /** How many users have pinned it. */
+  users: number
+  /** Retained episodes of the show. */
+  episodes: number
+  /** Source, rendition and offline copy bytes of those episodes. */
+  bytes: number
 }
 
 /** One episode the next sweep would delete (`RetentionItemOut`). */
@@ -331,6 +348,11 @@ export interface RetentionItem {
    * cached payload from before batches still parses.
    */
   torrent_files?: number
+  /**
+   * In `held` only: what keeps this episode past its grace (pinned, part-way
+   * through, played recently, its copy being downloaded). M20.
+   */
+  hold?: string | null
 }
 
 /** `GET /api/retention/preview` — the sweep's own rule, with no deletion. */
@@ -339,6 +361,16 @@ export interface RetentionPreview {
   dry_run: boolean
   episodes: RetentionItem[]
   bytes: number
+  /** Past their grace but kept by a hold (M20). Optional for older payloads. */
+  held?: RetentionItem[]
+  /**
+   * What the floor eviction would then take, least recently watched first
+   * (FR-T6, M20): non-empty only while free space is under the floor.
+   */
+  floor?: RetentionItem[]
+  /** The two graces the reasons are written in (FR-T1, FR-T5). */
+  watched_grace_hours?: number
+  grace_days?: number
 }
 
 /* --- Wire shapes: offline catalogue (M15.5) --------------------------- */

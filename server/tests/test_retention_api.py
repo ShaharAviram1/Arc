@@ -281,7 +281,7 @@ async def test_the_disk_page_splits_arcs_bytes_from_the_filesystems(
 
     body = (await admin.get("/api/retention/disk")).json()
 
-    assert sorted(body) == ["data_dir", "episodes_retained", "retained"]
+    assert sorted(body) == ["data_dir", "episodes_retained", "pinned", "retained"]
     assert sorted(body["data_dir"]) == ["free", "total", "used"]
     assert body["data_dir"]["total"] > 0
     assert body["data_dir"]["free"] <= body["data_dir"]["total"]

@@ -162,6 +162,33 @@ async def add_completion(
         duration_s=1440.0,
         completed=True,
         completed_at=at,
+        # The last sample is the completion itself; without this the row
+        # would carry the wall clock, months after the frozen NOW, and read as
+        # "played just now" (hold c, M20 T8).
+        updated_at=at,
+    )
+    session.add(progress)
+    await session.flush()
+    return progress
+
+
+async def add_partial(
+    session: AsyncSession,
+    user: User,
+    episode: Episode,
+    *,
+    at: datetime,
+    position_s: float = 576.0,
+    duration_s: float = 1440.0,
+) -> WatchProgress:
+    """A partial watch (not completed, position above zero) last updated ``at``."""
+    progress = WatchProgress(
+        user_id=user.id,
+        episode_id=episode.id,
+        position_s=position_s,
+        duration_s=duration_s,
+        completed=False,
+        updated_at=at,
     )
     session.add(progress)
     await session.flush()
@@ -172,6 +199,7 @@ __all__ = [
     "DAY",
     "NOW",
     "add_completion",
+    "add_partial",
     "add_want",
     "days_ago",
     "make_retained_episode",

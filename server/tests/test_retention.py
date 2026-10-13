@@ -142,7 +142,8 @@ async def test_an_episode_one_user_has_not_finished_stays(
     alice = await make_user(db_session, "alice-t1@arc.test")
     bob = await make_user(db_session, "bob-t1@arc.test")
     await add_completion(db_session, alice, episode, at=days_ago(8))
-    await add_completion(db_session, bob, episode, at=days_ago(2))
+    # Bob finished five hours ago: inside the 6-hour watched grace (M20).
+    await add_completion(db_session, bob, episode, at=days_ago(5 / 24))
 
     assert await candidates(db_session, settings, now=NOW) == []
 
@@ -326,13 +327,13 @@ async def test_a_refetched_file_gets_a_grace_period_of_its_own(
 async def test_a_progress_change_this_morning_holds_the_files(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
-    """The anchor is a grace period, not a licence: G has not run out."""
+    """The anchor is a grace period, not a licence: the 6-hour watched grace has not run out."""
     settings = acquisition_settings(tmp_path)
     episode = await make_retained_episode(
         db_session, settings, anilist_id=970103, number=4, ready_at=days_ago(2)
     )
     alice = await make_user(db_session, "alice-w5-fresh@arc.test")
-    await set_progress_entry(db_session, alice, episode, progress=9, updated_at=days_ago(0.5))
+    await set_progress_entry(db_session, alice, episode, progress=9, updated_at=days_ago(3 / 24))
 
     assert await candidates(db_session, settings, now=NOW) == []
 

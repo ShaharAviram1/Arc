@@ -28,6 +28,7 @@ from arc.api import (
     media,
     media_stream,
     offline_copies,
+    pins,
     playback,
     recs,
     retention,
@@ -216,6 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(retention.router)
     app.include_router(media.router)
     app.include_router(offline_copies.router)
+    app.include_router(pins.router)
     app.include_router(trips.router)
     app.include_router(manual_release.router)
     app.include_router(playback.router)

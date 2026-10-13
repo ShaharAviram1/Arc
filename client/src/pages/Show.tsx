@@ -49,6 +49,7 @@ import {
   useAnime,
   useCancelSample,
   useRequestSample,
+  useSetPinned,
   useRetryTranscode,
   useSetListEntry,
   type AnimeCredit,
@@ -1551,6 +1552,58 @@ function tripSupport(anime: AnimeDetail): string | null {
   return null
 }
 
+const PIN_LABEL = 'Keep files'
+const PIN_WORKING = 'Saving…'
+const PIN_HINT_OFF =
+  'Keep this show’s episodes on the server after you watch them. Without it, a watched ' +
+  'episode is deleted a few hours later and fetched again if anyone wants it.'
+const PIN_HINT_ON =
+  'Arc keeps this show’s episodes after watching. Only a full disk can still remove them. ' +
+  'Press to stop keeping them.'
+const PIN_FAILED = 'Could not change “Keep files”. Try again.'
+
+/**
+ * "Keep files" (spec §4.9 FR-T8, M20).
+ *
+ * Arc deletes a watched episode a few hours after the last person finished it
+ * (FR-T1). A pin keeps the show's files instead — for a show somebody rewatches,
+ * or one whose release is hard to find again. It is per user, and the server
+ * keeps the files if anyone has pinned the show; the disk floor (FR-T6) may
+ * still evict them as a last resort. A toggle with `aria-pressed`, hidden for
+ * the demo account, which the server refuses.
+ */
+function PinControl({ anime }: { anime: AnimeDetail }) {
+  const setPinned = useSetPinned(anime.id)
+  const pinned = anime.pinned === true
+
+  return (
+    <div className="flex flex-col items-start">
+      {/* The accessible name stays "Keep files" while saving; the busy
+          state is `aria-busy` and the visible label. */}
+      <Button
+        pressed={pinned}
+        disabled={setPinned.isPending}
+        aria-label={PIN_LABEL}
+        aria-busy={setPinned.isPending}
+        title={pinned ? PIN_HINT_ON : PIN_HINT_OFF}
+        onClick={() => {
+          setPinned.mutate(!pinned)
+        }}
+      >
+        <span className="inline-flex items-center gap-[8px]" aria-hidden="true">
+          {pinned && !setPinned.isPending ? <CheckGlyph /> : null}
+          {setPinned.isPending ? PIN_WORKING : PIN_LABEL}
+        </span>
+      </Button>
+      {setPinned.isError ? (
+        <p role="alert" className="mt-1.5 text-[13px] text-[var(--arc-error)]">
+          {PIN_FAILED}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 /** The hero, its title block, and the row of actions under it. */
 function Hero({
   anime,
@@ -1559,7 +1612,7 @@ function Hero({
 }: {
   anime: AnimeDetail
   timezone?: string
-  /** Not the demo account (FR-D5), and `me` has loaded. */
+  /** Not the demo account (FR-D5), and `me` has loaded. Also gates "Keep files". */
   canTrip: boolean
 }) {
   const hasTrip = anime.trip !== null && anime.trip !== undefined
@@ -1602,6 +1655,7 @@ function Hero({
         />
         <SampleControl anime={anime} />
         {entry === null ? null : <ScoreControl animeId={anime.id} score={entry.score} />}
+        {canTrip ? <PinControl anime={anime} /> : null}
         {canTrip && !hasTrip && tripBlocked === null ? <TripControl anime={anime} /> : null}
       </div>
       {tripBlocked === null ? null : (

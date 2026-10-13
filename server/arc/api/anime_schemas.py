@@ -950,6 +950,9 @@ class AnimeDetail(AnimeCore):
     #: of its own so that the page that edits it makes no extra request: the
     #: cost is one ``settings`` lookup on a request an admin was making anyway.
     override: OverrideOut | None = None
+    #: Whether the caller has pinned this show: "Keep files" (FR-T8). Per
+    #: user; the sweep keeps the files if *anyone* has.
+    pinned: bool = False
 
     @classmethod
     def build(
@@ -975,6 +978,7 @@ class AnimeDetail(AnimeCore):
         slots: SlotView | None = None,
         tmdb_mapped: bool = False,
         override: OverrideOut | None = None,
+        pinned: bool = False,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -1025,6 +1029,7 @@ class AnimeDetail(AnimeCore):
             trip_limits=trip_limits
             or TripLimits(max_episodes=int(DEFAULT_SETTINGS[TRIP_MAX_EPISODES_KEY])),
             override=override,
+            pinned=pinned,
             episodes=[
                 EpisodeOut.from_episode(
                     episode,

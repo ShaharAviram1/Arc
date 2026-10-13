@@ -1109,13 +1109,34 @@ that the course professor can log in at any time, and the owner uses it daily.
   answered.
 
 ### 4.9 Retention and cleanup
-- FR-T1 An episode's files (source + rendition) are deleted when **all** of
-  the following hold: every user who wanted the episode has completed it, and
-  a grace period of **G** days has elapsed since the last completion
-  (default G = 7). "Completed" here is FR-W5's definition — an episode at or
+- FR-T1 **Delete after watching** (owner 2026-10-13, M20). An episode's files
+  (source + rendition) are deleted when every user who wanted the episode has
+  completed it and a grace period has elapsed since the last completion. The
+  grace depends on how the episode stopped being wanted: after a **watch** it
+  is `watched_grace_hours` (default 6 hours; the sweep is hourly, so in
+  practice 6–7 hours); after a **drop** (FR-T2, or the show leaving
+  watching/planned) and for a file **nobody ever wanted** it is **G** days
+  (default G = 7). Every anchor runs its own grace and the files go only once
+  **all** of them have run out: a completion seven hours ago does not cut
+  short a drop eight hours ago that still has days to run. "Completed" here is FR-W5's definition — an episode at or
   below a user's list progress counts as completed by that user, anchored on
-  that entry's last change — so an episode somebody skipped past is deleted on
-  the same schedule as one they watched in Arc.
+  that entry's last change (never earlier than the file itself) — so an
+  episode somebody skipped past is deleted on the same schedule as one they
+  watched in Arc.
+  Four **holds** keep an episode whose grace has run out, for as long as they
+  last: (a) **any** user has pinned the show (FR-T8); (b) somebody has a
+  partial watch on it (position above zero, not completed) updated within
+  **D** days, even with no want — a show on hold, say; (c) **anybody played
+  it** within `watched_grace_hours`, and never less than 30 minutes (so a
+  grace of 0 cannot delete an episode whose last minutes are still playing
+  after the 90 % completion) — the last progress sample, which also covers a
+  rewatch, since a completion's time is written once; (d) its offline copy was
+  **sent to a device within the last 10 minutes** — a download in progress.
+  Hold (d) has a ceiling: a device fetching in a loop could otherwise hold the
+  episode indefinitely, so it lapses 6 hours after the episode's grace ran out
+  (or after the copy was made, if later; Arc records no first-serve time). A completion replayed from a device's outbox (FR-S9) carries the
+  device's own time, possibly hours ago, so the next sweep may delete the
+  episode at once; that is correct, the user watched it.
   An episode's small offline copy (FR-P6) is among its files and goes with
   it (M19). While a copy is being made from an episode's source, that source
   is never deleted; the episode waits for the next sweep.
@@ -1144,15 +1165,34 @@ that the course professor can log in at any time, and the owner uses it daily.
   show nobody is following any more is what ends a pack's life. The record of
   which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
   no search at all — a later want is served from the same pack.
-- FR-T4 Admin can see disk usage and manually delete or re-fetch.
+- FR-T4 Admin can see disk usage and manually delete or re-fetch. The
+  preview of the next sweep gives each episode's reason with its grace in the
+  anchor's unit ("…the 6-hour grace period ran out at 11:00 UTC on
+  2026-06-01", "…the 7-day grace period ran out on 2026-06-01"), lists the
+  episodes past their grace that a hold keeps and which hold, while free space
+  is under the floor lists what the floor eviction (FR-T6) would then take —
+  the same plan and reasons the sweep uses — and the disk
+  view lists every pinned show with its bytes and how many users pinned it
+  (M20).
 - FR-T5 All of G, D, N are admin-configurable, and so is M20's
-  delete-after-watching grace `watched_grace_hours` (default 6, 0..168; the
-  rule itself lands with M20 T8).
+  delete-after-watching grace `watched_grace_hours` (default 6, 0..168).
 - FR-T6 Acquisition holds itself while free space on the data volume is below
   an admin-set floor (default 10 GB): reconciliation, ingest and playback
   continue, no new search starts; it resumes on its own when space is freed.
   **A new trip (FR-A12) is refused while held**; an existing trip's episodes
-  that have not started wait like any other.
+  that have not started wait like any other. **As a last resort the hourly
+  sweep then evicts** (M20, owner 2026-10-13): after its normal pass, while
+  free space is under the floor, it deletes retained episodes **least recently
+  watched first** (by the later of the last play and the last completion, so a
+  rewatch counts; else the last drop; else the file's age), ignoring grace and
+  pins, one at a time, until free space is a GiB above the floor. It never
+  evicts an episode with a live want (which covers a pending trip episode), a
+  download, match or encode in flight, one whose offline copy is being sent or
+  that an active trip is waiting for, one somebody was part-way through within
+  the last 24 hours, or one anybody played within the last 30 minutes; the
+  want, the play and the copy are asked again immediately before each
+  eviction. `RETENTION_DRY_RUN` is honoured, and in a dry run the episodes the
+  normal pass would delete are not counted twice.
 - FR-T7 **Idle small copies** (M19, owner 2026-10-05). A `ready` episode's
   small offline copy (FR-P6) that nobody has fetched for `offline_idle_days`
   (default 7, admin-editable, at least 1) is deleted by the hourly sweep — the
@@ -1169,6 +1209,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   from when the copy was made); at **cancellation** (FR-A12); and once
   its user's account is deleted. A `ready`
   episode's copy is never deleted by a trip: it follows the idle rule above.
+- FR-T8 **Pin a show** (M20, owner 2026-10-13). A user may pin a show
+  ("Keep files" on the show page): delete after watching (FR-T1) then skips
+  every episode of it — source and rendition both are kept. A pin is per user
+  and idempotent; the show's files are kept if **any** user has pinned it.
+  Pinning fetches nothing, and only the disk floor (FR-T6) can still remove a
+  pinned show's files. The demo account cannot pin (FR-D5).
 
 ### 4.10 Admin (phase 2 UI; the underlying settings exist from phase 1 via config)
 - FR-D1 Users & invites; deactivate a user.
@@ -1228,12 +1274,12 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
 | Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
-| Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk, review queue |
+| Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk (Storage: usage, the pinned shows with their bytes and how many users pinned each, and the next sweep's preview with its reasons in hours or days plus the episodes a hold keeps — FR-T4, FR-T8, M20), review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
 | How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
 | Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). The switch **Remove episodes once watched** (per device, on by default) and, while it is on, a **Keep** toggle per row; a row reads "Watched · removing soon" or "Kept" (FR-S9 item 9, owner 2026-10-08). Reached from the account menu (not for the demo account) and from the offline line on every page |
@@ -2390,3 +2436,21 @@ through the same edge, without the grace period.
   FR-T5 gain `watched_grace_hours` (6) and `min_seeders_warn` (3). Settings
   only; the halfway prefetch, delete-after-watching and the seeder warning land
   in M20 T4, T8 and T9.
+- 2026-10-13 (owner, M20 T8) — **Delete after watching, pins, floor
+  eviction.** FR-T1 rewritten: a watched episode's grace is
+  `watched_grace_hours` (6) instead of G days; a drop and "nobody ever wanted
+  it" keep G; every anchor's deadline must pass. Four holds keep an episode
+  past its grace: a pin by anyone, a partial watch within D days, a play
+  within the grace (at least 30 minutes; covers rewatches), an offline copy
+  sent within 10 minutes (lapsing 6 hours after the deadline). A replayed offline completion carries
+  the device's time, so the next sweep may delete at once (correct). New
+  FR-T8 **Pin a show** ("Keep files", per user, any user's pin keeps the show;
+  keeps source and rendition both — owner Q3; refused for the demo account —
+  Q17). FR-T6: under the floor the sweep now also **evicts**, least recently
+  watched first (the later of last play and last completion — a rewatch
+  counts; orchestrator's call after review), ignoring grace and pins but never
+  a live want, an encode, a copy being sent, a pending trip copy, a partial
+  watch within 24 h or a play within 30 minutes, until a GiB above the floor
+  (owner Q14). FR-T4: preview reasons in hours, the held episodes, the floor
+  evictions while under the floor, and pinned bytes per show on the disk
+  view. New table `show_pins`.

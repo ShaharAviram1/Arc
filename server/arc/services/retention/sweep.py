@@ -60,6 +60,34 @@ dropped ones. Taking the union — every completion, plus every drop — is what
 makes "two users, one finished it a week ago and one finished it this morning"
 come out as "not yet", which is the whole point of the rule.
 
+**Two graces, chosen by the anchor's kind (M20, owner 2026-10-13).** A
+*watched* anchor — a completion, or list progress passing the episode — uses
+``watched_grace_hours`` (default 6): Arc is a cache in front of the indexer,
+and a watched episode leaves the same evening. A drop and "nobody ever wanted
+it" keep G days.
+
+**Four holds keep an episode whose grace has run out** (FR-T1, M20 T8), each
+reported by the preview (:func:`retention_plan`):
+
+* the show is **pinned** by any user (FR-T8);
+* somebody has a **partial watch** on it (not completed, position > 0) updated
+  within D days — a user with the show on hold has no live want, but is
+  halfway through this episode;
+* somebody **played** it within ``watched_grace_hours`` —
+  ``max(watch_progress.updated_at)``, which covers a rewatch, because
+  ``completed_at`` is written once;
+* its offline copy was **served** within the last ten minutes: a device is
+  downloading it right now.
+
+A replayed offline completion carries the device's own time, possibly hours
+ago, so the next sweep may delete at once. That is correct: the user watched
+it.
+
+**The disk floor evicts as a last resort** (FR-T6, :func:`floor_evictions`):
+grace and pins are ignored, least recently watched first; a live want, an
+encode, a copy being served, a pending trip copy, a partial watch within
+24 hours and a play within 30 minutes are never touched.
+
 **Nothing in flight is ever a candidate.** ``searching``, ``downloading``,
 ``matching`` and ``preparing`` are excluded by not being in
 :data:`RETAINED_STATES` at all: an episode being encoded has a job holding its
@@ -97,6 +125,7 @@ from arc.models import (
     OfflineCopy,
     OfflineCopyState,
     Rendition,
+    ShowPin,
     Torrent,
     TorrentFile,
     Trip,
@@ -106,9 +135,9 @@ from arc.models import (
     Want,
     WatchProgress,
 )
-from arc.services.media.copies import encoding_episode_ids
+from arc.services.media.copies import encoding_episode_ids, served_recently
 from arc.services.media.names import offline_path_for, output_dir_for
-from arc.services.retention.rules import grace_period
+from arc.services.retention.rules import grace_period, unwatched_period, watched_grace_hours
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +183,39 @@ REASON_NO_FILES = "no files on disk"
 #: What the state change is logged as (spec §6: ``ready → (retention) →
 #: not_wanted``).
 RETENTION_REASON = "retention"
+
+#: The floor eviction's reason (FR-T6, M20 T8), completed by
+#: :func:`floor_evictions` with the least-recently-watched moment.
+REASON_FLOOR = "free space is below the floor"
+
+#: The four holds (FR-T1, M20 T8): why an episode past its grace is kept.
+HOLD_PINNED = "the show is pinned"
+HOLD_PARTIAL = "somebody is part-way through it"
+HOLD_PLAYED = "somebody played it recently"
+HOLD_SERVING = "a device is downloading its offline copy"
+
+#: How recently an offline copy must have been served to count as being
+#: downloaded right now (hold d). ``last_served_at`` is written at most every
+#: five minutes (:data:`arc.services.media.copies.SERVED_TOUCH_SECONDS`), so a
+#: download in progress always has a stamp younger than this.
+COPY_SERVING_WINDOW: Final[timedelta] = timedelta(minutes=10)
+
+#: Hold (d) has a ceiling: a device fetching in a loop must not hold an
+#: episode for ever. It lapses this long after the episode's grace ran out
+#: (or after the copy was made, if later). Arc records no "first served"
+#: moment, so the deadline stands in for it. The same six hours as the trip
+#: settle's ``FETCH_CEILING`` (:mod:`arc.services.trips.settle`, which cannot
+#: be imported here: it imports the deleter, which imports this module).
+COPY_SERVING_CEILING: Final[timedelta] = timedelta(hours=6)
+
+#: Somebody played the episode this recently: it is being watched right now.
+#: The floor never evicts such an episode, and hold (c)'s window is never
+#: shorter than this, whatever ``watched_grace_hours`` says (0 included) — a
+#: completion at 90 % drops the want while the last minutes are still playing.
+PLAYING_WINDOW: Final[timedelta] = timedelta(minutes=30)
+
+#: A partial watch this recent is never evicted, even under the floor.
+FLOOR_PARTIAL_WINDOW: Final[timedelta] = timedelta(hours=24)
 
 
 # --- Path safety ------------------------------------------------------------
@@ -330,6 +392,9 @@ class Deletable:
     #: The moment the grace period was counted from; null for the file-age
     #: case, where the anchor is the file itself.
     anchor: datetime | None = None
+    #: For an episode whose grace has run out but which is kept anyway: the
+    #: hold that keeps it (``HOLD_*``). Null for everything the sweep deletes.
+    hold: str | None = None
 
     @property
     def bytes(self) -> int:
@@ -489,27 +554,49 @@ class _Facts:
     #: of them since.
     torrent_files: list[TorrentFile] = field(default_factory=list)
     #: The small offline copy, when there is one (FR-P6). It goes with the
-    #: episode; it is never a reason to keep one.
+    #: episode; on its own it is never a reason to keep one, but one being
+    #: downloaded right now is (:attr:`copy_serving`).
     offline_copy: OfflineCopy | None = None
+    #: ``max(watch_progress.updated_at)`` over every user (hold c). It moves on
+    #: every progress sample, so it is the last time anybody played the
+    #: episode — a rewatch included, which ``completed_at`` (written once)
+    #: cannot see.
+    last_played: datetime | None = None
+    #: The latest ``updated_at`` of a partial watch: not completed, position
+    #: above zero. :attr:`partial_recent` is it measured against D.
+    last_partial: datetime | None = None
+    #: Somebody has a partial watch updated within D days (hold b).
+    partial_recent: bool = False
+    #: Any user has pinned the show (hold a, FR-T8).
+    pinned: bool = False
+    #: The offline copy was served within :data:`COPY_SERVING_WINDOW` (hold d):
+    #: a device is downloading it right now.
+    copy_serving: bool = False
 
-    @property
-    def anchor(self) -> tuple[datetime, str] | None:
-        """When the grace period starts, and what that says about the episode."""
-        moments = [
-            (moment, reason)
-            for moment, reason in (
-                (self.last_completed, REASON_WATCHED),
-                # Also "watched": FR-W5 makes the two one fact, and a preview
-                # that distinguished them would be telling an admin about
-                # Arc's table layout rather than about the episode.
-                (self.progress_anchor, REASON_WATCHED),
-                (self.last_dropped, REASON_DROPPED),
-            )
-            if moment is not None
-        ]
-        if not moments:
+    def deadline(self, *, watched: timedelta, dropped: timedelta) -> _Deadline | None:
+        """The latest of every anchor's own deadline (FR-T1, M20 T8).
+
+        Each anchor runs its own grace — a completion or the progress anchor
+        ``watched`` (hours), a drop ``dropped`` (G days) — and the episode may
+        go only once **all** of them have run out. Taking the latest *anchor*
+        and its kind would let a completion seven hours ago cut short a drop
+        eight hours ago that still has days to run. ``None`` when there is no
+        anchor at all (the file-age case is the caller's).
+        """
+        found: list[_Deadline] = []
+        for moment, base, span, hours in (
+            (self.last_completed, REASON_WATCHED, watched, True),
+            # Also "watched": FR-W5 makes the two one fact, and a preview that
+            # distinguished them would be telling an admin about Arc's table
+            # layout rather than about the episode.
+            (self.progress_anchor, REASON_WATCHED, watched, True),
+            (self.last_dropped, REASON_DROPPED, dropped, False),
+        ):
+            if moment is not None:
+                found.append(_Deadline(moment + span, base, moment, span, hours))
+        if not found:
             return None
-        return max(moments, key=lambda pair: pair[0])
+        return max(found, key=lambda item: item.at)
 
     @property
     def progress_anchor(self) -> datetime | None:
@@ -547,19 +634,99 @@ class _Facts:
         ]
         return max(moments) if moments else None
 
+    @property
+    def watched_order(self) -> datetime | None:
+        """The floor eviction's key — least recently watched first (FR-T6).
 
-def _reason(base: str, anchor: datetime, grace: timedelta) -> str:
-    """The sentence a preview shows and the log line carries."""
+        ``max(last_played, last_completed)``, then ``last_dropped``, then the
+        file's age: a year-old episode rewatched yesterday was watched
+        yesterday, and is not the first to go (owner's call, M20 T8 review).
+        """
+        watched = [moment for moment in (self.last_played, self.last_completed) if moment]
+        if watched:
+            return max(watched)
+        for moment in (self.last_dropped, self.file_age_from):
+            if moment is not None:
+                return moment
+        return None
+
+    def playing_now(self, now: datetime) -> bool:
+        """Somebody played it within :data:`PLAYING_WINDOW`."""
+        return self.last_played is not None and self.last_played + PLAYING_WINDOW > now
+
+    def hold(
+        self, now: datetime, played_window: timedelta, deadline: datetime | None = None
+    ) -> str | None:
+        """The hold that keeps this episode past its grace, if any (M20 T8).
+
+        Checked in the order a reader would ask: a pin is the user's explicit
+        word, then somebody watching it, then a device fetching it. Hold (c)'s
+        window is never shorter than :data:`PLAYING_WINDOW`; hold (d) lapses
+        :data:`COPY_SERVING_CEILING` after ``deadline`` (or after the copy was
+        made, if later).
+        """
+        if self.pinned:
+            return HOLD_PINNED
+        if self.partial_recent:
+            return HOLD_PARTIAL
+        window = max(played_window, PLAYING_WINDOW)
+        if self.last_played is not None and self.last_played + window > now:
+            return HOLD_PLAYED
+        if self.copy_serving:
+            started = [
+                moment
+                for moment in (
+                    deadline,
+                    self.offline_copy.ready_at if self.offline_copy is not None else None,
+                )
+                if moment is not None
+            ]
+            if not started or max(started) + COPY_SERVING_CEILING > now:
+                return HOLD_SERVING
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _Deadline:
+    """One anchor's deadline: when its grace runs out, and how to say so."""
+
+    at: datetime
+    base: str
+    anchor: datetime
+    span: timedelta
+    hours: bool
+
+
+def _reason(base: str, anchor: datetime, grace: timedelta, *, hours: bool = False) -> str:
+    """The sentence a preview shows and the log line carries.
+
+    ``hours`` is the watched form (M20): "the 6-hour grace period ran out at
+    14:00 UTC on 2026-06-01". The day form is unchanged for drops and for
+    "nobody ever wanted it".
+    """
+    end = (anchor + grace).astimezone(UTC)
+    if hours:
+        count = int(grace.total_seconds() // 3600)
+        return (
+            f"{base}; the {count}-hour grace period ran out at "
+            f"{end:%H:%M} UTC on {end.date().isoformat()}"
+        )
     days = int(grace.total_seconds() // 86400)
-    return f"{base}; the {days}-day grace period ran out on {(anchor + grace).date().isoformat()}"
+    return f"{base}; the {days}-day grace period ran out on {end.date().isoformat()}"
 
 
-async def _facts(session: AsyncSession) -> dict[int, _Facts]:
+async def _facts(
+    session: AsyncSession, *, now: datetime, partial_window: timedelta
+) -> dict[int, _Facts]:
     """Everything the rule needs, for every episode that could be a candidate.
 
-    Six set-based queries rather than six per episode: a library with a
+    Set-based queries rather than a handful per episode: a library with a
     thousand ready episodes is an ordinary size, and an hourly sweep that made
     six thousand round trips would be the most expensive thing Arc does.
+
+    ``partial_window`` is how recent a partial watch must be to set
+    :attr:`_Facts.partial_recent` (D for the sweep, 24 hours for the floor);
+    :attr:`_Facts.copy_serving` is measured against ``now``.
     """
     facts: dict[int, _Facts] = defaultdict(_Facts)
     retained = select(Episode.id).where(Episode.state.in_(RETAINED_STATES))
@@ -580,17 +747,30 @@ async def _facts(session: AsyncSession) -> dict[int, _Facts]:
     for episode_id, moment in dropped.all():
         facts[episode_id].last_dropped = moment
 
-    completed = await session.execute(
-        select(WatchProgress.episode_id, func.max(WatchProgress.completed_at))
-        .where(
-            WatchProgress.episode_id.in_(retained),
-            WatchProgress.completed.is_(True),
-            WatchProgress.completed_at.is_not(None),
+    # One pass over ``watch_progress`` (it has no index on ``episode_id``) for
+    # three facts: the last completion (the watched anchor), and for holds b
+    # and c the last time anybody played it at all and the last partial watch.
+    # ``updated_at`` moves on every progress sample.
+    progress = await session.execute(
+        select(
+            WatchProgress.episode_id,
+            func.max(WatchProgress.completed_at).filter(
+                WatchProgress.completed.is_(True), WatchProgress.completed_at.is_not(None)
+            ),
+            func.max(WatchProgress.updated_at),
+            func.max(WatchProgress.updated_at).filter(
+                WatchProgress.completed.is_(False), WatchProgress.position_s > 0
+            ),
         )
+        .where(WatchProgress.episode_id.in_(retained))
         .group_by(WatchProgress.episode_id)
     )
-    for episode_id, moment in completed.all():
-        facts[episode_id].last_completed = moment
+    for episode_id, completed_at, played_at, partial_at in progress.all():
+        fact = facts[episode_id]
+        fact.last_completed = completed_at
+        fact.last_played = played_at
+        fact.last_partial = partial_at
+        fact.partial_recent = partial_at is not None and partial_at > now - partial_window
 
     # FR-W5's half of "watched": every episode at or below somebody's list
     # progress, anchored on that entry's own ``updated_at``. The join is on
@@ -641,25 +821,56 @@ async def _facts(session: AsyncSession) -> dict[int, _Facts]:
         await session.scalars(select(OfflineCopy).where(OfflineCopy.episode_id.in_(retained)))
     ).all():
         facts[copy.episode_id].offline_copy = copy
+        facts[copy.episode_id].copy_serving = served_recently(
+            copy, now=now, interval=COPY_SERVING_WINDOW.total_seconds()
+        )
+
+    # Hold a (FR-T8): a pin by any user covers every episode of the show.
+    pinned = await session.execute(
+        select(Episode.id).where(
+            Episode.id.in_(retained),
+            Episode.anime_id.in_(select(ShowPin.anime_id)),
+        )
+    )
+    for (episode_id,) in pinned.all():
+        facts[episode_id].pinned = True
 
     return facts
 
 
-async def candidates(
+@dataclass(frozen=True, slots=True)
+class RetentionPlan:
+    """What the next sweep deletes, and what it would but for a hold (FR-T4)."""
+
+    deletable: list[Deletable]
+    #: Past their grace, kept by one of the four holds (M20 T8). Each carries
+    #: its :attr:`Deletable.hold`.
+    held: list[Deletable]
+
+
+async def retention_plan(
     session: AsyncSession,
     settings: Settings,
     *,
     now: datetime | None = None,
     grace: timedelta | None = None,
-) -> list[Deletable]:
-    """Every episode the next sweep would delete, with its reason and size.
+    watched_grace: timedelta | None = None,
+) -> RetentionPlan:
+    """The rule, read-only: :func:`candidates` plus the episodes a hold keeps.
 
-    Pure with respect to the database: nothing is written here, which is what
-    lets ``GET /api/retention/preview`` call it directly.
+    ``grace`` is G (drops and "nobody ever wanted it"); ``watched_grace`` is
+    the watched anchor's grace (``watched_grace_hours``). Both are read from
+    ``settings`` when not given. Nothing is written here, which is what lets
+    ``GET /api/retention/preview`` call it directly.
     """
     moment = now or datetime.now(UTC)
     window = grace if grace is not None else await grace_period(session)
-    facts = await _facts(session)
+    watched_window = (
+        watched_grace
+        if watched_grace is not None
+        else timedelta(hours=await watched_grace_hours(session))
+    )
+    facts = await _facts(session, now=moment, partial_window=await unwatched_period(session))
     # A copy being made is reading the source right now (FR-P6). The episode
     # waits for the next sweep; the deleter asks again before it acts.
     encoding = await encoding_episode_ids(session)
@@ -671,6 +882,7 @@ async def candidates(
     ).all()
 
     found: list[Deletable] = []
+    held: list[Deletable] = []
     for episode in episodes:
         fact = facts.get(episode.id, _Facts())
         if fact.active_wants or episode.id in encoding:
@@ -682,39 +894,40 @@ async def candidates(
             # grace period — there is nothing to wait to be sure about — and
             # the "deletion" is the reset. Whatever build_targets does find
             # (an orphaned torrent, a download directory with no row) goes
-            # with it.
-            found.append(
-                Deletable(
-                    episode_id=episode.id,
-                    anime_id=episode.anime_id,
-                    number=episode.number,
-                    state=episode.state,
-                    reason=REASON_NO_FILES,
-                    targets=build_targets(
-                        settings,
-                        episode.id,
-                        rendition=None,
-                        media_files=[],
-                        torrents=fact.torrents,
-                        torrent_files=fact.torrent_files,
-                        offline_copy=fact.offline_copy,
-                    ),
-                )
+            # with it. Only a copy a device is fetching right now holds it.
+            reset = Deletable(
+                episode_id=episode.id,
+                anime_id=episode.anime_id,
+                number=episode.number,
+                state=episode.state,
+                reason=REASON_NO_FILES,
+                targets=build_targets(
+                    settings,
+                    episode.id,
+                    rendition=None,
+                    media_files=[],
+                    torrents=fact.torrents,
+                    torrent_files=fact.torrent_files,
+                    offline_copy=fact.offline_copy,
+                ),
+                hold=HOLD_SERVING if fact.copy_serving else None,
             )
+            (held if fact.copy_serving else found).append(reset)
             continue
 
-        anchored = fact.anchor
-        if anchored is not None:
-            anchor, base = anchored
-        else:
+        # The grace by the anchor's kind (M20): hours after watching, G days
+        # after a drop or for a file nobody ever wanted — and every anchor's
+        # deadline must have passed, not only the latest anchor's.
+        due = fact.deadline(watched=watched_window, dropped=window)
+        if due is None:
             # Nobody ever wanted it: the bytes' own age is the anchor. No
             # rendition and no indexed file either means there is nothing whose
             # age could be measured and nothing the deletion would remove.
             aged = fact.file_age_from
             if aged is None:
                 continue
-            anchor, base = aged, REASON_UNWANTED
-        if anchor + window >= moment:
+            due = _Deadline(aged + window, REASON_UNWANTED, aged, window, False)
+        if due.at >= moment:
             continue
 
         targets = build_targets(
@@ -728,18 +941,181 @@ async def candidates(
         )
         if targets.empty:
             continue
-        found.append(
-            Deletable(
-                episode_id=episode.id,
-                anime_id=episode.anime_id,
-                number=episode.number,
-                state=episode.state,
-                reason=_reason(base, anchor, window),
-                targets=targets,
-                anchor=anchor,
+        hold = fact.hold(moment, watched_window, due.at)
+        item = Deletable(
+            episode_id=episode.id,
+            anime_id=episode.anime_id,
+            number=episode.number,
+            state=episode.state,
+            reason=_reason(due.base, due.anchor, due.span, hours=due.hours),
+            targets=targets,
+            anchor=due.anchor,
+            hold=hold,
+        )
+        (found if hold is None else held).append(item)
+    return RetentionPlan(deletable=found, held=held)
+
+
+async def candidates(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    grace: timedelta | None = None,
+    watched_grace: timedelta | None = None,
+) -> list[Deletable]:
+    """Every episode the next sweep would delete, with its reason and size.
+
+    :func:`retention_plan` without the held list. Pure with respect to the
+    database.
+    """
+    plan = await retention_plan(
+        session, settings, now=now, grace=grace, watched_grace=watched_grace
+    )
+    return plan.deletable
+
+
+# --- The disk floor (FR-T6, M20 T8) -----------------------------------------
+
+
+async def floor_evictions(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    need_bytes: int,
+    now: datetime | None = None,
+    exclude: frozenset[int] = frozenset(),
+) -> list[Deletable]:
+    """What to evict, least recently watched first, to free ``need_bytes``.
+
+    ``exclude`` names episodes already accounted for — what the normal pass
+    of the same sweep deletes (or, in a dry run, would have deleted).
+
+    The last resort under the disk floor (FR-T6, owner 2026-10-13). Grace and
+    pins are **ignored**: a full disk stops every new fetch, and a pinned show
+    nobody has watched for a month is the right thing to give up first. Never
+    evicted, whatever the floor says:
+
+    * anything outside :data:`RETAINED_STATES` — every
+      :data:`PROTECTED_STATES` episode is being written or read;
+    * an episode with a **live want** — somebody is about to watch it, and a
+      pending trip copy holds one too;
+    * an encode in flight, a copy being served (hold d), the copy of an
+      active trip's pending episode;
+    * a partial watch updated within :data:`FLOOR_PARTIAL_WINDOW`;
+    * anything played within :data:`PLAYING_WINDOW` — a rewatch, or the last
+      minutes after a completion at 90 % dropped the want.
+
+    Ordered by :attr:`_Facts.watched_order` ascending —
+    ``max(last_played, last_completed)``, else ``last_dropped``, else the
+    file's age — and cut at the first prefix whose bytes reach ``need_bytes``.
+    Read-only, like :func:`candidates`; the caller deletes one at a time and
+    measures the disk again after each.
+    """
+    if need_bytes <= 0:
+        return []
+    moment = now or datetime.now(UTC)
+    facts = await _facts(session, now=moment, partial_window=FLOOR_PARTIAL_WINDOW)
+    encoding = await encoding_episode_ids(session)
+    trip_pending = set(
+        (
+            await session.scalars(
+                select(TripEpisode.episode_id)
+                .join(Trip, Trip.id == TripEpisode.trip_id)
+                .where(
+                    Trip.state == TripState.ACTIVE,
+                    TripEpisode.state == TripEpisodeState.PENDING,
+                )
+            )
+        ).all()
+    )
+    episodes = (
+        await session.scalars(
+            select(Episode).where(Episode.state.in_(RETAINED_STATES)).order_by(Episode.id)
+        )
+    ).all()
+
+    ranked: list[tuple[datetime, Deletable]] = []
+    for episode in episodes:
+        if episode.state in PROTECTED_STATES:  # pragma: no cover - not retained
+            continue
+        if episode.id in exclude:
+            continue
+        fact = facts.get(episode.id, _Facts())
+        if (
+            fact.active_wants
+            or episode.id in encoding
+            or episode.id in trip_pending
+            or fact.copy_serving
+            or fact.partial_recent
+            or fact.playing_now(moment)
+        ):
+            continue
+        targets = build_targets(
+            settings,
+            episode.id,
+            rendition=fact.rendition,
+            media_files=fact.media_files,
+            torrents=fact.torrents,
+            torrent_files=fact.torrent_files,
+            offline_copy=fact.offline_copy,
+        )
+        if targets.empty or targets.bytes <= 0:
+            continue
+        order = fact.watched_order
+        key = order if order is not None else datetime.max.replace(tzinfo=UTC)
+        reason = (
+            f"{REASON_FLOOR}; least recently watched ({order.date().isoformat()})"
+            if order is not None
+            else f"{REASON_FLOOR}; least recently watched"
+        )
+        ranked.append(
+            (
+                key,
+                Deletable(
+                    episode_id=episode.id,
+                    anime_id=episode.anime_id,
+                    number=episode.number,
+                    state=episode.state,
+                    reason=reason,
+                    targets=targets,
+                    anchor=order,
+                ),
             )
         )
-    return found
+
+    ranked.sort(key=lambda pair: (pair[0], pair[1].episode_id))
+    return _prefix([item for _, item in ranked], need_bytes)
+
+
+async def in_use_now(session: AsyncSession, episode_id: int, *, now: datetime) -> bool:
+    """Whether somebody is playing the episode or a device is fetching its copy.
+
+    Asked by the floor eviction immediately before each deletion, next to the
+    live-want check: the plan is minutes old by the time the last episode in
+    it is reached.
+    """
+    played = await session.scalar(
+        select(func.max(WatchProgress.updated_at)).where(WatchProgress.episode_id == episode_id)
+    )
+    if played is not None and played + PLAYING_WINDOW > now:
+        return True
+    copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
+    return copy is not None and served_recently(
+        copy, now=now, interval=COPY_SERVING_WINDOW.total_seconds()
+    )
+
+
+def _prefix(ranked: list[Deletable], need_bytes: int) -> list[Deletable]:
+    """The shortest head of ``ranked`` whose bytes reach ``need_bytes``."""
+    chosen: list[Deletable] = []
+    total = 0
+    for item in ranked:
+        if total >= need_bytes:
+            break
+        chosen.append(item)
+        total += item.bytes
+    return chosen
 
 
 # --- Idle offline copies (FR-P6) ---------------------------------------------
@@ -906,8 +1282,17 @@ async def retained_bytes(session: AsyncSession, settings: Settings) -> int:
 
 
 __all__ = [
+    "COPY_SERVING_CEILING",
+    "COPY_SERVING_WINDOW",
+    "FLOOR_PARTIAL_WINDOW",
+    "HOLD_PARTIAL",
+    "HOLD_PINNED",
+    "HOLD_PLAYED",
+    "HOLD_SERVING",
+    "PLAYING_WINDOW",
     "PROTECTED_STATES",
     "REASON_DROPPED",
+    "REASON_FLOOR",
     "REASON_IDLE_COPY",
     "REASON_MANUAL",
     "REASON_NO_FILES",
@@ -918,14 +1303,18 @@ __all__ = [
     "Deletable",
     "IdleCopy",
     "RetainedUsage",
+    "RetentionPlan",
     "Targets",
     "allowed_roots",
     "build_targets",
     "candidates",
     "dir_size",
+    "floor_evictions",
     "idle_copies",
+    "in_use_now",
     "retained_bytes",
     "retained_usage",
+    "retention_plan",
     "safe_path",
     "targets_for_episode",
 ]

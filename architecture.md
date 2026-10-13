@@ -159,7 +159,7 @@ arc/
                                  jobs, settings, anime, catalog, catalogue,
                                  list, schedule, home, review, acquisition,
                                  retention, media, media_stream, playback,
-                                 offline_copies, sync, mal, recs (+ csrf, deps
+                                 offline_copies, pins, sync, mal, recs (+ csrf, deps
                                  and the schema and
                                  `episode_extras` helpers they share; there is
                                  no `admin` router — the admin panel is the
@@ -184,7 +184,8 @@ arc/
                                  entry; `watched.py` is the leaf holding
                                  FR-W5's "what counts as watched", which the
                                  API and the wants reconciler both read
-        retention/               cleanup rules
+        retention/               cleanup rules, holds, floor eviction
+        pins.py                  per-user show pins, "Keep files" (FR-T8, M20)
         storage.py               free space on the data volume (FR-T4, FR-T6);
                                  a leaf read by both retention's disk page and
                                  acquisition's storage guard
@@ -504,9 +505,10 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason, last_search_at / last_search_forms / last_search_results (FR-A7, 2026-09-14: when `search_release` last asked Nyaa about this episode, how many query forms ran and how many distinct releases they returned between them *before* the filter — smallints, nullable, no backfill, written on every attempt that reaches Nyaa and never cleared. Three columns rather than a blob because all three are rendered on one line of the show page, and because "6 forms, 0 results" is what separates a query that matches nothing from a filter that keeps nothing) |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
-| `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most hourly; the idle rule counts from it, else from ready_at), error. M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
+| `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most every five minutes since M20 T8 — hourly before; the idle rule counts from it, else from ready_at, and retention's "copy being sent" hold reads it against a ten-minute window), error. M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at |
+| `show_pins` | user_id (FK CASCADE) + anime_id (FK CASCADE) (PK pair), created_at. A user's "Keep files" on a show (FR-T8, M20 T8, revision `911eca1dfc62`): delete after watching skips every episode of a show with **any** row here; only the floor eviction (§5.7) may still remove them. Written only by `services/pins.py` (`INSERT … ON CONFLICT DO NOTHING` / `DELETE`, both idempotent). No index beyond the key: a few rows per user, read whole once an hour |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
 | `wants` | user_id, episode_id (PK pair), created_at, dropped_at, drop_reason, sample (bool, `false` by default — the want a user asked for by hand, "try episode 1" / FR-A8, rather than one the reconciler derived from their list), trip (bool NOT NULL DEFAULT false, M19 T3, revision `811a128415cc` — true when the row exists **only** because of a trip, FR-A12: no window and no sample asked for it. **Rewritten by `compute_wants` on every run**, so it is the last reconciliation's answer; an episode whose live wants are all `trip` is *trip-only*, §5.4e) |
@@ -3226,7 +3228,64 @@ because the show left watching/planned is dropped, not deleted, so it
 always leaves an anchor; only a want the user watched past is deleted (its
 completion is the anchor). With no anchor at all (manual drops), the
 file's own age (`renditions.ready_at`, else `media_files.created_at`).
-Deletable when anchor + G < now. Deletion: qBittorrent torrent with files
+**The grace follows the anchor's kind (M20 T8, owner 2026-10-13):** a
+*watched* anchor (a completion or the progress anchor; `REASON_WATCHED`) uses
+`watched_grace_hours` (default 6, `retention/rules.watched_grace_hours`); a
+drop (`REASON_DROPPED`) and the file-age case (`REASON_UNWANTED`) keep G days.
+Each anchor runs its own deadline (`_Facts.deadline()`): deletable when the
+**latest deadline** — max(completion + hours, progress + hours, drop + G) —
+is past **and no hold applies**; the reason is built from that latest
+deadline, so a completion after a drop cannot cut the drop's G short. `_Facts` gains
+four set-based facts for the holds, each a reason the preview names
+(`Deletable.hold`, `HOLD_*`): **(a) `pinned`** — the show has any `show_pins`
+row (FR-T8); **(b) `partial_recent`** — a `watch_progress` row with
+`completed = false` and `position_s > 0` updated within D; **(c)
+`last_played`** — `max(watch_progress.updated_at)` over every user, held while
+`last_played + max(watched_grace_hours, PLAYING_WINDOW = 30 min) > now`
+(covers a rewatch, since `completed_at` is write-once, and a grace of 0 still
+covers the minutes after a 90 % completion); **(d) `copy_serving`** — the
+offline copy's `last_served_at` within `COPY_SERVING_WINDOW` (10 min; the media
+route now touches it at most every 5 min, `SERVED_TOUCH_SECONDS`), lapsing
+`COPY_SERVING_CEILING` (6 h, the trip settle's `FETCH_CEILING` value) after
+the deadline or the copy's `ready_at`, whichever is later — Arc stores no
+first-serve time. Hold (d), without the ceiling, also keeps a "no files on
+disk" reset from removing a copy mid-download. The three `watch_progress`
+facts (last completion, last play, last partial) come from **one** grouped
+query with filtered aggregates (the table has no index on `episode_id`).
+`retention_plan()` returns both lists — `deletable` (what `candidates()`
+returns, and what the sweep acts on) and `held` (past grace, kept by a hold)
+— so the preview and the sweep stay one rule. `_reason` writes the watched
+form in hours ("…; the 6-hour grace period ran out at 11:00 UTC on
+2026-06-01") and the others in days as before. A completion replayed from a
+device's outbox carries the device's time (`progress.py`), so it may be
+deleted at the next sweep; that is intended (spec FR-T1).
+
+**Floor eviction (FR-T6, M20 T8).** After the normal pass and the idle
+copies, `retention_sweep` calls `retention/floor.floor_plan` — the one
+function the preview calls too. With a floor set and the disk measurable, it
+takes `free` (measured, plus `pending_bytes`: what the pass freed but the disk
+does not show yet — zero for a real sweep, the pass's and idle copies' bytes
+for the preview and a dry run) and, if `storage_hold(free, floor)`, asks
+`floor_evictions(need_bytes = floor + 1 GiB − free, exclude = the pass's
+episodes)`: every `RETAINED_STATES` episode with bytes, **ignoring grace and
+pins**, minus anything with a live want (which covers a pending trip
+episode), an `offline_encode` in flight, `copy_serving`, a `pending`
+`trip_episodes` row of an active trip, a partial watch updated within 24 h
+(`FLOOR_PARTIAL_WINDOW`), or a play within 30 minutes (`PLAYING_WINDOW`),
+ordered by `_Facts.watched_order` ascending — `max(last_played,
+last_completed)`, else `last_dropped`, else `file_age_from` (least recently
+watched, a rewatch counting; ties by id) — and cut at the first prefix
+reaching `need`. The handler deletes them one at a time, asking again first
+for a live want and for `sweep.in_use_now` (a play within 30 minutes or a copy
+served within 10), one commit each, reason `REASON_FLOOR`, measuring the disk
+again after each and stopping once free ≥ floor + 1 GiB (the hysteresis
+keeps one new download from starting the next eviction). Under
+`RETENTION_DRY_RUN` nothing is deleted and the would-be bytes are counted
+instead. PROTECTED states are never retained, so never evicted. The preview
+sends the plan as `floor[]` with the same reason strings; the Storage tab
+renders it as "Floor evictions".
+
+Deletion: qBittorrent torrent with files
 (Arc category only; "not in client" is a no-op), rendition dir, source
 dir `downloads/<id>` or the manual-drop file, then the rows, then
 `→ not_wanted` (edges added for `downloaded|matched|failed`). Every path
@@ -3245,9 +3304,15 @@ not completed it; a stale-dropped want is revived only by an Arc-side action
 the row's `updated_at` when MAL omits one and nothing changed, so an
 unchanged six-hourly import can never keep a want alive. A qBittorrent
 outage skips that episode for this sweep only. Admin:
-`GET /api/retention/preview`, `POST /api/retention/sweep`,
+`GET /api/retention/preview` (since M20 also `held[]` with each row's `hold`,
+`floor[]` while under the floor, and `watched_grace_hours` / `grace_days`), `POST /api/retention/sweep`,
 `POST /api/episodes/{id}/delete-files`; `retained_bytes` on
-`GET /api/acquisition/status`.
+`GET /api/acquisition/status`; `GET /api/retention/disk` carries
+`pinned[]` — `{anime_id, anime_title, users, episodes, bytes}` per pinned
+show, largest first, from `services/pins.pinned_usage` (sources and copies
+from their size columns, renditions measured on a worker thread, retained
+episodes only). Pins: `PUT`/`DELETE /api/anime/{id}/pin` (§5b), and `pinned`
+(the caller's own) on `GET /api/anime/{id}`.
 
 **A batch-backed episode (FR-A11, 2026-09-18) needs almost no code here, and
 that is the design rather than luck.** Its file lives in
@@ -3882,6 +3947,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/anime/{id}` | any | (internal id) `AnimeDetail` + `anilist_id`, `mal_id`, `source`; `list_entry.mal_sync` state and, on this endpoint only, `list_entry.waiting` / `waiting_reason` (`slot` | `paused` | `held`) / `fetching_count` / `slot_cap` — FR-A10's picture of the caller, from `wants.slot_view(session, user_id, settings=…)`, computed only when the entry is watching/planned and stored nowhere; `relations[]` carry `id` (internal, null when Arc has no row yet) plus `anilist_id`/`mal_id`, and — for the relations Arc *has* cached — `cover_url`, `cover_large_url`, `episodes`, `season_year` for M15's franchise rail (all null when the row is not cached; nothing is fetched to fill them, and `format` comes from the stored relation blob so it is present either way). Resolved in one query over named columns, not one per relation; episodes carry `air_at_estimated`: summary + synopsis, genres, studio, `credits[]` (`{role, name}`, studio first — M15's "Made by" block; one row long on a MAL-sourced show), `cover_large_url` (nullable key art), `banner_url` and `backdrop_url` (the hero prefers the second), `tmdb_mapped` (whether the offline cross-id map reaches this show on TMDB — §5.8: not a promise of pictures, but what separates "the stills are on their way", since opening the page queues the enrichment, from "there are none to come"; since 2026-09-17 it is read only by the client's still-poll gate — the episode rows no longer say anything out loud, they fall back to the show's backdrop and then its key visual), relations, `next_airing`, `list_entry`, `episode_count`, `episodes[]` (id, number, title, `still_url` (nullable), air_at, aired, state, `watched` and `watched_source` — FR-W5: watched is `number <= list_entry.progress` **or** a completed `watch_progress` row of the caller's, and the source says which (`arc` | `progress` | null) so the client offers "Unwatch" only where there is a row to clear), plus `search` = `{at, forms, results, next_at} | null` — FR-A7's search summary (2026-09-14), sent only while the episode is `wanted`/`searching`/`unavailable` and only once a search has run, with `next_at` read from the pending `search_release` job's `run_after` in the same per-page pass as the torrents, renditions and transcode jobs (`api/episode_extras.py`, one query for the whole list) because FR-A6's retry schedule is a job row and not a column). Each episode's `offline` carries its small copy as `OfflineOut` (FR-P6, M19 — `null` unless the episode is `ready`; built from the same `episode_extras` pass: the `offline_copies` rows, the latest `offline_encode` job of those queued/preparing, and which episodes still have a `media_files` row — three queries for the page, no N+1 — and sent the same way on `GET /api/home` rows and `/play`'s episode; `unavailable` there means no copy and no source row). The episode's `release` carries `batch: true` when it is one selected file of a pack (FR-A11), and its `download_progress` is then **that file's** and not the pack's: the same `episode_extras` pass resolves a batch-backed episode through the `torrent_files` row that still claims it (one more query for the whole list, never one per episode), so the group and the title a row shows are the pack's — true of every episode in it — and the flag is what keeps the client from rendering them as a release of this one. A claim given back (cancelled, rejected, swept) stops answering for the episode at once, leaving its own `torrents` row, if it ever had one, to answer for it. `trip_limits` = `{max_episodes}` (the `trip_max_episodes` setting, 1..50; every caller, demo included — FR-A12, so the trip stepper knows the cap without the admin-only settings route). And `sample` = the caller's own live "try episode 1" want (`{episode_id, episode_number, requested_at, state}`) or null (FR-A8), and — **for an admin only** — `override` = this show's per-show rule override (`OverrideOut`, null for everybody else and for a show on the global rules; M16). It rides on this payload rather than a route of its own so the show page's editor costs no second round trip: one `settings` lookup, only for the reader who can act on it, and `read_override`'s title comes off the identity map because `ensure_anime` has already loaded the row |
 | `POST /api/anime/{id}/refresh` | admin | enqueue `catalog_refresh` for this show (deduped per anime id) |
 | `POST /api/anime/{id}/sample` | any | "try episode 1" (FR-A8): wants the show's lowest-numbered episode as a sample, with **no list change and no MAL write** → 202 `SampleOut` = `{episode_id, episode_number, requested_at, state}` — `state` is the episode's state *after* the call, because the route starts the search itself through the reconciler's shared `start_search()` (with the `UNAVAILABLE_RETRY` gate skipped) and also enqueues `compute_wants` for everything else. It queues the show's **TMDB enrichment** too (§5.8), so the episode's still arrives with the episode rather than with the nightly sweep. A **dormant** watching/planned entry (FR-A9) is no longer refused — it has no window, so "the next episodes are fetched automatically" would be false — and no entry of any status is activated by a sample: one episode is what was asked for. Idempotent: with a sample already live it answers that one and writes nothing, and pressing it after a stale drop (FR-T2) clears that drop. 404 unknown anime; 409 with the reason as plain English — "this show has no episodes yet", "episode 1 has not aired yet", "you are already following this show; the next episodes are fetched automatically" |
+| `PUT /api/anime/{id}/pin`, `DELETE /api/anime/{id}/pin` | any but demo | "Keep files" (FR-T8, M20 T8): pin or unpin the show for the caller (`show_pins`, §4). 204 either way, idempotent (a second pin is the same row, an unpin of an unpinned show is a no-op); nothing is fetched. 403 `demo_account` for the demo account before anything is looked up; 404 unknown anime. The caller's own pin is `pinned` on `GET /api/anime/{id}`; every pin with its bytes is `pinned[]` on `GET /api/retention/disk` (admin) |
 | `DELETE /api/anime/{id}/sample` | any | cancel it: every live sample want of the caller on this show is **dropped** (`sample cancelled`) rather than deleted, so retention keeps its grace anchor, and the route releases the episode to `not_wanted` through the reconciler's shared `release_if_unwanted()` unless somebody else still wants it (`compute_wants` is enqueued as well). 204; 404 when there is no live sample (a second press, or one FR-T2 already closed) |
 | `PUT /api/list/{anime_id}`, `DELETE /api/list/{anime_id}`, `GET /api/list?status=` | any | list states; PUT sets `updated_by=arc`, `mal_dirty=true` and **stamps `activated_at` if it is null** — the PUT *is* FR-A9's touch, including one that re-sends the status the show already has, which is what the Show page's "Fetch this show" button sends; `completed` sets progress to episode count; `score: null` clears. Rows are `{anime: AnimeSummary, entry}`, so each carries `cover_large_url`, `genres[]`, `banner_url`, `backdrop_url` and `studio` (M15: My List credits the studio per row). Every `ListEntryOut` carries `activated_at` and a derived `dormant: bool` (null stamp **and** the show not `RELEASING`), which is what the Show page's note and My List's "imported" badge read |
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: on a browse 7 undated days (0 = Monday in the user's timezone); on the current season 7–13 days each with a local `date` (Monday of this week to today + 6) holding only the shows airing that date (any season, via `airing_between`; `last_episode` when two of a show's air that date), finished shows only on dates an episode of theirs aired and otherwise in `ended`, not-yet-started ones in `unscheduled` with `starts_on` (2026-10-04); entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every weekly-format show with an air time on its dates, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
@@ -6337,3 +6403,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-13 — M20 T1: pure remux/subtitle helpers landed; no behaviour change yet
   (`copyable`, `remux_args`, `media/subtitles.py`; §5.3c).
 - 2026-10-13 — M20 T0: look_ahead_n default 1 (prod row migrated 2 → 1), watched_grace_hours (6) and min_seeders_warn (3) added; behaviour lands in T4/T8/T9. Revision `a7d2e5c9f318` (`seed_m20_settings`, data only, on `f1a6d3c08b52`).
+- 2026-10-13 (owner, M20 T8) — **Delete after watching, pins, floor eviction** (§4, §5.7, §5b; spec FR-T1/T4/T5/T6/T8). Retention's grace follows the anchor's kind: `watched_grace_hours` after a watch, G days after a drop or for a never-wanted file. Four holds (pin by anyone, partial watch within D, play within the grace, copy sent within 10 min) keep an episode past its grace and are listed by the preview (`retention_plan().held`). Every anchor's own deadline must pass (a completion cannot cut a drop's G short). Hold (c) is at least 30 minutes; hold (d) lapses 6 h after the deadline. Under the disk floor the hourly sweep evicts least recently watched first (`floor_evictions`; order `max(last_played, last_completed)`, then `last_dropped`, then file age — orchestrator's call after review), ignoring grace and pins, never a live want / encode / copy being sent / pending trip copy / partial watch within 24 h / play within 30 min (re-asked before each delete), one commit each, until floor + 1 GiB; dry run honoured without double counting. The plan is `retention/floor.floor_plan`, shared with the preview's `floor[]`. New table `show_pins` (revision `911eca1dfc62` on `a7d2e5c9f318`), `services/pins.py`, `api/pins.py`; `pinned` on the show payload and `pinned[]` on the disk view. `SERVED_TOUCH_SECONDS` 3600 → 300 so the 10-minute copy hold sees a download in progress. No new dependency.

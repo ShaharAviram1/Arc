@@ -36,12 +36,15 @@ from arc.models import Episode, Want
 from arc.services.acquisition.qbit import QbitUnavailable
 from arc.services.jobs.registry import JobContext, register
 from arc.services.retention.delete import delete_episode_files, delete_idle_copy
+from arc.services.retention.floor import floor_plan, floor_target, free_bytes
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
 from arc.services.retention.rules import offline_idle_period
 from arc.services.retention.sweep import (
     REASON_MANUAL,
+    Deletable,
     candidates,
     idle_copies,
+    in_use_now,
     targets_for_episode,
 )
 
@@ -71,7 +74,8 @@ async def _wanted_again(ctx: JobContext, episode_id: int) -> bool:
 
 @register(RETENTION_SWEEP)
 async def retention_sweep(ctx: JobContext) -> None:
-    """Delete everything past its grace period (FR-T1, FR-T3)."""
+    """Delete everything past its grace period (FR-T1, FR-T3), then, if the
+    disk is still under its floor, evict least recently watched (FR-T6)."""
     now = datetime.now(UTC)
     dry_run = ctx.settings.retention_dry_run
     found = await candidates(ctx.session, ctx.settings, now=now)
@@ -79,6 +83,7 @@ async def retention_sweep(ctx: JobContext) -> None:
     swept = 0
     freed = 0
     unreachable = 0
+    acted: list[Deletable] = []
     for target in found:
         episode = await ctx.session.get(Episode, target.episode_id)
         if episode is None:  # pragma: no cover - the show was deleted mid-sweep
@@ -112,6 +117,7 @@ async def retention_sweep(ctx: JobContext) -> None:
             continue
         swept += 1
         freed += removed.freed_bytes
+        acted.append(target)
         if not dry_run:
             await ctx.session.commit()
 
@@ -129,6 +135,17 @@ async def retention_sweep(ctx: JobContext) -> None:
             if not dry_run:
                 await ctx.session.commit()
 
+    # Last, the disk floor (FR-T6, M20 T8): if the volume is still under it,
+    # evict least recently watched first until it is a GiB above it.
+    evicted, evicted_bytes = await _evict_to_floor(
+        ctx,
+        now=now,
+        dry_run=dry_run,
+        swept=acted,
+        pending_bytes=freed if dry_run else 0,
+    )
+    freed += evicted_bytes
+
     ctx.log.info(
         "retention sweep finished",
         extra={
@@ -136,11 +153,90 @@ async def retention_sweep(ctx: JobContext) -> None:
             "candidates": len(found),
             "deleted": swept,
             "idle_copies": copies,
+            "floor_evicted": evicted,
             "skipped_qbit_down": unreachable,
             "freed_bytes": freed,
             "dry_run": dry_run,
         },
     )
+
+
+async def _evict_to_floor(
+    ctx: JobContext,
+    *,
+    now: datetime,
+    dry_run: bool,
+    swept: list[Deletable],
+    pending_bytes: int,
+) -> tuple[int, int]:
+    """Evict until free space is at least the floor plus 1 GiB (FR-T6, M20 T8).
+
+    The plan is :func:`~arc.services.retention.floor.floor_plan` — the same
+    function the preview calls — measured after the normal pass: ``swept`` is
+    excluded, and under ``RETENTION_DRY_RUN`` its bytes (``pending_bytes``)
+    count as freed although nothing was deleted. Before each deletion the live
+    want, a play within 30 minutes and a copy being sent are asked again; each
+    episode is committed on its own, and the disk is measured again after
+    each, so the loop stops as soon as the target is reached. In a dry run
+    nothing is deleted and the would-be bytes are counted instead.
+    """
+    found = await floor_plan(
+        ctx.session, ctx.settings, now=now, already=swept, pending_bytes=pending_bytes
+    )
+    if not found:
+        return 0, 0
+    target = await floor_target(ctx.session)
+    measured = await free_bytes(ctx.settings)
+    if target is None or measured is None:  # pragma: no cover - floor_plan was empty then
+        return 0, 0
+    free = measured + pending_bytes
+    ctx.log.warning(
+        "free space is below the floor; evicting least recently watched first",
+        extra={"free_bytes": free, "target_bytes": target, "planned": len(found)},
+    )
+
+    evicted = 0
+    freed = 0
+    for item in found:
+        if free >= target:
+            break
+        episode = await ctx.session.get(Episode, item.episode_id)
+        if episode is None:  # pragma: no cover - the show was deleted mid-sweep
+            continue
+        if await _wanted_again(ctx, item.episode_id):
+            continue
+        if await in_use_now(ctx.session, item.episode_id, now=datetime.now(UTC)):
+            ctx.log.info(
+                "somebody is playing or fetching this episode; not evicting it",
+                extra={"episode_id": item.episode_id},
+            )
+            continue
+        try:
+            removed = await delete_episode_files(
+                ctx.session,
+                ctx.settings,
+                episode,
+                item.targets,
+                reason=item.reason,
+                dry_run=dry_run,
+            )
+        except QbitUnavailable as exc:
+            ctx.log.warning(
+                "qBittorrent is unreachable; not evicting this episode",
+                extra={"episode_id": item.episode_id, "error": str(exc)},
+            )
+            continue
+        if not removed.acted:
+            continue
+        evicted += 1
+        freed += removed.freed_bytes
+        if dry_run:
+            free += removed.freed_bytes
+            continue
+        await ctx.session.commit()
+        again = await free_bytes(ctx.settings)
+        free = again if again is not None else free + removed.freed_bytes
+    return evicted, freed
 
 
 @register(DELETE_EPISODE_FILES)

@@ -46,6 +46,7 @@ from arc.models.offline import (
     OfflineId,
     OfflineImport,
 )
+from arc.models.pins import ShowPin
 from arc.models.recs import RecRun
 from arc.models.settings import DEFAULT_SETTINGS, Setting
 from arc.models.tracking import IN_PROGRESS_INDEX, ListEntry, WatchProgress
@@ -89,6 +90,7 @@ __all__ = [
     "ReviewState",
     "Session",
     "Setting",
+    "ShowPin",
     "Torrent",
     "TorrentFile",
     "TorrentKind",

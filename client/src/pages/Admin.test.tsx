@@ -899,6 +899,78 @@ describe('Admin — Storage (FR-D3, FR-T4)', () => {
     expect(await screen.findByText(/1 batch file claim released/)).toBeInTheDocument()
   })
 
+  it('lists pinned shows with their bytes (FR-T8)', async () => {
+    await openStorage({
+      [DISK_PATH]: {
+        body: {
+          ...DISK,
+          pinned: [
+            { anime_id: 701, anime_title: 'Mushishi', users: 2, episodes: 3, bytes: 4_200_000_000 },
+          ],
+        },
+      },
+    })
+
+    const section = screen.getByRole('region', { name: 'Pinned shows' })
+    expect(within(section).getByRole('link', { name: 'Mushishi' })).toHaveAttribute(
+      'href',
+      '/anime/701',
+    )
+    expect(within(section).getByText(/3 episodes/)).toHaveTextContent('pinned by 2 users')
+  })
+
+  it('says when no show is pinned', async () => {
+    await openStorage()
+
+    expect(screen.getByText('No show is pinned.')).toBeInTheDocument()
+  })
+
+  it('lists the episodes a hold keeps past their grace (M20)', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          held: [
+            {
+              ...RETENTION_PREVIEW.episodes[0],
+              episode_id: 9006,
+              number: 6,
+              hold: 'the show is pinned',
+            },
+          ],
+        },
+      },
+    })
+
+    expect(await screen.findByText('Kept by a hold')).toBeInTheDocument()
+    expect(screen.getByText(/the show is pinned/)).toBeInTheDocument()
+  })
+
+  it('lists what the floor would evict, with the sweep’s own reason (FR-T6)', async () => {
+    const reason = 'free space is below the floor; least recently watched (2026-09-01)'
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          floor: [{ ...RETENTION_PREVIEW.episodes[0], episode_id: 9007, number: 7, reason }],
+        },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Floor evictions' })
+    expect(within(section).getByText(/episode 7/)).toBeInTheDocument()
+    expect(
+      within(section).getByText(new RegExp(reason.replace(/[()]/g, '\\$&'))),
+    ).toBeInTheDocument()
+  })
+
+  it('shows no floor section when the disk is above the floor', async () => {
+    await openStorage()
+
+    await screen.findByRole('table', { name: 'Retention preview' })
+    expect(screen.queryByRole('region', { name: 'Floor evictions' })).not.toBeInTheDocument()
+  })
+
   it('says nothing about claims when there are none', async () => {
     await openStorage()
 

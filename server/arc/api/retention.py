@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,8 +36,17 @@ from arc.api.deps import EpisodeId, SessionDep, SettingsDep, get_admin_user
 from arc.api.jobs import JobOut
 from arc.models import Anime, Episode, EpisodeState, Job
 from arc.services.catalog import preferred_title
+from arc.services.pins import pinned_usage
+from arc.services.retention.floor import floor_plan
 from arc.services.retention.names import enqueue_delete_files, enqueue_retention_sweep
-from arc.services.retention.sweep import PROTECTED_STATES, candidates, retained_usage
+from arc.services.retention.rules import grace_days, offline_idle_period, watched_grace_hours
+from arc.services.retention.sweep import (
+    PROTECTED_STATES,
+    Deletable,
+    idle_copies,
+    retained_usage,
+    retention_plan,
+)
 from arc.services.storage import disk_usage
 
 log = logging.getLogger(__name__)
@@ -81,6 +91,9 @@ class RetentionItemOut(BaseModel):
     #: the claim, which is un-wanted *before* the file is unlinked so that a
     #: start for another episode cannot re-fetch what retention just removed.
     torrent_files: int = 0
+    #: In ``held`` only: the hold that keeps this episode past its grace
+    #: (pinned, part-way through, played recently, copy being downloaded).
+    hold: str | None = None
 
 
 class RetentionPreviewOut(BaseModel):
@@ -92,6 +105,19 @@ class RetentionPreviewOut(BaseModel):
     episodes: list[RetentionItemOut]
     #: The sum of the list, so the client does not have to add it up.
     bytes: int
+    #: Past their grace but kept by a hold (M20 T8). Not deleted by the next
+    #: sweep; listed so that "why is this still on the disk?" has an answer.
+    held: list[RetentionItemOut] = []
+    #: What the floor eviction would then take (FR-T6, M20 T8): non-empty only
+    #: while free space, after the normal pass, is under the floor. The same
+    #: plan and reason strings as the sweep (``retention/floor.floor_plan``);
+    #: the sweep stops early if the disk, measured again after each eviction,
+    #: is already a GiB above the floor.
+    floor: list[RetentionItemOut] = []
+    #: The two graces the reasons are written in (FR-T1, FR-T5): hours after
+    #: watching, G days after a drop or for a file nobody ever wanted.
+    watched_grace_hours: int = 6
+    grace_days: int = 7
 
 
 @router.get(
@@ -105,33 +131,52 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
     Nothing is written and no upstream service is called, so this is safe to
     poll and safe to look at while a sweep is running.
     """
-    found = await candidates(session, settings)
-    titles: dict[int, str] = {}
-    for target in found:
-        if target.anime_id not in titles:
-            anime = await session.get(Anime, target.anime_id)
-            titles[target.anime_id] = preferred_title(anime) if anime is not None else ""
+    now = datetime.now(UTC)
+    plan = await retention_plan(session, settings, now=now)
+    # The floor half, exactly as the sweep plans it after its normal pass:
+    # what that pass and the idle-copy rule free counts as freed already.
+    deleting = {target.episode_id for target in plan.deletable}
+    idle = await idle_copies(session, settings, now=now, idle=await offline_idle_period(session))
+    pending = sum(target.bytes for target in plan.deletable) + sum(
+        copy.bytes for copy in idle if copy.episode_id not in deleting
+    )
+    floor = await floor_plan(
+        session, settings, now=now, already=plan.deletable, pending_bytes=pending
+    )
+    titles = await _titles(session, {t.anime_id for t in (*plan.deletable, *plan.held, *floor)})
     return RetentionPreviewOut(
         dry_run=settings.retention_dry_run,
-        bytes=sum(target.bytes for target in found),
-        episodes=[
-            RetentionItemOut(
-                episode_id=target.episode_id,
-                anime_id=target.anime_id,
-                anime_title=titles[target.anime_id],
-                number=target.number,
-                state=target.state,
-                reason=target.reason,
-                bytes=target.bytes,
-                rendition_dir=(
-                    str(target.targets.rendition_dir) if target.targets.rendition_dir else None
-                ),
-                source_dir=(str(target.targets.source_dir) if target.targets.source_dir else None),
-                torrents=list(target.targets.torrent_hashes),
-                torrent_files=len(target.targets.torrent_file_ids),
-            )
-            for target in found
-        ],
+        bytes=sum(target.bytes for target in plan.deletable),
+        episodes=[_item(target, titles) for target in plan.deletable],
+        held=[_item(target, titles) for target in plan.held],
+        floor=[_item(target, titles) for target in floor],
+        watched_grace_hours=await watched_grace_hours(session),
+        grace_days=await grace_days(session),
+    )
+
+
+async def _titles(session: SessionDep, anime_ids: set[int]) -> dict[int, str]:
+    titles: dict[int, str] = {}
+    for anime_id in sorted(anime_ids):
+        anime = await session.get(Anime, anime_id)
+        titles[anime_id] = preferred_title(anime) if anime is not None else ""
+    return titles
+
+
+def _item(target: Deletable, titles: dict[int, str]) -> RetentionItemOut:
+    return RetentionItemOut(
+        episode_id=target.episode_id,
+        anime_id=target.anime_id,
+        anime_title=titles.get(target.anime_id, ""),
+        number=target.number,
+        state=target.state,
+        reason=target.reason,
+        bytes=target.bytes,
+        rendition_dir=(str(target.targets.rendition_dir) if target.targets.rendition_dir else None),
+        source_dir=(str(target.targets.source_dir) if target.targets.source_dir else None),
+        torrents=list(target.targets.torrent_hashes),
+        torrent_files=len(target.targets.torrent_file_ids),
+        hold=target.hold,
     )
 
 
@@ -155,6 +200,19 @@ class RetainedOut(BaseModel):
     total: int
 
 
+class PinnedShowOut(BaseModel):
+    """One pinned show on ``GET /api/retention/disk`` (FR-T8)."""
+
+    anime_id: int
+    anime_title: str
+    #: How many users have pinned it.
+    users: int
+    #: Retained episodes of the show.
+    episodes: int
+    #: Source, rendition and offline copy bytes of those episodes.
+    bytes: int
+
+
 class DiskOut(BaseModel):
     """``GET /api/retention/disk`` (FR-T4, FR-D3).
 
@@ -167,6 +225,9 @@ class DiskOut(BaseModel):
     data_dir: DiskUsageOut
     retained: RetainedOut
     episodes_retained: int
+    #: Every pinned show and what its retained episodes hold (FR-T8), largest
+    #: first. Delete after watching skips these; only the floor may evict them.
+    pinned: list[PinnedShowOut] = []
 
 
 def _disk_usage(path: Path) -> DiskUsageOut:
@@ -199,7 +260,19 @@ async def disk(session: SessionDep, settings: SettingsDep) -> DiskOut:
     """
     usage = await retained_usage(session, settings)
     data_dir = await asyncio.to_thread(_disk_usage, settings.data_dir)
+    pinned = await pinned_usage(session, settings)
+    titles = await _titles(session, {show.anime_id for show in pinned})
     return DiskOut(
+        pinned=[
+            PinnedShowOut(
+                anime_id=show.anime_id,
+                anime_title=titles.get(show.anime_id, ""),
+                users=show.users,
+                episodes=show.episodes,
+                bytes=show.bytes,
+            )
+            for show in pinned
+        ],
         data_dir=data_dir,
         retained=RetainedOut(
             sources=usage.sources,
@@ -264,6 +337,7 @@ __all__ = [
     "IN_FLIGHT",
     "DiskOut",
     "DiskUsageOut",
+    "PinnedShowOut",
     "RetainedOut",
     "RetentionItemOut",
     "RetentionPreviewOut",

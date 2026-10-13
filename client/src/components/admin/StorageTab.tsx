@@ -171,6 +171,116 @@ function DiskPanel({ disk }: { disk: RetentionDisk }) {
   )
 }
 
+const PINNED_EXPLANATION =
+  'Shows somebody asked Arc to keep (“Keep files” on the show page). Watched episodes of these ' +
+  'are not deleted after the grace period; only a disk under its free-space floor can still ' +
+  'evict them, least recently watched first.'
+
+/** Every pinned show and what it holds on the disk (FR-T8, M20). */
+function PinnedPanel({ disk }: { disk: RetentionDisk }) {
+  const pinned = disk.pinned ?? []
+  return (
+    <section className="mt-10" aria-labelledby="pinned-shows-heading">
+      <h3 id="pinned-shows-heading" className="text-[16px] font-medium text-[var(--arc-text)]">
+        Pinned shows
+      </h3>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {PINNED_EXPLANATION}
+      </p>
+      {pinned.length === 0 ? (
+        <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">No show is pinned.</p>
+      ) : (
+        <ul className="mt-3 flex flex-col gap-0.5">
+          {pinned.map((show) => (
+            <li
+              key={show.anime_id}
+              className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3"
+            >
+              <Link
+                to={`/anime/${String(show.anime_id)}`}
+                className="text-[14px] font-medium text-[var(--arc-text)] hover:underline"
+              >
+                {show.anime_title}
+              </Link>
+              <span className="text-[13px] tabular-nums text-[var(--arc-text-muted)]">
+                {formatBytes(show.bytes)} ·{' '}
+                {show.episodes === 1 ? '1 episode' : `${String(show.episodes)} episodes`} · pinned
+                by {show.users === 1 ? '1 user' : `${String(show.users)} users`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+/** Episodes past their grace that a hold keeps (M20): why they are still here. */
+function HeldList({ held }: { held: RetentionItem[] }) {
+  return (
+    <EpisodeList
+      title="Kept by a hold"
+      items={held}
+      detail={(item) => `${item.hold ?? ''} · ${formatBytes(item.bytes)}`}
+    />
+  )
+}
+
+const FLOOR_NOTE =
+  'Free space is under the floor, so after the list above the sweep evicts these too, least ' +
+  'recently watched first — pins and grace periods do not protect them. It stops as soon as ' +
+  'the disk is a GiB above the floor.'
+
+/** What the floor eviction would take (FR-T6, M20): same plan as the sweep. */
+function FloorList({ floor }: { floor: RetentionItem[] }) {
+  return (
+    <EpisodeList
+      title="Floor evictions"
+      note={FLOOR_NOTE}
+      items={floor}
+      detail={(item) => `${item.reason} · ${formatBytes(item.bytes)}`}
+    />
+  )
+}
+
+function EpisodeList({
+  title,
+  note,
+  items,
+  detail,
+}: {
+  title: string
+  note?: string
+  items: RetentionItem[]
+  detail: (item: RetentionItem) => string
+}) {
+  if (items.length === 0) return null
+  return (
+    <section className="mt-6" aria-label={title}>
+      <h3 className="text-[16px] font-medium text-[var(--arc-text)]">{title}</h3>
+      {note === undefined ? null : (
+        <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+          {note}
+        </p>
+      )}
+      <ul className="mt-3 flex flex-col gap-0.5">
+        {items.map((item) => (
+          <li
+            key={item.episode_id}
+            className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3"
+          >
+            <span className="text-[14px] text-[var(--arc-text)]">
+              {item.anime_title}
+              <span className="text-[var(--arc-text-muted)]"> · episode {item.number}</span>
+            </span>
+            <span className="text-[13px] text-[var(--arc-text-muted)]">{detail(item)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 /**
  * How many batch file claims the whole preview would give back (FR-A11).
  *
@@ -283,7 +393,10 @@ export function StorageTab() {
           }}
         />
       ) : (
-        <DiskPanel disk={disk.data} />
+        <>
+          <DiskPanel disk={disk.data} />
+          <PinnedPanel disk={disk.data} />
+        </>
       )}
 
       <section className="mt-10">
@@ -359,7 +472,10 @@ export function StorageTab() {
             {preview.data.episodes.length === 0 ? (
               <p className="text-[14px] text-[var(--arc-text-muted)]">
                 Nothing is due for deletion. Files are removed, and only removed, once the grace
-                period has run out.
+                period has run out
+                {preview.data.watched_grace_hours === undefined
+                  ? '.'
+                  : ` (${String(preview.data.watched_grace_hours)} hours after watching, ${String(preview.data.grace_days ?? 7)} days after a drop).`}
               </p>
             ) : (
               <>
@@ -385,6 +501,8 @@ export function StorageTab() {
                 </TableScroll>
               </>
             )}
+            <FloorList floor={preview.data.floor ?? []} />
+            <HeldList held={preview.data.held ?? []} />
           </div>
         )}
       </section>
