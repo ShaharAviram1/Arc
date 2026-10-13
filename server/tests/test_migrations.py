@@ -656,3 +656,44 @@ def test_device_holdings_is_keyed_per_device_and_indexed_per_user_report(
     assert primary is not None and "(user_id, device_id, episode_id)" in primary
     lookup = _index_definition(test_database_url, "device_holdings", HOLDINGS_USER_REPORTED_INDEX)
     assert lookup is not None and "(user_id, reported_at)" in lookup
+
+
+#: ``torrents_evicted_at`` (M20 T9) and the revision it sits on.
+EVICTED_AT = "244fbc2111f9"
+BEFORE_EVICTED_AT = "caf1811e8ee6"
+
+
+def _torrents_column(url: str, column: str) -> tuple[str, str] | None:
+    async def run() -> tuple[str, str] | None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT data_type, is_nullable FROM information_schema.columns "
+                        "WHERE table_name = 'torrents' AND column_name = :column"
+                    ),
+                    {"column": column},
+                )
+                row = found.first()
+                return None if row is None else (str(row[0]), str(row[1]))
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_torrents_evicted_at_goes_up_and_down(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``torrents.evicted_at`` (M20 T9): a nullable timestamptz, and reversible."""
+    config = alembic_config(test_database_url)
+    column = ("timestamp with time zone", "YES")
+    assert _torrents_column(test_database_url, "evicted_at") == column
+    try:
+        command.downgrade(config, BEFORE_EVICTED_AT)
+        assert _torrents_column(test_database_url, "evicted_at") is None
+        command.upgrade(config, EVICTED_AT)
+        assert _torrents_column(test_database_url, "evicted_at") == column
+    finally:
+        command.upgrade(config, "head")

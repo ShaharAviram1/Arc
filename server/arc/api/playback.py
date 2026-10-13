@@ -251,6 +251,7 @@ async def play(
             transcode_job=extras.transcode_jobs.get(episode.id),
             offline=extras.offline.out(episode),
             trip_only=episode.id in extras.trip_only,
+            min_seeders_warn=extras.min_seeders_warn,
         ),
         anime=AnimeSummary.from_anime(anime),
         playlist_url=None if not_ready else playlist_url(episode.id),

@@ -127,6 +127,8 @@ async def make_retained_episode(
                 title="[Group] Retention Test - 07 (1080p).mkv",
                 qbit_state="stalledUP",
                 progress=1.0,
+                # It finished, so retention remembers it (M20 T9).
+                completed_at=ready_at or NOW - 30 * DAY,
             )
         )
     await session.flush()

@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from arc.api.episode_extras import EpisodeRelease, OfflineFacts
+from arc.api.episode_extras import EpisodeRelease, OfflineFacts, few_seeders
 from arc.api.media_stream import download_url
 from arc.api.offline_schemas import OfflineOut
 from arc.api.schemas import OverrideOut
@@ -385,7 +385,8 @@ class ReleaseOut(BaseModel):
     resolution: str | None = None
     #: The raw release title. The client renders it in a tooltip.
     title: str | None = None
-    #: Seeders **at pick time**, not now — it is what the ranker saw.
+    #: Seeders: what the ranker saw at pick time, until the client's tracker
+    #: scrape replaces it while the torrent is live (M20 T9).
     seeders: int | None = None
     #: Whether this episode is one selected file of a batch (FR-A4, FR-A11).
     #: The group and the title are the *pack's*, which is exactly what they are
@@ -669,6 +670,15 @@ class EpisodeOut(BaseModel):
     #: Whether the caller has a live want on this episode (window, sample or
     #: trip): the show page offers "Change release…" only then (FR-A13).
     wanted_by_me: bool = False
+    #: The live torrent has fewer seeders than ``min_seeders_warn`` (FR-A16):
+    #: the row says "Few seeders (2)" and offers the show pin (FR-T8), because
+    #: a thin swarm is the one that will not be there for a re-fetch. Only the
+    #: show page and the player compute it; false elsewhere and when the
+    #: setting is 0.
+    few_seeders: bool = False
+    #: That live torrent's seeders — Nyaa's count on a first fetch, the
+    #: tracker's once the client has scraped — or null with no live torrent.
+    seeders: int | None = None
 
     @classmethod
     def from_episode(
@@ -688,6 +698,7 @@ class EpisodeOut(BaseModel):
         offline: OfflineOut | None = None,
         trip_only: bool = False,
         wanted_by_me: bool = False,
+        min_seeders_warn: int = 0,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -748,6 +759,8 @@ class EpisodeOut(BaseModel):
             # also covers it.
             trip_only=trip_only and episode.state is not EpisodeState.READY,
             wanted_by_me=wanted_by_me,
+            few_seeders=few_seeders(release, min_seeders_warn),
+            seeders=release.live_seeders if release is not None else None,
         )
 
 
@@ -1014,6 +1027,7 @@ class AnimeDetail(AnimeCore):
         tmdb_mapped: bool = False,
         override: OverrideOut | None = None,
         pinned: bool = False,
+        min_seeders_warn: int = 0,
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -1084,6 +1098,7 @@ class AnimeDetail(AnimeCore):
                     offline=offline.out(episode) if offline is not None else None,
                     trip_only=episode.id in trip_only,
                     wanted_by_me=episode.id in wanted_by_me,
+                    min_seeders_warn=min_seeders_warn,
                 )
                 for episode in episodes
             ],

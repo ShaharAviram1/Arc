@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.offline_schemas import OfflineOut
@@ -51,6 +51,8 @@ from arc.models import (
     TorrentKind,
 )
 from arc.services.acquisition.names import SEARCH_RELEASE
+from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_EVICTED, QBIT_MISSING
+from arc.services.acquisition.rules import min_seeders_warn
 from arc.services.media.copies import episodes_with_sources
 from arc.services.media.names import latest_offline_jobs, latest_transcode_jobs
 from arc.services.trips.rules import trip_only_episode_ids
@@ -82,6 +84,31 @@ class EpisodeRelease:
     progress: float | None
     #: Whether this episode is one file of a pack (FR-A11).
     batch: bool = False
+
+    @property
+    def live(self) -> bool:
+        """Whether the torrent is one Arc is still using, not one it decided about."""
+        state = self.torrent.qbit_state
+        return state is None or (state not in DECIDED_STATES and state != QBIT_MISSING)
+
+    @property
+    def live_seeders(self) -> int | None:
+        """The live torrent's seeders (FR-A16), or ``None`` when not live or unknown."""
+        return self.torrent.seeders if self.live else None
+
+
+def few_seeders(release: EpisodeRelease | None, threshold: int) -> bool:
+    """FR-A16: the live torrent has fewer than ``threshold`` seeders (0 = never).
+
+    Pure, so the table in the tests is the rule. Nyaa's figure on a first fetch
+    and the tracker's on a re-fetch are the same column (``poll_qbit`` replaces
+    one with the other once the client has scraped), so nothing here needs to
+    know which it is.
+    """
+    if threshold <= 0 or release is None:
+        return False
+    seeders = release.live_seeders
+    return seeders is not None and seeders < threshold
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +192,9 @@ class EpisodeExtras:
     #: The episodes wanted only by trips (FR-A12): no rendition is coming for
     #: them, whoever is looking. One grouped query for the page.
     trip_only: frozenset[int] = frozenset()
+    #: ``min_seeders_warn`` (FR-A16): below this many seeders on its live
+    #: torrent an episode row warns; 0 never warns. One ``settings`` read.
+    min_seeders_warn: int = 0
 
 
 async def torrents_for(
@@ -196,8 +226,16 @@ async def torrents_for(
     if not episode_ids:
         return {}
     wanted = set(episode_ids)
+    # An ``evicted`` row is the remembered release of an episode whose bytes
+    # retention removed (M20 T9): kept for the next fetch, not a release the
+    # episode has now, so the row shows what it showed before the row was kept.
     rows = await session.scalars(
-        select(Torrent).where(Torrent.episode_id.in_(wanted)).order_by(Torrent.id)
+        select(Torrent)
+        .where(
+            Torrent.episode_id.in_(wanted),
+            or_(Torrent.qbit_state.is_(None), Torrent.qbit_state != QBIT_EVICTED),
+        )
+        .order_by(Torrent.id)
     )
     found: dict[int, EpisodeRelease] = {
         torrent.episode_id: EpisodeRelease(torrent=torrent, progress=torrent.progress)
@@ -282,7 +320,9 @@ async def episode_extras(
     offline_codec: str | None = None,
     offline_demo: bool = False,
 ) -> EpisodeExtras:
-    """All five lookups for one page's worth of episodes, in at most eight queries.
+    """All five lookups for one page's worth of episodes, in at most nine queries.
+
+    The ninth is the one ``settings`` read behind FR-A16's seeder warning.
 
     ``offline_codec`` is the host's ``OFFLINE_CODEC``, passed by the callers
     that hold the settings (:class:`OfflineFacts`); ``offline_demo`` is
@@ -301,6 +341,7 @@ async def episode_extras(
             else await offline_facts_for(session, episode_ids, codec=offline_codec)
         ),
         trip_only=frozenset(await trip_only_episode_ids(session, episode_ids)),
+        min_seeders_warn=await min_seeders_warn(session),
     )
 
 
@@ -309,6 +350,7 @@ __all__ = [
     "EpisodeRelease",
     "OfflineFacts",
     "episode_extras",
+    "few_seeders",
     "next_searches_for",
     "offline_facts_for",
     "renditions_for",

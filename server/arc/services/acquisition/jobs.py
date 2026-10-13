@@ -146,6 +146,7 @@ from arc.services.acquisition.qbit import (
     FILE_OFF,
     FILE_ON,
     MAX_TORRENT_FILES,
+    QBIT_EVICTED,
     QBIT_MISSING,
     QBIT_STALLED,
     QBIT_UNREADABLE,
@@ -217,6 +218,17 @@ STALL_NO_BYTES_AFTER = timedelta(hours=6)
 #: the *right* one of the three: "no seeders" is a statement about the swarm and
 #: is only made when the tracker actually said so, while a torrent that has
 #: fetched nothing from a swarm that does exist gets "no bytes".
+#: How long a **re-fetch** of a remembered release (M20 T9, FR-A6) may fetch
+#: nothing at all — no metadata, no bytes, or a swarm the tracker reports as
+#: empty — before Arc gives up on it and searches Nyaa at once. Fifteen
+#: minutes of activity rather than :data:`STALL_NO_BYTES_AFTER`'s six hours:
+#: the release worked once, so the only question is whether anybody is still
+#: seeding it, and a person may be waiting to press play.
+REFETCH_DEAD_MINUTES = 15
+
+#: The stall sentence for it (logged; the episode goes straight back to a search).
+REFETCH_DEAD = "the remembered release has no seeders left after {age}"
+
 NO_METADATA = "no metadata after {age}"
 NO_SEEDERS = "no seeders after {age}"
 NO_BYTES = "no bytes after {age}"
@@ -1372,6 +1384,89 @@ async def _trip_pack_cover(
     return None if need is None else (cover, need)
 
 
+async def _remembered(session: AsyncSession, episode: Episode) -> Torrent | None:
+    """The release this episode used last time, if retention evicted it (M20 T9).
+
+    The newest **single** of this episode whose row says ``evicted``: its bytes
+    were deleted after it worked, and the row was kept precisely so that a
+    later want starts on the same torrent without a Nyaa search (FR-T3, FR-A6).
+    A release that stalled — chosen by hand or not — is ``stalled``, never
+    ``evicted``, so it is not remembered; nor is one that was rejected,
+    cancelled or unreadable, because retention deletes those rows outright.
+    """
+    found: Torrent | None = await session.scalar(
+        select(Torrent)
+        .where(
+            Torrent.episode_id == episode.id,
+            Torrent.kind == TorrentKind.SINGLE,
+            Torrent.qbit_state == QBIT_EVICTED,
+        )
+        .order_by(Torrent.evicted_at.desc().nulls_last(), Torrent.id.desc())
+        .limit(1)
+    )
+    return found
+
+
+def _magnet_for(torrent: Torrent) -> str:
+    """The stored magnet, or one built from the hash when none was stored.
+
+    A release pasted as a ``.torrent`` file may have no magnet on its row
+    (FR-A13); the hash alone is enough for the client to find the swarm again.
+    ``btmh`` with the SHA-256 multihash prefix for a v2 hash, ``btih`` for v1.
+    """
+    if torrent.magnet:
+        return torrent.magnet
+    info_hash = torrent.info_hash.lower()
+    if len(info_hash) == 64:
+        return f"magnet:?xt=urn:btmh:1220{info_hash}"
+    return f"magnet:?xt=urn:btih:{info_hash}"
+
+
+async def _refetch(ctx: JobContext, episode: Episode, torrent: Torrent) -> None:
+    """Re-add the remembered release and put the episode back to downloading.
+
+    Idempotent on the client side: :meth:`QbitClient.add` treats "already
+    holding this hash" (its 409 path) as success, which is what a crash between
+    the add and the commit, or a client that never finished the eviction's
+    delete, looks like on the next run. ``evicted_at`` stays: it is what marks
+    this download as a re-fetch for :func:`poll_qbit`'s fast dead-swarm rule.
+    """
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        save_path = await qbit.add(
+            _magnet_for(torrent), episode_id=episode.id, info_hash=torrent.info_hash
+        )
+        if not await needs_rendition(ctx.session, episode.id):
+            # Taken only for a trip (FR-A12): behind everything else, as a
+            # fresh pick would be.
+            await _to_the_back(ctx, qbit, torrent.info_hash)
+    torrent.qbit_state = "added"
+    torrent.progress = 0.0
+    torrent.completed_at = None
+    # The old count is weeks stale; the next scrape writes the current one.
+    torrent.seeders = None
+    torrent.added_at = datetime.now(UTC)
+    transition(
+        episode,
+        EpisodeState.DOWNLOADING,
+        reason=f"downloading {torrent.title or torrent.info_hash} again",
+    )
+    await ctx.session.flush()
+    ctx.log.info(
+        "re-fetching the remembered release",
+        extra={
+            "job_id": ctx.job.id,
+            "episode_id": episode.id,
+            "anime_id": episode.anime_id,
+            "number": episode.number,
+            "hash": torrent.info_hash,
+            "title": torrent.title,
+            "manual": torrent.manual,
+            "evicted_at": torrent.evicted_at.isoformat() if torrent.evicted_at else None,
+            "savepath": save_path,
+        },
+    )
+
+
 @register(SEARCH_RELEASE)
 async def search_release(ctx: JobContext) -> None:
     """Find a release for one episode and start it downloading (FR-A3..A6).
@@ -1484,6 +1579,17 @@ async def search_release(ctx: JobContext) -> None:
                 },
             )
             return
+
+    # Then the remembered release (M20 T9, FR-A6): the single this episode
+    # used before retention removed its bytes. After the pack check above, so
+    # an episode a pack Arc holds can serve costs no duplicate bytes; before
+    # Nyaa, so re-adding it costs no request at all. If it has fetched nothing
+    # after ``REFETCH_DEAD_MINUTES``, ``poll_qbit`` gives up on it and queues
+    # the search straight away.
+    remembered = await _remembered(ctx.session, episode)
+    if remembered is not None:
+        await _refetch(ctx, episode, remembered)
+        return
 
     rules = await load_rules(ctx.session, anime.id)
     # The process-wide client, not one of this job's own: the pacing gap and
@@ -1782,6 +1888,57 @@ def stall_reason(
     if info.progress <= 0.0:
         return NO_BYTES.format(age=hours)
     return None
+
+
+def refetch_stall_reason(
+    info: TorrentInfo, *, after: timedelta = timedelta(minutes=REFETCH_DEAD_MINUTES)
+) -> str | None:
+    """Why a **re-fetch** of a remembered release is dead, or ``None`` (M20 T9).
+
+    The fast half of FR-A6 for a release Arc already used once and that has
+    fetched **nothing** after ``after`` of *activity*: still asking for its
+    metadata (a hash-only re-add, or trackers silent on an old magnet), a swarm
+    the tracker says is empty, or no bytes at all. The same clock as
+    :func:`stall_reason` — ``time_active``, so a torrent queued behind the
+    client's download limit is not dead for having waited — and the same
+    exemptions: finished, bytes arriving now, or a state that is neither
+    downloading nor fetching metadata. **Any progress at all** leaves it to the
+    first-fetch thresholds: one 0/0 scrape must not delete a re-fetch that is
+    90 % in. Pure, like :func:`stall_reason`.
+    """
+    if info.complete or info.progress > 0.0:
+        return None
+    if info.time_active is None or info.dlspeed > 0:
+        return None
+    if timedelta(seconds=info.time_active) < after:
+        return None
+    age = _plural(int(after.total_seconds() // 60), "minute")
+    if info.state in METADATA_STATES:
+        return NO_METADATA.format(age=age)
+    if info.state not in ACTIVE_DL_STATES:
+        return None
+    if info.dead_swarm:
+        return REFETCH_DEAD.format(age=age)
+    return NO_BYTES.format(age=age)
+
+
+async def _search_priority(session: AsyncSession, episode_id: int) -> int:
+    """The priority of this episode's last ``search_release``, or the default.
+
+    The fallback search after a dead re-fetch goes in at the place the search
+    that led to it had (M20 T9): a trip's 160 stays a trip's, the window's 150
+    the window's.
+    """
+    found = await session.scalar(
+        select(Job.priority)
+        .where(
+            Job.type == SEARCH_RELEASE,
+            cast(ColumnElement[str], Job.payload["episode_id"].astext) == str(episode_id),
+        )
+        .order_by(Job.id.desc())
+        .limit(1)
+    )
+    return found if found is not None else SEARCH_RELEASE_PRIORITY
 
 
 #: What an episode is told when the release a person chose for it stalled
@@ -2318,6 +2475,10 @@ async def _poll_batch(
             return BatchPoll(stop=None if info.state in SETTLED_STATES else info.hash)
         return BatchPoll(delete=info.hash)
     torrent.qbit_state = info.state
+    if info.swarm_seeds is not None:
+        # The tracker's figure replaces Nyaa's once scraped (FR-A16), as for a
+        # single: a pack's thin swarm warns on the episodes it serves.
+        torrent.seeders = info.swarm_seeds
 
     # The one request this loop can make, and the condition under which it does
     # not: a pack with every wanted file in, sitting stopped where the last poll
@@ -2439,6 +2600,10 @@ async def poll_qbit(ctx: JobContext) -> None:
             # has no episode of its own (FR-A11), so this loop is byte for byte
             # the loop it was before batches existed.
             .where(Torrent.episode_id.is_not(None))
+            # A remembered release (M20 T9) has no bytes and no torrent in the
+            # client by definition; it grows with every eviction, and there is
+            # nothing for a poll to learn from it.
+            .where(or_(Torrent.qbit_state.is_(None), Torrent.qbit_state != QBIT_EVICTED))
             .order_by(Torrent.id)
         )
     ).all()
@@ -2521,6 +2686,11 @@ async def poll_qbit(ctx: JobContext) -> None:
                 continue
 
             torrent.progress = info.progress
+            if not decided and info.swarm_seeds is not None:
+                # The tracker's figure replaces Nyaa's from pick time once the
+                # client has scraped one (M20 T9): it is what the few-seeders
+                # warning on the show reads (FR-A16).
+                torrent.seeders = info.swarm_seeds
             if not decided:
                 # A decision is not a state qBittorrent has an opinion about:
                 # the client is still happily seeding a file a person has said
@@ -2551,7 +2721,39 @@ async def poll_qbit(ctx: JobContext) -> None:
             reason = stall_reason(
                 info, metadata_after=metadata_after, no_bytes_after=no_bytes_after
             )
+            # A re-fetch of a remembered release (M20 T9, FR-A6) that has
+            # fetched nothing — dead swarm, no metadata, no bytes — is given up
+            # on after ``REFETCH_DEAD_MINUTES`` rather than the first-fetch
+            # thresholds, and **any** stall of a re-fetch is followed by a
+            # search straight away rather than ``unavailable``: a release that
+            # worked once and does not now is a reason to look for another, not
+            # to wait a day.
+            refetch = torrent.evicted_at is not None
+            if refetch and reason is None:
+                reason = refetch_stall_reason(info)
             if reason is None:
+                continue
+            if refetch:
+                torrent.qbit_state = QBIT_STALLED
+                transition(episode, EpisodeState.UNAVAILABLE, reason=manual_stall(torrent, reason))
+                priority = await _search_priority(ctx.session, episode.id)
+                await start_search(
+                    ctx.session, episode, now=datetime.now(UTC), retry_now=True, priority=priority
+                )
+                stalled.append(info.hash)
+                ctx.log.warning(
+                    "a re-fetch of the remembered release stalled; searching for another at once",
+                    extra={
+                        "episode_id": episode.id,
+                        "hash": torrent.info_hash,
+                        "state": info.state,
+                        "time_active_s": info.time_active,
+                        "swarm_seeds": info.swarm_seeds,
+                        "swarm_peers": info.swarm_peers,
+                        "priority": priority,
+                        "reason": reason,
+                    },
+                )
                 continue
             # FR-A6 from the other end. The retry schedule handles "Nyaa has
             # nothing"; this handles "Nyaa had something and it was dead", and
@@ -2931,6 +3133,8 @@ __all__ = [
     "QBIT_CANCEL",
     "QBIT_POLICY",
     "QBIT_RESELECT",
+    "REFETCH_DEAD",
+    "REFETCH_DEAD_MINUTES",
     "REMOVED_FROM_CLIENT",
     "SEARCH_RELEASE",
     "SETTLED_STATES",
@@ -2944,6 +3148,7 @@ __all__ = [
     "qbit_apply_policy",
     "qbit_cancel",
     "qbit_reselect",
+    "refetch_stall_reason",
     "retry_delay",
     "search_release",
     "stall_reason",

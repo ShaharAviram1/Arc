@@ -141,7 +141,7 @@ BATCH_DIR: Final[str] = "batch"
 
 # --- What ``torrents.qbit_state`` may hold ----------------------------------
 #
-# Mostly it holds whatever qBittorrent last called the torrent. The four values
+# Mostly it holds whatever qBittorrent last called the torrent. The values
 # below are Arc's own, and they live here — beside :data:`COMPLETE_STATES` and
 # the client that reads the others — because there is exactly one column they
 # describe and three different modules write them. Keeping them together is
@@ -178,6 +178,14 @@ QBIT_MISSING: Final[str] = "missing"
 #: tomorrow and the pack deserves another look.
 QBIT_UNREADABLE: Final[str] = "unreadable"
 
+#: Retention removed this **single**'s bytes after it had done its job (FR-T3,
+#: M20 T9): the client was told to delete it with its files, and the row stays,
+#: with ``evicted_at``, as the episode's **remembered release**. A later want's
+#: ``search_release`` re-adds it before asking Nyaa anything (FR-A6). Decided,
+#: so a poll never calls it ``missing``; not in :data:`DELETE_ON_SIGHT`,
+#: because the delete already happened and there is nothing left to chase.
+QBIT_EVICTED: Final[str] = "evicted"
+
 #: The values ``poll_qbit`` must never overwrite, in either direction: neither
 #: with a live state string from the client nor with :data:`QBIT_MISSING`. Each
 #: is a *decision* somebody or something made about this download, and the
@@ -185,7 +193,7 @@ QBIT_UNREADABLE: Final[str] = "unreadable"
 #: sixty seconds later, when Arc is the reason it is missing, would lose the
 #: answer to "why is this episode unavailable?".
 DECIDED_STATES: Final[frozenset[str]] = frozenset(
-    {QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED, QBIT_UNREADABLE}
+    {QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED, QBIT_UNREADABLE, QBIT_EVICTED}
 )
 
 #: Below what rate, in KiB/s, qBittorrent counts a torrent as "slow" and stops
@@ -1092,6 +1100,7 @@ __all__ = [
     "FILE_ON",
     "MAX_TORRENT_FILES",
     "QBIT_CANCELLED",
+    "QBIT_EVICTED",
     "QBIT_MISSING",
     "QBIT_REJECTED",
     "QBIT_STALLED",

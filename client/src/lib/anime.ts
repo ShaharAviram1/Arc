@@ -320,6 +320,19 @@ export interface EpisodeOut {
    * the wire so a cached payload from before 2026-10-06 parses.
    */
   wanted_by_me?: boolean
+  /**
+   * The live torrent has fewer seeders than the admin's `min_seeders_warn`
+   * (FR-A16, M20): the row says "Few seeders (2)" and offers the show pin
+   * (FR-T8), because a thin swarm may not be there to fetch it again after
+   * the files are deleted. Optional on the wire so a payload from before M20
+   * parses as no warning.
+   */
+  few_seeders?: boolean
+  /**
+   * That live torrent's seeders — Nyaa's count on a first fetch, the
+   * tracker's once the client has scraped — or null with no live torrent.
+   */
+  seeders?: number | null
 }
 
 /**

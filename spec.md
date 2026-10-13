@@ -368,7 +368,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   not failed at anything. A release Arc has already tried is never chosen
   again, and a release with no seeders is never chosen at all. Torrents
   stopped by hand, and torrents queued behind the client's own download
-  limit, are never touched by this.
+  limit, are never touched by this. **The remembered release goes first**
+  (M20 T9): an episode whose files retention deleted is fetched again from the
+  same release, re-added to the client before any search, with no Nyaa
+  request at all (FR-T3) — after a pack Arc already holds has been asked
+  whether it can serve the episode (FR-A11), so no bytes are fetched twice. A
+  re-fetch that has fetched **nothing** — no metadata, no bytes, or a swarm the
+  tracker says is empty — is given up on after `REFETCH_DEAD_MINUTES` (15) of
+  download time rather than 60 minutes or 6 hours; one with any progress keeps
+  the first-fetch thresholds. **Any** stall of a re-fetch is removed with its
+  files like any stall and followed at once by a search for another release
+  at the same priority — the episode goes back to "wanted", not
+  "unavailable". The dead release is never chosen again, as above. A first
+  fetch keeps the rules above.
 - FR-A7 Users can see the acquisition status of each episode on the show page
   (wanted, searching, downloading with %, preparing, ready, unavailable).
   While Arc is still looking, the row also says **what the last search did**
@@ -381,7 +393,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   pack (FR-A11) shows **its own file's** percentage, never the pack's, and the
   row says `from a batch` after the group and the resolution — which are the
   pack's and are true of twenty-six episodes, so without the phrase they read
-  as a release of this one.
+  as a release of this one. An episode whose live download has few seeders
+  says so on the row, with a Pin action (FR-A16).
 - FR-A8 A user can ask for the first episode of any show as a sample from the
   show page, without changing their list or MAL. Only that one episode is
   fetched; it follows the same states, D-day drop (FR-T2) and retention
@@ -570,6 +583,20 @@ that the course professor can log in at any time, and the owner uses it daily.
   a browser that clears its storage mints a new device id). The server uses
   the set only for FR-A1's device skip, together with delivered trip copies
   (FR-A12). Refused for the demo account, which has no downloads.
+- FR-A16 **Seeder warning** (M20, owner 2026-10-13). An episode whose live
+  download has fewer than `min_seeders_warn` seeders (default 3, 0..100;
+  0 = never; FR-D2) says so on its show-page row: "Few seeders (2) — pin this
+  show to keep it", with a **Pin** action that is FR-T8's "Keep files" for the
+  viewer. A thin swarm is the one that may not be there to fetch the episode
+  again once its files are deleted after watching (FR-T1, FR-T3). The count is
+  Nyaa's on a first fetch and the tracker's once the torrent client has
+  scraped one, on a first fetch and a re-fetch alike (owner Q16), for a single
+  and for a pack. While Arc itself is seeding a finished episode, the
+  tracker's count includes Arc, so a `ready` episode's figure may be one
+  higher than the swarm that would serve a re-fetch. Once the
+  show is pinned, and for the demo account (which cannot pin), the row keeps
+  "Few seeders (2)" and drops the suggestion. A release Arc has decided
+  against, or retention has evicted, warns about nothing.
 
 ### 4.3 Library indexing and matching
 - FR-L1 The server watches the download directory and an optional "manual
@@ -1283,7 +1310,15 @@ that the course professor can log in at any time, and the owner uses it daily.
   grace anchor behind.
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired. The small offline copy
-  (FR-P6) is deleted with the rest, row and file.
+  (FR-P6) is deleted with the rest, row and file. **A single is re-acquired
+  from the remembered release** (M20 T9): the torrent is removed from the
+  client with its files, but its record is kept, marked evicted, and the next
+  want re-adds that same release before any search (FR-A6). Only a release
+  that did its job is remembered: one that finished downloading, behind an
+  episode that is not `failed`, and that Arc had not decided against
+  (stalled, rejected, cancelled, unreadable). A remembered release is
+  forgotten 180 days after its files went (the hourly sweep), and a later want
+  then searches as for a first fetch.
 - FR-T1/FR-T3 for a **batch-backed** episode (FR-A11): what is deleted is the
   episode's **own file**, and the torrent is kept. The episode is charged the
   bytes of that file and nothing else — never the pack's total, and never
@@ -1294,7 +1329,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   or removed with its files by FR-A11's rule: retention of the last file of a
   show nobody is following any more is what ends a pack's life. The record of
   which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
-  no search at all — a later want is served from the same pack.
+  no search at all — a later want is served from the same pack. (FR-A11 is
+  unchanged by M20 T9's remembered release: a pack already kept its claims.)
 - FR-T4 Admin can see disk usage and manually delete or re-fetch. The
   preview of the next sweep gives each episode's reason with its grace in the
   anchor's unit ("…the 6-hour grace period ran out at 11:00 UTC on
@@ -1404,7 +1440,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
 | Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
@@ -2629,3 +2665,22 @@ through the same edge, without the grace period.
   server's whenever the stream is live, never the media element's (a growing
   playlist would otherwise let 90 % of what has downloaded count as watched
   and write to MAL). `/play` carries `subtitles: {lang} | null`.
+- 2026-10-13 (owner, M20 T9) — **The remembered release and the seeder
+  warning.** FR-T3: retention removes a single from the client with its files
+  but keeps its record, marked evicted, and the next want re-adds that release
+  before any Nyaa search (FR-A6: the remembered release goes first). A re-fetch
+  whose tracker reports an empty swarm is given up on after
+  `REFETCH_DEAD_MINUTES` (15) of download time, not 6 hours, and a search is
+  queued at once at the same priority instead of flagging the episode
+  unavailable; a first fetch keeps the 6-hour rule. New FR-A16 **Seeder
+  warning**: fewer than `min_seeders_warn` seeders on an episode's live
+  download shows "Few seeders (2) — pin this show to keep it" on its row
+  (FR-A7) with a Pin action, from Nyaa's count on a first fetch and the
+  tracker's once scraped (owner Q16: both). FR-A11 unchanged. New column
+  `torrents.evicted_at`. After review (same day, orchestrator's calls): only a
+  finished release behind a non-failed episode is remembered; a pack Arc
+  holds is asked before the remembered release; any stall of a re-fetch
+  searches at once, and "nothing fetched" (no metadata, no bytes, dead swarm)
+  is judged after 15 minutes, but a re-fetch with any progress keeps the
+  first-fetch thresholds; remembered releases are forgotten after 180 days;
+  packs' seeder counts follow the tracker too.

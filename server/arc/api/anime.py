@@ -430,6 +430,8 @@ async def detail(
         override=None if override is None else OverrideOut.build(override),
         # The caller's own "Keep files" (FR-T8): one primary-key lookup.
         pinned=await is_pinned(session, user_id=user.id, anime_id=anime.id),
+        # FR-A16's threshold, read once with the extras.
+        min_seeders_warn=extras.min_seeders_warn,
     )
 
 

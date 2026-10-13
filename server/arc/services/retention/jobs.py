@@ -35,7 +35,11 @@ from sqlalchemy import select
 from arc.models import Episode, Want
 from arc.services.acquisition.qbit import QbitUnavailable
 from arc.services.jobs.registry import JobContext, register
-from arc.services.retention.delete import delete_episode_files, delete_idle_copy
+from arc.services.retention.delete import (
+    delete_episode_files,
+    delete_idle_copy,
+    prune_remembered,
+)
 from arc.services.retention.floor import floor_plan, floor_target, free_bytes
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
 from arc.services.retention.rules import offline_idle_period
@@ -146,6 +150,12 @@ async def retention_sweep(ctx: JobContext) -> None:
     )
     freed += evicted_bytes
 
+    # Remembered releases (M20 T9, FR-T3) older than REMEMBER_DAYS: rows only,
+    # no bytes, so last and in one statement.
+    forgotten = await prune_remembered(ctx.session, now=now, dry_run=dry_run)
+    if forgotten and not dry_run:
+        await ctx.session.commit()
+
     ctx.log.info(
         "retention sweep finished",
         extra={
@@ -154,6 +164,7 @@ async def retention_sweep(ctx: JobContext) -> None:
             "deleted": swept,
             "idle_copies": copies,
             "floor_evicted": evicted,
+            "remembered_forgotten": forgotten,
             "skipped_qbit_down": unreachable,
             "freed_bytes": freed,
             "dry_run": dry_run,

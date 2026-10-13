@@ -524,7 +524,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `device_holdings` | user_id (FK users CASCADE), device_id (VARCHAR(36), the device's own UUIDv4 in canonical form — a label, never a path), episode_id (FK episodes CASCADE), reported_at (TIMESTAMPTZ NOT NULL). PK `(user_id, device_id, episode_id)`; index `ix_device_holdings_user_id_reported_at` (the reconciler's lookup and the TTL purge). M20 T4 (FR-A15), revision `603a536051f9`. The unwatched downloads one device reported, **replaced whole** on each `PUT /api/devices/{device_id}/holdings` (every row restamped, under an advisory lock on (user, device)); read by the reconciler's device skip for `DEVICE_HOLDING_DAYS` (14) after `reported_at` and no longer. Each report also deletes the user's rows older than that and keeps at most `MAX_DEVICES` (10) devices per user, oldest report evicted first |
 | `trips` | id, user_id (FK CASCADE), anime_id (FK CASCADE), first_number, last_number, count (how many aired episodes it took, ≤ what was asked), state (`active` \| `finished` \| `cancelled` \| `expired`, varchar enum, default `active`), created_at, deadline_at (`created_at + trip_copy_days`), ended_at. Partial unique index `ux_trips_one_active_per_user` on `user_id WHERE state = 'active'` — one active trip per user, held by the database as well as by `create_trip`. M19 T3 (FR-A12), revision `811a128415cc`, which also seeds `trip_max_episodes` (50) and `trip_copy_days` (14) |
 | `trip_episodes` | trip_id + episode_id (PK, both FK CASCADE), state (`pending` \| `delivered` \| `expired` \| `cancelled`, default `pending`), available_at (copy first ready for this trip — the start of the `trip_copy_days` clock; stamped by the copy hook and by `create_trip` when a copy already exists), delivered_at (device confirmed; M19 T4 writes it — set and with released_at null, the episode is in that user's device-held set and the window skips it, without sliding past it; M20 T4, FR-A1/FR-A15, reversing 2026-10-06), released_at (device deleted its copy; T4 — the episode is back in the window from the next reconciliation). Index `ix_trip_episodes_episode_id`. "Available" is not a state: it is `pending` with a ready copy |
-| `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, **manual (bool NOT NULL DEFAULT false, revision `f1a6d3c08b52`: a person chose this release by hand, FR-A13)**, added_at, completed_at |
+| `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, **manual (bool NOT NULL DEFAULT false, revision `f1a6d3c08b52`: a person chose this release by hand, FR-A13)**, added_at, completed_at, **evicted_at (TIMESTAMPTZ NULL, revision `244fbc2111f9` `torrents_evicted_at`, M20 T9: when retention removed this single's bytes; the row stays with `qbit_state = 'evicted'` as the **remembered release** a later want re-adds before any search, FR-T3/FR-A6, and kept on re-add, so a live row with it set is a re-fetch)**. `qbit_state` holds the client's state or one of Arc's decisions: `rejected`, `stalled`, `cancelled`, `unreadable`, `evicted` (`qbit.DECIDED_STATES`), or `missing`. `seeders` is Nyaa's at pick time until `poll_qbit` replaces it with the tracker's scrape (FR-A16) |
 | `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
 | `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at. Partial expression index `ix_jobs_prepare_episode ON jobs ((payload->>'episode_id')) WHERE type IN ('transcode','remux')` behind `latest_transcode_jobs` / `latest_prepare_jobs` (M20; it replaced `ix_jobs_transcode_episode`, partial on `transcode` only, in revision `caf1811e8ee6`) |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
@@ -1354,6 +1354,64 @@ trip's `pending` episodes, and only episodes with nothing landed
   the reason Arc would not take it), a paste box and **Use this release**;
   refusals are the server's `detail.message`. `ReleaseOut.manual` marks the
   row's release.
+
+**Remembered release and seeder warning (M20 T9, FR-T3, FR-A6, FR-A16,
+owner 2026-10-13).**
+
+- **Evicted state.** `qbit.QBIT_EVICTED = "evicted"` is in `DECIDED_STATES`
+  (a poll never overwrites it and never calls it `missing`) but not in
+  `DELETE_ON_SIGHT` (retention already deleted it). Retention writes it
+  (§5.7); nothing else does.
+- **Re-fetch before Nyaa.** `search_release`, after the pause/hold checks, the
+  `FOR UPDATE` re-read, the live-want check, the move to `searching` and
+  `batch.claim_existing` (a pack Arc holds serves the episode first, so no
+  bytes are fetched twice), asks `jobs._remembered(episode)` — the newest `kind = 'single'` row of the episode
+  with `qbit_state = 'evicted'` (by `evicted_at`, then id). If there is one,
+  `_refetch` re-adds it (`qbit.add` with the stored magnet, or
+  `magnet:?xt=urn:btih:<hash>` / `urn:btmh:1220<hash>` when the row has none;
+  the client already holding the hash is `add`'s 409-then-`has` path, so a
+  retry is safe), sends a trip-only episode's torrent to the back as a fresh
+  pick would, sets `qbit_state = "added"`, `progress = 0`, `completed_at =
+  null`, `seeders = null` (the next scrape writes the current count),
+  `added_at = now`, moves the episode to `downloading` and logs
+  `re-fetching the remembered release`. Nyaa is not asked anything. The manual
+  release sheet refuses an evicted hash with "Arc will fetch this release
+  again on its own" (`manual.TRIED`). `evicted_at` is **kept**: a live row with
+  `evicted_at` set is a re-fetch. A stalled, rejected, cancelled or unreadable
+  release is never remembered (retention deletes those rows; a stalled
+  re-fetch stays `stalled` and `_pick` keeps skipping its hash).
+- **Fast fallback for a re-fetch.** `poll_qbit` no longer loads `evicted`
+  rows at all (they have no torrent in the client and grow with every
+  eviction). For a single row with `evicted_at` set, `stall_reason` runs as
+  before and, when it finds nothing, `jobs.refetch_stall_reason` (pure; the
+  same `time_active` clock and exemptions) gives up after
+  `REFETCH_DEAD_MINUTES = 15` (module constant) on a re-fetch that has fetched
+  **nothing** (`progress <= 0`): "no metadata after 15 minutes" in
+  `METADATA_STATES`, and in `ACTIVE_DL_STATES` "the remembered release has no
+  seeders left…" for a dead swarm or "no bytes after 15 minutes" otherwise
+  (covers a never-scraped hash-only re-add). Any progress leaves it to the
+  ordinary thresholds, so one 0/0 scrape cannot delete a 90 % re-fetch.
+  **Any** stall reason on a re-fetch takes the fast branch: the existing path
+  — row `stalled`, torrent deleted with its files after the flush — then the
+  episode passes through `unavailable` to `wanted` with
+  `wants.start_search(retry_now=True)` and a `search_release` enqueued at once
+  at the priority of the episode's last search job (`_search_priority`;
+  default 150). A first fetch (no `evicted_at`) keeps the ordinary rules.
+- **Seeders.** The first fetch writes Nyaa's count (`_record_torrent`, as
+  before); `poll_qbit` overwrites `torrents.seeders` with `swarm_seeds` whenever
+  the tracker has been scraped, for a single it has not decided about and for
+  an undecided pack (`_poll_batch`). While Arc seeds a finished episode the
+  tracker's count includes Arc itself.
+  `episode_extras` reads `min_seeders_warn` once per page
+  (`EpisodeExtras.min_seeders_warn`) and the pure `few_seeders(release,
+  threshold)` decides: a **live** torrent (state null or not decided and not
+  `missing`) with known seeders below a non-zero threshold. `EpisodeOut` gains
+  `few_seeders` (bool) and `seeders` (the live torrent's count, else null), set
+  on the show page and the player's payload; elsewhere the threshold is 0.
+  `torrents_for` skips `evicted` rows, so an evicted episode's row shows no
+  release, as before T9. Client: the row's "Few seeders (2) — pin this show to
+  keep it" line with a **Pin** button calling `useSetPinned` (FR-T8); pinned or
+  demo → "Few seeders (2)" alone.
 
 ### 5.2 Ingest and match
 1. `ingest_file` (a function, called by `library_scan` and by the poll's
@@ -3512,7 +3570,18 @@ renders it as "Floor evictions".
 Deletion: qBittorrent torrent with files
 (Arc category only; "not in client" is a no-op), rendition dir, source
 dir `downloads/<id>` or the manual-drop file, then the rows, then
-`→ not_wanted` (edges added for `downloaded|matched|failed`). Every path
+`→ not_wanted` (edges added for `downloaded|matched|failed`). **A single's
+`torrents` row is kept, not deleted** (M20 T9, FR-T3, `delete._delete_rows`):
+one that did its job (`delete.remembers`: a single, finished —
+`completed_at` set —, not decided against, and the episode, read before the
+reset, not `failed`) becomes the **remembered release** — `qbit_state =
+'evicted'`, `evicted_at = now`, `progress = 0`, `completed_at = null` — which
+the next want's `search_release` re-adds before asking Nyaa (§5.1a). Every
+other row (decided, never finished, behind a broken file) is deleted as
+before; one already `evicted` is left alone. Last in each sweep,
+`delete.prune_remembered` deletes `evicted` rows whose `evicted_at` is older
+than `REMEMBER_DAYS` (180; rows only, honours the dry run; logged as
+`remembered_forgotten`). Batches are unchanged (below; FR-A11). Every path
 is resolved and re-checked against `renditions`/`downloads`/`manual` roots
 right before removal; symlinks and out-of-root paths are refused; a live
 want is re-checked immediately before deleting; `RETENTION_DRY_RUN` logs
@@ -6667,3 +6736,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-13 (owner) — M20 T2: **remux replaces burn-in as the default preparation** (reverses the 2026-09-05 burn-in decision; burn-in transcode is the fallback for sources `copyable()` refuses). New job `remux` (`media/remux.py`, own lock key, own cap group `MAX_REMUXES`, 2 attempts), `REMUX_AUDIO_BITRATE`; revision `caf1811e8ee6` (`renditions_kind_prepare_index`, on `a7d2e5c9f318`): `renditions.kind`, `renditions.text_subtitles`, `ix_jobs_transcode_episode` → `ix_jobs_prepare_episode`. Generated master/subtitle playlists and WebVTT segments (§5.4a); first-frame PTS cached in a `remux.json` sidecar written at remux time (not on the row: no extra column, and it travels with the directory). `episode.mp4` refused for a remux with a text track (Q7). Retention's in-flight guard now counts remux and transcode jobs. No new dependency.
 - 2026-10-13 — M20 T2 review fixes: a remux steps aside for a running transcode (`stage=deferred`, skipped by `latest_transcode_jobs`) and a transcode defers (`PrepareDeferred`) to a running remux; stale staging is removed only when its job is not running; generated subtitle playlist and segments are `no-cache` + ETag, not immutable; `fallback_reason` travels to the queued transcode (with `force`) and out as `EpisodeOut.prepare_note`; `REMUX_TIMEOUT_SECONDS` (600) replaces the transcode's 3 h timeout for remuxes; FR-P3 states that a remux beside a full encode group needs `WORKER_CONCURRENCY` > `MAX_TRANSCODES`.
 - 2026-10-13 — M20 T3: **subtitle switch, start position, live duration rule** (§5.4a, spec FR-S10/FR-S1/FR-S4). `PlayInfo.subtitles` (`SubtitlesOut`, from `text_subtitles`/`subtitle_lang`); client `PlayInfo.live` typed for T6. hls.js gets `startPosition` (resume or 0) and `renderTextTracksNatively`; `subtitleDisplay` is set on the instance because hls.js 1.7 has no config option of that name. New `client/src/player/subtitles.ts` (the two switches and the `localStorage` preference); CC button in the player; `video::cue` styling; `resolveDuration` moves to `ProgressReporter.ts` and takes `live`. No schema change, no new dependency, no `C` shortcut.
+- 2026-10-13 (owner, M20 T9) — **Remembered release, fast dead-swarm fallback, seeder warning** (§4 `torrents`, §5.1a, §5.7; spec FR-T3/FR-A6/FR-A7/FR-A16). Retention keeps a single's `torrents` row as `qbit_state = 'evicted'` with the new `evicted_at` (revision `244fbc2111f9` `torrents_evicted_at`, on `911eca1dfc62`) instead of deleting it; decided rows are still deleted, batches unchanged. `QBIT_EVICTED` joins `DECIDED_STATES`, not `DELETE_ON_SIGHT`. `search_release` re-adds the newest evicted single before any Nyaa request (`_remembered`/`_refetch`; 409-safe). `poll_qbit`: a re-fetch (live row with `evicted_at`) whose tracker reports an empty swarm stalls after `REFETCH_DEAD_MINUTES` (15) of `time_active` and queues `search_release` at once at its last search's priority (episode → `wanted`, not `unavailable`); `torrents.seeders` follows the tracker scrape. `few_seeders`/`seeders` on `EpisodeOut` from `min_seeders_warn`; the show row's Pin uses the T8 pin mutation. No new dependency. After review (same day): `remembers()` keeps only finished singles behind a non-failed episode; `_remembered` runs after `claim_existing`; any re-fetch stall searches at once and "nothing fetched" (metaDL, no bytes, dead swarm, `progress <= 0`) is judged at 15 min; `poll_qbit` skips `evicted` rows; `prune_remembered` forgets them after 180 days; `_poll_batch` writes pack seeders; re-add clears `seeders`.

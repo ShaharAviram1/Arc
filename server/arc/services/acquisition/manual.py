@@ -94,6 +94,7 @@ from arc.services.acquisition.nyaa import (
 from arc.services.acquisition.qbit import (
     DECIDED_STATES,
     QBIT_CANCELLED,
+    QBIT_EVICTED,
     QBIT_MISSING,
     QBIT_REJECTED,
     QBIT_STALLED,
@@ -484,6 +485,8 @@ TRIED: Final[Mapping[str, str]] = {
     QBIT_CANCELLED: "Arc is removing this release right now",
     QBIT_UNREADABLE: "Arc could not identify the files in this pack",
     QBIT_MISSING: "this release went missing from the torrent client",
+    # The remembered release (M20 T9): the next search re-adds it by itself.
+    QBIT_EVICTED: "Arc will fetch this release again on its own",
 }
 
 

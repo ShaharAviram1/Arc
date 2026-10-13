@@ -177,7 +177,9 @@ class Torrent(Base):
     #: Release group, as parsed. Quoted in SQL: ``group`` is a keyword.
     group: Mapped[str | None] = mapped_column("group", String(64))
     resolution: Mapped[str | None] = mapped_column(String(16))
-    #: Seeders *at pick time* — a ranking input, not a live figure (FR-A3).
+    #: Seeders: Nyaa's figure at pick time (a ranking input, FR-A3), replaced by
+    #: the tracker's swarm count once ``poll_qbit`` has one (M20 T9). The
+    #: few-seeders warning on the show reads it (FR-A16).
     seeders: Mapped[int | None] = mapped_column(Integer)
     trusted: Mapped[bool | None] = mapped_column(Boolean)
     #: qBittorrent's own state string (downloading, stalledDL, …), or one of
@@ -185,8 +187,10 @@ class Torrent(Base):
     #: has an opinion about and are never overwritten by a poll: ``rejected``
     #: (a person said the delivered file was not this episode), ``stalled``
     #: (it was going nowhere and was removed with its files), ``cancelled``
-    #: (nobody wanted it any more) and ``missing`` (gone from the client for
-    #: some reason that was not Arc's).
+    #: (nobody wanted it any more), ``missing`` (gone from the client for
+    #: some reason that was not Arc's) and ``evicted`` (retention removed the
+    #: bytes of a single that worked; the row stays as the **remembered
+    #: release** a later want re-adds before asking Nyaa, FR-T3, FR-A6).
     qbit_state: Mapped[str | None] = mapped_column(String(32))
     #: 0..1 download progress, polled every 60 s (§5.1 step 4). For a batch it
     #: is the client's figure for the **selected** files, and an episode's own
@@ -219,6 +223,12 @@ class Torrent(Base):
     )
     added_at: Mapped[datetime] = created_at()
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: When retention last removed this release's bytes (FR-T3, M20 T9). Set
+    #: with ``qbit_state = 'evicted'`` and **kept** when the release is re-added
+    #: from memory, so a non-null value on a live row means "this download is a
+    #: re-fetch" — which is what puts it on the fast dead-swarm fallback
+    #: (``REFETCH_DEAD_MINUTES``, FR-A6) instead of the six-hour one.
+    evicted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
 class TorrentFile(Base):

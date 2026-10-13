@@ -111,6 +111,14 @@ async def rows_for(session: AsyncSession, model: type, episode_id: int) -> int:
     return len(list(found.all()))
 
 
+async def evicted_rows(session: AsyncSession, episode_id: int) -> int:
+    """How many of this episode's ``torrents`` rows are remembered releases (M20 T9)."""
+    found = await session.scalars(
+        select(Torrent).where(Torrent.episode_id == episode_id, Torrent.qbit_state == "evicted")
+    )
+    return len(list(found.all()))
+
+
 def qbit_stub(monkeypatch: pytest.MonkeyPatch, *, holding: str | None = HASH) -> QbitStub:
     """A qBittorrent stub every client built from settings will talk to."""
     stub = QbitStub()
@@ -455,7 +463,8 @@ async def test_deleting_removes_the_files_the_rows_and_the_torrent(
     assert not source_dir.exists()
     assert await rows_for(db_session, Rendition, episode.id) == 0
     assert await rows_for(db_session, MediaFile, episode.id) == 0
-    assert await rows_for(db_session, Torrent, episode.id) == 0
+    # The single's row stays as the remembered release (M20 T9, FR-T3).
+    assert await evicted_rows(db_session, episode.id) == 1
     assert episode.state is EpisodeState.NOT_WANTED
     assert stub.deleted == [{"hashes": HASH, "deleteFiles": "true"}]
 
@@ -505,7 +514,7 @@ async def test_a_torrent_the_client_has_forgotten_is_tolerated(
 
     assert stub.deleted == [], "nothing was sent for a hash the client does not hold"
     assert episode.state is EpisodeState.NOT_WANTED
-    assert await rows_for(db_session, Torrent, episode.id) == 0
+    assert await evicted_rows(db_session, episode.id) == 1
 
 
 async def test_a_dry_run_deletes_nothing_at_all(

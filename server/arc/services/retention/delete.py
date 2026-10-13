@@ -19,7 +19,9 @@ awkward state behind:
    (a manual drop lives in ``DATA_DIR/manual`` and has no directory of its
    own; a batch member is a loose file too) and the small offline copy
    (FR-P6), 6. the ``renditions``, ``media_files``, ``torrents`` and
-   ``offline_copies`` rows, and the tombstoned ``wants`` rows
+   ``offline_copies`` rows — except that a single's ``torrents`` row is kept
+   as ``evicted``, the remembered release (M20 T9, :func:`_delete_rows`) —
+   and the tombstoned ``wants`` rows
    that were the reason this episode could go
    (:func:`_delete_leftover_wants` — with one exception, which is the whole of
    its docstring), and
@@ -53,6 +55,7 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -70,10 +73,11 @@ from arc.models import (
     Rendition,
     Torrent,
     TorrentFile,
+    TorrentKind,
     Want,
 )
 from arc.services.acquisition.claims import release_files
-from arc.services.acquisition.qbit import QbitClient
+from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_EVICTED, QbitClient
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import STALE_DROP_REASON
 from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids
@@ -273,12 +277,74 @@ async def _delete_copy_row(session: AsyncSession, episode_id: int) -> int:
     return cast("CursorResult[Any]", result).rowcount or 0
 
 
-async def _delete_rows(session: AsyncSession, targets: Targets) -> tuple[int, int]:
+#: How long a remembered release is kept after its bytes went (M20 T9, FR-T3).
+#: Half a year: long enough for any rewatch or a second user arriving late, and
+#: a bound on a table that otherwise grows with every eviction.
+REMEMBER_DAYS = 180
+
+
+async def prune_remembered(session: AsyncSession, *, now: datetime, dry_run: bool) -> int:
+    """Forget remembered releases evicted more than :data:`REMEMBER_DAYS` ago.
+
+    Rows only — the bytes went at eviction. A later want for such an episode
+    searches Nyaa as for any first fetch. A dry run counts and deletes nothing.
+    Flushes, does not commit.
+    """
+    cutoff = now - timedelta(days=REMEMBER_DAYS)
+    stale = (
+        Torrent.qbit_state == QBIT_EVICTED,
+        Torrent.evicted_at.is_not(None),
+        Torrent.evicted_at < cutoff,
+    )
+    if dry_run:
+        found = await session.scalars(select(Torrent.id).where(*stale))
+        count = len(found.all())
+    else:
+        result = await session.execute(sql_delete(Torrent).where(*stale))
+        count = cast("CursorResult[Any]", result).rowcount or 0
+    if count:
+        log.info(
+            "remembered releases forgotten" if not dry_run else "retention dry run: would forget",
+            extra={"count": count, "remember_days": REMEMBER_DAYS},
+        )
+    return count
+
+
+def remembers(torrent: Torrent, episode_state: EpisodeState) -> bool:
+    """Whether retention keeps this row as the remembered release (M20 T9, FR-T3).
+
+    Only a **single that did its job**: it finished downloading
+    (``completed_at`` set), Arc has not decided against it, and the episode it
+    served is not ``failed`` — a release behind a broken file would otherwise
+    be re-added on every want and never searched past. Pure.
+    """
+    return (
+        torrent.kind is TorrentKind.SINGLE
+        and torrent.qbit_state not in DECIDED_STATES
+        and torrent.completed_at is not None
+        and episode_state is not EpisodeState.FAILED
+    )
+
+
+async def _delete_rows(
+    session: AsyncSession, targets: Targets, *, episode_state: EpisodeState
+) -> tuple[int, int]:
     """The ``renditions``, ``media_files`` and ``torrents`` rows (FR-T3).
 
-    The counts are what the database actually removed, not what was asked for:
+    The counts are what the database actually changed, not what was asked for:
     a re-run of a sweep that already deleted these rows should say it deleted
     nothing rather than claim the work twice.
+
+    **A single that did its job is kept, as the remembered release** (M20 T9,
+    FR-T3, FR-A6; :func:`remembers`): its row becomes ``qbit_state =
+    'evicted'`` with ``evicted_at``, its progress and completion are reset
+    because the bytes are gone, and the next want re-adds the same release
+    before asking Nyaa. Any other row — decided against (stalled, rejected,
+    cancelled, unreadable), never finished, or behind a ``failed`` episode — is
+    deleted exactly as before. A row already ``evicted`` is left as it is and
+    not counted. Batches never reach here (``targets.torrent_ids`` holds only
+    rows keyed on the episode, FR-A11). ``episode_state`` is the state before
+    the reset to ``not_wanted``.
     """
     if targets.rendition_id is not None:
         await session.execute(sql_delete(Rendition).where(Rendition.id == targets.rendition_id))
@@ -290,10 +356,25 @@ async def _delete_rows(session: AsyncSession, targets: Targets) -> tuple[int, in
         files = cast("CursorResult[Any]", result).rowcount or 0
     torrents = 0
     if targets.torrent_ids:
-        result = await session.execute(
-            sql_delete(Torrent).where(Torrent.id.in_(targets.torrent_ids))
-        )
-        torrents = cast("CursorResult[Any]", result).rowcount or 0
+        rows = (
+            await session.scalars(select(Torrent).where(Torrent.id.in_(targets.torrent_ids)))
+        ).all()
+        now = datetime.now(UTC)
+        doomed: list[int] = []
+        for torrent in rows:
+            if torrent.qbit_state == QBIT_EVICTED:
+                continue
+            if remembers(torrent, episode_state):
+                torrent.qbit_state = QBIT_EVICTED
+                torrent.evicted_at = now
+                torrent.progress = 0.0
+                torrent.completed_at = None
+                torrents += 1
+            else:
+                doomed.append(torrent.id)
+        if doomed:
+            result = await session.execute(sql_delete(Torrent).where(Torrent.id.in_(doomed)))
+            torrents += cast("CursorResult[Any]", result).rowcount or 0
     return files, torrents
 
 
@@ -387,7 +468,7 @@ async def delete_episode_files(
         str(offline_path) if not keep_copy and _remove_file(offline_path, settings) else None
     )
 
-    files, torrents = await _delete_rows(session, targets)
+    files, torrents = await _delete_rows(session, targets, episode_state=episode.state)
     copies = 0 if keep_copy else await _delete_copy_row(session, episode.id)
     wants = await _delete_leftover_wants(session, episode.id)
     state_changed = transition(episode, EpisodeState.NOT_WANTED, reason=reason)

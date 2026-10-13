@@ -972,6 +972,81 @@ function WatchedControl({ animeId, episode }: { animeId: number; episode: Episod
   )
 }
 
+/** The words of the few-seeders line (FR-A16). */
+const FEW_SEEDERS_PIN = 'Pin'
+const FEW_SEEDERS_PINNING = 'Pinning…'
+const FEW_SEEDERS_HINT =
+  'Few people are sharing this release. Arc deletes watched episodes after a few hours; ' +
+  'pinning the show keeps its files so it need not be fetched again.'
+const FEW_SEEDERS_FAILED = 'Could not pin the show. Try again.'
+
+function fewSeedersLabel(seeders: number | null): string {
+  return seeders === null ? 'Few seeders' : `Few seeders (${String(seeders)})`
+}
+
+/**
+ * "Few seeders (2) — pin this show to keep it" (spec FR-A16, M20).
+ *
+ * Under the episode's meta line when its live torrent has fewer seeders than
+ * the admin's threshold. The Pin action is the hero's "Keep files" (FR-T8)
+ * through the same mutation, so both controls agree the moment either is
+ * pressed. Once the show is pinned — or for the demo account, which may not
+ * pin — the line keeps the count and drops the suggestion. Raised over the
+ * row's link overlay so the button is reachable.
+ */
+function FewSeeders({
+  anime,
+  episodeId,
+  seeders,
+  canPin,
+}: {
+  anime: AnimeDetail
+  episodeId: number
+  seeders: number | null
+  canPin: boolean
+}) {
+  const setPinned = useSetPinned(anime.id)
+  const offer = canPin && anime.pinned !== true
+  const label = fewSeedersLabel(seeders)
+  const hintId = `few-seeders-hint-${String(episodeId)}`
+
+  return (
+    <p
+      className="relative z-10 mt-1 flex flex-wrap items-center gap-x-1.5 text-[13px] text-[var(--arc-warn)]"
+      title={FEW_SEEDERS_HINT}
+    >
+      <span>{offer ? `${label} — pin this show to keep it` : label}</span>
+      {/* The hover hint, for screen readers and touch, which never see `title`. */}
+      <span id={hintId} className="sr-only">
+        {FEW_SEEDERS_HINT}
+      </span>
+      {offer ? (
+        <button
+          type="button"
+          disabled={setPinned.isPending}
+          aria-busy={setPinned.isPending}
+          aria-label="Pin this show"
+          aria-describedby={hintId}
+          onClick={() => {
+            setPinned.mutate(true)
+          }}
+          className={cx(
+            'font-medium text-[var(--arc-text)] underline underline-offset-4 disabled:opacity-60',
+            FOCUS_RING,
+          )}
+        >
+          {setPinned.isPending ? FEW_SEEDERS_PINNING : FEW_SEEDERS_PIN}
+        </button>
+      ) : null}
+      {setPinned.isError ? (
+        <span role="alert" className="text-[var(--arc-error)]">
+          {FEW_SEEDERS_FAILED}
+        </span>
+      ) : null}
+    </p>
+  )
+}
+
 /**
  * One episode (spec §6).
  *
@@ -1040,6 +1115,14 @@ function EpisodeRow({
         </p>
         {canDownload ? (
           <OfflineReason episodeId={episode.id} className="mt-1 block text-[13px]" />
+        ) : null}
+        {episode.few_seeders === true ? (
+          <FewSeeders
+            anime={anime}
+            episodeId={episode.id}
+            seeders={episode.seeders ?? null}
+            canPin={canDownload}
+          />
         ) : null}
       </div>
 
