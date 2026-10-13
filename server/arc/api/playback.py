@@ -131,11 +131,12 @@ def _neighbours(
 
 async def _live_want(session: SessionDep, user_id: int, episode_id: int) -> Want | None:
     """The caller's live want on this episode, if any (FR-A14's pending answer)."""
-    return await session.scalar(
+    found = await session.execute(
         select(Want).where(
             Want.user_id == user_id, Want.episode_id == episode_id, Want.dropped_at.is_(None)
         )
     )
+    return found.scalar_one_or_none()
 
 
 @router.get(
