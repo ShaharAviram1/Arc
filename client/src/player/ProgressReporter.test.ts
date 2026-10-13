@@ -4,6 +4,7 @@ import {
   MIN_REPORT_GAP_MS,
   ProgressReporter,
   REPORT_INTERVAL_MS,
+  resolveDuration,
   SEEK_DEBOUNCE_MS,
 } from '@/player/ProgressReporter'
 
@@ -338,5 +339,38 @@ describe('ProgressReporter', () => {
       expect(queue).not.toHaveBeenCalled()
       instance.destroy()
     })
+  })
+})
+
+/**
+ * The duration every report carries (FR-S4; M20 T3, plan C8). A live stream's
+ * media duration is only as long as what has downloaded, so it must never be
+ * the one a completion is measured against.
+ */
+describe('resolveDuration', () => {
+  it('takes the server duration while live, even over a finite media duration', () => {
+    expect(resolveDuration(300, 1440, true)).toBe(1440)
+  })
+
+  it('never reports the media duration while live, whatever the two say', () => {
+    for (const media of [300, 1440, 2000, Number.NaN, Infinity, 0]) {
+      expect(resolveDuration(media, 1440, true)).toBe(1440)
+    }
+    // A server with no duration yet gives 0, which the API refuses: no report
+    // at all rather than one measured against a growing playlist.
+    expect(resolveDuration(300, 0, true)).toBe(0)
+  })
+
+  it('keeps preferring the media duration when not live', () => {
+    expect(resolveDuration(1436.8, 1420)).toBe(1436.8)
+    expect(resolveDuration(1436.8, 1420, false)).toBe(1436.8)
+    expect(resolveDuration(300, 1440, false)).toBe(300)
+  })
+
+  it('falls back to the server duration when the media has none, not live', () => {
+    expect(resolveDuration(Number.NaN, 1420)).toBe(1420)
+    expect(resolveDuration(Infinity, 1420)).toBe(1420)
+    expect(resolveDuration(0, 1420)).toBe(1420)
+    expect(resolveDuration(-1, 0)).toBe(0)
   })
 })

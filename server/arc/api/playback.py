@@ -66,6 +66,7 @@ from arc.api.playback_schemas import (
     PlayInfo,
     ProgressIn,
     ProgressOut,
+    SubtitlesOut,
 )
 from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, Want, WatchProgress
 from arc.services.acquisition.wants import coverable
@@ -260,6 +261,7 @@ async def play(
         resume_at=progress.updated_at if progress is not None else None,
         previous=previous,
         next=following,
+        subtitles=None if not_ready else SubtitlesOut.from_rendition(rendition),
     )
 
 

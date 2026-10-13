@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -28,8 +29,9 @@ import { downloads } from '@/offline/downloads'
 import { useOffline } from '@/offline/network'
 import { useDownload } from '@/offline/useDownloads'
 import { HlsVideo } from '@/player/HlsVideo'
-import { ProgressReporter } from '@/player/ProgressReporter'
+import { ProgressReporter, resolveDuration } from '@/player/ProgressReporter'
 import { chooseSource, useLocalCopy } from '@/player/source'
+import { rememberSubtitles, subtitlesRemembered } from '@/player/subtitles'
 
 /**
  * The player (spec §4.5 FR-S1–FR-S6, roadmap M8; chrome redesigned in M15).
@@ -303,6 +305,38 @@ function FullscreenGlyph({ exit }: { exit: boolean }) {
 }
 
 /**
+ * "CC" in a rounded frame — the mark every player uses for the subtitle
+ * switch. Drawn solid while subtitles show, as an outline while they are off,
+ * so the state reads without the pressed styling.
+ */
+function SubtitlesGlyph({ on }: { on: boolean }) {
+  return (
+    <svg aria-hidden focusable="false" viewBox="0 0 24 24" className={SOLID_ICON}>
+      <rect
+        x="2.75"
+        y="5.25"
+        width="18.5"
+        height="13.5"
+        rx="2.6"
+        className={on ? 'fill-current' : 'fill-none stroke-current'}
+        strokeWidth={1.8}
+      />
+      <text
+        x="12"
+        y="15.1"
+        textAnchor="middle"
+        fontSize="7.6"
+        fontWeight="700"
+        fontFamily="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+        className={on ? 'fill-black' : 'fill-current'}
+      >
+        CC
+      </text>
+    </svg>
+  )
+}
+
+/**
  * ⟲ 10 / ⟳ 10 — the round-trip arrow every player uses for a ten-second jump,
  * with the number reading through the middle of it so the button says how far
  * without a word of text beside it.
@@ -434,11 +468,6 @@ function playQuietly(video: HTMLVideoElement): void {
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   return EDITABLE.has(target.tagName) || target.isContentEditable
-}
-
-/** The media's own duration when it has one, else what the transcode recorded. */
-function resolveDuration(mediaDuration: number, fallback: number): number {
-  return Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : fallback
 }
 
 /**
@@ -794,6 +823,26 @@ function PlayerView({ id }: { id: number }) {
   const [offlineMenuOpen, setOfflineMenuOpen] = useState(false)
 
   const serverDuration = data?.duration ?? 0
+  /**
+   * A stream still being cut from a download (M20): its media duration grows
+   * with the download, so the server's is the only one used (FR-S4, C8).
+   */
+  const live = (data?.live ?? null) !== null
+  /**
+   * The subtitle switch (FR-S10): on by default, the viewer's last choice on
+   * this device once they have made one. Per account, like the position.
+   */
+  const subtitlesOwner = userId ?? downloads().ownerId
+  const [subtitlesChoice, setSubtitlesChoice] = useState<boolean | null>(null)
+  // Read from storage once per account, not on every render (a timeupdate
+  // re-renders the page several times a second).
+  const subtitlesStored = useMemo(() => subtitlesRemembered(subtitlesOwner), [subtitlesOwner])
+  const subtitlesOn = subtitlesChoice ?? subtitlesStored
+  const toggleSubtitles = useCallback(() => {
+    const on = !subtitlesOn
+    setSubtitlesChoice(on)
+    rememberSubtitles(subtitlesOwner, on)
+  }, [subtitlesOn, subtitlesOwner])
   const total = mediaDuration > 0 ? mediaDuration : serverDuration
   const remaining = total > 0 ? Math.max(0, total - position) : 0
 
@@ -989,12 +1038,12 @@ function PlayerView({ id }: { id: number }) {
     (seconds: number) => {
       const video = videoRef.current
       if (video === null) return
-      const limit = resolveDuration(video.duration, serverDuration)
+      const limit = resolveDuration(video.duration, serverDuration, live)
       const clamped = Math.max(0, limit > 0 ? Math.min(seconds, limit) : seconds)
       video.currentTime = clamped
       setPosition(clamped)
     },
-    [serverDuration],
+    [serverDuration, live],
   )
 
   const skip = useCallback(
@@ -1039,7 +1088,7 @@ function PlayerView({ id }: { id: number }) {
           return
         case 'End': {
           event.preventDefault()
-          const limit = resolveDuration(video.duration, serverDuration)
+          const limit = resolveDuration(video.duration, serverDuration, live)
           if (limit <= 0) return
           video.currentTime = limit
           setPosition(limit)
@@ -1073,7 +1122,7 @@ function PlayerView({ id }: { id: number }) {
     return () => {
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [endOverlayShown, keepWatching, serverDuration, toggleFullscreen])
+  }, [endOverlayShown, keepWatching, serverDuration, live, toggleFullscreen])
 
   // Any sign of a person brings the chrome back. Moves are throttled, because
   // a pointer move fires dozens of times a second and none of them need a
@@ -1345,11 +1394,23 @@ function PlayerView({ id }: { id: number }) {
 
   const played = total > 0 ? Math.min(1, Math.max(0, position / total)) : 0
 
+  /**
+   * The CC button exists only for a stream whose rendition has a text track
+   * (FR-S10). A device copy has its subtitles burned into the picture (§5.3b),
+   * so there is nothing to switch there.
+   */
+  const hasSubtitles = (info.subtitles ?? null) !== null && source.kind !== 'file'
+  /** Where hls.js starts loading: the resume, by the same rule as the seek. */
+  const startPosition =
+    info.resume_position !== null && shouldResume(info.resume_position, serverDuration)
+      ? info.resume_position
+      : 0
+
   function onReady(duration: number) {
     const video = videoRef.current
     if (video === null) return
 
-    setMediaDuration(resolveDuration(duration, 0))
+    setMediaDuration(resolveDuration(duration, 0, live))
 
     // A second `loadedmetadata` means the stream was rebuilt — a Retry after a
     // fatal error. The fresh media starts at zero, which would throw away the
@@ -1367,7 +1428,7 @@ function PlayerView({ id }: { id: number }) {
     resumedRef.current = true
 
     const start = info.resume_position
-    if (shouldResume(start, resolveDuration(duration, serverDuration)) && start !== null) {
+    if (shouldResume(start, resolveDuration(duration, serverDuration, live)) && start !== null) {
       video.currentTime = start
       setPosition(start)
       setResumedAt(start)
@@ -1425,23 +1486,27 @@ function PlayerView({ id }: { id: number }) {
         // over a full-bleed picture is the same kind of clutter as the bar.
         className={chromeShown ? '' : 'cursor-none'}
         onVideoClick={onVideoClick}
+        startPosition={startPosition}
+        subtitles={hasSubtitles ? subtitlesOn : undefined}
         onReady={onReady}
         onTimeUpdate={(nextPosition, duration) => {
-          reporterRef.current?.update(nextPosition, resolveDuration(duration, serverDuration))
+          reporterRef.current?.update(nextPosition, resolveDuration(duration, serverDuration, live))
           if (Date.now() - lastLocalSaveRef.current >= LOCAL_POSITION_EVERY_MS) {
-            keepPosition(nextPosition, resolveDuration(duration, serverDuration))
+            keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
           }
           setPosition(nextPosition)
-          setMediaDuration(resolveDuration(duration, 0))
-          setBuffered(bufferedFraction(videoRef.current, resolveDuration(duration, serverDuration)))
+          setMediaDuration(resolveDuration(duration, 0, live))
+          setBuffered(
+            bufferedFraction(videoRef.current, resolveDuration(duration, serverDuration, live)),
+          )
         }}
         onPlay={(nextPosition, duration) => {
-          reporterRef.current?.play(nextPosition, resolveDuration(duration, serverDuration))
+          reporterRef.current?.play(nextPosition, resolveDuration(duration, serverDuration, live))
           setPlaying(true)
         }}
         onPause={(nextPosition, duration) => {
-          reporterRef.current?.pause(nextPosition, resolveDuration(duration, serverDuration))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
+          reporterRef.current?.pause(nextPosition, resolveDuration(duration, serverDuration, live))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
           setPlaying(false)
           // A pause is a sign of a person, so the bar comes back — but it no
           // longer *stays*: the idle timer runs while paused too, and takes it
@@ -1455,13 +1520,13 @@ function PlayerView({ id }: { id: number }) {
           if (!muted) setAutoplayMuted(false)
         }}
         onSeeked={(nextPosition, duration) => {
-          reporterRef.current?.seek(nextPosition, resolveDuration(duration, serverDuration))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
+          reporterRef.current?.seek(nextPosition, resolveDuration(duration, serverDuration, live))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
           setPosition(nextPosition)
         }}
         onEnded={(nextPosition, duration) => {
-          reporterRef.current?.end(nextPosition, resolveDuration(duration, serverDuration))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration))
+          reporterRef.current?.end(nextPosition, resolveDuration(duration, serverDuration, live))
+          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
           setPlaying(false)
           setChrome(true)
           setEnded(true)
@@ -1741,7 +1806,19 @@ function PlayerView({ id }: { id: number }) {
               )}
             </div>
 
-            <div className="flex items-center justify-self-end">
+            <div className="flex items-center gap-1 justify-self-end md:gap-2">
+              {hasSubtitles ? (
+                <button
+                  type="button"
+                  aria-label="Subtitles"
+                  aria-pressed={subtitlesOn}
+                  title={subtitlesOn ? 'Turn subtitles off' : 'Turn subtitles on'}
+                  onClick={toggleSubtitles}
+                  className={PLAYER_ICON}
+                >
+                  <SubtitlesGlyph on={subtitlesOn} />
+                </button>
+              ) : null}
               <button
                 type="button"
                 aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}

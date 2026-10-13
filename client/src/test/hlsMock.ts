@@ -14,10 +14,16 @@ import { vi } from 'vitest'
 
 export interface FakeHlsConfig {
   xhrSetup?: (xhr: XMLHttpRequest, url: string) => void
+  startPosition?: number
+  renderTextTracksNatively?: boolean
 }
 
-/** Only the event the player subscribes to. */
-export const Events = { ERROR: 'hlsError' } as const
+/** Only the events the player subscribes to, under hls.js's own names. */
+export const Events = {
+  ERROR: 'hlsError',
+  SUBTITLE_TRACKS_UPDATED: 'hlsSubtitleTracksUpdated',
+  SUBTITLE_TRACK_SWITCH: 'hlsSubtitleTrackSwitch',
+} as const
 
 type Handler = (event: string, data: unknown) => void
 
@@ -32,6 +38,15 @@ export class FakeHls {
   readonly loadSource = vi.fn<(src: string) => void>()
   readonly attachMedia = vi.fn<(media: HTMLMediaElement) => void>()
   readonly destroy = vi.fn<() => void>()
+  /**
+   * The subtitle switch (FR-S10), as plain fields: `-1` is "no track", which
+   * is where hls.js starts before it has read the master playlist. A test
+   * fills `subtitleTracks` and emits `SUBTITLE_TRACKS_UPDATED` to stand in
+   * for the master's `EXT-X-MEDIA` subtitle group.
+   */
+  subtitleTrack = -1
+  subtitleDisplay = true
+  subtitleTracks: { default: boolean }[] = []
 
   private readonly handlers = new Map<string, Handler[]>()
 

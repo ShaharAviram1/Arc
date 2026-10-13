@@ -1711,3 +1711,191 @@ describe('Player progress reporting failures', () => {
     expect(screen.queryByText(PROGRESS_UNSAVED)).not.toBeInTheDocument()
   })
 })
+
+/**
+ * The subtitle track at play time (FR-S10, M20 T3): a remuxed rendition's
+ * WebVTT track is on by default, the CC button switches it off and on, and the
+ * choice is remembered on this device for this account.
+ */
+describe('Player subtitles (FR-S10)', () => {
+  const WITH_SUBTITLES: PlayInfo = { ...PLAY_INFO, subtitles: { lang: 'en' } }
+  const SUBTITLES_KEY = `arc:subtitles-off:${String(TEST_USER.id)}`
+
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    window.localStorage.clear()
+  })
+
+  /** What hls.js does with the master's `DEFAULT=YES` subtitle group. */
+  function offerTrack(hls: FakeHls): void {
+    act(() => {
+      hls.subtitleTracks = [{ default: true }]
+      hls.emit(Events.SUBTITLE_TRACKS_UPDATED, {})
+    })
+  }
+
+  it('shows the CC button with the track showing on load', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+
+    const video = await readyVideo()
+    const hls = instances[0]
+    if (hls === undefined) throw new Error('no hls.js instance')
+    offerTrack(hls)
+    await loadMetadata(video)
+
+    const button = await screen.findByRole('button', { name: 'Subtitles' })
+    expect(button).toHaveAttribute('aria-pressed', 'true')
+    expect(hls.subtitleTrack).toBe(0)
+    expect(hls.subtitleDisplay).toBe(true)
+  })
+
+  it('toggles the track off and remembers it across a remount', async () => {
+    const user = userEvent.setup()
+    const { fetchMock, view } = renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+
+    const video = await readyVideo()
+    const first = instances[0]
+    if (first === undefined) throw new Error('no hls.js instance')
+    offerTrack(first)
+    await loadMetadata(video)
+    // `/me` has answered, so the choice is filed under this account.
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
+    })
+
+    await user.click(await screen.findByRole('button', { name: 'Subtitles' }))
+
+    expect(screen.getByRole('button', { name: 'Subtitles' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+    expect(first.subtitleTrack).toBe(-1)
+    expect(first.subtitleDisplay).toBe(false)
+    expect(window.localStorage.getItem(SUBTITLES_KEY)).toBe('1')
+
+    view.unmount()
+    resetHls()
+    renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+    const again = await readyVideo()
+    const second = instances[0]
+    if (second === undefined) throw new Error('no hls.js instance')
+    // hls.js auto-selects the DEFAULT=YES track; the remembered choice undoes it.
+    act(() => {
+      second.subtitleTracks = [{ default: true }]
+      second.subtitleTrack = 0
+      second.emit(Events.SUBTITLE_TRACK_SWITCH, { id: 0 })
+    })
+    await loadMetadata(again)
+
+    const button = await screen.findByRole('button', { name: 'Subtitles' })
+    await waitFor(() => {
+      expect(button).toHaveAttribute('aria-pressed', 'false')
+    })
+    expect(second.subtitleTrack).toBe(-1)
+
+    // And back on, which forgets the "off".
+    await user.click(button)
+    expect(second.subtitleTrack).toBe(0)
+    expect(window.localStorage.getItem(SUBTITLES_KEY)).toBeNull()
+  })
+
+  it('offers no CC button for a rendition with no text track', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: { ...PLAY_INFO, subtitles: null } } })
+
+    const video = await readyVideo()
+    await loadMetadata(video)
+
+    expect(await screen.findByRole('button', { name: 'Fullscreen' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Subtitles' })).not.toBeInTheDocument()
+  })
+
+  it('still plays with subtitles on when storage is blocked', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    })
+    try {
+      renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+      await readyVideo()
+      expect(await screen.findByRole('button', { name: 'Subtitles' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+    } finally {
+      getItem.mockRestore()
+    }
+  })
+
+  it('reads the stored choice once per account, not on every render', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+    try {
+      const { fetchMock } = renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+      const video = await readyVideo()
+      await waitFor(() => {
+        expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
+      })
+      await loadMetadata(video)
+      for (const position of [800, 801, 802, 803, 804]) seekTo(video, position)
+
+      const reads = getItem.mock.calls.filter(([key]) => key === SUBTITLES_KEY)
+      expect(reads).toHaveLength(1)
+    } finally {
+      getItem.mockRestore()
+    }
+  })
+
+  it('starts hls.js at the resume position, not the live edge', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: WITH_SUBTITLES } })
+
+    await readyVideo(false)
+    expect(instances[0]?.config.startPosition).toBe(PLAY_INFO.resume_position)
+  })
+
+  it('starts hls.js at 0 when there is nothing to resume', async () => {
+    renderPlayer({ [PLAY_PATH]: { body: PLAY_INFO_LAST } })
+
+    await readyVideo(false)
+    expect(instances[0]?.config.startPosition).toBe(0)
+  })
+})
+
+/**
+ * The duration a live stream is measured against (FR-S4, M20 plan C8): the
+ * media element's grows with the download, so the server's is reported.
+ */
+describe('Player duration while live (FR-S4)', () => {
+  const LIVE: PlayInfo = {
+    ...PLAY_INFO,
+    resume_position: null,
+    duration: 1440,
+    live: {
+      front_seconds: 300,
+      expected_duration: 1440,
+      download_progress: 0.2,
+      seeders: 12,
+      ended: false,
+    },
+  }
+
+  it('reports the server duration, never the media element’s', async () => {
+    const { fetchMock } = renderPlayer({ [PLAY_PATH]: { body: LIVE } })
+
+    const video = await readyVideo(false)
+    // Five minutes downloaded: the element says 300 s.
+    equipVideo(video, 300)
+    await loadMetadata(video)
+    seekTo(video, 290)
+    fireEvent.pause(video)
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('POST /api/progress')
+    })
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+    expect(posts.length).toBeGreaterThan(0)
+    for (const [, init] of posts) {
+      expect(jsonBodyOf(init).duration_s).toBe(1440)
+    }
+  })
+})

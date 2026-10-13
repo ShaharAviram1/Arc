@@ -244,3 +244,21 @@ body {
     text-decoration: none;
   }
 }
+
+/*
+ * The subtitle track of a remuxed stream (FR-S10, M20 T3), drawn by the
+ * browser from WebVTT: hls.js renders it as a native TextTrack and Safari
+ * plays it natively, so `::cue` is the one place both are styled. White on a
+ * 60 % black box, sized to the viewport's height so a line reads at arm's
+ * length on an iPad and does not shrink to nothing on a phone. Safari's own
+ * fullscreen player and the viewer's system caption settings may override it,
+ * which is their right.
+ */
+video::cue {
+  color: #ffffff;
+  background-color: rgba(0, 0, 0, 0.6);
+  font-size: 4.5vh;
+  line-height: 1.3;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
+}

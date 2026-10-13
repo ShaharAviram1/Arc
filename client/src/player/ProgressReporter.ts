@@ -31,6 +31,24 @@ export const SEEK_DEBOUNCE_MS = 500
  */
 export const MIN_REPORT_GAP_MS = 2_000
 
+/**
+ * The duration every report and every seek limit is measured against (FR-S4).
+ *
+ * Normally the media's own duration when it has one, else the server's
+ * (`fallback`): the two agree to within a second, and the media's is the one
+ * the playhead actually moves along.
+ *
+ * **While the stream is live** (`live`, M20) the media element's duration is
+ * never used, finite or not: an EVENT playlist reports a finite duration that
+ * grows with the download, so 90 % of five downloaded minutes would count as
+ * watched and write to MyAnimeList (a non-negotiable). The server's expected
+ * duration is the answer then, even when the element's looks plausible.
+ */
+export function resolveDuration(mediaDuration: number, fallback: number, live = false): number {
+  if (live) return fallback
+  return Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : fallback
+}
+
 export interface ProgressReporterOptions {
   episodeId: number
   /** Sends one report; the player wires this to the progress mutation. */

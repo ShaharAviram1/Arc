@@ -733,7 +733,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   rendition (FR-P1) is served with its **subtitle rendition**: the master
   playlist offers the WebVTT track, on by default, and the subtitle playlist
   and segments are cut from the stored track on request, each cue in the one
-  segment it starts in.
+  segment it starts in. **Subtitles are on by default** whenever the rendition
+  has them, in FR-P2's language; the user can turn them off with the player's
+  CC button, and that choice is remembered on that device (FR-S10).
   **The player starts playing on its own** (owner, 2026-09-17): opening an
   episode is the decision, and the page presses play as soon as the source is
   attached and the resume seek (FR-S2) has been made. The browser's autoplay
@@ -751,7 +753,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   after five seconds; Dismiss closes it sooner.
 - FR-S3 Progress is reported every 10 s while playing and on pause/seek/close.
 - FR-S4 An episode counts as **watched** when position ≥ 90 % of duration.
-  This sets WatchProgress.completed, advances ListEntry.progress if this
+  **The duration** is the media's own once it has one, else the server's
+  (the rendition's recorded length) — except **while the stream is live**
+  (M20: a stream still being cut from a download), when it is always the
+  server's expected duration and never the media element's, because a
+  growing playlist reports a length only as long as what has downloaded and
+  90 % of that is not 90 % of the episode. This sets WatchProgress.completed, advances ListEntry.progress if this
   episode number is greater than current progress, and enqueues a MAL sync.
   If the show is not on the user's list, watching it adds it as Watching
   (the act of watching is the user's choice); status is never changed
@@ -1064,6 +1071,17 @@ that the course professor can log in at any time, and the owner uses it daily.
      copy is marked watched and leaves by the same rules; one completed before
      the copy was kept is a rewatch and stays. The server saying "not
      completed" never clears a mark, and a Kept copy is not asked about.
+- FR-S10 **Subtitles at play time** (M20). A streamed episode whose rendition
+  carries a text track (a remux, FR-P1/FR-P7) plays with that track showing,
+  in FR-P2's language. The player's control bar has a **CC** button, shown
+  only when the rendition has a text track (never for a burn-in transcode, and
+  never for a device copy, whose subtitles are in the picture); pressing it
+  hides the track, pressing it again shows it. The choice is remembered per
+  account **on that device** (browser storage; nothing is sent to the server)
+  and applies to every episode played there afterwards; a browser that blocks
+  storage simply starts with subtitles on. There is no keyboard shortcut for it
+  (FR-S6 is unchanged). Cues are drawn by the browser as white text on a
+  translucent black box, sized to the screen's height so they read on an iPad.
 
 ### 4.6 Watch tracking and list states
 - FR-W1 Home shows **Continue watching** (episodes with a saved position that
@@ -1387,7 +1405,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -2604,3 +2622,10 @@ through the same edge, without the grace period.
   rendition with a text track** (Q7): it would play without subtitles. §8 no
   longer excludes user-selectable subtitle tracks (the player's on/off lands in
   M20 T3).
+- 2026-10-13 (M20 T3) — **Subtitles at play time** (new FR-S10; FR-S1, FR-S4,
+  §5 Player). The CC button turns a remux's text track off and on; the choice
+  is remembered per account on the device (no server state). No `C` shortcut:
+  FR-S6 is unchanged until the owner asks for one. FR-S4's duration is the
+  server's whenever the stream is live, never the media element's (a growing
+  playlist would otherwise let 90 % of what has downloaded count as watched
+  and write to MAL). `/play` carries `subtitles: {lang} | null`.

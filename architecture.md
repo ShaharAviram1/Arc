@@ -2012,6 +2012,41 @@ remux|transcode` (no mode: `transcode` with `force`, else `remux`).
   `ProgressReporter` posts every 10 s while playing, on pause, on seek
   (debounced), and on `pagehide` via `sendBeacon`, with a 2 s floor between
   ordinary reports.
+- **The subtitle track and the duration rule, client half (M20 T3, FR-S10,
+  FR-S4).** `/play` carries `subtitles: {lang} | null`
+  (`SubtitlesOut.from_rendition`: non-null exactly when the rendition has
+  `text_subtitles`; `lang` is `subtitle_lang`, or `und`; null while the
+  episode is not ready) and, typed now for T6, `live?: {front_seconds,
+  expected_duration, download_progress, seeders, ended}`. `HlsVideo` creates
+  hls.js with `{ xhrSetup, startPosition, renderTextTracksNatively: true }`
+  and sets `hls.subtitleDisplay = true` on the instance (hls.js 1.7 has no
+  such config option). `startPosition` is the resume position when FR-S2
+  would seek to it, else 0 — never hls.js's default, which on an EVENT
+  playlist is the live edge. The track reaches the page two ways
+  (`player/subtitles.ts`): with hls.js, the master's `DEFAULT=YES,
+  AUTOSELECT=YES` subtitle rendition is auto-selected and rendered as a native
+  `TextTrack`, and hls.js owns its mode, so the switch is `hls.subtitleTrack`
+  (`-1` disables it and stops its segments loading) plus
+  `hls.subtitleDisplay`; on native HLS (iOS Safari) the rendition appears in
+  `video.textTracks`, and the switch is the first subtitle/caption track's
+  `mode` (`showing` / `disabled`). `HlsVideo`'s `setSubtitles(on)` picks the
+  right one; its `subtitles` prop (undefined = leave the track alone) is
+  applied after `loadedmetadata`, on hls.js's `SUBTITLE_TRACKS_UPDATED` and
+  `SUBTITLE_TRACK_SWITCH` (so its auto-select is undone for a viewer who
+  turned subtitles off), on Safari's `addtrack`, and whenever the prop
+  changes — none of which recreates the stream. The player's CC button
+  (`aria-pressed`, beside fullscreen) exists only when `subtitles` is non-null
+  and the source is the stream, not a device copy (burned in, §5.3b); the
+  choice lives in `localStorage` under `arc:subtitles-off:<user id>` (`1` =
+  off, absent = on), every access wrapped in try/catch, no server state, no
+  shortcut. `video::cue` in `index.css`: white on `rgba(0,0,0,0.6)`, 4.5vh.
+  **Duration:** `resolveDuration(media, server, live)` (in
+  `ProgressReporter.ts`) returns the media's finite positive duration, else
+  the server's — but when `live` (`/play` carried `live`) always the server's,
+  never the element's (plan C8: an EVENT playlist's finite, growing duration
+  would let 90 % of what has downloaded complete the episode and write to
+  MAL). Every report, local position, seek limit, `End` and the resume check
+  go through it. T6 adds the server-side guard in `record_progress`.
 - **Autoplay, as built (M16 batch 4, FR-S1, owner 2026-09-17).** `onReady`
   (i.e. `loadedmetadata`) does the resume seek and then calls `beginPlayback`,
   behind a ref so it happens once per page and never in a loop: `await
@@ -4158,7 +4193,7 @@ Mutating requests must carry an allowed `Origin`.
 | `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row, which puts the episode back in the caller's window from the next reconciliation (M20 T4: a delivered, unreleased episode is skipped); idempotent |
 | `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4 → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
 | `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null), `subtitles` (`{lang}` when the rendition has a text track, else null; M20 T3, FR-S10). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want |
 | `POST /api/episodes/{id}/demand` | any, demo included | M20 T4 (FR-A14): press play on a not-ready episode → **202 `{state}`**. **409** `{detail: {code, message}}` with `not_in_window` (not in the caller's `coverable` set), `acquisition_paused` or `storage_held` (only while the episode still needs fetching). 404 unknown episode. A `ready` episode answers 202 `{state: ready}` and writes nothing. Otherwise, under the shared wants lock, upserts the want with `demanded_at`, starts/raises the search to priority 100, `qbit_top` if downloading, queues `compute_wants`. Origin required |
 | `PUT /api/devices/{device_id}/holdings` | any but demo (403 `demo_account`) | M20 T4 (FR-A15): body `{episode_ids: [id…]}` (≤ 500, extra keys 422) **replaces** that device's set → **204**. `device_id` must parse as a version-4 UUID (else 422) and is stored canonical, so two spellings are one device; ids naming no episode are dropped; the user's rows older than 14 days are purged and at most 10 devices kept (oldest report evicted); a change queues `compute_wants`. Origin required |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
@@ -6631,3 +6666,4 @@ asked*, so `make test` is exactly as fast as it was.
   and is indexed `(user_id, reported_at)` (same revision, not yet deployed).
 - 2026-10-13 (owner) — M20 T2: **remux replaces burn-in as the default preparation** (reverses the 2026-09-05 burn-in decision; burn-in transcode is the fallback for sources `copyable()` refuses). New job `remux` (`media/remux.py`, own lock key, own cap group `MAX_REMUXES`, 2 attempts), `REMUX_AUDIO_BITRATE`; revision `caf1811e8ee6` (`renditions_kind_prepare_index`, on `a7d2e5c9f318`): `renditions.kind`, `renditions.text_subtitles`, `ix_jobs_transcode_episode` → `ix_jobs_prepare_episode`. Generated master/subtitle playlists and WebVTT segments (§5.4a); first-frame PTS cached in a `remux.json` sidecar written at remux time (not on the row: no extra column, and it travels with the directory). `episode.mp4` refused for a remux with a text track (Q7). Retention's in-flight guard now counts remux and transcode jobs. No new dependency.
 - 2026-10-13 — M20 T2 review fixes: a remux steps aside for a running transcode (`stage=deferred`, skipped by `latest_transcode_jobs`) and a transcode defers (`PrepareDeferred`) to a running remux; stale staging is removed only when its job is not running; generated subtitle playlist and segments are `no-cache` + ETag, not immutable; `fallback_reason` travels to the queued transcode (with `force`) and out as `EpisodeOut.prepare_note`; `REMUX_TIMEOUT_SECONDS` (600) replaces the transcode's 3 h timeout for remuxes; FR-P3 states that a remux beside a full encode group needs `WORKER_CONCURRENCY` > `MAX_TRANSCODES`.
+- 2026-10-13 — M20 T3: **subtitle switch, start position, live duration rule** (§5.4a, spec FR-S10/FR-S1/FR-S4). `PlayInfo.subtitles` (`SubtitlesOut`, from `text_subtitles`/`subtitle_lang`); client `PlayInfo.live` typed for T6. hls.js gets `startPosition` (resume or 0) and `renderTextTracksNatively`; `subtitleDisplay` is set on the instance because hls.js 1.7 has no config option of that name. New `client/src/player/subtitles.ts` (the two switches and the `localStorage` preference); CC button in the player; `video::cue` styling; `resolveDuration` moves to `ProgressReporter.ts` and takes `live`. No schema change, no new dependency, no `C` shortcut.

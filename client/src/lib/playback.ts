@@ -62,6 +62,34 @@ export interface EpisodeRef {
   ready: boolean
 }
 
+/**
+ * The text track a remuxed rendition carries (FR-S1, FR-S10, M20): served as
+ * the master playlist's default subtitle rendition. `lang` is FR-P2's choice
+ * (`und` when the source did not say).
+ */
+export interface SubtitlesInfo {
+  lang: string
+}
+
+/**
+ * A stream still being cut from a growing download (FR-S4, M20 T6/T7).
+ * Typed now so the player's duration rule is ready for it; the server fills
+ * it from T6 on. While it is present the player never takes the media
+ * element's duration (it is only as long as what has been downloaded) and
+ * uses `expected_duration` (the server's `duration`) instead.
+ */
+export interface LiveInfo {
+  /** Seconds playable so far: the download front. */
+  front_seconds: number
+  /** The episode's whole length, as the server expects it. */
+  expected_duration: number
+  /** 0..1, the download's own progress. */
+  download_progress: number
+  seeders: number | null
+  /** The playlist has its ENDLIST: the episode is whole now. */
+  ended: boolean
+}
+
 /** `GET /api/episodes/{id}/play`; 404 until the episode is `ready`. */
 export interface PlayInfo {
   episode: EpisodeOut
@@ -91,6 +119,14 @@ export interface PlayInfo {
   resume_at?: string | null
   previous: EpisodeRef | null
   next: EpisodeRef | null
+  /**
+   * The rendition's text track (FR-S10, M20), or null for one with none — a
+   * burn-in transcode, or a source with no usable text track. The CC button
+   * exists only when this does. Absent from a server older than M20 T3.
+   */
+  subtitles?: SubtitlesInfo | null
+  /** Set while the stream is live (M20 T6); see {@link LiveInfo}. */
+  live?: LiveInfo
   /**
    * Client-side only: this payload was rebuilt on the device from a download
    * (FR-S9) because the server could not be reached, or no longer has the

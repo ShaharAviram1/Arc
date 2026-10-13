@@ -256,6 +256,46 @@ async def test_play_carries_the_playlist_url_the_duration_and_the_neighbours(
     }
 
 
+async def _set_rendition(
+    factory: SessionFactory, episode_id: int, *, kind: str, text: bool, lang: str | None
+) -> None:
+    async with factory() as session:
+        row = (
+            await session.execute(select(Rendition).where(Rendition.episode_id == episode_id))
+        ).scalar_one()
+        row.kind = kind
+        row.text_subtitles = text
+        row.subtitle_lang = lang
+        await session.commit()
+
+
+async def test_play_carries_the_subtitle_track_of_a_remux(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """FR-S10: the CC button's source. A remux with a text track names its
+    language; a burn-in transcode, or a remux with no track, carries null."""
+    _anime_id, ids = await add_show(api_factory, anilist_id=950010, ready=(9, 10, 11, 12))
+    await _set_rendition(api_factory, ids[9], kind="remux", text=True, lang="en")
+    await _set_rendition(api_factory, ids[10], kind="remux", text=True, lang=None)
+    await _set_rendition(api_factory, ids[11], kind="remux", text=False, lang=None)
+    await _set_rendition(api_factory, ids[12], kind="transcode", text=False, lang="en")
+
+    answers = {
+        number: (await client.get(f"/api/episodes/{ids[number]}/play")).json()
+        for number in (9, 10, 11, 12)
+    }
+
+    assert answers[9]["subtitles"] == {"lang": "en"}
+    # The source did not say: announced as undetermined, still switchable.
+    assert answers[10]["subtitles"] == {"lang": "und"}
+    assert answers[11]["subtitles"] is None
+    # Burned into the picture: nothing to switch off.
+    assert answers[12]["subtitles"] is None
+    # T4's fields are untouched by it.
+    assert answers[9]["pending"] is None
+    assert answers[9]["playlist_url"] == f"/media/{ids[9]}/index.m3u8"
+
+
 async def test_play_carries_the_episode_title_and_still(
     client: AsyncClient, api_factory: SessionFactory
 ) -> None:

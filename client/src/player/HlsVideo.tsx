@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type HlsJs from 'hls.js'
 import type { ErrorData } from 'hls.js'
 import { buttonClass } from '@/components/ui/styles'
+import { applyHlsSubtitles, showTextTracks } from '@/player/subtitles'
 
 /**
  * A `<video>` fed by HLS (spec §4.5 FR-S1, §5.4).
@@ -25,6 +26,17 @@ import { buttonClass } from '@/components/ui/styles'
  * All media state stays on the element the caller owns through `videoRef`;
  * this component only decides how bytes get into it, and reports the events
  * back out.
+ *
+ * Two things it does decide (M20 T3, architecture §5.4a):
+ *
+ * - **Where hls.js starts loading** (`startPosition`): the caller's resume
+ *   position, or 0 — never hls.js's default of "the live edge", which on a
+ *   growing (EVENT) playlist would start the viewer at the download front.
+ * - **Whether the subtitle track shows** (`subtitles`), through
+ *   `setSubtitles(on)`: `hls.subtitleTrack` on the hls.js path, the
+ *   `TextTrack`'s `mode` on the native one (see `player/subtitles.ts`). It is
+ *   applied after `loadedmetadata`, whenever hls.js updates or switches its
+ *   subtitle tracks, whenever Safari adds one, and whenever the prop changes.
  */
 
 /** Asked of the element; only meaningful together with the MSE check above. */
@@ -78,6 +90,16 @@ export interface HlsVideoProps {
    * business; this only says that one happened.
    */
   onVideoClick?: () => void
+  /**
+   * Where hls.js starts loading, in seconds (the resume position, or 0). Read
+   * when the instance is created, never as a reason to recreate one.
+   */
+  startPosition?: number
+  /**
+   * Whether the stream's subtitle track should show (FR-S10). `undefined`
+   * leaves the track alone (a stream with no text track, or a device copy).
+   */
+  subtitles?: boolean
 }
 
 export function HlsVideo({
@@ -96,12 +118,51 @@ export function HlsVideo({
   onVolumeChange,
   onRateChange,
   onVideoClick,
+  startPosition = 0,
+  subtitles,
 }: HlsVideoProps) {
   const [mode, setMode] = useState<Loading>('loading')
   const [fatal, setFatal] = useState<string | null>(null)
   /** Bumped by Retry; recreating the instance is the only reliable recovery. */
   const [attempt, setAttempt] = useState(0)
   const hlsRef = useRef<HlsJs | null>(null)
+  /**
+   * The latest props the effects below read without depending on them: a
+   * new resume position or a toggle must not tear the stream down.
+   */
+  const startRef = useRef(startPosition)
+  const subtitlesRef = useRef(subtitles)
+  useEffect(() => {
+    startRef.current = startPosition
+    subtitlesRef.current = subtitles
+  })
+
+  /**
+   * The CC switch (FR-S10). hls.js owns the track's mode on its path, so it
+   * is asked through its own API; on the native path the element's
+   * `textTracks` are the only handle there is.
+   */
+  const setSubtitles = useCallback(
+    (on: boolean) => {
+      const hls = hlsRef.current
+      if (hls !== null) {
+        applyHlsSubtitles(hls, on)
+        return
+      }
+      showTextTracks(videoRef.current?.textTracks, on)
+    },
+    [videoRef],
+  )
+
+  /** The prop's current value applied, if it has one. */
+  const applySubtitles = useCallback(() => {
+    const on = subtitlesRef.current
+    if (on !== undefined) setSubtitles(on)
+  }, [setSubtitles])
+
+  useEffect(() => {
+    if (subtitles !== undefined) setSubtitles(subtitles)
+  }, [subtitles, setSubtitles])
 
   useEffect(() => {
     const video = videoRef.current
@@ -128,7 +189,17 @@ export function HlsVideo({
     if (!hasMse && video.canPlayType(HLS_MIME) !== '') {
       video.src = src
       setMode('native')
+      // Safari may add the subtitle rendition's track after the metadata has
+      // loaded; the viewer's choice is applied to it as it appears.
+      // (Guarded: a test DOM's list may be no event target at all.)
+      const tracks = video.textTracks as Partial<TextTrackList> | undefined
+      const listens =
+        tracks !== undefined &&
+        typeof tracks.addEventListener === 'function' &&
+        typeof tracks.removeEventListener === 'function'
+      if (listens) tracks.addEventListener?.('addtrack', applySubtitles)
       return () => {
+        if (listens) tracks.removeEventListener?.('addtrack', applySubtitles)
         video.removeAttribute('src')
       }
     }
@@ -148,8 +219,22 @@ export function HlsVideo({
           xhrSetup: (xhr) => {
             xhr.withCredentials = true
           },
+          // From the resume position (or the start), never the live edge an
+          // EVENT playlist would otherwise put the viewer at (M20).
+          startPosition: startRef.current,
+          // The remux's WebVTT track, drawn by the browser as a TextTrack so
+          // `::cue` styles it (FR-S10).
+          renderTextTracksNatively: true,
         })
+        // On by default. hls.js 1.7 has no `subtitleDisplay` config option —
+        // it is a property of the instance (true by default) — so it is set
+        // here, explicitly, rather than left to the library's default.
+        hls.subtitleDisplay = true
         hlsRef.current = hls
+        // hls.js picks the playlist's DEFAULT track itself; a viewer who
+        // switched subtitles off has that undone as soon as it happens.
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, applySubtitles)
+        hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, applySubtitles)
         hls.on(Hls.Events.ERROR, (_event: unknown, data: ErrorData) => {
           // Non-fatal errors are hls.js's own retries and are not worth
           // interrupting playback over; a fatal one has given up.
@@ -168,7 +253,7 @@ export function HlsVideo({
       hlsRef.current?.destroy()
       hlsRef.current = null
     }
-  }, [src, kind, attempt, videoRef])
+  }, [src, kind, attempt, videoRef, applySubtitles])
 
   const positionOf = useCallback((): [number, number] => {
     const video = videoRef.current
@@ -204,6 +289,7 @@ export function HlsVideo({
           if (kind === 'file') onSourceError?.()
         }}
         onLoadedMetadata={() => {
+          if (kind === 'hls') applySubtitles()
           onReady?.(videoRef.current?.duration ?? Number.NaN)
         }}
         onTimeUpdate={emit(onTimeUpdate)}

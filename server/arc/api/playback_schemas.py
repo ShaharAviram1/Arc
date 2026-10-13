@@ -15,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
 from arc.api.deps import MAX_ID, MIN_ID
-from arc.models import Episode, EpisodeState
+from arc.models import Episode, EpisodeState, Rendition
+
+#: The language a text track is announced with when the source did not say
+#: (BCP 47's "undetermined").
+UNDETERMINED_LANG = "und"
 
 
 class EpisodeRef(BaseModel):
@@ -69,6 +73,24 @@ class PendingOut(BaseModel):
     seeders: int | None = None
 
 
+class SubtitlesOut(BaseModel):
+    """The text track a remuxed rendition carries (FR-S1, FR-S10, M20 T3).
+
+    The master playlist offers it as the default subtitle rendition; the
+    player shows a CC button only when this is present. ``lang`` is FR-P2's
+    choice, recorded on the rendition (``und`` when the source did not say).
+    """
+
+    lang: str
+
+    @classmethod
+    def from_rendition(cls, rendition: Rendition | None) -> SubtitlesOut | None:
+        """Null for no rendition, a burn-in transcode, or a remux with no track."""
+        if rendition is None or not rendition.text_subtitles:
+            return None
+        return cls(lang=rendition.subtitle_lang or UNDETERMINED_LANG)
+
+
 class PlayInfo(BaseModel):
     """``GET /api/episodes/{id}/play`` — everything the player opens with.
 
@@ -108,6 +130,10 @@ class PlayInfo(BaseModel):
     resume_at: datetime | None = None
     previous: EpisodeRef | None = None
     next: EpisodeRef | None = None
+    #: The rendition's text track (FR-S10), or null when it has none — a
+    #: burn-in transcode, a remux of a source with no usable text track, or
+    #: an episode with nothing to stream yet.
+    subtitles: SubtitlesOut | None = None
 
 
 class ProgressIn(BaseModel):

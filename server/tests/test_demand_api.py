@@ -442,3 +442,37 @@ async def test_without_a_demand_the_trip_copy_is_offline_only(
 
     assert body["offline_only"] is True
     assert body["pending"] is None
+
+
+@pytest.mark.parametrize("demanded", [True, False], ids=["pending", "offline_only"])
+async def test_a_not_ready_episode_offers_no_subtitle_track(
+    client: AsyncClient, user: User, api_factory: SessionFactory, demanded: bool
+) -> None:
+    """FR-S10: nothing to stream, so nothing to switch — even when a remux row
+    with a text track is still lying around for the episode."""
+    ids = await followed_show(api_factory, user.id, anilist_id=975040 + int(demanded))
+    await delivered_trip(api_factory, user.id, ids[4], demanded=demanded)
+    async with api_factory() as session:
+        session.add(
+            Rendition(
+                episode_id=ids[4],
+                dir=f"/data/renditions/{ids[4]}",
+                playlist_path=f"/data/renditions/{ids[4]}/index.m3u8",
+                duration=1420.0,
+                kind="remux",
+                text_subtitles=True,
+                subtitle_lang="en",
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/episodes/{ids[4]}/play")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["playlist_url"] is None
+    if demanded:
+        assert body["pending"] is not None
+    else:
+        assert body["offline_only"] is True
+    assert body["subtitles"] is None
