@@ -1812,7 +1812,16 @@ owner's word.
       committed aa54283.
 - [ ] T2: `remux` job for complete files, VOD subtitle rendition, burn-in fallback
 - [ ] T3: Player, part 1: subtitle track, safe duration, start position
-- [ ] T4: Window rules: N = 1, halfway prefetch, device-copy skip, play on demand (server)
+- [x] T4: Window rules: N = 1, halfway prefetch, device-copy skip, play on demand (server)
+      — verified 2026-10-13: Validator conditional PASS (11 adversarial pg cases;
+      repeated demands cannot walk a season; cross-user isolation) and Reviewer
+      (no blockers; fixed: a demanded want now ends when it leaves the covered
+      set, a shared advisory lock between demand and the reconciler, upsert on
+      concurrent demands, holdings lock + 14-day purge + 10 devices per user,
+      the prefetch never takes a K slot, pending beats offline_only for a
+      demanded trip episode); orchestrator: rebased onto T8 (migration
+      603a536051f9 after 911eca1dfc62), full server suite on the merged tree
+      4647 passed, 3 skipped, lints clean; merged 0350852.
 - [ ] T5: Device reporting and play-on-demand UI (client, non-live)
 - [ ] T6: Progressive remux on a growing file (server)
 - [ ] T7: Player, part 2: live playback (client)
