@@ -73,6 +73,23 @@ class PendingOut(BaseModel):
     seeders: int | None = None
 
 
+class LiveOut(BaseModel):
+    """A stream cut from a download still in progress (FR-P8, M20 T6).
+
+    Set while ``/media/{id}/…`` is served from the live directory. The player
+    takes ``expected_duration`` as the episode's length (never the media
+    element's, which grows with the download), shows ``front_seconds`` as how
+    far it may play, and ``download_progress``/``seeders`` while it waits.
+    ``ended`` is the playlist having its ``ENDLIST``: the episode is whole.
+    """
+
+    front_seconds: float
+    expected_duration: float
+    download_progress: float
+    seeders: int | None = None
+    ended: bool = False
+
+
 class SubtitlesOut(BaseModel):
     """The text track a remuxed rendition carries (FR-S1, FR-S10, M20 T3).
 
@@ -105,7 +122,8 @@ class PlayInfo(BaseModel):
     #: ``/media/{episode_id}/index.m3u8`` — derived from the id, never from
     #: anything on disk (spec §7). Sent rather than assumed so the client has
     #: one place to read it from. ``null`` exactly when ``offline_only`` or
-    #: ``pending`` is set.
+    #: ``pending`` is set. While ``live`` is set it is the same URL, served
+    #: from the download in progress.
     playlist_url: str | None
     #: The rendition's own duration in seconds. ``0`` only for a ``ready``
     #: episode whose rendition row somehow carries no duration, and for an
@@ -120,6 +138,9 @@ class PlayInfo(BaseModel):
     #: M20): it is being searched for, downloaded or prepared, and the player
     #: polls this route until ``playlist_url`` arrives. Null otherwise.
     pending: PendingOut | None = None
+    #: Set while the episode plays from its download in progress (FR-P8, M20
+    #: T6); ``pending`` is null then and ``duration`` is ``expected_duration``.
+    live: LiveOut | None = None
     #: Where to seek on open, or null for the beginning (FR-S2).
     resume_position: float | None = None
     #: When the caller's position for this episode was last written — the

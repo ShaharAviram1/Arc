@@ -45,7 +45,7 @@ from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import Job, JobStatus
 from arc.services.jobs.runner import claim_one, run_job
-from arc.services.media.names import ENCODE_TYPES, REMUX_TYPES
+from arc.services.media.names import ENCODE_TYPES, LIVE_TYPES, REMUX_TYPES
 
 log = logging.getLogger("arc.worker")
 
@@ -77,8 +77,16 @@ def process_caps(settings: Settings) -> dict[frozenset[str], int]:
     against the encoders nor wait behind them. A remux is claimed while the
     encode group is full; that is what lets an episode become playable in
     under a minute on a host that is busy making trip copies.
+
+    The **live remux** (M20 T6) has a third group, ``MAX_LIVE_REMUXES``: it
+    runs for as long as its download, and in either of the other groups it
+    would hold a slot for half an hour.
     """
-    return {ENCODE_TYPES: settings.max_transcodes, REMUX_TYPES: settings.max_remuxes}
+    return {
+        ENCODE_TYPES: settings.max_transcodes,
+        REMUX_TYPES: settings.max_remuxes,
+        LIVE_TYPES: settings.max_live_remuxes,
+    }
 
 
 def full_types(caps: dict[frozenset[str], int], running: Counter[str]) -> frozenset[str]:

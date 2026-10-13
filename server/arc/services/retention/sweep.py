@@ -224,18 +224,21 @@ FLOOR_PARTIAL_WINDOW: Final[timedelta] = timedelta(hours=24)
 def allowed_roots(settings: Settings) -> tuple[Path, ...]:
     """The only directories retention may delete anything inside.
 
-    Four. ``renditions`` and ``downloads`` are FR-T3's own words; ``manual`` is
+    Five. ``renditions`` and ``downloads`` are FR-T3's own words; ``manual`` is
     there because FR-T3 also says a manually dropped file is deleted *itself*
     rather than with its directory, and the manual drop directory is precisely
     where such a file lives. ``offline`` holds the small copies (FR-P6), which
     go with their episode and, on their own, when nobody has fetched them for
-    ``offline_idle_days``.
+    ``offline_idle_days``. ``live`` holds a progressive remux while its
+    source downloads (M20 T6); what is left there is swept by
+    :func:`~arc.services.media.live.sweep_live_leftovers`.
     """
     return (
         settings.renditions_dir,
         settings.downloads_dir,
         settings.manual_dir,
         settings.offline_dir,
+        settings.live_dir,
     )
 
 

@@ -30,6 +30,17 @@ What a demand does, in one transaction:
    the window's own priority is moved up to it.
 3. If the episode is already downloading, queues ``qbit_top`` so the torrent
    goes to the top of the client's queue.
+4. And (M20 T6, FR-P8), for a downloading **single**, queues
+   ``qbit_sequential`` (sequential download, first and last pieces first, top
+   of the queue) and the live remux, which decides on the file itself whether
+   it may be played early (MKV, the pre-match gate, copyable, a duration).
+   Nothing here asks the matcher or the catalogue: this runs under the want
+   lock, in a request. The answer is the live remux's own when it has given
+   one — a refusal says the episode "will play when its download finishes" —
+   and optimistic otherwise. A live remux that is running or has finished is
+   not queued again (a restart would only redo it). A demand on an episode
+   that is not downloading yet gets its live remux from ``search_release``
+   once it is.
 
 Refused while acquisition is paused or held for disk space (FR-T6) — but only
 for an episode that still needs fetching. One already downloading or further
@@ -44,23 +55,34 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, JobStatus, Want
+from arc.models import Episode, EpisodeState, JobStatus, Torrent, TorrentKind, Want
 from arc.services.acquisition.names import (
     DEMAND_PRIORITY,
+    QBIT_SEQUENTIAL,
+    QBIT_SEQUENTIAL_PRIORITY,
     QBIT_TOP,
     QBIT_TOP_PRIORITY,
     SEARCH_RELEASE,
     enqueue_compute_wants,
     search_dedupe_key,
+    sequential_dedupe_key,
     top_dedupe_key,
 )
+from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_MISSING
 from arc.services.acquisition.rules import is_paused, is_storage_held
 from arc.services.acquisition.wants import STARTABLE, coverable, lock_wants, start_search
 from arc.services.jobs.queue import enqueue, find_active
+from arc.services.media.names import (
+    STAGE_LIVE_DONE,
+    STAGE_LIVE_REFUSED,
+    enqueue_remux_live,
+    latest_live_job,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +103,9 @@ ACQUISITION_PAUSED_MESSAGE = (
 )
 STORAGE_HELD = "storage_held"
 STORAGE_HELD_MESSAGE = "The server is low on disk space, so it is not fetching anything right now."
+#: Said when a downloading episode cannot be played before its download ends
+#: (a batch, an MP4, a release name that does not surely name this episode).
+PLAYS_WHEN_DOWNLOADED_MESSAGE = "This episode will play when its download finishes."
 
 
 class DemandRefused(Exception):
@@ -103,6 +128,11 @@ class DemandOutcome:
     started: bool
     #: Whether a ``qbit_top`` was queued (the episode was downloading).
     topped: bool
+    #: Whether a live remux was queued: the episode can be played while it
+    #: downloads (FR-P8). False with :attr:`live_note` set when it cannot.
+    live: bool = False
+    #: Why not, for a person ("will play when its download finishes").
+    live_note: str | None = None
 
     @property
     def state(self) -> EpisodeState:
@@ -164,6 +194,9 @@ async def demand(
             dedupe_key=top_dedupe_key(episode.id),
         )
         topped = True
+    live, live_note = False, None
+    if episode.state is EpisodeState.DOWNLOADING:
+        live, live_note = await _start_live(session, episode, settings)
     # The reconciler re-reads the flags (a trip-only episode stops being one)
     # and keeps the demanded row; deduplicated on the type.
     await enqueue_compute_wants(session)
@@ -176,9 +209,66 @@ async def demand(
             "state": episode.state.value,
             "started": started,
             "topped": topped,
+            "live": live,
+            "live_note": live_note,
         },
     )
-    return DemandOutcome(episode=episode, want=want, started=started, topped=topped)
+    return DemandOutcome(
+        episode=episode,
+        want=want,
+        started=started,
+        topped=topped,
+        live=live,
+        live_note=live_note,
+    )
+
+
+async def _start_live(
+    session: AsyncSession, episode: Episode, settings: Settings | None
+) -> tuple[bool, str | None]:
+    """Make a downloading single playable while it downloads, if it may be (FR-P8).
+
+    Only a single (a batch's other files are other episodes). ``(live, note)``:
+    the live remux's refusal for this download when it has already given one,
+    else an optimistic ``(True, None)``.
+    """
+    torrent = await session.scalar(
+        select(Torrent)
+        .where(
+            Torrent.episode_id == episode.id,
+            Torrent.kind == TorrentKind.SINGLE,
+            or_(
+                Torrent.qbit_state.is_(None),
+                Torrent.qbit_state.not_in(sorted(DECIDED_STATES | {QBIT_MISSING})),
+            ),
+        )
+        .order_by(Torrent.id.desc())
+        .limit(1)
+    )
+    if torrent is None:
+        return False, PLAYS_WHEN_DOWNLOADED_MESSAGE
+    await enqueue(
+        session,
+        QBIT_SEQUENTIAL,
+        {"episode_id": episode.id},
+        priority=QBIT_SEQUENTIAL_PRIORITY,
+        dedupe_key=sequential_dedupe_key(episode.id),
+    )
+    latest = await latest_live_job(session, episode.id)
+    if latest is not None and latest.created_at >= torrent.added_at:
+        stage = str((latest.payload or {}).get("stage") or "")
+        if latest.status is JobStatus.RUNNING:
+            return True, None
+        if latest.status is JobStatus.DONE and stage == STAGE_LIVE_DONE:
+            return True, None
+        if latest.status is JobStatus.DONE and stage == STAGE_LIVE_REFUSED:
+            log.info(
+                "a demanded download will not be played before it finishes",
+                extra={"episode_id": episode.id, "reason": latest.payload.get("reason")},
+            )
+            return False, PLAYS_WHEN_DOWNLOADED_MESSAGE
+    await enqueue_remux_live(session, episode.id)
+    return True, None
 
 
 async def _raise_queued_search(session: AsyncSession, episode_id: int) -> None:
@@ -199,6 +289,7 @@ __all__ = [
     "ACQUISITION_PAUSED",
     "DEMAND_PRIORITY",
     "NOT_IN_WINDOW",
+    "PLAYS_WHEN_DOWNLOADED_MESSAGE",
     "STORAGE_HELD",
     "DemandOutcome",
     "DemandRefused",

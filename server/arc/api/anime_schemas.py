@@ -686,6 +686,9 @@ class EpisodeOut(BaseModel):
     #: That live torrent's seeders — Nyaa's count on a first fetch, the
     #: tracker's once the client has scraped — or null with no live torrent.
     seeders: int | None = None
+    #: The episode plays from its download right now (FR-P8): the row reads
+    #: "downloading 43 % · playable" (FR-A7). False for a ready episode.
+    live_playable: bool = False
 
     @classmethod
     def from_episode(
@@ -707,6 +710,7 @@ class EpisodeOut(BaseModel):
         wanted_by_me: bool = False,
         min_seeders_warn: int = 0,
         fetchable: bool = False,
+        live_playable: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -770,6 +774,7 @@ class EpisodeOut(BaseModel):
             fetchable=fetchable and episode.state is not EpisodeState.READY,
             few_seeders=few_seeders(release, min_seeders_warn),
             seeders=release.live_seeders if release is not None else None,
+            live_playable=live_playable and episode.state is not EpisodeState.READY,
         )
 
 
@@ -1038,6 +1043,7 @@ class AnimeDetail(AnimeCore):
         pinned: bool = False,
         min_seeders_warn: int = 0,
         fetchable: frozenset[int] = frozenset(),
+        live_playable: frozenset[int] = frozenset(),
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -1110,6 +1116,7 @@ class AnimeDetail(AnimeCore):
                     wanted_by_me=episode.id in wanted_by_me,
                     min_seeders_warn=min_seeders_warn,
                     fetchable=episode.id in fetchable,
+                    live_playable=episode.id in live_playable,
                 )
                 for episode in episodes
             ],

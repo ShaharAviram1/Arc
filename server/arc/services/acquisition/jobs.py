@@ -129,6 +129,7 @@ from arc.services.acquisition.names import (
     QBIT_CANCEL,
     QBIT_POLICY,
     QBIT_RESELECT,
+    QBIT_SEQUENTIAL,
     QBIT_TOP,
     SEARCH_RELEASE,
     SEARCH_RELEASE_PRIORITY,
@@ -172,6 +173,7 @@ from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest
 from arc.services.library.names import MATCH_FILE, match_dedupe_key
+from arc.services.media.names import enqueue_remux_live, episode_demanded
 from arc.services.trips.names import TRIP_BATCH_MIN, TRIP_SEARCH_PRIORITY
 from arc.services.trips.rules import (
     needs_rendition,
@@ -1279,6 +1281,57 @@ async def _streams_from_trip_pack(session: AsyncSession, rows: Sequence[TorrentF
     return touched is not None
 
 
+async def _queue_live_if_demanded(ctx: JobContext, episode_id: int, *, streaming: bool) -> None:
+    """Queue the live remux for a single somebody pressed play on (M20 T6, FR-P8).
+
+    The demand came before there was a download; now there is one, so the
+    live remux starts as soon as its head arrives. The job itself decides
+    whether the download qualifies (MKV, pre-match, copyable).
+    """
+    if streaming and await episode_demanded(ctx.session, episode_id):
+        await enqueue_remux_live(ctx.session, episode_id)
+
+
+@register(QBIT_SEQUENTIAL)
+async def qbit_sequential(ctx: JobContext) -> None:
+    """Switch a downloading single to sequential download and to the top (M20 T6).
+
+    Queued by a demand on a ``downloading`` episode: the torrent may have been
+    added before M20, or as a trip's. ``ensure_sequential`` reads the client's
+    flags and toggles only what is off, so a second run changes nothing; the
+    move to the top is the same place twice. A trip-only episode is left as it
+    is (FR-A12), and a batch is never switched: its other files are not this
+    episode.
+    """
+    episode_id = int(ctx.payload["episode_id"])
+    episode = await ctx.session.get(Episode, episode_id)
+    if episode is None or episode.state is not EpisodeState.DOWNLOADING:
+        return
+    if episode_id in await trip_only_episode_ids(ctx.session, [episode_id]):
+        return
+    live = or_(Torrent.qbit_state.is_(None), Torrent.qbit_state.not_in(DECIDED_STATES))
+    info_hash = await ctx.session.scalar(
+        select(Torrent.info_hash)
+        .where(Torrent.episode_id == episode_id, Torrent.kind == TorrentKind.SINGLE, live)
+        .order_by(Torrent.id.desc())
+        .limit(1)
+    )
+    if info_hash is None:
+        return
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        sequential, first_last = await qbit.ensure_sequential(info_hash)
+        await _to_the_top(ctx, qbit, info_hash)
+    ctx.log.info(
+        "a demanded download was made sequential",
+        extra={
+            "episode_id": episode_id,
+            "hash": info_hash,
+            "toggled_sequential": sequential,
+            "toggled_first_last": first_last,
+        },
+    )
+
+
 @register(QBIT_TOP)
 async def qbit_top(ctx: JobContext) -> None:
     """Move an episode's torrent back to the top once it is not trip-only (FR-A12).
@@ -1431,11 +1484,18 @@ async def _refetch(ctx: JobContext, episode: Episode, torrent: Torrent) -> None:
     delete, looks like on the next run. ``evicted_at`` stays: it is what marks
     this download as a re-fetch for :func:`poll_qbit`'s fast dead-swarm rule.
     """
+    # Streaming singles download in order, first and last pieces first, so
+    # they can be played while they download (M20 T6, FR-A5); a trip-only one
+    # keeps its ordinary order and goes to the back.
+    streaming = await needs_rendition(ctx.session, episode.id)
     async with QbitClient.from_settings(ctx.settings) as qbit:
         save_path = await qbit.add(
-            _magnet_for(torrent), episode_id=episode.id, info_hash=torrent.info_hash
+            _magnet_for(torrent),
+            episode_id=episode.id,
+            info_hash=torrent.info_hash,
+            sequential=streaming,
         )
-        if not await needs_rendition(ctx.session, episode.id):
+        if not streaming:
             # Taken only for a trip (FR-A12): behind everything else, as a
             # fresh pick would be.
             await _to_the_back(ctx, qbit, torrent.info_hash)
@@ -1450,6 +1510,7 @@ async def _refetch(ctx: JobContext, episode: Episode, torrent: Torrent) -> None:
         EpisodeState.DOWNLOADING,
         reason=f"downloading {torrent.title or torrent.info_hash} again",
     )
+    await _queue_live_if_demanded(ctx, episode.id, streaming=streaming)
     await ctx.session.flush()
     ctx.log.info(
         "re-fetching the remembered release",
@@ -1774,17 +1835,25 @@ async def search_release(ctx: JobContext) -> None:
     await _drop_held(ctx, trip)
     torrent = await _record_torrent(ctx.session, episode, chosen)
 
+    # Every streaming single is added sequentially, first and last pieces
+    # first (M20 T6, FR-A5): any of them can then be played while it
+    # downloads. A trip-only one is not, and goes to the back (FR-A12).
+    streaming = await needs_rendition(ctx.session, episode.id)
     async with QbitClient.from_settings(ctx.settings) as qbit:
         save_path = await qbit.add(
-            chosen.item.magnet, episode_id=episode.id, info_hash=chosen.item.info_hash
+            chosen.item.magnet,
+            episode_id=episode.id,
+            info_hash=chosen.item.info_hash,
+            sequential=streaming,
         )
-        if not await needs_rendition(ctx.session, episode.id):
+        if not streaming:
             # Taken only for a trip (FR-A12): behind everything else.
             await _to_the_back(ctx, qbit, chosen.item.info_hash)
 
     torrent.qbit_state = "added"
     torrent.progress = 0.0
     transition(episode, EpisodeState.DOWNLOADING, reason=f"downloading {chosen.item.title}")
+    await _queue_live_if_demanded(ctx, episode.id, streaming=streaming)
     await ctx.session.flush()
     ctx.log.info(
         "release chosen",

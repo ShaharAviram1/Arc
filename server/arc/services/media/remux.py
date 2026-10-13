@@ -30,6 +30,7 @@ stderr tail before the exception the runner retries on (two attempts).
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from time import perf_counter
@@ -37,7 +38,7 @@ from typing import Any, Final
 
 from arc.config import Settings
 from arc.core.text import keep_head_and_tail
-from arc.models import Episode, EpisodeState, JobStatus
+from arc.models import Episode, EpisodeState, JobStatus, MediaFile
 from arc.models.media import RENDITION_REMUX
 from arc.services.acquisition.states import transition
 from arc.services.jobs.registry import JobContext, register
@@ -65,6 +66,7 @@ from arc.services.media.jobs import (
     running_prepare_job,
     validate_output,
 )
+from arc.services.media.live_serve import remove_live_dir
 from arc.services.media.names import (
     REMUX,
     REMUX_INFO_NAME,
@@ -117,6 +119,8 @@ STAGE_FALLBACK = "fallback"
 KEY_FALLBACK_REASON = "fallback_reason"
 KEY_TRANSCODE_JOB = "transcode_job_id"
 KEY_AUDIO = "audio"
+#: Set on a remux that adopted a live directory instead of running ffmpeg.
+KEY_ADOPTED = "adopted"
 
 #: The 90 kHz clock of MPEG-TS timestamps, which ``X-TIMESTAMP-MAP`` speaks.
 MPEGTS_HZ: Final[int] = 90_000
@@ -371,6 +375,18 @@ async def _remux(ctx: JobContext, episode_id: int) -> None:
     if not source.exists():
         raise await _fail_early(ctx, episode, reporter, f"the source file is missing: {source}")
 
+    # A progressive remux (M20 T6) may already have cut this very file while
+    # it downloaded: adopt it rather than run ffmpeg a second time.
+    if not force and await _adopt(ctx, episode, reporter, media_file):
+        return
+    # The ordinary remux runs; a live directory is not the rendition. Not
+    # while a live remux is still writing it: that job sees the episode leave
+    # its states and removes its own directory.
+    from arc.services.media.live import running_live_job
+
+    if await running_live_job(ctx.session, episode_id) is None:
+        remove_live_dir(settings, episode_id)
+
     await discard_stale_staging(ctx.session, output_dir, episode_id, ctx.job.id)
     staging = output_dir.with_suffix(STAGING_SUFFIX.format(job_id=ctx.job.id))
 
@@ -459,6 +475,86 @@ async def _remux(ctx: JobContext, episode_id: int) -> None:
             "notes": notes,
         },
     )
+
+
+#: How long a remux waits for a running live remux of the same episode to
+#: write its ``ENDLIST`` before it remuxes the file itself. The live job
+#: closes ffmpeg's input as soon as the last piece is checked, so this is
+#: normally seconds; a live directory that already has its ``ENDLIST`` is
+#: adopted at once, whatever the job is still doing (it notices the episode
+#: is ready and stops).
+LIVE_ADOPT_WAIT_SECONDS: float = 15.0
+LIVE_ADOPT_POLL_SECONDS: float = 2.0
+
+
+async def _adopt(
+    ctx: JobContext, episode: Episode, reporter: _Reporter, media_file: MediaFile
+) -> bool:
+    """Make the live directory the rendition (:func:`~arc.services.media.live.adopt_live`).
+
+    Waits up to :data:`LIVE_ADOPT_WAIT_SECONDS` for a live remux of this
+    episode that is still running. ``True`` when the episode is ``ready``.
+    """
+    from arc.services.media.live import (
+        adopt_live,
+        live_has_ended,
+        publish_adopted,
+        running_live_job,
+    )
+
+    waited = 0.0
+    while not live_has_ended(ctx.settings, episode.id):
+        if await running_live_job(ctx.session, episode.id) is None:
+            break
+        if waited >= LIVE_ADOPT_WAIT_SECONDS:
+            # Still being cut: never adopted from under it.
+            return False
+        await ctx.session.commit()
+        await asyncio.sleep(LIVE_ADOPT_POLL_SECONDS)
+        waited += LIVE_ADOPT_POLL_SECONDS
+    adopted = await adopt_live(ctx.session, ctx.settings, episode.id, media_file)
+    if adopted is None:
+        return False
+    if episode.state is not EpisodeState.PREPARING:
+        transition(episode, EpisodeState.PREPARING, reason=f"remux job {ctx.job.id}")
+    await _save_rendition(
+        ctx.session,
+        episode.id,
+        output_dir=adopted.output_dir,
+        duration=adopted.duration,
+        width=adopted.width,
+        height=adopted.height,
+        subtitle_lang=adopted.subtitle_lang,
+        audio_lang=adopted.audio_lang,
+        kind=RENDITION_REMUX,
+        text_subtitles=adopted.text_subtitles,
+        playlist_name=VIDEO_PLAYLIST_NAME,
+    )
+    transition(episode, EpisodeState.READY, reason="live remux adopted")
+    # Ready first, then the rename: a request in between finds the episode
+    # ready and the ready route falls back to the live directory, so the
+    # player's URLs never 404 across the adoption.
+    await ctx.session.commit()
+    publish_adopted(ctx.settings, episode.id)
+    await reporter.write(
+        stage=STAGE_DONE,
+        progress=1.0,
+        extra={
+            KEY_ERROR: None,
+            KEY_ADOPTED: True,
+            KEY_AUDIO: "copy" if adopted.audio_copy else "aac",
+        },
+    )
+    ctx.log.info(
+        "episode ready (live remux adopted)",
+        extra={
+            "episode_id": episode.id,
+            "segments": adopted.segments,
+            "duration": adopted.duration,
+            "text_subtitles": adopted.text_subtitles,
+        },
+    )
+    return True
 
 
 async def _hand_over(
@@ -611,7 +707,9 @@ async def _run(
 
 
 __all__ = [
+    "KEY_ADOPTED",
     "KEY_AUDIO",
+    "LIVE_ADOPT_WAIT_SECONDS",
     "KEY_FALLBACK_REASON",
     "KEY_TRANSCODE_JOB",
     "LANGUAGE_NAMES",

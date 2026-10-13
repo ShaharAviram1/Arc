@@ -330,6 +330,14 @@ class QbitStub:
         self.expire_once = False
         #: Set to make every request raise, as an unreachable client does.
         self.down = False
+        #: M20 T6: hash → ``torrents/pieceStates``, hash → ``piece_size``, and a
+        #: hook called before every ``pieceStates`` answer (the download
+        #: advancing over fake time). The two toggles flip ``seq_dl`` and
+        #: ``f_l_piece_prio`` on the torrent's row and are recorded in order.
+        self.piece_states: dict[str, list[int]] = {}
+        self.piece_sizes: dict[str, int] = {}
+        self.on_piece_states: Callable[[str], None] | None = None
+        self.toggles: list[tuple[str, str]] = []
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self)
@@ -494,6 +502,29 @@ class QbitStub:
                 return httpx.Response(409, text="Torrent queueing must be enabled")
             hashes = self._form(request).get("hashes", "")
             self.topped.extend(value for value in hashes.split("|") if value)
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/pieceStates"):
+            info_hash = (request.url.params.get("hash") or "").lower()
+            if self.on_piece_states is not None:
+                self.on_piece_states(info_hash)
+            return httpx.Response(200, text=json.dumps(self.piece_states.get(info_hash, [])))
+        if path.endswith("/torrents/properties"):
+            info_hash = (request.url.params.get("hash") or "").lower()
+            if not any(t["hash"].lower() == info_hash for t in self.torrents):
+                return httpx.Response(404, text="Not Found")
+            size = self.piece_sizes.get(info_hash, 0)
+            count = len(self.piece_states.get(info_hash, []))
+            return httpx.Response(200, text=json.dumps({"piece_size": size, "pieces_num": count}))
+        if path.endswith("/torrents/toggleSequentialDownload") or path.endswith(
+            "/torrents/toggleFirstLastPiecePrio"
+        ):
+            field = "seq_dl" if path.endswith("SequentialDownload") else "f_l_piece_prio"
+            hashes = self._form(request).get("hashes", "")
+            for value in hashes.split("|"):
+                self.toggles.append((field, value.lower()))
+                for torrent in self.torrents:
+                    if torrent["hash"].lower() == value.lower():
+                        torrent[field] = not torrent.get(field, False)
             return httpx.Response(200, text="")
         if path.endswith("/app/version"):
             return httpx.Response(200, text=self.version)

@@ -35,6 +35,7 @@ from sqlalchemy import select
 from arc.models import Episode, Want
 from arc.services.acquisition.qbit import QbitUnavailable
 from arc.services.jobs.registry import JobContext, register
+from arc.services.media.live import sweep_live_leftovers
 from arc.services.retention.delete import (
     delete_episode_files,
     delete_idle_copy,
@@ -149,6 +150,12 @@ async def retention_sweep(ctx: JobContext) -> None:
         pending_bytes=freed if dry_run else 0,
     )
     freed += evicted_bytes
+
+    # Live directories (M20 T6) nothing stands behind any more: a download
+    # that was cancelled, a file that went to review, a remux that did not
+    # adopt. Never in a dry run: it is housekeeping, not a retention decision.
+    if not dry_run:
+        await sweep_live_leftovers(ctx.session, ctx.settings)
 
     # Remembered releases (M20 T9, FR-T3) older than REMEMBER_DAYS: rows only,
     # no bytes, so last and in one statement.

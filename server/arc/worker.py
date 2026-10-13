@@ -85,6 +85,7 @@ from arc.services.library.names import LIBRARY_SCAN, LIBRARY_SCAN_PRIORITY
 from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers)
 from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
 from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
+from arc.services.media import live as live_remux  # (registers handlers)
 from arc.services.media import offline as offline_copies  # noqa: F401  (registers handlers)
 from arc.services.media import remux as remux_jobs  # noqa: F401  (registers handlers)
 from arc.services.media.jobs import sweep_transcodes
@@ -352,6 +353,21 @@ async def _sweep_offline_leftovers(factory: SessionFactory, settings: Settings) 
         log.exception("could not sweep offline-copy leftovers")
 
 
+async def _sweep_live_leftovers(factory: SessionFactory, settings: Settings) -> None:
+    """Remove live directories nothing stands behind any more (M20 T6).
+
+    Once, at start-up, after orphaned jobs are reclaimed — so the directory of
+    a live remux that was running when the worker died, and is pending again
+    now, is kept for its restart to clear.
+    """
+    try:
+        async with factory() as session:
+            await live_remux.sweep_live_leftovers(session, settings)
+            await session.commit()
+    except Exception:  # pragma: no cover - housekeeping must not kill the worker
+        log.exception("could not sweep live-remux leftovers")
+
+
 async def _sweep_transcodes(factory: SessionFactory) -> None:
     """Queue transcodes for episodes the queue has lost track of (M7, FR-P1).
 
@@ -403,6 +419,7 @@ async def run(settings: Settings) -> None:
     await _reclaim_orphans(factory, identity)
     await _sweep_stale(factory, stale_after)
     await _sweep_offline_leftovers(factory, settings)
+    await _sweep_live_leftovers(factory, settings)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(

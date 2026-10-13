@@ -120,7 +120,7 @@ async def test_demanding_the_window_episode_answers_202(
     response = await client.post(f"/api/episodes/{ids[4]}/demand")
 
     assert response.status_code == 202, response.text
-    assert response.json() == {"state": "wanted"}
+    assert response.json() == {"state": "wanted", "live": False, "message": None}
     async with api_factory() as session:
         want = await session.get(Want, (user.id, ids[4]))
         assert want is not None and want.demanded_at is not None

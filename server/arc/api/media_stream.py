@@ -111,6 +111,7 @@ from arc.models import (
     Anime,
     Episode,
     EpisodeState,
+    Job,
     OfflineCopy,
     OfflineCopyState,
     Rendition,
@@ -133,14 +134,24 @@ from arc.services.media.download import (
     slice_parts,
     stat_etag,
 )
+from arc.services.media.live_serve import (
+    LIVE_TARGET_DURATION,
+    LivePlaylist,
+    LiveServed,
+    growing_cues,
+    held_back,
+    live_media_playlist,
+    live_servable,
+)
 from arc.services.media.names import (
     REMUX_INFO_NAME,
     SUBTITLES_VTT_NAME,
     RemuxInfo,
+    live_dir_for,
     offline_path_for,
     output_dir_for,
 )
-from arc.services.media.plan import PLAYLIST_NAME, VIDEO_PLAYLIST_NAME
+from arc.services.media.plan import PLAYLIST_NAME, VIDEO_PLAYLIST_NAME, WORK_DIR
 from arc.services.media.subtitles import (
     SUBTITLES_PLAYLIST_NAME,
     Cue,
@@ -230,6 +241,15 @@ TEXT_SUBTITLES_REFUSED: Final[str] = (
     "use Keep offline for the small copy instead"
 )
 
+#: A live directory's playlists change every few seconds while the source
+#: downloads (M20 T6): never stored, by anything.
+LIVE_PLAYLIST_CACHE: Final[str] = "no-store"
+
+#: And its segments: a restart of the live remux rewrites the same names with
+#: the same bytes, but five minutes is all the promise a growing directory is
+#: worth. Never ``immutable``.
+LIVE_SEGMENT_CACHE: Final[str] = "private, max-age=300"
+
 #: The whole-episode download's name (FR-S7). Not in :data:`SEGMENT_PATTERN`,
 #: so it can never be mistaken for a part, and registered before the segment
 #: route so the literal wins the match.
@@ -314,6 +334,13 @@ async def _ready_dir(session: SessionDep, settings: SettingsDep, episode_id: int
     if episode is None or episode.state is not EpisodeState.READY:
         _miss()
     directory = output_dir_for(settings, episode_id)
+    if not directory.exists() and not _is_symlink(directory):
+        # A live remux being adopted (M20 T6): ``ready`` is committed a moment
+        # before ``live/<id>`` is renamed into place, and in that moment the
+        # complete live directory is what the rendition row describes.
+        live = live_dir_for(settings, episode_id)
+        if live.is_dir() and not _is_symlink(live) and not _is_symlink(settings.live_dir):
+            return live
     if _is_symlink(directory):
         log.warning(
             "rendition directory is a symlink; refusing",
@@ -528,6 +555,14 @@ async def playlist(
     ``user`` is asked for by name here — the router already requires a session
     — because the log line below is per playback and names who is watching.
     """
+    live = await _live_dir(session, settings, episode_id)
+    if live is not None:
+        response = await _live_master(request, *live)
+        log.info(
+            "live playlist served",
+            extra={"user_id": user.id, "episode_id": episode_id, "status": response.status_code},
+        )
+        return response
     directory, rendition = await _ready_rendition(session, settings, episode_id)
     if _is_remux(rendition):
         assert rendition is not None  # for the type checker: _is_remux says so
@@ -795,6 +830,184 @@ async def _subtitle_file(
     # Parsing a whole track is CPU work; it stays off the event loop.
     cues = await anyio.to_thread.run_sync(_cues, track)
     body = vtt_segment(cues, start, end, _info(files, directory).mpegts)
+    return _generated(request, body, etag, media_type=SUBTITLE_TYPE, cache=PLAYLIST_CACHE)
+
+
+# --- A progressive remux while its source downloads (M20 T6, §5.4a) ------------
+#
+# ``DATA_DIR/live/<id>/`` is served in place of the rendition while the episode
+# is not ready and :func:`~arc.services.media.live_serve.live_servable` says
+# so. The same discipline as everywhere else in this module: the directory is
+# derived from the id and refused if it is a link, every name is the router's
+# closed vocabulary, files are opened relative to the directory with
+# ``O_NOFOLLOW``. ffmpeg's playlist is never passed through: it is re-emitted
+# with a fixed target duration, the EVENT type, ``EXT-X-START`` and only the
+# segments that exist (:func:`~arc.services.media.live_serve.
+# live_media_playlist`). Subtitle segments are cut at request time from the
+# subtitle file ffmpeg is still writing, holding back cues past the last
+# finished video segment.
+
+
+async def _live_dir(
+    session: SessionDep, settings: SettingsDep, episode_id: int
+) -> tuple[Path, Job] | None:
+    """The live directory and its job when this episode is served from one."""
+    served = await _live_served(session, settings, episode_id)
+    return (served.directory, served.job) if served is not None else None
+
+
+async def _live_served(
+    session: SessionDep, settings: SettingsDep, episode_id: int
+) -> LiveServed | None:
+    """:func:`~arc.services.media.live_serve.live_servable`, after the link checks."""
+    episode = await session.get(Episode, episode_id)
+    if episode is None or episode.state is EpisodeState.READY:
+        return None
+    if _is_symlink(settings.live_dir) or _is_symlink(settings.live_dir / str(episode_id)):
+        log.warning("live directory is a symlink; refusing", extra={"episode_id": episode_id})
+        _miss()
+    return await live_servable(session, settings, episode)
+
+
+def _live_playlist(directory: Path) -> LivePlaylist:
+    """ffmpeg's playlist re-emitted over the segments that exist. Blocking."""
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        _miss()
+    try:
+        try:
+            fd = _open_at(dir_fd, VIDEO_PLAYLIST_NAME)
+        except FileNotFoundError:
+            text = ""
+        except OSError:
+            log.warning(
+                "refusing a link under a live directory", extra={"part": VIDEO_PLAYLIST_NAME}
+            )
+            _miss()
+        else:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    _miss()
+                text = handle.read(MAX_PLAYLIST_BYTES).decode("utf-8", "replace")
+        present = set()
+        with os.scandir(dir_fd) as entries:
+            for entry in entries:
+                if entry.is_file(follow_symlinks=False):
+                    present.add(entry.name)
+    finally:
+        os.close(dir_fd)
+    return live_media_playlist(text, present)
+
+
+def _live_subtitle_source(directory: Path) -> tuple[bytes, bool] | None:
+    """The subtitle file ffmpeg is writing under ``_work/``, and whether it is ASS."""
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        _miss()
+    try:
+        try:
+            work_fd = os.open(
+                WORK_DIR,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=dir_fd,
+            )
+        except OSError:
+            return None
+        try:
+            for name, ass in (("sub.ass", True), ("sub.srt", False)):
+                try:
+                    fd = _open_at(work_fd, name)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _miss()
+                with os.fdopen(fd, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_VTT_BYTES:
+                        _miss()
+                    return handle.read(MAX_VTT_BYTES), ass
+            return None
+        finally:
+            os.close(work_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _live_info(directory: Path) -> RemuxInfo:
+    files = _read_files(directory, (REMUX_INFO_NAME,))
+    found = files.get(REMUX_INFO_NAME)
+    if found is None:
+        return RemuxInfo()
+    return RemuxInfo.from_json(found.data.decode("utf-8", "replace"))
+
+
+def _payload_int(job: Job, key: str) -> int | None:
+    value: Any = (job.payload or {}).get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+async def _live_master(request: Request, directory: Path, job: Job) -> Response:
+    """The master playlist of a live directory: the same shape as a remux's."""
+    info = await anyio.to_thread.run_sync(_live_info, directory)
+    width, height = _payload_int(job, "width"), _payload_int(job, "height")
+    language: Any = (job.payload or {}).get("subtitle_lang")
+    body = master_playlist(
+        bandwidth=info.bandwidth or 1,
+        codecs=info.codecs,
+        resolution=(width, height) if width is not None and height is not None else None,
+        subtitle_name=info.subtitle_name,
+        subtitle_lang=language if isinstance(language, str) else None,
+    )
+    etag = download_etag([("live-index", len(body), hash_text(body))])
+    return _generated(request, body, etag, media_type=PLAYLIST_TYPE, cache=LIVE_PLAYLIST_CACHE)
+
+
+async def _live_file(request: Request, directory: Path, job: Job, name: str) -> Response:
+    """One name under a live directory: playlists generated, segments served."""
+    if name == VIDEO_PLAYLIST_NAME:
+        playlist = await anyio.to_thread.run_sync(_live_playlist, directory)
+        etag = download_etag([("live-video", len(playlist.text), hash_text(playlist.text))])
+        return _generated(
+            request, playlist.text, etag, media_type=PLAYLIST_TYPE, cache=LIVE_PLAYLIST_CACHE
+        )
+    if name == SUBTITLES_PLAYLIST_NAME or name.endswith(".vtt"):
+        return await _live_subtitles(request, directory, name)
+    return _serve(
+        request, directory, directory / name, media_type=SEGMENT_TYPE, cache=LIVE_SEGMENT_CACHE
+    )
+
+
+async def _live_subtitles(request: Request, directory: Path, name: str) -> Response:
+    """``subs.m3u8`` mirroring the served video, or one ``sub_NNNNN.vtt`` cut now."""
+    info = await anyio.to_thread.run_sync(_live_info, directory)
+    if info.subtitle_name is None:
+        _miss()
+    playlist = await anyio.to_thread.run_sync(_live_playlist, directory)
+    segment = _SUBTITLE_SEGMENT.match(name)
+    if segment is None:
+        body = subtitles_playlist(
+            list(playlist.bounds), ended=playlist.ended, target_duration=LIVE_TARGET_DURATION
+        )
+        etag = download_etag([("live-subs", len(body), hash_text(body))])
+        return _generated(request, body, etag, media_type=PLAYLIST_TYPE, cache=LIVE_PLAYLIST_CACHE)
+    index = int(segment.group(1))
+    if index >= len(playlist.bounds):
+        _miss()
+    source = await anyio.to_thread.run_sync(_live_subtitle_source, directory)
+    cues: list[Cue] = []
+    if source is not None:
+        raw, ass = source
+        cues = held_back(
+            await anyio.to_thread.run_sync(lambda: growing_cues(raw, ass=ass)),
+            playlist.front_seconds,
+        )
+    start, end = playlist.bounds[index]
+    if index == len(playlist.bounds) - 1 and playlist.ended:
+        end = math.inf
+    body = vtt_segment(cues, start, end, info.mpegts)
+    etag = download_etag([(name, len(body), hash_text(body))])
     return _generated(request, body, etag, media_type=SUBTITLE_TYPE, cache=PLAYLIST_CACHE)
 
 
@@ -1339,6 +1552,9 @@ async def segment(
     No ``user`` parameter: the session is required by the router (241 segments
     an episode, and nothing here has anything to say about who asked).
     """
+    live = await _live_dir(session, settings, episode_id)
+    if live is not None:
+        return await _live_file(request, live[0], live[1], name)
     if name == VIDEO_PLAYLIST_NAME:
         directory = await _ready_dir(session, settings, episode_id)
         return _serve(
@@ -1386,6 +1602,8 @@ __all__ = [
     "DEMO_REFUSED",
     "DOWNLOAD_CACHE",
     "DOWNLOAD_NAME",
+    "LIVE_PLAYLIST_CACHE",
+    "LIVE_SEGMENT_CACHE",
     "NOT_FOUND",
     "OFFLINE_NAME",
     "PLAYLIST_CACHE",

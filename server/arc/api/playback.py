@@ -62,16 +62,34 @@ from arc.api.playback_schemas import (
     CompletedEpisode,
     CompletedOut,
     EpisodeRef,
+    LiveOut,
     PendingOut,
     PlayInfo,
     ProgressIn,
     ProgressOut,
     SubtitlesOut,
 )
-from arc.models import Anime, Episode, EpisodeState, ListEntry, Rendition, Want, WatchProgress
+from arc.models import (
+    Anime,
+    Episode,
+    EpisodeState,
+    Job,
+    ListEntry,
+    Rendition,
+    Want,
+    WatchProgress,
+)
 from arc.services.acquisition.wants import coverable
 from arc.services.catalog import episodes_for
 from arc.services.catalog.airing import aired_through, out_of_order
+from arc.services.media.live_serve import LiveServed, live_servable
+from arc.services.media.names import (
+    KEY_DOWNLOAD_PROGRESS,
+    KEY_EXPECTED_DURATION,
+    KEY_SEEDERS,
+    latest_live_with,
+    payload_float,
+)
 from arc.services.playback.progress import (
     ProgressOutcome,
     record_progress,
@@ -228,7 +246,23 @@ async def play(
         fetchable = await coverable(session, user.id, now=at)
         previous, following = _neighbours(siblings, episode, fetchable=fetchable)
     pending: PendingOut | None = None
+    live: LiveOut | None = None
+    subtitles = None if not_ready else SubtitlesOut.from_rendition(rendition)
     if waiting:
+        # Playing while downloading (FR-P8, M20 T6): the same playlist URL,
+        # served from the live directory, in place of the pending wait.
+        found = await live_servable(session, settings, episode)
+        if found is not None:
+            # During an idle restart the newest job has not probed yet: the
+            # facts come from the newest one that did.
+            probed = await latest_live_with(session, episode.id, KEY_EXPECTED_DURATION)
+            live = _live_out(found, probed)
+            if live.expected_duration > 0:
+                duration = live.expected_duration
+            language: Any = ((probed or found.job).payload or {}).get("subtitle_lang")
+            if isinstance(language, str) and language:
+                subtitles = SubtitlesOut(lang=language)
+    if waiting and live is None:
         release = extras.torrents.get(episode.id)
         pending = PendingOut(
             state=episode.state,
@@ -252,17 +286,40 @@ async def play(
             offline=extras.offline.out(episode),
             trip_only=episode.id in extras.trip_only,
             min_seeders_warn=extras.min_seeders_warn,
+            live_playable=live is not None,
         ),
         anime=AnimeSummary.from_anime(anime),
-        playlist_url=None if not_ready else playlist_url(episode.id),
+        playlist_url=playlist_url(episode.id) if not not_ready or live is not None else None,
         offline_only=offline_only,
         pending=pending,
+        live=live,
         duration=duration,
         resume_position=resume_position(progress, duration or None),
         resume_at=progress.updated_at if progress is not None else None,
         previous=previous,
         next=following,
-        subtitles=None if not_ready else SubtitlesOut.from_rendition(rendition),
+        subtitles=subtitles,
+    )
+
+
+def _live_out(served: LiveServed, probed: Job | None) -> LiveOut:
+    """The live numbers ``/play`` reports.
+
+    How far it plays and whether it has ended come from the playlist being
+    served; the download's numbers from the newest job's payload (else the
+    probed one's); the expected length from the newest job that probed.
+    """
+    numbers = served.job if served.job.payload.get(KEY_DOWNLOAD_PROGRESS) is not None else probed
+    raw_seeders: Any = ((numbers.payload if numbers is not None else None) or {}).get(KEY_SEEDERS)
+    progress = payload_float(numbers, KEY_DOWNLOAD_PROGRESS) or 0.0
+    return LiveOut(
+        front_seconds=round(served.playlist.front_seconds, 3),
+        expected_duration=payload_float(probed, KEY_EXPECTED_DURATION) or 0.0,
+        download_progress=min(max(progress, 0.0), 1.0),
+        seeders=raw_seeders
+        if isinstance(raw_seeders, int) and not isinstance(raw_seeders, bool)
+        else None,
+        ended=served.playlist.ended,
     )
 
 

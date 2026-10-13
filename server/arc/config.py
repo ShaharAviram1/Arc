@@ -334,6 +334,20 @@ class Settings(BaseSettings):
     #: tens of seconds, and one still running after ten minutes is stuck (a
     #: hung read, a dying disk), not slow. Far shorter than the transcode's.
     remux_timeout_seconds: float = Field(default=600.0, gt=0)
+    #: Concurrent progressive remuxes in one worker process (M20 T6, FR-P8). A
+    #: live remux runs as long as its download does — tens of minutes on a slow
+    #: swarm — so it has a cap group of its own and never holds a remux or an
+    #: encode slot (:func:`arc.services.jobs.loop.process_caps`). Production
+    #: runs ``WORKER_CONCURRENCY=3`` so one of these never halves the queue.
+    max_live_remuxes: int = Field(default=1, ge=1)
+    #: How long a live remux waits with no progress of the download front
+    #: before it stops ffmpeg (the playlist stays servable up to there) and
+    #: queues itself again five minutes later.
+    live_idle_minutes: int = Field(default=10, ge=1)
+    #: How much of the file has to be downloaded, contiguously from its first
+    #: byte, before the live remux probes it: the Matroska header (tracks, the
+    #: Segment duration) and the first cluster are well inside 8 MiB.
+    live_head_bytes: int = Field(default=8 << 20, ge=1 << 20)
 
     # --- Transcode (M7) ---------------------------------------------------
     #: The binaries. Names, resolved on ``PATH``, or absolute paths — a host
@@ -630,6 +644,16 @@ class Settings(BaseSettings):
         place, and both names must be the same directory.
         """
         return (self.data_dir / "offline").resolve()
+
+    @property
+    def live_dir(self) -> Path:
+        """Where a progressive remux writes while the source downloads (M20 T6).
+
+        ``live/<episode id>/``, resolved like :attr:`renditions_dir` and on the
+        same filesystem: once the episode is matched, the remux adopts the
+        directory with one ``os.replace`` into ``renditions/<episode id>``.
+        """
+        return (self.data_dir / "live").resolve()
 
     @property
     def fonts_dir(self) -> Path:

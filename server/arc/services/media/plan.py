@@ -928,6 +928,14 @@ def remux_args(
             f"0:s:{subtitle.type_index}",
             "-c:s",
             "copy" if copy else "srt",
+        ]
+        if live:
+            # Live (M20 T6): every event reaches the file as it is muxed. The
+            # default 32 KiB output buffer is larger than a whole episode's
+            # ASS, so without this the track appears only when ffmpeg exits
+            # and a player sees no subtitles while the episode downloads.
+            args += ["-flush_packets", "1"]
+        args += [
             "-f",
             "ass" if subtitle.is_ass else "srt",
             plan.subtitle_file,

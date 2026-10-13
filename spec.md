@@ -350,7 +350,13 @@ that the course professor can log in at any time, and the owner uses it daily.
   FR-A11 unchanged.
 - FR-A5 Chosen magnets are added to qBittorrent with a per-episode category
   and save path; the server polls completion and hands the file to the
-  library pipeline.
+  library pipeline. **Every streaming single is added sequentially, first and
+  last pieces first** (M20 T6, owner Q15 2026-10-13), so any download can be
+  played while it runs (FR-P8); a trip-only single keeps the ordinary order
+  (FR-A12). A single already downloading when somebody presses play on it is
+  switched to sequential and moved to the top of the client's queue (the
+  `qbit_sequential` job reads the client's flags first and toggles only what
+  is off).
 - FR-A6 If no acceptable release exists yet, retry on a backoff schedule
   (every 30 min on air day, then every 6 h). After 14 days flag the episode
   "unavailable"; while someone still wants it, retry once a day (cheap: a
@@ -394,7 +400,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   row says `from a batch` after the group and the resolution — which are the
   pack's and are true of twenty-six episodes, so without the phrase they read
   as a release of this one. An episode whose live download has few seeders
-  says so on the row, with a Pin action (FR-A16).
+  says so on the row, with a Pin action (FR-A16). A downloading episode that
+  can already be played from its download (FR-P8) reads **"downloading 43 % ·
+  playable"** (M20 T6).
 - FR-A8 A user can ask for the first episode of any show as a sample from the
   show page, without changing their list or MAL. Only that one episode is
   fetched; it follows the same states, D-day drop (FR-T2) and retention
@@ -623,7 +631,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   selected file at full size before a byte has arrived. Such files reach the
   library through the download's own hand-off when they finish; a review
   item an earlier scan made for one (pending, linked to nothing) is removed,
-  with its model suggestion, when the scan meets it again.
+  with its model suggestion, when the scan meets it again. Playing while
+  downloading (FR-P8) does not change this: its **pre-match gate** reads only
+  the *name* qBittorrent reports for the in-flight file and **indexes
+  nothing** — no MediaFile, no review item, no link (M20 T6).
 - FR-L2 Filename parsing extracts group, title, season, episode, resolution,
   source, codec, and version (v2 etc.). Parser is deterministic
   (anitopy-style). **Season inference on the catalogue side** (owner incident,
@@ -668,6 +679,17 @@ that the course professor can log in at any time, and the owner uses it daily.
   show's count never auto-links to that show** (2026-10-08): episode 13 of a
   finished 12-episode season does not exist, so it is shown for review but not
   linked; a sequel's offset reading that explains the number is the answer.
+  **Stated exception: playing while downloading** (FR-P8, owner Q6
+  2026-10-13). A file still downloading may be played before the match runs,
+  but only when **its name pre-matches the downloaded episode at the
+  auto-link threshold, with the download's prior** — the matcher's own steps
+  over the in-flight name: not a creditless or batch name, no conflicting or
+  disagreeing season mark, an episode number, both auto-link bars, the best
+  candidate being this very episode, and a number in the name (if any) equal
+  to it. Otherwise the episode plays only once its download finishes and the
+  ordinary match has linked it. The ordinary match still runs on the finished
+  file and alone links it; if it sends the file to review, the stream stops
+  being served (the live directory is no longer kept).
 - FR-L5 For unsure cases an LLM may be asked to propose the most likely
   candidate with a one-line reason; the proposal is shown in the review
   queue, never auto-applied.
@@ -767,6 +789,32 @@ that the course professor can log in at any time, and the owner uses it daily.
   queued under `MAX_TRANSCODES`; the remux job finishes saying so, with the
   reason ("10-bit"). Audio is never a reason to fall back: non-AAC audio is
   converted in the remux. An admin can force either path for one episode.
+- FR-P8 **Playing while downloading** (M20 T6, owner 2026-10-13). An episode
+  somebody pressed play on (FR-A14) can be watched while its file downloads:
+  the single is fetched sequentially (FR-A5) and a **live remux** feeds the
+  file's bytes to the same remux as FR-P1 as they arrive, publishing a growing
+  (EVENT) playlist that the player streams up to the download front. Only
+  when all of these hold: the download is a **single** (a batch waits), its
+  video file is **Matroska** (an MP4 waits: its index may be at the end), the
+  head of the file is **copyable** (FR-P7), and the file's name passes the
+  **pre-match gate** (FR-L4's stated exception); the head must also **state
+  the episode's duration**, and the torrent must not hide pad files in front
+  of it. Otherwise the episode plays when its download finishes, and the play
+  request says so once the live remux has looked ("This episode will play when
+  its download finishes"). The player is not offered the stream before its
+  first segment exists. How far the download is, is counted only
+  from **hash-checked pieces in a row from the file's first byte** — never from
+  the file's size or time, which qBittorrent sets up front — and no byte past
+  that front is ever read. With no progress for `LIVE_IDLE_MINUTES` (10) the
+  live remux stops (what was cut stays playable) and tries again five minutes
+  later (at most twelve times in a row); a download that is cancelled or
+  stalls ends it and its files go. A restart never empties a stream somebody
+  is watching: it catches up beside it and takes its place. When
+  the download finishes the ordinary match runs; once it links the very file
+  the live remux was cut from, that output **becomes the rendition** without a
+  second remux (the player's URLs do not change). The live remux restarts from
+  the file's first byte whenever it starts, and its output is the same each
+  time. One live remux at a time per worker (`MAX_LIVE_REMUXES`, 1).
 
 ### 4.5 Streaming and player
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
@@ -799,7 +847,13 @@ that the course professor can log in at any time, and the owner uses it daily.
   (M20: a stream still being cut from a download), when it is always the
   server's expected duration and never the media element's, because a
   growing playlist reports a length only as long as what has downloaded and
-  90 % of that is not 90 % of the episode. This sets WatchProgress.completed, advances ListEntry.progress if this
+  90 % of that is not 90 % of the episode. **The server guards this too**
+  (M20 T6): a completion reported for an episode that is not `ready` is
+  refused when the reported duration is under 90 % of the expected duration
+  the live remux read from the file's header — the position is kept, the
+  episode is not marked watched — and **refused outright when no expected
+  duration is known** for an episode a live remux stands behind, so no client,
+  however old, can trigger a MAL write from a truncated duration. This sets WatchProgress.completed, advances ListEntry.progress if this
   episode number is greater than current progress, and enqueues a MAL sync.
   If the show is not on the user's list, watching it adds it as Watching
   (the act of watching is the user's choice); status is never changed
@@ -2722,3 +2776,35 @@ through the same edge, without the grace period.
   demand (not in the window, paused, storage held) shows the server's
   sentence with no spinner. The end overlay offers Next on an episode that
   can be fetched on demand.
+- 2026-10-13 (owner Q4, Q6, Q13, Q15; M20 T6) — **Playing while downloading**
+  (new FR-P8; FR-A5, FR-A7, FR-L1, FR-L4, FR-S4). Every streaming single is
+  added sequentially, first and last pieces first (trip-only singles are
+  not); a demanded downloading single is switched to sequential and moved to
+  the top. A demanded single whose video is MKV, whose head is copyable and
+  whose in-flight name pre-matches this episode at the auto-link threshold
+  with the download's prior is remuxed live into an EVENT playlist (fixed
+  target duration 8 — native Safari keeps its seekable range three target
+  durations behind the end — `EXT-X-START` at 0) and played up to the download
+  front, counted from hash-checked pieces only; nothing is indexed before the
+  download finishes (FR-L4's stated exception). The ordinary match then
+  links the file and the remux adopts the live output when it was cut from
+  that very file. The server refuses a completion on a non-ready episode
+  whose reported duration is under 90 % of the expected one. Small calls made
+  in the implementation (reported for objection): the pre-match gate also
+  refuses a name whose own episode number differs from the downloaded one
+  (stricter than the finished-file match, which trusts the prior for
+  absolute numbering); a file of the download going to review stops the live
+  stream being served; the live directory stays servable from "downloading"
+  through "preparing" until the remux adopts it; a remux waits up to two
+  minutes for a still-running live remux before remuxing the file itself.
+  After review (same day): a live remux needs the header's duration and a
+  file not behind hidden pad files; the play request no longer asks the
+  matcher (the live remux does, and the request reports its answer); the
+  stream is offered only once its first segment exists, and the show page's
+  "playable" follows the same test; a restart catches up beside the stream it
+  replaces; idle retries stop after twelve. And after the end-to-end check
+  (same day): subtitles are written as the episode downloads, not only at its
+  end; the stream's segment target is 8 s so Safari can seek close to the
+  download; a finished live stream is adopted at once, and a still-running one
+  is waited for at most 15 s (not two minutes); the stream's URLs keep
+  answering across the adoption.

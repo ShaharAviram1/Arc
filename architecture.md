@@ -68,7 +68,11 @@ Two Python processes share one codebase and one database:
   itself hold back a remux — but every claim still needs one of the
   `WORKER_CONCURRENCY` slots, so a remux runs beside a full encode group only
   when `WORKER_CONCURRENCY` > `MAX_TRANSCODES` (both default 2; production
-  runs `WORKER_CONCURRENCY=3`, owner 2026-10-13).
+  runs `WORKER_CONCURRENCY=3`, owner 2026-10-13). `remux_live` (M20 T6, the
+  progressive remux of §5.3d) is a third group, capped by `MAX_LIVE_REMUXES`
+  (default 1): it runs as long as its download, and **production must set
+  `WORKER_CONCURRENCY=3`** (approved, owner Q13 2026-10-13; the code default
+  stays 2) so one live remux never halves the queue.
 
 One arrow the diagram does not draw: the worker's writes **announce
 themselves** over Postgres `LISTEN`/`NOTIFY` on the `arc_events` channel, and
@@ -127,7 +131,9 @@ nothing depends on it — every page that reacts to an event also polls.
   2026-10-05: both run a whole-episode ffmpeg, and both take the one
   `transcode_semaphore`), and since M20 `{remux}` → `MAX_REMUXES` (a remux
   copies the video and takes no semaphore; its own group so it does not count
-  against the encoders). The groups do not add slots: with the encode group
+  against the encoders), and since M20 T6 `{remux_live}` → `MAX_LIVE_REMUXES`
+  (1; a live remux holds its claim for as long as the download runs). The
+  groups do not add slots: with the encode group
   full, a remux is claimed only if `WORKER_CONCURRENCY` leaves one free, i.e.
   `WORKER_CONCURRENCY` > `MAX_TRANSCODES`. Nothing is reprioritised — an excluded
   type keeps its place and is claimed in the usual order the moment a slot
@@ -2002,6 +2008,155 @@ remux|transcode` (no mode: `transcode` with `force`, else `remux`).
   `vtt_to_cues` (added in T2) reads `cues_to_vtt`'s own output back, for the
   media route that cuts `subs.vtt` into segments.
 
+### 5.3d Progressive remux (M20 T6, FR-P8)
+
+Playing an episode while its single downloads. Modules: `media/live.py` (the
+handler, the reader, adoption, the sweep), `media/live_serve.py`
+(handler-free: what the router and `/play` read), `library/prematch.py` (the
+gate), `acquisition/qbit.py` (sequential download, piece states).
+
+- **Sequential download.** `search_release` and T9's `_refetch` add every
+  streaming single (`needs_rendition`) with `sequentialDownload=true&
+  firstLastPiecePrio=true` (`QbitClient.add(..., sequential=True)`); a
+  trip-only one is added as before and sent to the back. A demand on a
+  downloading single queues `qbit_sequential` (payload `{episode_id}`, dedupe
+  `qbit_sequential:<id>`, priority 60): `ensure_sequential` reads `seq_dl` /
+  `f_l_piece_prio` from `torrents/info` and calls
+  `toggleSequentialDownload` / `toggleFirstLastPiecePrio` only for a flag that
+  is false (both are toggles), then `topPrio`. Trip-only and batch-backed
+  episodes are left alone.
+- **Who queues it.** `demand()` on a `downloading` episode with a live single
+  queues `qbit_sequential` and `remux_live` **without asking the matcher or
+  the catalogue** (it runs under the want lock, in a request; the job gates).
+  It answers from the newest `remux_live` created since the torrent was
+  added: `refused` → `live: false` with "This episode will play when its
+  download finishes." and nothing re-queued; `running`, or done
+  `live_done` → `live: true` and nothing re-queued (a restart would only
+  redo it); otherwise it queues and answers `live: true` (optimistic). A
+  batch-backed episode answers `live: false` with the same sentence.
+  `search_release`/`_refetch` queue `remux_live` after adding a streaming
+  single when the episode has a demanded want (a demand that arrived before
+  there was a download). `remux_live`: payload `{episode_id}`, dedupe
+  `remux_live:<id>`, priority 5 (`LIVE_PRIORITY`), cap group
+  `MAX_LIVE_REMUXES` (§2), advisory lock `('remux_live', id)`.
+- **The handler.** Refuses (`stage=refused`, `reason`, directory removed)
+  unless: the episode is `downloading` (in `downloaded`…`preparing` it ends
+  `idle` and leaves what is there), a `kind=single` torrent row not in a
+  decided state exists, a user's live want has `demanded_at`, the largest
+  video file of `torrents/files` (the `VIDEO_EXTENSIONS` rule) is `.mkv`, its
+  path — `save_path_for(id)` + the qBittorrent name through `host_path`,
+  resolved — lies inside `downloads/<id>/`, and the **pre-match gate**
+  passes: `library.prematch.prematch()` parses the file's base name and runs
+  `matcher.match` with the download prior `(anime_id, number)`, then the
+  match job's own refusals in order (nc/batch name, no candidate, season
+  conflict, `prior_season_mismatch`, no episode number, `auto_links`
+  threshold and title floor), plus: the best candidate is this episode and a
+  number in the name equals it. Nothing is indexed. It also refuses a file
+  whose summed listed offset disagrees with qBittorrent's `piece_range`
+  (`offset // piece_size != piece_range[0]`, or no range on a file that is
+  not first): BEP 47 pad files and v2 padding are not listed, and the front
+  would be wrong. Then it cuts into `live/<id>` (emptied) — or, when a
+  playlist with segments is being served there, into `live/<id>.new` (see
+  Restart) — waits for the metadata
+  (`torrents/files`, `torrents/properties.piece_size`) and for the front to
+  reach `LIVE_HEAD_BYTES` (8 MiB), opens the source (`open_confined`: after
+  the open the descriptor's real path — `/proc/self/fd` on Linux,
+  `F_GETPATH` on macOS — must lie inside `downloads/<id>/`), and ffprobes the
+  head through a pipe (`-f matroska pipe:0`; the MKV header's Segment
+  duration is `expected_duration`). A head that does not probe (fonts
+  attached before the first cluster) is waited for at twice the size, up to
+  64 MiB, and refused as unreadable past that or once the whole file is in.
+  It builds the plan, **refuses a head with no duration** (the guard below
+  needs one), and requires `copyable()`. It writes
+  `owner.json` (`{job_id, info_hash, file_index, file_size, path, width,
+  height, subtitle_lang, audio_lang, audio_copy, expected_duration}`) and a
+  provisional `remux.json` (codecs from the head, bandwidth = 1.5 × the
+  file's mean rate, `mpegts` filled in once the first segment exists, from an
+  ffprobe of `init.mp4` + `seg_00000.m4s` concatenated in `_work/` — never of
+  the growing playlist, which libavformat opens near its live end; the
+  remaining offset of about 83 ms early in a session, until adoption measures
+  the VOD playlist, is accepted), and
+  runs `remux_args(plan, …, live=True)` (`-f matroska -i pipe:0`,
+  `-hls_playlist_type event`, `temp_file`, and `-flush_packets 1` on the
+  subtitle output — ffmpeg's 32 KiB output buffer is larger than a whole
+  episode's ASS, so without it `_work/sub.ass` stays empty until ffmpeg
+  exits and nothing is subtitled while the episode downloads) with ffmpeg's
+  stdin fed by the reader.
+- **The front.** Every poll (2 s once caught up): the torrent row's state
+  (`cancelled`/`stalled`/`evicted`/`rejected`/`missing` or the row gone →
+  exit, directory removed, `stage=gone`), the episode still in
+  `downloading`…`preparing`, `torrents/info` (gone → exit), and
+  `torrents/pieceStates`. `contiguous_bytes(states, piece_size,
+  file_offset, file_size)` counts state-2 (hash-checked) pieces in a row from
+  the piece holding the file's first byte (`file_offset` = the sizes of the
+  files before it), clamped to the file: first/last-priority pieces at the end
+  count for nothing until the gap closes. File size and mtime are never used
+  (qBittorrent pre-allocates).
+- **The reader.** `FrontGatedReader` `pread`s at most `min(1 MiB, front −
+  position)` per write, and at the front sleeps and polls; when the front is
+  the whole file (every piece hash-checked — the client's "complete" is not
+  awaited) it closes stdin (ffmpeg then writes `ENDLIST`). A `drain` that
+  takes over `DRAIN_TIMEOUT_SECONDS` (60) is a `TranscodeError` (ffmpeg hung);
+  an ffmpeg that has exited while the reader waits is noticed at once. No
+  front movement for `LIVE_IDLE_MINUTES` (10) — also when the file is shorter
+  than the front — → ffmpeg's process group is killed (no `ENDLIST`; the
+  playlist stays servable), a new `remux_live` is queued with `run_after =
+  now + 5 min` and `requeues` + 1, `stage=idle`; after
+  `MAX_IDLE_REQUEUES` (12) in a row the job ends `gone` ("no progress after 12
+  tries") and the directory goes. A segment longer than the target duration
+  is logged once.
+- **Payload** (on the pattern of `offline_copies`; no table): `stage`
+  (`waiting` → `remux` → `live_done`, or `idle`/`refused`/`gone`), `reason`,
+  `front_bytes`, `file_size`, `front_seconds` and `segments` (of what the
+  router would serve), `expected_duration`, `download_progress`, `seeders`
+  (tracker's, else connected), `dl_speed`, `width`, `height`,
+  `subtitle_lang`, `info_hash`, `file_index`. Written at most every 5 s, with
+  `locked_at` every 60 s.
+- **Restart.** Every start feeds from byte 0; the output is deterministic
+  (same bytes in → same `seg_NNNNN.m4s` names and bytes; asserted by the slow
+  test). Over a served playlist the restart cuts into `live/<id>.new` and
+  swaps it in (`live/<id>` → `.old`, `.new` → `live/<id>`, `.old` removed;
+  ffmpeg's working directory follows the rename) once it serves as many
+  segments as the old one, or its end; an idle exit before that discards
+  `.new` and leaves the old playlist served. A non-zero ffmpeg exit, or an
+  exit before the whole file was fed, removes the directories and raises for
+  the runner's retry.
+- **Adoption.** The download completes, `poll_qbit` hands it to the matcher,
+  `link` queues `remux`. Before probing, `remux` adopts at once when
+  `live/<id>` already has its `ENDLIST` (even if the `remux_live` row is
+  still finishing: it sees the episode `ready` and stops); otherwise it waits
+  up to `LIVE_ADOPT_WAIT_SECONDS` (15) while a `remux_live` is running, then
+  remuxes the file itself. `adopt_live`: `owner.json` must name the linked
+  `MediaFile` (same resolved path, same size on the row and on disk),
+  `video.m3u8` must hold `ENDLIST`, `validate_output` must pass. Then
+  `EVENT` → `VOD`, `_work/sub.*` → `subs.vtt`, `remux.json` rewritten with the
+  measured first-frame PTS and peak bandwidth, `_work/` and `owner.json`
+  removed; then the `renditions` row (`kind='remux'`) and `preparing →
+  ready` are **committed first** and only then `publish_adopted` renames
+  `live/<id>` → `renditions/<id>`; in that instant the ready route
+  (`_ready_dir`) falls back to `live/<id>` when `renditions/<id>` does not
+  exist, so the player's no-store playlist never 404s; `stage=done,
+  adopted=true` — no second ffmpeg. Otherwise the ordinary remux runs and removes `live/<id>`
+  only when no `remux_live` of the episode is running (a running one sees the
+  episode leave its states and removes its own).
+- **Leftovers.** `sweep_live_leftovers` (worker start, after orphans are
+  reclaimed, and every hourly `retention_sweep` outside dry-run) keeps
+  `live/<id>` only while `live_servable` would serve it (or its job is
+  running), and `live/<id>.new` only while its job is running; anything else
+  under `live/` — another episode state, a refused or
+  gone or failed job, a file of the download in review, a non-numeric name, a
+  link (unlinked, never followed) — is removed. `live/` is one of retention's
+  `allowed_roots`.
+- **The duration guard.** `record_progress` refuses a completion (not the
+  position) on a non-`ready` episode a live remux stands behind (its newest
+  `remux_live` pending, running, or done `idle`/`live_done`) when the
+  reported duration is under `LIVE_DURATION_GUARD` (0.9) × the newest
+  recorded `expected_duration` — and **outright when none is recorded**
+  (`media.names.live_duration`, `truncated_duration(..., live=)`): no MAL
+  write can follow from a truncated duration, whatever the client. Retention
+  counts `remux_live` among the jobs reading a source
+  (`copies.SOURCE_READER_TYPES`).
+
 ### 5.4 Streaming
 - `GET /media/{episode_id}/index.m3u8` and `/media/{episode_id}/{segment}`
   are served by the API with session auth; playlists are rewritten so segment
@@ -2039,6 +2194,46 @@ remux|transcode` (no mode: `transcode` with `force`, else `remux`).
   player does not ask again); a refusal is the sentence in the card.
 
 ### 5.4a Streaming and playback as built (M8)
+- **The live branch (M20 T6, FR-P8, §5.3d).** Every media route first asks
+  `_live_dir`: for an episode that is not `ready`, `live_serve.live_servable`
+  returns `DATA_DIR/live/<id>/` when the episode is in `downloading`…
+  `preparing`, the newest `remux_live` job is pending/running (not
+  `refused`/`gone`) or done with `idle`/`live_done`, the directory exists and
+  is not a link (a link is a 404), it serves **at least one segment** (a job
+  still waiting for the head hands out nothing: `/play` stays `pending`), and
+  no file under `downloads/<id>/` is pending review or linked to another
+  episode. Then: `index.m3u8` is the remux master generated from the
+  live `remux.json` and the job's `width`/`height`/`subtitle_lang`;
+  `video.m3u8` is **re-emitted** (`live_media_playlist`), never passed
+  through — `#EXT-X-VERSION:7`, a fixed `#EXT-X-TARGETDURATION:8`
+  (`LIVE_TARGET_DURATION`; ffmpeg cuts at 6 s, a longer segment is logged
+  once, and native Safari keeps its seekable range 3 × the target behind the
+  end, so 20 left an iPad a minute behind the download),
+  `#EXT-X-MEDIA-SEQUENCE:0`, `#EXT-X-PLAYLIST-TYPE:EVENT`,
+  `#EXT-X-START:TIME-OFFSET=0,PRECISE=YES`, `#EXT-X-INDEPENDENT-SEGMENTS`,
+  the map, and only the segments whose files exist as plain files (the
+  first missing one ends the list; no `init.mp4`, no segments), with
+  `#EXT-X-ENDLIST` only when ffmpeg wrote it and every segment is there;
+  `subs.m3u8` mirrors those bounds (the same target, 8, EVENT until ended) and
+  `sub_NNNNN.vtt` is cut at request time from `_work/sub.ass|srt` as ffmpeg is
+  writing it — complete lines only (a whole SRT block), cues starting past the
+  last served segment held back, `X-TIMESTAMP-MAP` from the live
+  `remux.json`; `init.mp4`/`seg_NNNNN.m4s` through `_serve` (link refusal,
+  confinement, ranges, ETag). `Cache-Control: no-store` on every live
+  playlist, `private, max-age=300` on live segments (never `immutable`),
+  `private, no-cache` on live VTT. `episode.mp4` and `offline.mp4` never serve
+  live. A `ready` episode is always served from `renditions/<id>`, so the
+  same URLs keep working across the adoption. `/play`, for a caller with a
+  live want on a non-ready episode that `live_servable` accepts, answers
+  `playlist_url` (the same `/media/{id}/index.m3u8`), `live: {front_seconds,
+  expected_duration, download_progress, seeders, ended}` from the job
+  payload (`front_seconds` and `ended` from the served playlist; the download
+  numbers from the newest job; `expected_duration` and the subtitle language
+  from the newest job that probed), `pending: null`, `duration` =
+  `expected_duration`, and `subtitles: {lang}`. `EpisodeOut.live_playable`
+  (FR-A7's "downloading 43 % · playable") is the same test, computed in
+  `episode_extras(live_settings=…)` by `live_playable_ids` for the show page
+  and on `/play`.
 - **A remuxed rendition (M20 T2).** The name vocabulary under
   `/media/{id}/` (`download.PART_NAME_PATTERN`, `\A…\z`) is `init.mp4`,
   `seg_NNNNN.m4s`, `video.m3u8`, `subs.m3u8`, `sub_NNNNN.vtt`; `index.m3u8`,
@@ -4313,8 +4508,8 @@ Mutating requests must carry an allowed `Origin`.
 | `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4 → **204**: the device deleted its copy; stamps `released_at` on a delivered row, which puts the episode back in the caller's window from the next reconciliation (M20 T4: a delivered, unreleased episode is skipped); idempotent |
 | `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4 → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
 | `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
-| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null), `subtitles` (`{lang}` when the rendition has a text track, else null; M20 T3, FR-S10). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want |
-| `POST /api/episodes/{id}/demand` | any, demo included | M20 T4 (FR-A14): press play on a not-ready episode → **202 `{state}`**. **409** `{detail: {code, message}}` with `not_in_window` (not in the caller's `coverable` set), `acquisition_paused` or `storage_held` (only while the episode still needs fetching). 404 unknown episode. A `ready` episode answers 202 `{state: ready}` and writes nothing. Otherwise, under the shared wants lock, upserts the want with `demanded_at`, starts/raises the search to priority 100, `qbit_top` if downloading, queues `compute_wants`. Origin required |
+| `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null), `subtitles` (`{lang}` when the rendition has a text track, else null; M20 T3, FR-S10). 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want. **While the episode plays from its download** (M20 T6, FR-P8: a live want, and `live_serve.live_servable` accepts its `live/<id>/`): `playlist_url` is the same `/media/{id}/index.m3u8`, `live: {front_seconds, expected_duration, download_progress, seeders, ended}` (from the `remux_live` payload; `ended` once ffmpeg wrote `ENDLIST`), `pending: null`, `duration` = `expected_duration`, `subtitles: {lang}` when the live remux extracts a track |
+| `POST /api/episodes/{id}/demand` | any, demo included | M20 T4 (FR-A14): press play on a not-ready episode → **202 `{state, live, message}`** (M20 T6: for a downloading single, `qbit_sequential` + `remux_live` are queued without any matcher or catalogue call — the job gates; `live` is false with `message` "This episode will play when its download finishes." when the newest live remux of this download refused, or for a batch; true otherwise — optimistic until the job has looked; a running or finished live remux is not re-queued). **409** `{detail: {code, message}}` with `not_in_window` (not in the caller's `coverable` set), `acquisition_paused` or `storage_held` (only while the episode still needs fetching). 404 unknown episode. A `ready` episode answers 202 `{state: ready}` and writes nothing. Otherwise, under the shared wants lock, upserts the want with `demanded_at`, starts/raises the search to priority 100, `qbit_top` if downloading, queues `compute_wants`. Origin required |
 | `PUT /api/devices/{device_id}/holdings` | any but demo (403 `demo_account`) | M20 T4 (FR-A15): body `{episode_ids: [id…]}` (≤ 500, extra keys 422) **replaces** that device's set → **204**. `device_id` must parse as a version-4 UUID (else 422) and is stored canonical, so two spellings are one device; ids naming no episode are dropped; the user's rows older than 14 days are purged and at most 10 devices kept (oldest report evicted); a change queues `compute_wants`. Origin required |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
@@ -4378,6 +4573,21 @@ Mutating requests must carry an allowed `Origin`.
   canonical form in `device_holdings.device_id`, and nothing builds a file
   name, directory or URL from it. It identifies a device only within the
   caller's own rows (the key includes `user_id`).
+- **The live directory** (`DATA_DIR/live/<episode id>/`, M20 T6, §5.3d) has
+  the renditions' discipline. The router derives it from the id; a symlink at
+  `live/` or `live/<id>` is a 404; files are named only from the closed
+  vocabulary and opened relative to the directory with `O_NOFOLLOW` (a link
+  inside is a 404 and is never listed in a re-emitted playlist);
+  `owner.json`, `remux.json` and `_work/` are not in the vocabulary (422).
+  ffmpeg's playlist is never served as written. The live remux reads its
+  source through `O_RDONLY|O_NOFOLLOW` at a path built from the episode's own
+  save directory and qBittorrent's file name, resolved and refused unless it
+  lies inside `downloads/<id>/`, and never past the hash-checked front. The
+  directory is inside retention's `allowed_roots` and is swept, a link
+  unlinked rather than followed.
+  `LIVE_DIR` itself (`DATA_DIR/live`) is resolved in `config.py` like the
+  other roots, so a `live` root that is itself a symlink is followed —
+  accepted, the same as `renditions/`, `downloads/` and `offline/`.
 - qBittorrent Web UI bound to the internal Docker network only.
 
 ## 8. Deployment
@@ -4506,6 +4716,14 @@ production with nothing in the chain configured is a startup ERROR),
 `MAX_REMUXES` (2; concurrent remuxes per worker process, M20),
 `REMUX_AUDIO_BITRATE` (160k; what a remux converts non-AAC audio to),
 `REMUX_TIMEOUT_SECONDS` (600; a remux's ffmpeg is killed and retried after it),
+`MAX_LIVE_REMUXES` (1; concurrent progressive remuxes per worker process, their
+own cap group — M20 T6, §5.3d), `LIVE_IDLE_MINUTES` (10, ≥ 1; no download
+progress for this long stops a live remux and requeues it five minutes later),
+`LIVE_HEAD_BYTES` (8388608 = 8 MiB, ≥ 1 MiB; contiguous bytes from the file's
+start before the live remux probes it). **Production sets
+`WORKER_CONCURRENCY=3`** (owner Q13, 2026-10-13; the code default stays 2) so
+one live remux, which holds its claim for as long as the download, never
+halves the queue.
 `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `MATCH_AUTO_THRESHOLD` (0.85),
 `MATCH_MIN_CANDIDATE` (0.40), `MATCH_MIN_TITLE_FOR_AUTO` (0.92; above the
 0.88 non-exact cap, so in practice auto-link needs an exact normalised title
@@ -6789,3 +7007,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-13 — M20 T3: **subtitle switch, start position, live duration rule** (§5.4a, spec FR-S10/FR-S1/FR-S4). `PlayInfo.subtitles` (`SubtitlesOut`, from `text_subtitles`/`subtitle_lang`); client `PlayInfo.live` typed for T6. hls.js gets `startPosition` (resume or 0) and `renderTextTracksNatively`; `subtitleDisplay` is set on the instance because hls.js 1.7 has no config option of that name. New `client/src/player/subtitles.ts` (the two switches and the `localStorage` preference); CC button in the player; `video::cue` styling; `resolveDuration` moves to `ProgressReporter.ts` and takes `live`. No schema change, no new dependency, no `C` shortcut.
 - 2026-10-13 (owner, M20 T9) — **Remembered release, fast dead-swarm fallback, seeder warning** (§4 `torrents`, §5.1a, §5.7; spec FR-T3/FR-A6/FR-A7/FR-A16). Retention keeps a single's `torrents` row as `qbit_state = 'evicted'` with the new `evicted_at` (revision `244fbc2111f9` `torrents_evicted_at`, on `911eca1dfc62`) instead of deleting it; decided rows are still deleted, batches unchanged. `QBIT_EVICTED` joins `DECIDED_STATES`, not `DELETE_ON_SIGHT`. `search_release` re-adds the newest evicted single before any Nyaa request (`_remembered`/`_refetch`; 409-safe). `poll_qbit`: a re-fetch (live row with `evicted_at`) whose tracker reports an empty swarm stalls after `REFETCH_DEAD_MINUTES` (15) of `time_active` and queues `search_release` at once at its last search's priority (episode → `wanted`, not `unavailable`); `torrents.seeders` follows the tracker scrape. `few_seeders`/`seeders` on `EpisodeOut` from `min_seeders_warn`; the show row's Pin uses the T8 pin mutation. No new dependency. After review (same day): `remembers()` keeps only finished singles behind a non-failed episode; `_remembered` runs after `claim_existing`; any re-fetch stall searches at once and "nothing fetched" (metaDL, no bytes, dead swarm, `progress <= 0`) is judged at 15 min; `poll_qbit` skips `evicted` rows; `prune_remembered` forgets them after 180 days; `_poll_batch` writes pack seeders; re-add clears `seeders`.
 - 2026-10-13 — M20 T5: **device holdings reporting and play on demand, client side** (§5.4, §5.4d; spec FR-S9 item 10, FR-S5 item 2, FR-A14, §5 Home/Show/Player). IndexedDB v4 adds the `meta` store (`deviceId`, `holdings:<user>`). `DownloadManager.reportHoldings()` (5 s debounce, 10 min dedupe, a pending note replayed on the outbox's landed flush and on reconnect, demo skipped) PUTs the complete, unwatched downloads; `lib/playback.ts` gains `demandEpisode`, `demandRefusal`, `PlayInfo.pending`, `EpisodeRef.fetchable`, `pendingLabel`, `WatchState`; the player demands before loading (router state) or on a pending answer, polls `/play` every 3 s, and shows the server's sentence on a 409. Server: `EpisodeOut.fetchable` on the show payload (`coverable`, computed only when a row is not ready and the show can be in the caller's window). No new dependency, no migration.
+- 2026-10-13 (owner Q4/Q6/Q13/Q15, M20 T6) — **Progressive remux** (new §5.3d; §2 caps, §5.4a live branch, §5b `/play` and `/demand`, §7 live directory, §9 env; spec FR-P8, FR-A5, FR-A7, FR-L1, FR-L4, FR-S4). New job types `remux_live` (`media/live.py`; priority 5, dedupe per episode, advisory lock `('remux_live', id)`, own cap group `MAX_LIVE_REMUXES`=1, heartbeat 60 s) and `qbit_sequential` (`acquisition/jobs.py`; read-then-toggle + `topPrio`). `QbitClient.add(sequential=)`, `info`, `piece_states`, `properties`, `ensure_sequential`; `FileInfo.piece_range`; `TorrentInfo.seq_dl`/`f_l_piece_prio`. Every streaming single is added sequentially (trip-only unchanged). The front is `contiguous_bytes` over hash-checked pieces; `FrontGatedReader` never reads past it. Pre-match gate `library/prematch.py` (nothing indexed). EVENT playlists re-emitted by the router with a fixed target duration (8 after T7's WebKit check; first written 20) and `EXT-X-START` 0 (owner Q4). Adoption by `remux` (`adopt_live`, `os.replace` into `renditions/<id>`, no second ffmpeg); `sweep_live_leftovers` at worker start and in the hourly sweep; `live/` in retention's `allowed_roots`. Server-side completion guard in `record_progress` (0.9 × `expected_duration` on non-ready episodes). Config `live_dir`, `MAX_LIVE_REMUXES`, `LIVE_IDLE_MINUTES`, `LIVE_HEAD_BYTES`; production sets `WORKER_CONCURRENCY=3` (code default 2). Live state in the job payload — no table, no migration, no new dependency. After review (same day): no live remux without a header duration, and no completion on a live episode without one; pad-file layouts refused (`offset_agrees`); the first segment's PTS from `init.mp4` + `seg_00000.m4s`; the head grows to 64 MiB before "unreadable"; `drain` timeout and ffmpeg-exit detection; stdin closed once every piece is checked; the idle clock also on a short file; a 12-requeue cap; restarts over a served playlist cut into `live/<id>.new` and swap in; `/demand` no longer runs the pre-match (the job does) and never restarts a running or finished live remux; the remux never deletes or adopts under a running live job; servable needs a segment; `EpisodeOut.live_playable`; `open_confined`; `remux_live` in `SOURCE_READER_TYPES`. After the Validator's end-to-end run and T7's WebKit check (same day): `-flush_packets 1` on the live subtitle output (the ASS stayed empty until ffmpeg exited); the live target duration 20 → 8 (Safari's seekable range trails the end by 3 × the target); adoption commits `ready` before the rename, and the ready route falls back to `live/<id>` for that instant; adoption no longer holds a remux slot for two minutes (adopt at once on `ENDLIST`, else wait at most 15 s).

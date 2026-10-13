@@ -821,16 +821,32 @@ def test_the_capped_groups_are_the_encoders_and_the_remux(settings: Settings) ->
     One encoder group since M19 (2026-10-05): ``transcode`` and
     ``offline_encode`` both run a whole-episode ffmpeg, and share
     ``MAX_TRANSCODES`` between them. And the remux in a group of its own since
-    M20, under ``MAX_REMUXES``.
+    M20, under ``MAX_REMUXES``; and the live remux in a third (M20 T6), under
+    ``MAX_LIVE_REMUXES``.
     """
     encoders = frozenset({media_names.TRANSCODE, media_names.OFFLINE_ENCODE})
     remuxes = frozenset({media_names.REMUX})
+    live = frozenset({media_names.REMUX_LIVE})
     assert process_caps(settings) == {
         encoders: settings.max_transcodes,
         remuxes: settings.max_remuxes,
+        live: settings.max_live_remuxes,
     }
-    lowered = settings.model_copy(update={"max_transcodes": 1, "max_remuxes": 1})
-    assert process_caps(lowered) == {encoders: 1, remuxes: 1}
+    assert settings.max_live_remuxes == 1
+    lowered = settings.model_copy(
+        update={"max_transcodes": 1, "max_remuxes": 1, "max_live_remuxes": 2}
+    )
+    assert process_caps(lowered) == {encoders: 1, remuxes: 1, live: 2}
+
+
+def test_a_running_live_remux_closes_only_its_own_group(settings: Settings) -> None:
+    """One live remux fills its group and leaves the remux and encode groups open."""
+    caps = process_caps(settings)
+    full = full_types(caps, Counter({media_names.REMUX_LIVE: 1}))
+    assert full == frozenset({media_names.REMUX_LIVE})
+    assert media_names.REMUX_LIVE not in full_types(
+        caps, Counter({media_names.REMUX: 2, media_names.TRANSCODE: 2})
+    )
 
 
 def test_a_full_encode_group_does_not_close_the_remux_group(settings: Settings) -> None:

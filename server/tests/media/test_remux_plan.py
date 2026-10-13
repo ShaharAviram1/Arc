@@ -176,6 +176,19 @@ def test_remux_args_live_and_audio_encode() -> None:
     assert args.count("-c:v") == 1 and "-vf" not in args
 
 
+def test_remux_args_live_flushes_the_subtitle_output_per_packet() -> None:
+    """Live (M20 T6): the ASS file grows as events are muxed, not at exit."""
+    plan = _plan(_probe("probe_subsplease_1080p_h264_high"))
+    live = remux_args(plan, live=True)
+    playlist_at = live.index(VIDEO_PLAYLIST_NAME)
+    assert live[playlist_at + 1 :] == [
+        "-map", "0:s:0", "-c:s", "copy", "-flush_packets", "1", "-f", "ass", ASS_FILE,
+    ]  # fmt: skip
+    # Only the subtitle output: the HLS output keeps its own buffering.
+    assert live.index("-flush_packets") > playlist_at
+    assert "-flush_packets" not in remux_args(plan, live=False)
+
+
 def _with_subtitle(codec: str | None) -> TranscodePlan:
     plan = _plan(_probe("probe_subsplease_1080p_h264_high"))
     subtitle = None if codec is None else Stream(index=5, type_index=2, codec=codec)

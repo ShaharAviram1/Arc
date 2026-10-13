@@ -38,6 +38,7 @@ from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.offline_schemas import OfflineOut
+from arc.config import Settings
 from arc.models import (
     Episode,
     EpisodeState,
@@ -54,6 +55,7 @@ from arc.services.acquisition.names import SEARCH_RELEASE
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_EVICTED, QBIT_MISSING
 from arc.services.acquisition.rules import min_seeders_warn
 from arc.services.media.copies import episodes_with_sources
+from arc.services.media.live_serve import live_playable_ids
 from arc.services.media.names import latest_offline_jobs, latest_transcode_jobs
 from arc.services.trips.rules import trip_only_episode_ids
 
@@ -195,6 +197,10 @@ class EpisodeExtras:
     #: ``min_seeders_warn`` (FR-A16): below this many seeders on its live
     #: torrent an episode row warns; 0 never warns. One ``settings`` read.
     min_seeders_warn: int = 0
+    #: The episodes that play from their download right now (FR-A7's
+    #: "downloading 43 % · playable", FR-P8). Only when the caller passed the
+    #: settings that locate the live directories; empty otherwise.
+    live_playable: frozenset[int] = frozenset()
 
 
 async def torrents_for(
@@ -319,6 +325,7 @@ async def episode_extras(
     *,
     offline_codec: str | None = None,
     offline_demo: bool = False,
+    live_settings: Settings | None = None,
 ) -> EpisodeExtras:
     """All five lookups for one page's worth of episodes, in at most nine queries.
 
@@ -342,6 +349,11 @@ async def episode_extras(
         ),
         trip_only=frozenset(await trip_only_episode_ids(session, episode_ids)),
         min_seeders_warn=await min_seeders_warn(session),
+        live_playable=(
+            await live_playable_ids(session, live_settings, episode_ids)
+            if live_settings is not None
+            else frozenset()
+        ),
     )
 
 

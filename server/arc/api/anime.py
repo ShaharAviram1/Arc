@@ -343,7 +343,11 @@ async def detail(
     # per episode.
     episode_ids = [episode.id for episode in episodes]
     extras = await episode_extras(
-        session, episode_ids, offline_codec=settings.offline_codec, offline_demo=user.is_demo
+        session,
+        episode_ids,
+        offline_codec=settings.offline_codec,
+        offline_demo=user.is_demo,
+        live_settings=settings,
     )
     # The caller's own "try episode 1" want, if they have one (FR-A8). The
     # episode number comes from the list already loaded rather than from a
@@ -447,6 +451,8 @@ async def detail(
         pinned=await is_pinned(session, user_id=user.id, anime_id=anime.id),
         # FR-A16's threshold, read once with the extras.
         min_seeders_warn=extras.min_seeders_warn,
+        # FR-A7's "playable" while downloading (FR-P8).
+        live_playable=extras.live_playable,
     )
 
 

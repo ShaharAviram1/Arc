@@ -103,6 +103,7 @@ from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.catalog.airing import FINISHED
 from arc.services.mal.names import enqueue_mal_push, is_linked
 from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pending
+from arc.services.media.names import live_duration
 
 #: Watched at ninety per cent (FR-S4). Ends run about that long past the last
 #: thing anybody watches for.
@@ -149,6 +150,32 @@ CONTINUE_MIN_POSITION_S = 30.0
 #: three minutes long never reaches this shelf at all, because it is never more
 #: than three minutes from its own end.
 CONTINUE_TAIL_S = 180.0
+
+
+#: The server-side duration guard (FR-S4, M20 T6). While an episode plays
+#: from its download in progress, a media element reports only the length
+#: downloaded so far; 90 % of five downloaded minutes must never complete a
+#: 24-minute episode and write to MyAnimeList. So a completion on an episode
+#: that is not ``ready`` is refused when the reported duration is below this
+#: share of the length the live remux read from the file's header.
+LIVE_DURATION_GUARD = 0.90
+
+
+def truncated_duration(duration_s: float, expected_s: float | None, *, live: bool) -> bool:
+    """Whether a completion must be refused as possibly measured on a growing stream (pure).
+
+    Only for an episode a live remux stands behind (``live``). With an
+    expected length, a reported duration under :data:`LIVE_DURATION_GUARD` of
+    it is refused; **without one the completion is refused outright** — there
+    is nothing to tell a truncated duration from a whole one, and the safe
+    answer to "may this write to MyAnimeList?" is no until the episode is
+    ready.
+    """
+    if not live:
+        return False
+    if expected_s is None or expected_s <= 0:
+        return True
+    return duration_s < LIVE_DURATION_GUARD * expected_s
 
 
 def is_completed(position_s: float, duration_s: float) -> bool:
@@ -267,6 +294,12 @@ async def record_progress(
     at = now or datetime.now(UTC)
     stamp = reported_at or at
     completing = force_complete or is_completed(position_s, duration_s)
+    if completing and not force_complete and episode.state is not EpisodeState.READY:
+        guard = await live_duration(session, episode.id)
+        if truncated_duration(duration_s, guard.expected, live=guard.live):
+            # A player on a stream still downloading measured only what has
+            # arrived (the guard above): progress is kept, the completion is not.
+            completing = False
 
     statement = pg_insert(WatchProgress).values(
         user_id=user_id,

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -35,7 +36,7 @@ from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import DEFAULT_PRIORITY, Episode, Job, ListEntry, Want
+from arc.models import DEFAULT_PRIORITY, Episode, Job, JobStatus, ListEntry, Want
 from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue
 
 #: Prepare one episode for playback: probe, plan, burn in, package. Since M20
@@ -438,6 +439,201 @@ async def enqueue_remux(
     )
 
 
+# --- The progressive remux (M20 T6, FR-P8) -----------------------------------
+
+#: Remux a single while it downloads, so the episode plays before it is whole
+#: (architecture.md §5.3d). The handler is :func:`arc.services.media.live.
+#: remux_live`; the name lives here so the claim loop's caps, the media router
+#: and the progress guard can ask about it without importing ffmpeg's world.
+REMUX_LIVE = "remux_live"
+
+#: Its cap group (:func:`arc.services.jobs.loop.process_caps`): a live remux
+#: runs for as long as its download, so it never takes a remux or encode slot.
+LIVE_TYPES: frozenset[str] = frozenset({REMUX_LIVE})
+
+#: Ahead of everything else: somebody is sitting in front of the player.
+LIVE_PRIORITY = 5
+
+#: Payload stages of a ``remux_live`` job. ``waiting`` is before the head of
+#: the file is in; ``remux`` is ffmpeg running; ``idle`` is the job that
+#: stopped for want of progress and queued itself again (its playlist stays
+#: servable); ``live_done`` is ffmpeg's clean exit with ``ENDLIST``;
+#: ``refused`` is a download that does not qualify (the reason is in the
+#: payload); ``gone`` is a torrent cancelled or removed under it.
+STAGE_LIVE_WAITING = "waiting"
+STAGE_LIVE_REMUX = "remux"
+STAGE_LIVE_IDLE = "idle"
+STAGE_LIVE_DONE = "live_done"
+STAGE_LIVE_REFUSED = "refused"
+STAGE_LIVE_GONE = "gone"
+
+#: A finished ``remux_live`` whose directory is still worth serving: the
+#: playlist is there and nothing has decided against it.
+LIVE_SERVABLE_STAGES: frozenset[str] = frozenset({STAGE_LIVE_IDLE, STAGE_LIVE_DONE})
+
+#: The payload keys the media router, ``/play`` and the progress guard read.
+KEY_EXPECTED_DURATION = "expected_duration"
+KEY_FRONT_SECONDS = "front_seconds"
+KEY_FRONT_BYTES = "front_bytes"
+KEY_FILE_SIZE = "file_size"
+KEY_DOWNLOAD_PROGRESS = "download_progress"
+KEY_SEEDERS = "seeders"
+KEY_DL_SPEED = "dl_speed"
+KEY_SEGMENTS = "segments"
+KEY_LIVE_REASON = "reason"
+#: How many idle exits in a row led to this job (capped by the handler).
+KEY_REQUEUES = "requeues"
+
+#: The live directory's record of what it was cut from: ``{job_id, info_hash,
+#: file_index, file_size}``. The remux adopts the directory only when it
+#: matches the file that was linked. Not in the router's vocabulary.
+LIVE_OWNER_NAME = "owner.json"
+
+
+def live_dedupe_key(episode_id: int) -> str:
+    """One live remux per episode, however many presses of play."""
+    return f"{REMUX_LIVE}:{episode_id}"
+
+
+def live_dir_for(settings: Settings, episode_id: int) -> Path:
+    """``DATA_DIR/live/<episode id>`` — derived from the id, never from input."""
+    return settings.live_dir / str(episode_id)
+
+
+async def latest_live_job(session: AsyncSession, episode_id: int) -> Job | None:
+    """The newest ``remux_live`` row for one episode, whatever its status."""
+    key = cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
+    found: Job | None = await session.scalar(
+        select(Job)
+        .where(Job.type == REMUX_LIVE, key == str(episode_id))
+        .order_by(Job.id.desc())
+        .limit(1)
+    )
+    return found
+
+
+def live_job_servable(job: Job | None) -> bool:
+    """Whether this ``remux_live`` row stands behind a directory worth serving.
+
+    Pending or running (a retry or an idle requeue counts: its directory is
+    what it left), or done with ``idle`` or ``live_done``. A refused, gone or
+    failed job stands behind nothing.
+    """
+    if job is None:
+        return False
+    if job.status in (JobStatus.PENDING, JobStatus.RUNNING):
+        return str((job.payload or {}).get("stage") or "") not in {
+            STAGE_LIVE_REFUSED,
+            STAGE_LIVE_GONE,
+        }
+    if job.status is JobStatus.DONE:
+        return str((job.payload or {}).get("stage") or "") in LIVE_SERVABLE_STAGES
+    return False
+
+
+def payload_float(job: Job | None, key: str) -> float | None:
+    """A positive finite number out of a job's payload, or ``None``."""
+    if job is None:
+        return None
+    raw: Any = (job.payload or {}).get(key)
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    value = float(raw)
+    if value != value or value <= 0 or value == float("inf"):
+        return None
+    return value
+
+
+async def live_expected_duration(session: AsyncSession, episode_id: int) -> float | None:
+    """The episode's whole length as a live remux read it from the MKV header.
+
+    The newest ``remux_live`` row that recorded one: a restart's new row has
+    none until it has probed the head again, and the old one's is as true.
+    ``None`` when no live remux ever probed this episode.
+    """
+    return payload_float(
+        await latest_live_with(session, episode_id, KEY_EXPECTED_DURATION), KEY_EXPECTED_DURATION
+    )
+
+
+async def latest_live_with(session: AsyncSession, episode_id: int, field: str) -> Job | None:
+    """The newest ``remux_live`` row of one episode whose payload has ``field`` set."""
+    key = cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
+    rows = await session.scalars(
+        select(Job)
+        .where(
+            Job.type == REMUX_LIVE,
+            key == str(episode_id),
+            Job.payload[field].astext.is_not(None),
+        )
+        .order_by(Job.id.desc())
+        .limit(1)
+    )
+    found: Job | None = rows.first()
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class LiveDuration:
+    """What the progress guard (FR-S4) knows about a non-ready episode."""
+
+    #: A live remux stands behind the episode (pending, running, or finished
+    #: with something servable): a player may be on a growing stream.
+    live: bool
+    #: The length the live remux read from the file's header, if any.
+    expected: float | None
+
+
+async def live_duration(session: AsyncSession, episode_id: int) -> LiveDuration:
+    """:class:`LiveDuration` for one episode: two indexed reads."""
+    latest = await latest_live_job(session, episode_id)
+    if not live_job_servable(latest):
+        return LiveDuration(live=False, expected=None)
+    return LiveDuration(live=True, expected=await live_expected_duration(session, episode_id))
+
+
+async def episode_demanded(session: AsyncSession, episode_id: int) -> bool:
+    """Whether some user's live want on this episode was made by pressing play."""
+    found = await session.scalar(
+        select(Want.user_id)
+        .where(
+            Want.episode_id == episode_id,
+            Want.dropped_at.is_(None),
+            Want.demanded_at.is_not(None),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+async def enqueue_remux_live(
+    session: AsyncSession,
+    episode_id: int,
+    *,
+    run_after: datetime | None = None,
+    exclude_job_id: int | None = None,
+    requeues: int = 0,
+) -> Job:
+    """Queue a live remux for one episode, deduplicated on the episode. Flushed.
+
+    ``exclude_job_id`` and ``requeues`` are for the handler requeueing itself
+    after an idle exit (:func:`~arc.services.jobs.queue.find_active` explains
+    the first; the second counts the exits in a row).
+    """
+    payload: dict[str, Any] = {EPISODE_KEY: episode_id}
+    if requeues:
+        payload[KEY_REQUEUES] = requeues
+    return await enqueue(
+        session,
+        REMUX_LIVE,
+        payload,
+        priority=LIVE_PRIORITY,
+        run_after=run_after,
+        dedupe_key=live_dedupe_key(episode_id),
+        exclude_job_id=exclude_job_id,
+    )
+
+
 __all__ = [
     "ENCODE_TYPES",
     "EPISODE_KEY",
@@ -450,8 +646,30 @@ __all__ = [
     "OFFLINE_WHY_REQUEST",
     "OFFLINE_WHY_TRIP",
     "PREPARE_TYPES",
+    "KEY_DL_SPEED",
+    "KEY_DOWNLOAD_PROGRESS",
+    "KEY_EXPECTED_DURATION",
+    "KEY_FILE_SIZE",
+    "KEY_FRONT_BYTES",
+    "KEY_FRONT_SECONDS",
+    "KEY_LIVE_REASON",
+    "KEY_REQUEUES",
+    "KEY_SEEDERS",
+    "KEY_SEGMENTS",
+    "LiveDuration",
+    "LIVE_OWNER_NAME",
+    "LIVE_PRIORITY",
+    "LIVE_SERVABLE_STAGES",
+    "LIVE_TYPES",
     "PRIORITY_PER_EPISODE",
     "REMUX",
+    "REMUX_LIVE",
+    "STAGE_LIVE_DONE",
+    "STAGE_LIVE_GONE",
+    "STAGE_LIVE_IDLE",
+    "STAGE_LIVE_REFUSED",
+    "STAGE_LIVE_REMUX",
+    "STAGE_LIVE_WAITING",
     "REMUX_INFO_NAME",
     "REMUX_MAX_ATTEMPTS",
     "REMUX_TYPES",
@@ -463,13 +681,23 @@ __all__ = [
     "WHY_KEY",
     "enqueue_offline_encode",
     "enqueue_remux",
+    "enqueue_remux_live",
+    "episode_demanded",
     "enqueue_transcode",
     "latest_offline_jobs",
     "latest_prepare_jobs",
+    "latest_live_job",
+    "latest_live_with",
     "latest_transcode_jobs",
+    "live_dedupe_key",
+    "live_dir_for",
+    "live_duration",
+    "live_expected_duration",
+    "live_job_servable",
     "offline_dedupe_key",
     "offline_path_for",
     "output_dir_for",
+    "payload_float",
     "remux_dedupe_key",
     "transcode_dedupe_key",
     "transcode_priority",

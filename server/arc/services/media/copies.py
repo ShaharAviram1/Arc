@@ -55,6 +55,7 @@ from arc.services.media.download import stat_etag
 from arc.services.media.names import (
     ENCODE_TYPES,
     EPISODE_KEY,
+    LIVE_TYPES,
     OFFLINE_ENCODE,
     OFFLINE_WHY_REQUEST,
     REMUX_TYPES,
@@ -252,10 +253,11 @@ def _offline_job_key() -> ColumnElement[str]:
 
 
 #: The job types that read an episode's source file while they run: the
-#: offline encode (FR-P6), the burn-in transcode and, since M20, the remux.
+#: offline encode (FR-P6), the burn-in transcode and, since M20, the remux and
+#: the live remux (which reads the file as it downloads).
 #: What :func:`encoding_episode_ids` asks about by default, so no deleter can
 #: take a source out from under any of them.
-SOURCE_READER_TYPES: Final[frozenset[str]] = ENCODE_TYPES | REMUX_TYPES
+SOURCE_READER_TYPES: Final[frozenset[str]] = ENCODE_TYPES | REMUX_TYPES | LIVE_TYPES
 
 #: Only the job that writes the small copy itself; the guard for deleting a
 #: *copy* rather than a source.

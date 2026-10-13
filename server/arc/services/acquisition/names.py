@@ -68,6 +68,10 @@ QBIT_POLICY = "qbit_apply_policy"
 #: Move an in-flight torrent of one episode back to the top of the client's
 #: queue once it is no longer wanted only for a trip (FR-A12).
 QBIT_TOP = "qbit_top_prio"
+#: Switch an in-flight single to sequential download, first and last pieces
+#: first, and move it to the top of the queue, because somebody pressed play
+#: on its episode (M20 T6, FR-P8). Read-then-toggle, so it is idempotent.
+QBIT_SEQUENTIAL = "qbit_sequential"
 
 # --- Queue priorities (lower runs first; the default is 100) ----------------
 #
@@ -95,6 +99,7 @@ QBIT_CANCEL_PRIORITY = 60
 #: episode somebody is waiting for, or a file nobody wants any more.
 QBIT_RESELECT_PRIORITY = 60
 QBIT_TOP_PRIORITY = 60
+QBIT_SEQUENTIAL_PRIORITY = 60
 
 #: Above the default: reconciling the whole wants table is a handful of
 #: queries, but nothing is waiting on the answer within the minute.
@@ -128,6 +133,11 @@ def cancel_dedupe_key(episode_id: int) -> str:
 def top_dedupe_key(episode_id: int) -> str:
     """One queued move to the top per episode."""
     return f"{QBIT_TOP}:{episode_id}"
+
+
+def sequential_dedupe_key(episode_id: int) -> str:
+    """One queued switch to sequential download per episode."""
+    return f"{QBIT_SEQUENTIAL}:{episode_id}"
 
 
 def reselect_dedupe_key(torrent_id: int) -> str:
@@ -168,6 +178,8 @@ __all__ = [
     "QBIT_POLICY_PRIORITY",
     "QBIT_RESELECT",
     "QBIT_RESELECT_PRIORITY",
+    "QBIT_SEQUENTIAL",
+    "QBIT_SEQUENTIAL_PRIORITY",
     "QBIT_TOP",
     "QBIT_TOP_PRIORITY",
     "SEARCH_RELEASE",
@@ -176,5 +188,6 @@ __all__ = [
     "enqueue_compute_wants",
     "reselect_dedupe_key",
     "search_dedupe_key",
+    "sequential_dedupe_key",
     "top_dedupe_key",
 ]

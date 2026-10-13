@@ -268,6 +268,12 @@ class TorrentInfo:
     #: only figures :func:`stall_reason` will call a dead swarm on.
     num_complete: int | None = None
     num_incomplete: int | None = None
+    #: Whether the client downloads this torrent's pieces in order, and its
+    #: files' first and last pieces first (M20 T6, FR-A5). What
+    #: :meth:`QbitClient.ensure_sequential` reads before toggling anything:
+    #: both endpoints are toggles, so writing without reading would undo.
+    seq_dl: bool = False
+    f_l_piece_prio: bool = False
 
     @property
     def complete(self) -> bool:
@@ -323,6 +329,8 @@ class TorrentInfo:
             num_leechs=_count(raw.get("num_leechs")),
             num_complete=_count(raw.get("num_complete")),
             num_incomplete=_count(raw.get("num_incomplete")),
+            seq_dl=raw.get("seq_dl") is True,
+            f_l_piece_prio=raw.get("f_l_piece_prio") is True,
         )
 
 
@@ -348,6 +356,9 @@ class FileInfo:
     #: 0..1, this file's own — an episode inside a batch is complete when its
     #: file is, not when the torrent is.
     progress: float
+    #: ``[first, last]`` piece indices the file spans, both inclusive, as the
+    #: client reports them; ``None`` from a client that did not say (M20 T6).
+    piece_range: tuple[int, int] | None = None
 
     @property
     def wanted(self) -> bool:
@@ -379,7 +390,32 @@ class FileInfo:
             size=_number(raw.get("size")),
             priority=_number(raw.get("priority")),
             progress=_fraction(raw.get("progress")),
+            piece_range=_piece_range(raw.get("piece_range")),
         )
+
+
+def _piece_range(value: Any) -> tuple[int, int] | None:
+    """``[first, last]`` out of ``torrents/files``, or ``None`` if it is not one."""
+    if not isinstance(value, list | tuple) or len(value) != 2:
+        return None
+    first, last = value
+    if any(isinstance(part, bool) or not isinstance(part, int) for part in (first, last)):
+        return None
+    if first < 0 or last < first:
+        return None
+    return int(first), int(last)
+
+
+@dataclass(frozen=True, slots=True)
+class TorrentProperties:
+    """The fields of ``torrents/properties`` a live remux reads (M20 T6).
+
+    ``piece_size`` is what turns piece indices into byte offsets; ``0`` is a
+    torrent whose metadata has not arrived yet, for which nothing can be said.
+    """
+
+    piece_size: int
+    pieces_num: int = 0
 
 
 def _fraction(value: Any) -> float:
@@ -660,7 +696,9 @@ class QbitClient:
             return False
         return isinstance(payload, list) and len(payload) > 0
 
-    async def add(self, magnet: str, *, episode_id: int, info_hash: str) -> str:
+    async def add(
+        self, magnet: str, *, episode_id: int, info_hash: str, sequential: bool = False
+    ) -> str:
         """Add ``magnet`` for one episode. Returns the save path used.
 
         **Adding a torrent the client already holds must succeed**, because
@@ -679,19 +717,28 @@ class QbitClient:
         client whether it is holding the hash. That answers the question the
         status code is too coarse to answer, and it costs one request on a
         path that is already talking to another process.
+
+        ``sequential`` (M20 T6, FR-A5) adds the torrent with its pieces fetched
+        in order and each file's first and last pieces first, so a streaming
+        single can be remuxed and played while it downloads. Every single that
+        is wanted for streaming is added this way; a trip-only one is not.
         """
         save_path = save_path_for(episode_id, downloads_path=self.downloads_path)
+        data = {
+            "urls": magnet,
+            "category": self.category,
+            "savepath": save_path,
+            "tags": f"arc,episode:{episode_id}",
+            "autoTMM": "false",
+        }
+        if sequential:
+            data["sequentialDownload"] = "true"
+            data["firstLastPiecePrio"] = "true"
         response = await self.request(
             "POST",
             "/torrents/add",
             allow_status=frozenset({httpx.codes.CONFLICT}),
-            data={
-                "urls": magnet,
-                "category": self.category,
-                "savepath": save_path,
-                "tags": f"arc,episode:{episode_id}",
-                "autoTMM": "false",
-            },
+            data=data,
         )
         if not _added(response):
             if not await self.has(info_hash):
@@ -1042,6 +1089,89 @@ class QbitClient:
         log.info("torrent moved to the top of the queue", extra={"hash": info_hash})
         return True
 
+    async def info(self, info_hash: str) -> TorrentInfo | None:
+        """One torrent's ``torrents/info`` row, or ``None`` if the client has none."""
+        response = await self.request("GET", "/torrents/info", params={"hashes": info_hash.lower()})
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise QbitError(f"qbittorrent answered unparseable JSON: {exc}") from exc
+        if not isinstance(payload, list):
+            raise QbitError("qbittorrent torrents/info did not answer with a list")
+        for raw in payload:
+            if isinstance(raw, dict):
+                row = TorrentInfo.from_json(raw)
+                if row is not None and row.hash == info_hash.lower():
+                    return row
+        return None
+
+    async def piece_states(self, info_hash: str) -> list[int]:
+        """``torrents/pieceStates``: one integer per piece (M20 T6).
+
+        ``0`` not downloaded, ``1`` downloading, ``2`` downloaded **and hash
+        checked** — the only state whose bytes are final. Anything that is not
+        an integer is read as ``0``: a piece Arc cannot vouch for is a piece it
+        does not have.
+        """
+        response = await self.request(
+            "GET", "/torrents/pieceStates", params={"hash": info_hash.lower()}
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise QbitError(f"qbittorrent answered unparseable JSON: {exc}") from exc
+        if not isinstance(payload, list):
+            raise QbitError("qbittorrent torrents/pieceStates did not answer with a list")
+        return [
+            value if isinstance(value, int) and not isinstance(value, bool) else 0
+            for value in payload
+        ]
+
+    async def properties(self, info_hash: str) -> TorrentProperties:
+        """``torrents/properties``: the piece size, for the front arithmetic (M20 T6)."""
+        response = await self.request(
+            "GET", "/torrents/properties", params={"hash": info_hash.lower()}
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise QbitError(f"qbittorrent answered unparseable JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise QbitError("qbittorrent torrents/properties did not answer with an object")
+        return TorrentProperties(
+            piece_size=_number(payload.get("piece_size")),
+            pieces_num=_number(payload.get("pieces_num")),
+        )
+
+    async def ensure_sequential(self, info_hash: str) -> tuple[bool, bool]:
+        """Make one torrent sequential, first and last pieces first (M20 T6).
+
+        Both of qBittorrent's endpoints are **toggles**, so the current values
+        are read from ``torrents/info`` first and only a flag that is off is
+        toggled: run twice, the second run changes nothing. Returns which of
+        the two were toggled. A torrent the client does not hold is
+        ``(False, False)``.
+        """
+        info = await self.info(info_hash)
+        if info is None:
+            return False, False
+        sequential = not info.seq_dl
+        first_last = not info.f_l_piece_prio
+        if sequential:
+            await self.request(
+                "POST", "/torrents/toggleSequentialDownload", data={"hashes": info_hash.lower()}
+            )
+        if first_last:
+            await self.request(
+                "POST", "/torrents/toggleFirstLastPiecePrio", data={"hashes": info_hash.lower()}
+            )
+        if sequential or first_last:
+            log.info(
+                "torrent switched to sequential download",
+                extra={"hash": info_hash, "sequential": sequential, "first_last": first_last},
+            )
+        return sequential, first_last
+
     async def torrents(self) -> list[TorrentInfo]:
         """Everything in Arc's category, as ``hash → state`` rows."""
         response = await self.request("GET", "/torrents/info", params={"category": self.category})
@@ -1114,6 +1244,7 @@ __all__ = [
     "QbitError",
     "QbitUnavailable",
     "TorrentInfo",
+    "TorrentProperties",
     "batch_save_path_for",
     "host_path",
     "save_path_for",

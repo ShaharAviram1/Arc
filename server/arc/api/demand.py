@@ -3,10 +3,13 @@
 What the player calls when the user presses play on an episode that is not
 ready. Thin over :mod:`arc.services.acquisition.demand`, which has the rule.
 
-* **202** ``{state}`` — the episode is wanted at the top of the queue; ``state``
-  is the episode's state after the demand (``wanted`` once a search started,
-  ``downloading`` …, or ``ready`` if it already was). The player then polls
-  ``GET /api/episodes/{id}/play`` for the pending progress.
+* **202** ``{state, live, message}`` — the episode is wanted at the top of the
+  queue; ``state`` is the episode's state after the demand (``wanted`` once a
+  search started, ``downloading`` …, or ``ready`` if it already was). The
+  player then polls ``GET /api/episodes/{id}/play`` for the pending progress.
+  ``live`` (M20 T6, FR-P8) is true when a downloading episode is being made
+  playable while it downloads; ``message`` says when it is not ("will play
+  when its download finishes").
 * **409** ``{detail: {code, message}}``, ``message`` a sentence a person can be
   shown: ``not_in_window`` (the episode is not one the caller's window
   covers), ``acquisition_paused`` or ``storage_held`` (the episode still
@@ -47,6 +50,10 @@ class DemandOut(BaseModel):
     """``POST /api/episodes/{id}/demand`` — where the episode stands now."""
 
     state: EpisodeState
+    #: A live remux was queued: the episode plays while it downloads (FR-P8).
+    live: bool = False
+    #: Why a downloading episode will only play once its download finishes.
+    message: str | None = None
 
 
 @router.post(
@@ -77,7 +84,7 @@ async def demand_episode(
             detail={"code": exc.code, "message": exc.message},
         ) from exc
     await session.commit()
-    return DemandOut(state=outcome.state)
+    return DemandOut(state=outcome.state, live=outcome.live, message=outcome.live_note)
 
 
 __all__ = ["EPISODE_NOT_FOUND", "DemandOut", "now", "router"]
