@@ -1810,7 +1810,17 @@ owner's word.
       on two library episodes; its two findings (fixed EVENT TARGETDURATION,
       SRT tag stripper) fixed and re-checked; 56 tests, ruff/format/mypy clean;
       committed aa54283.
-- [ ] T2: `remux` job for complete files, VOD subtitle rendition, burn-in fallback
+- [x] T2: `remux` job for complete files, VOD subtitle rendition, burn-in fallback
+      — verified 2026-10-13: Validator PASS with a real end-to-end remux of a
+      library episode (23.7 min remuxed in 4.1 s, 237 segments, every known
+      cue in the right vtt segment, MPEGTS offset = first video PTS) and 15
+      adversarial cases; Reviewer (no blockers; fixed: a burn-in encode and a
+      remux never share a directory, vtt/subs.m3u8 no longer immutable,
+      deferred stage + prepare_note, force survives dedupe, REMUX_TIMEOUT 600 s,
+      missing subs.vtt = no text track); orchestrator: rebased onto T4
+      (migration caf1811e8ee6 after 603a536051f9), full server suite on the
+      merged tree 4716 passed + 1 merge-induced test-helper clash fixed and
+      re-run (28 migration tests), lints clean; merged 87ff43f.
 - [ ] T3: Player, part 1: subtitle track, safe duration, start position
 - [x] T4: Window rules: N = 1, halfway prefetch, device-copy skip, play on demand (server)
       — verified 2026-10-13: Validator conditional PASS (11 adversarial pg cases;
