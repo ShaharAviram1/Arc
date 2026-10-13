@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createMissingStores,
   DB_VERSION,
+  DEVICE_ID_KEY,
+  deviceId,
   isPersistent,
+  memoryStore,
+  newUuid,
   resetStores,
   resilientStore,
   STORE_NAMES,
@@ -175,6 +179,8 @@ function fakeFactory(existing: FakeDatabase | null, options: { block?: boolean }
   }
 }
 
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
 // The shared setup has already opened the (absent, under jsdom) database.
 beforeEach(() => {
   resetStores()
@@ -259,8 +265,7 @@ describe('the IndexedDB upgrades (FR-S9; v3 for M19)', () => {
 
     const outbox = await resilientStore('outbox', factory).entries()
 
-    expect(DB_VERSION).toBe(3)
-    expect(v2.version).toBe(3)
+    expect(v2.version).toBe(DB_VERSION)
     expect(outbox.map(([key]) => key).sort()).toEqual(['r1', 'r2'])
     await vi.waitFor(() => {
       expect(v2.stores.get('downloads')?.get('1:9001')).toEqual({ ...full, variant: 'full' })
@@ -269,6 +274,59 @@ describe('the IndexedDB upgrades (FR-S9; v3 for M19)', () => {
     expect(v2.stores.get('downloads')?.get('2:9002')).toEqual(small)
     expect(v2.stores.get('downloads')?.size).toBe(2)
     expect(v2.stores.get('outbox')?.get('r1')).toEqual({ id: 'r1', kind: 'position' })
+  })
+
+  it('opens a v3 database at v4: adds the meta store and keeps every record', async () => {
+    const v3 = new FakeDatabase(3)
+    for (const name of STORE_NAMES) if (name !== 'meta') v3.stores.set(name, new Map())
+    const record = { userId: 1, episodeId: 9001, variant: 'full', state: 'complete' }
+    v3.stores.set('downloads', new Map<string, unknown>([['1:9001', record]]))
+    v3.stores.set('outbox', new Map<string, unknown>([['r1', { id: 'r1' }]]))
+    const { factory } = fakeFactory(v3)
+
+    const id = await deviceId(resilientStore('meta', factory))
+
+    expect(DB_VERSION).toBe(4)
+    expect(v3.version).toBe(4)
+    expect(v3.stores.has('meta')).toBe(true)
+    expect(id).toMatch(UUID_V4)
+    expect(v3.stores.get('meta')?.get(DEVICE_ID_KEY)).toBe(id)
+    // Nothing else moved.
+    expect(v3.stores.get('downloads')?.get('1:9001')).toEqual(record)
+    expect(v3.stores.get('outbox')?.get('r1')).toEqual({ id: 'r1' })
+  })
+
+  it('makes the device id once and answers the same one afterwards', async () => {
+    const meta = memoryStore()
+
+    const first = await deviceId(meta)
+    const second = await deviceId(meta)
+
+    expect(second).toBe(first)
+    expect(await meta.get(DEVICE_ID_KEY)).toBe(first)
+  })
+
+  it('replaces a stored device id that is not a version-4 UUID', async () => {
+    const meta = memoryStore([[DEVICE_ID_KEY, 'not-a-uuid']])
+
+    const id = await deviceId(meta)
+
+    expect(id).toMatch(UUID_V4)
+    expect(await meta.get(DEVICE_ID_KEY)).toBe(id)
+  })
+
+  it('builds a version-4 UUID without randomUUID (an insecure context)', () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true })
+    try {
+      expect(newUuid()).toMatch(UUID_V4)
+    } finally {
+      if (original === undefined) {
+        Reflect.deleteProperty(crypto, 'randomUUID')
+      } else {
+        Object.defineProperty(crypto, 'randomUUID', original)
+      }
+    }
   })
 
   it('upgrades a v1 database with no downloads to migrate without touching the outbox', () => {

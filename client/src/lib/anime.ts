@@ -321,6 +321,13 @@ export interface EpisodeOut {
    */
   wanted_by_me?: boolean
   /**
+   * The viewer may press play on this not-ready episode and have Arc fetch
+   * it now (FR-A14, M20): their window covers it, exactly the rule `POST
+   * /api/episodes/{id}/demand` accepts. Never true on a ready episode.
+   * Optional on the wire so a payload from before M20 T5 parses as false.
+   */
+  fetchable?: boolean
+  /**
    * The live torrent has fewer seeders than the admin's `min_seeders_warn`
    * (FR-A16, M20): the row says "Few seeders (2)" and offers the show pin
    * (FR-T8), because a thin swarm may not be there to fetch it again after

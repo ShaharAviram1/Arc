@@ -571,7 +571,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   the next episode can be fetched this way **now**, on the user's real
   progress — exactly what a demand would accept — so it turns true once the
   user passes the halfway mark. Nothing here touches a list entry or
-  MyAnimeList.
+  MyAnimeList. **What the user sees** (M20 T5): the show page's row of a
+  not-ready episode the user may demand has a **Play** button (and the row is
+  a target, like a ready one); the show payload marks such rows by the same
+  rule a demand applies, so a row never offers a play that would be refused
+  as outside the window. Watch Now's Continue watching and Ready to watch
+  tiles demand an episode that is not ready (its files deleted after
+  watching, say) when no copy on the device plays it. The player demands
+  the episode before loading it, and also when it opens on an episode that
+  is already on its way (pressing play is the demand). While the episode is
+  on its way the player shows the show and episode, a spinner and
+  **"Searching"**, **"Downloading 43 %"** (with the release's seeders) or
+  **"Preparing"**, asks again every 3 seconds, and becomes the player the
+  moment the episode streams. A refusal — not in the window, acquisition
+  paused, storage held — shows the server's own sentence and **no spinner**:
+  nothing was queued, so nothing is coming and nothing waits to retry.
 - FR-A15 **Device holdings** (M20, owner 2026-10-13). A device reports the
   episodes it holds as downloads the user has not watched, as a whole set
   that replaces what that device reported before; the device is named by a
@@ -815,10 +829,12 @@ that the course professor can log in at any time, and the owner uses it daily.
      what to watch next is ten minutes away. A rewatch crosses the same mark
      and says nothing, because the completion is not new.
   2. *The end itself* — with 1:30 or less remaining, and again when the media
-     ends — gets the overlay: **Next episode** (offered only when there is a
-     next episode and it is ready; when it exists but is not prepared, or the
-     episode was the last, the overlay says so instead of drawing a dead
-     button), **Keep watching** (puts the overlay away for the rest of that
+     ends — gets the overlay: **Next episode** (offered when there is a
+     next episode and it is ready **or can be fetched on demand** (FR-A14,
+     M20): pressing it then asks the server for it and opens the player, which
+     waits for it; a refusal is shown in the overlay as the server's sentence;
+     when the next episode exists but is neither, or the episode was the last,
+     the overlay says so instead of drawing a dead button), **Keep watching** (puts the overlay away for the rest of that
      playback; Escape does the same) and **Back to the show**. The episode
      keeps playing underneath, the overlay takes no keyboard focus so the
      shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
@@ -1098,6 +1114,17 @@ that the course professor can log in at any time, and the owner uses it daily.
      copy is marked watched and leaves by the same rules; one completed before
      the copy was kept is a rewatch and stays. The server saying "not
      completed" never clears a mark, and a Kept copy is not asked about.
+  10. **The device reports what it holds** (M20, FR-A15). The device tells the
+     server which episodes it holds for the signed-in account — every
+     complete download not marked watched (item 9), trip copies included —
+     **at launch, on reconnect, when a download completes and when one is
+     deleted**, so the look-ahead window skips them (FR-A1). The device names
+     itself by a random id made once and kept with its downloads. Several
+     moments close together make one report (a 5-second pause); a set that
+     has not changed is not sent again within 10 minutes; with no network the
+     report waits and goes on the next sync that reaches the server, or on
+     reconnect. Never for the demo account. A trip copy's own delivered and
+     deleted calls (item 8) carry on as before.
 - FR-S10 **Subtitles at play time** (M20). A streamed episode whose rendition
   carries a text track (a remux, FR-P1/FR-P7) plays with that track showing,
   in FR-P2's language. The player's control bar has a **CC** button, shown
@@ -1437,11 +1464,11 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Page | Phase | Contents |
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
-| Home | 1 | Season recommendations hero; Continue watching, Ready to watch, This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
+| Home | 1 | Season recommendations hero; Continue watching, Ready to watch (a tile whose episode is not ready and not on the device opens the player with a demand — FR-A14, M20), This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons, and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
+| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons (on a not-ready episode the viewer's window covers, a **Play** button that fetches it on demand and opens the waiting player — FR-A14, M20), and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too. An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -2684,3 +2711,14 @@ through the same edge, without the grace period.
   is judged after 15 minutes, but a re-fetch with any progress keeps the
   first-fetch thresholds; remembered releases are forgotten after 180 days;
   packs' seeder counts follow the tracker too.
+- 2026-10-13 (M20 T5) — **Device reporting and play on demand in the client**
+  (FR-S9 item 10, FR-S5 item 2, FR-A14 "what the user sees", §5 Home, Show,
+  Player). The device reports its unwatched downloads at launch, reconnect,
+  download complete and delete (debounced, deduped for 10 minutes, waiting
+  for the network when offline, never for the demo account). A not-ready
+  episode the window covers has a Play button on its show-page row; Watch
+  Now's tiles demand a not-ready episode; the player waits with "Searching",
+  "Downloading 43 %" or "Preparing", polling every 3 seconds, and a refused
+  demand (not in the window, paused, storage held) shows the server's
+  sentence with no spinner. The end overlay offers Next on an episode that
+  can be fetched on demand.

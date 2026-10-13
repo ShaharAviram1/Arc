@@ -60,6 +60,24 @@ export interface EpisodeRef {
   number: number
   state: string
   ready: boolean
+  /**
+   * The caller may press play on this not-ready episode and have Arc fetch it
+   * now (FR-A14, M20): their window covers it, on their real progress. False
+   * on a ready one. Absent from a server older than M20 T4.
+   */
+  fetchable?: boolean
+}
+
+/**
+ * Where a wanted, not-ready episode stands (FR-A14, M20): what the pending
+ * player shows while it polls `/play` for the playlist. `progress` is 0..1
+ * of the download, null before anything was reported; `seeders` is the
+ * release's count, null before there is a release.
+ */
+export interface PendingInfo {
+  state: string
+  progress: number | null
+  seeders: number | null
 }
 
 /**
@@ -108,6 +126,13 @@ export interface PlayInfo {
    * device's copy, or says to keep it offline first. Optional on the wire.
    */
   offline_only?: boolean
+  /**
+   * Set when the episode is not ready but the caller wants it (FR-A14, M20):
+   * it is being searched for, downloaded or prepared, `playlist_url` is
+   * null, and the player polls `/play` until the URL arrives. Null or absent
+   * otherwise.
+   */
+  pending?: PendingInfo | null
   /** Seconds to resume from, or null when there is nothing to resume. */
   resume_position: number | null
   /**
@@ -488,15 +513,56 @@ function isStatus404(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
 }
 
-export function usePlayInfo(episodeId: number): UseQueryResult<PlayInfo, Error> {
+/** How often the pending player asks `/play` again (FR-A14, M20). */
+export const PENDING_POLL_MS = 3000
+
+export interface PlayInfoOptions {
+  /** False holds the request back (the player's own demand goes first). */
+  enabled?: boolean
+  /**
+   * Re-ask every {@link PENDING_POLL_MS} while the answer is `pending` and has
+   * no `playlist_url` (FR-A14). Off once the player has been refused.
+   */
+  pollWhilePending?: boolean
+  /**
+   * How many 404s in a row to ask through, {@link PENDING_POLL_MS} apart,
+   * before the answer stands: after an accepted demand, the reconciler may not
+   * have made the want visible yet. 0 (the default) takes the first 404.
+   */
+  retryNotFound?: number
+}
+
+/** How many 404s the player asks through after an accepted demand (FR-A14). */
+export const DEMAND_NOT_FOUND_RETRIES = 3
+
+export function usePlayInfo(
+  episodeId: number,
+  options: PlayInfoOptions = {},
+): UseQueryResult<PlayInfo, Error> {
+  const poll = options.pollWhilePending !== false
   return useQuery<PlayInfo, Error>({
     queryKey: playQueryKey(episodeId),
     queryFn: () => loadPlayInfo(episodeId),
-    enabled: Number.isInteger(episodeId) && episodeId > 0,
+    enabled: Number.isInteger(episodeId) && episodeId > 0 && options.enabled !== false,
+    // The pending view's poll (FR-A14): until the playlist arrives, and only
+    // for an answer that is waiting on the server — never behind a video.
+    refetchInterval: (query) => {
+      // TanStack keeps the last data after an error: a pending answer that
+      // turned into a 404 (the want dropped) must stop the poll, not loop on it.
+      if (query.state.status === 'error') return false
+      const answer = query.state.data
+      return poll && answer?.pending != null && answer.playlist_url === null
+        ? PENDING_POLL_MS
+        : false
+    },
     // A 404 here means "not ready", which asking again will not change; the
     // resume position must also not be re-read behind a playing video, hence
-    // the infinite stale time for as long as the page is mounted.
-    retry: false,
+    // the infinite stale time for as long as the page is mounted. The one
+    // exception is just after an accepted demand (FR-A14): the want may not be
+    // visible to `/play` yet, so a 404 is asked again up to `retryNotFound`
+    // times, one poll interval apart.
+    retry: (failures, error) => isStatus404(error) && failures < (options.retryNotFound ?? 0),
+    retryDelay: PENDING_POLL_MS,
     staleTime: Infinity,
     refetchOnMount: false,
     // But it must be re-read on the way back in. Watching an episode moves its
@@ -647,4 +713,85 @@ export function useUnmarkWatched(): UseMutationResult<ProgressResult, Error, Wat
       invalidateAfterCompletion(client, animeId)
     },
   })
+}
+
+/** A 409 from `POST /api/episodes/{id}/demand`: the code, and a sentence to show as it is. */
+export interface DemandRefusal {
+  /** `not_in_window`, `acquisition_paused` or `storage_held` today. */
+  code: string
+  message: string
+}
+
+/** `POST /api/episodes/{id}/demand` answered 202: the episode's state now. */
+export interface DemandResult {
+  state: string
+}
+
+/**
+ * The server's refusal in a failed demand, or null for any other failure. A
+ * refusal is final for this press: nothing was queued (a demand refused while
+ * paused or storage-held is not kept for later), so the client shows the
+ * sentence and no spinner.
+ */
+export function demandRefusal(error: unknown): DemandRefusal | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const body = error.body
+  if (typeof body !== 'object' || body === null) return null
+  const detail = (body as { detail?: unknown }).detail
+  if (typeof detail !== 'object' || detail === null) return null
+  const { code, message } = detail as { code?: unknown; message?: unknown }
+  if (typeof code !== 'string' || typeof message !== 'string') return null
+  return { code, message }
+}
+
+/**
+ * Ask Arc to fetch an episode the viewer pressed play on, at the top of the
+ * queue (FR-A14, M20). Resolves with the episode's state; rejects with the
+ * `ApiError`, from which {@link demandRefusal} reads a 409's sentence.
+ */
+export function demandEpisode(episodeId: number): Promise<DemandResult> {
+  return apiFetch<DemandResult>(`/api/episodes/${String(episodeId)}/demand`, { method: 'POST' })
+}
+
+/** The router state that asks the player to demand its episode before loading it. */
+export interface WatchState {
+  /** Demand the episode, then load it (a play button on a not-ready episode). */
+  demand?: boolean
+  /** The opener already demanded it (the end overlay's Next): do not again. */
+  demanded?: boolean
+}
+
+function watchFlag(state: unknown, flag: keyof WatchState): boolean {
+  return typeof state === 'object' && state !== null && (state as WatchState)[flag] === true
+}
+
+/** Whether the player was opened with {@link WatchState.demand}. */
+export function wantsDemand(state: unknown): boolean {
+  return watchFlag(state, 'demand')
+}
+
+/** Whether the player was opened with {@link WatchState.demanded}. */
+export function alreadyDemanded(state: unknown): boolean {
+  return watchFlag(state, 'demanded')
+}
+
+/**
+ * What the pending player says (FR-A14): "Searching", "Downloading 43 %" or
+ * "Preparing", from the server's `pending.state` and `pending.progress`.
+ */
+export function pendingLabel(pending: PendingInfo): string {
+  switch (pending.state) {
+    case 'downloading':
+      return pending.progress === null
+        ? 'Downloading'
+        : // Floored (never "100 %" before it is whole), past float noise (0.29 × 100).
+          `Downloading ${String(Math.floor(Math.max(0, Math.min(1, pending.progress)) * 100 + 1e-9))} %`
+    case 'downloaded':
+    case 'matching':
+    case 'matched':
+    case 'preparing':
+      return 'Preparing'
+    default:
+      return 'Searching'
+  }
 }

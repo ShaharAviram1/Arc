@@ -61,7 +61,12 @@ import {
 } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
 import type { MalSync } from '@/lib/mal'
-import { useMarkWatched, useUnmarkWatched, WATCHED_BY_PROGRESS_HINT } from '@/lib/playback'
+import {
+  useMarkWatched,
+  useUnmarkWatched,
+  WATCHED_BY_PROGRESS_HINT,
+  type WatchState,
+} from '@/lib/playback'
 import { CHANGEABLE_STATES } from '@/lib/releases'
 import { PHASE_LABEL, tripCandidates, tripCodecsPlayable, type TripEpisode } from '@/lib/trips'
 import { canPlayTypeHere } from '@/offline/downloads'
@@ -1047,8 +1052,15 @@ function FewSeeders({
   )
 }
 
+/** The hover hint on a not-ready episode's Play (FR-A14, M20). */
+const PLAY_ON_DEMAND_HINT = 'Arc fetches it now; it plays as soon as it is ready'
+
 /**
  * One episode (spec §6).
+ *
+ * A window episode that is not ready yet but can be fetched on demand
+ * (`fetchable`, FR-A14) is a target too, with a Play button: the player asks
+ * the server for it and waits.
  *
  * The whole row is the target when the episode is playable — an overlay on the
  * title link rather than a row-wide `<Link>`, because the row also holds a
@@ -1075,6 +1087,10 @@ function EpisodeRow({
   const onDevice = canDownload && record?.state === 'downloaded'
   // A trip-only episode is never ready, but the copy on this device plays (FR-S9).
   const playable = episode.state === 'ready' || onDevice
+  // Play on demand (FR-A14, M20): a window episode that is not ready yet. The
+  // player asks the server for it and waits with "Searching" / "Downloading".
+  const fetchable = !playable && episode.fetchable === true
+  const watchState: WatchState | undefined = fetchable ? { demand: true } : undefined
   const title = episode.title ?? `Episode ${String(episode.number)}`
   const state =
     tripEpisodeState(episode, trip?.episode, onDevice) ?? episodeState(episode, timezone)
@@ -1087,16 +1103,17 @@ function EpisodeRow({
         // title, state at the left and the actions at the right; from `sm` up
         // it is one row, everything level.
         'relative flex w-full flex-wrap items-center gap-x-4 gap-y-3 rounded-row p-3.5 transition-colors duration-200 sm:flex-nowrap sm:gap-x-5',
-        playable ? 'hover:bg-[var(--arc-surface-hover)]' : '',
+        playable || fetchable ? 'hover:bg-[var(--arc-surface-hover)]' : '',
       )}
     >
       <EpisodeArt anime={anime} episode={episode} />
 
       <div className="min-w-0 flex-1">
         <p className="text-[16px] font-medium text-[var(--arc-text)]">
-          {playable ? (
+          {playable || fetchable ? (
             <Link
               to={`/watch/${String(episode.id)}`}
+              state={watchState}
               className={cx('after:absolute after:inset-0 after:rounded-row', FOCUS_RING)}
             >
               {`${String(episode.number)}. ${title}`}
@@ -1166,6 +1183,17 @@ function EpisodeRow({
           it while the offline menu is open, so the menu is not drawn under them.
         */}
         <div className="relative z-10 flex shrink-0 items-center gap-2.5 has-[[data-offline-menu]]:z-30">
+          {fetchable ? (
+            <Link
+              to={`/watch/${String(episode.id)}`}
+              state={watchState}
+              aria-label={`Fetch and play episode ${String(episode.number)}`}
+              title={PLAY_ON_DEMAND_HINT}
+              className={buttonClass('chip', 'text-[var(--arc-text)]')}
+            >
+              Play
+            </Link>
+          ) : null}
           {canDownload ? (
             <OfflineButton
               episode={episode}

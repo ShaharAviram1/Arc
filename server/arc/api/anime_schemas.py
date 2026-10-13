@@ -670,6 +670,13 @@ class EpisodeOut(BaseModel):
     #: Whether the caller has a live want on this episode (window, sample or
     #: trip): the show page offers "Change release…" only then (FR-A13).
     wanted_by_me: bool = False
+    #: Whether the caller may press play on this not-ready episode and have
+    #: Arc fetch it now (FR-A14, M20): their window covers it — the same
+    #: :func:`~arc.services.acquisition.wants.coverable` rule ``POST
+    #: /api/episodes/{id}/demand`` accepts, so the show page never offers a
+    #: play it would be refused for "not in window". Always false on a
+    #: ``ready`` episode (it streams) and outside the show page.
+    fetchable: bool = False
     #: The live torrent has fewer seeders than ``min_seeders_warn`` (FR-A16):
     #: the row says "Few seeders (2)" and offers the show pin (FR-T8), because
     #: a thin swarm is the one that will not be there for a re-fetch. Only the
@@ -699,6 +706,7 @@ class EpisodeOut(BaseModel):
         trip_only: bool = False,
         wanted_by_me: bool = False,
         min_seeders_warn: int = 0,
+        fetchable: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -759,6 +767,7 @@ class EpisodeOut(BaseModel):
             # also covers it.
             trip_only=trip_only and episode.state is not EpisodeState.READY,
             wanted_by_me=wanted_by_me,
+            fetchable=fetchable and episode.state is not EpisodeState.READY,
             few_seeders=few_seeders(release, min_seeders_warn),
             seeders=release.live_seeders if release is not None else None,
         )
@@ -1028,6 +1037,7 @@ class AnimeDetail(AnimeCore):
         override: OverrideOut | None = None,
         pinned: bool = False,
         min_seeders_warn: int = 0,
+        fetchable: frozenset[int] = frozenset(),
     ) -> AnimeDetail:
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
@@ -1099,6 +1109,7 @@ class AnimeDetail(AnimeCore):
                     trip_only=episode.id in trip_only,
                     wanted_by_me=episode.id in wanted_by_me,
                     min_seeders_warn=min_seeders_warn,
+                    fetchable=episode.id in fetchable,
                 )
                 for episode in episodes
             ],

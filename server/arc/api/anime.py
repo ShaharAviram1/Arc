@@ -79,14 +79,14 @@ from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.api.schemas import OverrideOut
 from arc.api.trip_schemas import TripLimits, TripOut
-from arc.models import Anime, Job, ListEntry, UserRole, Want
+from arc.models import Anime, EpisodeState, Job, ListEntry, UserRole, Want
 from arc.services.acquisition.samples import (
     SampleError,
     cancel_sample,
     request_sample,
     sample_for,
 )
-from arc.services.acquisition.wants import WANTING_STATUSES, slot_view
+from arc.services.acquisition.wants import WANTING_STATUSES, coverable, slot_view
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceNotFound,
@@ -371,6 +371,33 @@ async def detail(
     # editor is on this page, and giving it a route of its own would have been
     # a second round trip for every show page an admin opens.
     override = await read_override(session, anime.id) if user.role is UserRole.ADMIN else None
+    # The caller's own live wants on this show (FR-A13): one query.
+    wanted_by_me = (
+        frozenset(
+            (
+                await session.scalars(
+                    select(Want.episode_id).where(
+                        Want.user_id == user.id,
+                        Want.dropped_at.is_(None),
+                        Want.episode_id.in_(episode_ids),
+                    )
+                )
+            ).all()
+        )
+        if episode_ids
+        else frozenset[int]()
+    )
+    # Which not-ready rows the caller may press play on (FR-A14, M20): the
+    # rule ``POST /demand`` applies, so the page never offers a play it would
+    # be refused. ``coverable`` plans the caller's windows, so it runs only
+    # when this show can be in one — a watching/planned entry, or a live want
+    # of theirs here (a sample, a trip) — and some row is not ready.
+    fetchable = (
+        await coverable(session, user.id, now=now())
+        if any(episode.state is not EpisodeState.READY for episode in episodes)
+        and ((entry is not None and entry.status in WANTING_STATUSES) or bool(wanted_by_me))
+        else frozenset[int]()
+    )
     by_id = {episode.id: episode for episode in episodes}
     return AnimeDetail.build(
         anime,
@@ -406,20 +433,8 @@ async def detail(
         trip=trip_out,
         trip_limits=TripLimits(max_episodes=await trip_max_episodes(session)),
         trip_only=extras.trip_only,
-        # The caller's own live wants on this show (FR-A13): one query.
-        wanted_by_me=frozenset(
-            (
-                await session.scalars(
-                    select(Want.episode_id).where(
-                        Want.user_id == user.id,
-                        Want.dropped_at.is_(None),
-                        Want.episode_id.in_(episode_ids),
-                    )
-                )
-            ).all()
-        )
-        if episode_ids
-        else frozenset(),
+        wanted_by_me=wanted_by_me,
+        fetchable=fetchable,
         sample=(
             SampleOut.build(want, by_id[want.episode_id])
             if want is not None and want.episode_id in by_id

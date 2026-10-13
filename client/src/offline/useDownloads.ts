@@ -28,6 +28,9 @@ export function wireWatchedRemoval(box: Outbox, manager: DownloadManager): () =>
   })
   const unflushed = box.onFlushed(() => {
     void manager.removeWatched()
+    // A flush that landed is the queue's "back online": a holdings report
+    // that waited for the network goes now (M20, FR-S9).
+    void manager.reportHoldingsIfPending()
   })
   return () => {
     unwatched()
@@ -35,10 +38,11 @@ export function wireWatchedRemoval(box: Outbox, manager: DownloadManager): () =>
   }
 }
 
-export function useDownloadsSession(userId: number | null): void {
+export function useDownloadsSession(userId: number | null, demo = false): void {
   useEffect(() => {
     const manager = downloads()
-    manager.setOwner(userId)
+    // The demo account reports no holdings (M20): the server refuses them.
+    manager.setOwner(userId, { demo })
     void manager.hydrate()
     if (userId === null) return undefined
     const unlisten = manager.listen()
@@ -47,7 +51,7 @@ export function useDownloadsSession(userId: number | null): void {
       unwire()
       unlisten()
     }
-  }, [userId])
+  }, [userId, demo])
 }
 
 /** This device's "Remove episodes once watched" switch. */

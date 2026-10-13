@@ -76,6 +76,15 @@
  * record is marked when that completion is no older than the record (a copy
  * kept *after* an episode was finished is a rewatch, and stays).
  *
+ * **The server hears what the device holds** (M20, FR-S9, architecture
+ * §5.4d). {@link DownloadManager.reportHoldings} sends `PUT
+ * /api/devices/{deviceId}/holdings` with every complete download of the
+ * signed-in account not marked watched, so the acquisition window skips
+ * those episodes. At launch, on reconnect, when a download completes and when
+ * one is deleted; debounced 5 s; an unchanged set is not sent again within 10
+ * minutes; with no network the report waits (`meta`) and goes on the outbox's
+ * next landed flush or the reconnect; never for the demo account.
+ *
  * **A file is never touched while the worker may hold it.** From the moment a
  * pause is sent until the worker's terminal message for that file (which the
  * worker posts only after closing it) the name is *releasing*; a delete in
@@ -106,9 +115,9 @@ import {
   revokeCurrent,
   type CopyVariant,
 } from '@/offline/opfs'
-import { offlineNow } from '@/offline/network'
+import { offlineNow, subscribeNetwork } from '@/offline/network'
 import { outbox } from '@/offline/outbox'
-import { openStore, type KeyStore } from '@/offline/store'
+import { deviceId as storedDeviceId, openStore, type KeyStore } from '@/offline/store'
 
 export type DownloadState =
   'preparing' | 'queued' | 'downloading' | 'paused' | 'downloaded' | 'failed'
@@ -511,6 +520,12 @@ export interface ManagerOptions {
   loadCompleted?: (episodeIds: number[]) => Promise<CompletedEpisode[]>
   /** Whether Arc can reach its server now (`offlineNow`, observed). */
   isOnline?: () => boolean
+  /** `PUT /api/devices/{device_id}/holdings {episode_ids}` (M20, FR-S9). */
+  putHoldings?: (deviceId: string, episodeIds: number[]) => Promise<unknown>
+  /** This device's own id ({@link deviceId}). */
+  deviceId?: () => Promise<string>
+  /** Where the last holdings report is remembered (IndexedDB `meta`). */
+  meta?: KeyStore
 }
 
 function defaultWorker(): WorkerLike {
@@ -537,6 +552,37 @@ function defaultWorker(): WorkerLike {
       worker.terminate()
     },
   }
+}
+
+function defaultPutHoldings(device: string, episodeIds: number[]): Promise<unknown> {
+  return apiFetch<null>(`/api/devices/${encodeURIComponent(device)}/holdings`, {
+    method: 'PUT',
+    body: JSON.stringify({ episode_ids: episodeIds }),
+  })
+}
+
+/** How long {@link DownloadManager.reportHoldings} waits for more changes before it sends. */
+export const HOLDINGS_DEBOUNCE_MS = 5_000
+/** An unchanged set is not sent again within this long (the server's TTL is 14 days). */
+export const HOLDINGS_REFRESH_MS = 10 * 60_000
+/** The server's cap on one report (`arc.services.acquisition.holdings.MAX_HOLDINGS`). */
+export const MAX_HOLDINGS = 500
+/** The `meta` key of an account's last holdings report. */
+export function holdingsKey(userId: number): string {
+  return `holdings:${String(userId)}`
+}
+
+/** What is remembered of the last report: the set, when it was sent, or that it waits. */
+export interface HoldingsNote {
+  ids: number[]
+  /** When the server took this set (ms); 0 while it waits to be sent. */
+  sentAt: number
+  /** The set changed while Arc could not reach the server: send it on reconnect. */
+  pending?: boolean
+}
+
+function sameIds(a: readonly number[], b: readonly number[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index])
 }
 
 function defaultLoadInfo(episodeId: number): Promise<PlayInfo> {
@@ -594,6 +640,16 @@ export class DownloadManager {
   private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
   private readonly loadCompleted: (episodeIds: number[]) => Promise<CompletedEpisode[]>
   private readonly isOnline: () => boolean
+  private readonly putHoldings: (deviceId: string, episodeIds: number[]) => Promise<unknown>
+  private readonly deviceId: () => Promise<string>
+  private readonly meta: KeyStore
+
+  /** The signed-in account is the demo one: it holds nothing and reports nothing. */
+  private demo = false
+  /** The debounce of {@link reportHoldings}. */
+  private holdingsTimer: ReturnType<typeof setTimeout> | null = null
+  /** A report in flight, so a second waits for it rather than racing it. */
+  private reporting: Promise<void> = Promise.resolve()
 
   /** "Remove episodes once watched", this device's switch. On until it is turned off. */
   private removeWatchedOn = true
@@ -676,6 +732,9 @@ export class DownloadManager {
     this.queuedFor = options.queuedFor ?? defaultQueuedFor
     this.loadCompleted = options.loadCompleted ?? defaultLoadCompleted
     this.isOnline = options.isOnline ?? (() => !offlineNow())
+    this.putHoldings = options.putHoldings ?? defaultPutHoldings
+    this.meta = options.meta ?? openStore('meta')
+    this.deviceId = options.deviceId ?? (() => storedDeviceId(this.meta))
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -729,9 +788,15 @@ export class DownloadManager {
    * back, its downloads that failed for want of a session carry on by
    * themselves.
    */
-  setOwner(userId: number | null): void {
+  setOwner(userId: number | null, options: { demo?: boolean } = {}): void {
+    this.demo = userId !== null && options.demo === true
     if (this.owner === userId) return
     this.owner = userId
+    if (this.holdingsTimer !== null) {
+      // A report scheduled for the last account is not sent as this one's.
+      clearTimeout(this.holdingsTimer)
+      this.holdingsTimer = null
+    }
     this.urls.clear()
     this.revokeUrl()
     const active = this.active === null ? undefined : this.all.get(this.active)
@@ -760,6 +825,8 @@ export class DownloadManager {
       this.poll()
       // And completions made elsewhere mark this account's copies.
       void this.syncWatched()
+      // This account's launch, as far as the server's window is concerned.
+      if (this.hydrated !== null) this.reportHoldings()
     }
     this.pump()
   }
@@ -844,6 +911,8 @@ export class DownloadManager {
     this.confirmPending()
     await this.passWatched()
     void this.syncWatched()
+    // Launch: tell the server what this device holds (M20, FR-S9).
+    this.reportHoldings()
   }
 
   /** Remove every episode file no record names: the orphans of an interrupted delete. */
@@ -1091,6 +1160,100 @@ export class DownloadManager {
     )
     if (!stillShown) await this.dropCover(record.userId, record.animeId)
     this.pump()
+    // The device no longer holds it: the window may fetch it again (M20).
+    this.reportHoldings()
+  }
+
+  /* --- What this device holds (M20, FR-S9, architecture §5.4d) ----------------- */
+
+  /**
+   * Tell the server, soon, which episodes this device holds for the
+   * signed-in account, so its acquisition window skips them (FR-A15). Called
+   * at launch, on reconnect, when a download completes and when one is
+   * deleted; debounced by {@link HOLDINGS_DEBOUNCE_MS}, so a burst of
+   * completions is one request. The set is every complete download not marked
+   * watched, trip copies included (the trip path keeps its own `/delivered`
+   * calls besides). Never for the demo account, which keeps no copies.
+   */
+  reportHoldings(): void {
+    if (this.owner === null || this.demo) return
+    if (this.holdingsTimer !== null) clearTimeout(this.holdingsTimer)
+    this.holdingsTimer = setTimeout(() => {
+      this.holdingsTimer = null
+      void this.sendHoldings()
+    }, HOLDINGS_DEBOUNCE_MS)
+  }
+
+  /**
+   * A report the device could not deliver (no network) is sent now: what a
+   * flush of the outbox that reached the server calls, the queue's own
+   * "back online" moment.
+   */
+  async reportHoldingsIfPending(): Promise<void> {
+    const owner = this.owner
+    if (owner === null || this.demo) return
+    const note = await this.meta.get<HoldingsNote>(holdingsKey(owner))
+    if (note?.pending === true) this.reportHoldings()
+  }
+
+  /** The ids this device holds for `userId`: complete, not watched, sorted, capped. */
+  private heldIds(userId: number): number[] {
+    const ids = new Set<number>()
+    for (const record of this.all.values()) {
+      if (record.userId === userId && record.state === 'downloaded' && record.watched !== true) {
+        ids.add(record.episodeId)
+      }
+    }
+    // Over the server's cap, keep the highest ids: the newest episodes, which
+    // are the ones a look-ahead window can still reach (an old episode's id is
+    // behind every window), so the skip loses the least.
+    return [...ids].sort((a, b) => a - b).slice(-MAX_HOLDINGS)
+  }
+
+  /** Send the set now (after the debounce), one report at a time. Never rejects. */
+  sendHoldings(): Promise<void> {
+    const run = this.reporting.then(() => this.sendHoldingsNow())
+    this.reporting = run.catch(() => undefined)
+    return this.reporting
+  }
+
+  private async sendHoldingsNow(): Promise<void> {
+    const owner = this.owner
+    if (owner === null || this.demo) return
+    await this.hydrate()
+    if (this.owner !== owner || this.demo) return
+    const ids = this.heldIds(owner)
+    const key = holdingsKey(owner)
+    const last = await this.meta.get<HoldingsNote>(key)
+    if (last === undefined && ids.length === 0) return // Nothing held, nothing ever said.
+    if (
+      last !== undefined &&
+      last.pending !== true &&
+      sameIds(last.ids, ids) &&
+      this.now() - last.sentAt < HOLDINGS_REFRESH_MS
+    ) {
+      return
+    }
+    const waits: HoldingsNote = { ids: last?.ids ?? [], sentAt: last?.sentAt ?? 0, pending: true }
+    if (!this.isOnline()) {
+      // Kept for the reconnect: the outbox's next flush, or the browser's `online`.
+      await this.meta.put(key, waits)
+      return
+    }
+    try {
+      await this.putHoldings(await this.deviceId(), ids)
+      await this.meta.put(key, { ids, sentAt: this.now() } satisfies HoldingsNote)
+    } catch (error) {
+      if (isUnreachable(error) || (error instanceof ApiError && error.status >= 500)) {
+        // No answer, or the server failed: the next reconnect or landed flush
+        // sends it again.
+        await this.meta.put(key, waits)
+      } else if (error instanceof ApiError && error.status === 403) {
+        // The demo account: the server keeps nothing for it; neither do we.
+        this.demo = true
+      }
+      // Anything else (a 4xx) is tried again at the next of the four moments.
+    }
   }
 
   /** The app is on screen again, or back online: carry on with whatever was running. */
@@ -1128,13 +1291,24 @@ export class DownloadManager {
     }
     const onOnline = () => {
       this.nudge()
+      // Reconnect: the server hears what this device holds (M20).
+      this.reportHoldings()
     }
+    // Arc's own observation of the network (a request answered again) is the
+    // reconnect too, where the browser's `online` never fires.
+    let wasOffline = offlineNow()
+    const unsubscribe = subscribeNetwork(() => {
+      const offline = offlineNow()
+      if (wasOffline && !offline) this.reportHoldings()
+      wasOffline = offline
+    })
     const hourly = setInterval(() => {
       void this.removeWatched()
     }, REMOVE_WATCHED_MS)
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
     return () => {
+      unsubscribe()
       clearInterval(hourly)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
@@ -2005,6 +2179,8 @@ export class DownloadManager {
           this.pump()
         }
         this.confirm(key)
+        // A copy that has arrived is one the window can skip (M20).
+        this.reportHoldings()
         break
     }
   }

@@ -39,9 +39,10 @@
 export const DB_NAME = 'arc'
 /**
  * v1: `outbox`. v2 (M18): the five FR-S9 stores. v3 (M19): no new store; each
- * `downloads` record gains `variant: 'full'` ({@link upgradeDatabase}).
+ * `downloads` record gains `variant: 'full'` ({@link upgradeDatabase}). v4
+ * (M20): the `meta` store, which holds this device's own id ({@link deviceId}).
  */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 
 /** Every object store. Append, then bump {@link DB_VERSION}; never rename or remove. */
 export const STORE_NAMES = [
@@ -57,6 +58,8 @@ export const STORE_NAMES = [
   'covers',
   /** v2 (FR-S9): the signed-in user, so a launch with no network is not a sign-out. */
   'session',
+  /** v4 (M20, FR-S9): facts about this device itself: its {@link deviceId}, the last holdings report. */
+  'meta',
 ] as const
 
 export type StoreName = (typeof STORE_NAMES)[number]
@@ -522,6 +525,39 @@ export function onPersistenceLost(listener: () => void): () => void {
   return () => {
     persistenceListeners.delete(listener)
   }
+}
+
+/** The `meta` key {@link deviceId} lives under. */
+export const DEVICE_ID_KEY = 'deviceId'
+
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+/** A fresh version-4 UUID. `randomUUID` needs a secure context, so a fallback builds one. */
+export function newUuid(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
+ * This device's own id (M20, FR-S9): a version-4 UUID made the first time it
+ * is asked for and kept in the `meta` store from then on, so every holdings
+ * report from this browser names the same device. Created inside one
+ * transaction, so two tabs asking at once agree on one id. The server treats
+ * it as a label only, never a path.
+ */
+export async function deviceId(store: KeyStore = openStore('meta')): Promise<string> {
+  let made: string | undefined
+  await store.update<string>(DEVICE_ID_KEY, (current) => {
+    if (typeof current === 'string' && UUID_V4.test(current)) return undefined
+    made = newUuid()
+    return made
+  })
+  const kept = await store.get<string>(DEVICE_ID_KEY)
+  return typeof kept === 'string' && UUID_V4.test(kept) ? kept : (made ?? newUuid())
 }
 
 /** Drop every cached handle and flag. Tests only. */

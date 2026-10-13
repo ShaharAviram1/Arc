@@ -7,22 +7,31 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
 import { isStatus, useMe } from '@/lib/auth'
 import {
+  alreadyDemanded,
+  DEMAND_NOT_FOUND_RETRIES,
+  demandEpisode,
+  demandRefusal,
   formatClock,
+  pendingLabel,
   resumeLabel,
   shouldResume,
   useMarkWatched,
   usePlayInfo,
   useReportProgress,
   useUnmarkWatched,
+  wantsDemand,
   WATCHED_BY_PROGRESS_HINT,
+  type DemandRefusal,
   type EpisodeRef,
+  type PendingInfo,
   type PlayInfo,
+  type WatchState,
 } from '@/lib/playback'
 import { rememberPosition } from '@/offline/cache'
 import { downloads } from '@/offline/downloads'
@@ -156,6 +165,10 @@ const UNMARK_WATCHED_FAILED = 'Could not unmark that. Try again.'
 const NOT_READY_BODY =
   'Arc has no playable file for this episode yet. It may still be downloading or being prepared.'
 
+/** Play on demand refused (FR-A14): the server's sentence goes under this. */
+const CANNOT_FETCH_TITLE = 'Can’t fetch this episode now'
+/** A demand that failed with no sentence from the server (no network, a 5xx). */
+const DEMAND_FAILED = 'Could not ask Arc for that episode. Try again shortly.'
 const LOAD_FAILED_TITLE = 'Could not load this episode'
 const LOAD_FAILED_BODY = 'Could not load this episode. Try again shortly.'
 
@@ -504,6 +517,74 @@ function NotReady({ message }: { message: string }) {
 }
 
 /**
+ * Play on demand, waiting (FR-A14, M20): the episode is wanted and on its
+ * way. The page polls `/play` every few seconds (`usePlayInfo`) and becomes
+ * the player the moment `playlist_url` arrives; until then it says where the
+ * episode is — "Searching", "Downloading 43 %", "Preparing" — with the
+ * release's seeders once there is one.
+ */
+function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }) {
+  const label = pendingLabel(pending)
+  return (
+    <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+      <p className="text-[14px] text-[var(--arc-text-muted)]">{info.anime.title.preferred}</p>
+      <h1 className="mt-1 text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
+        Episode {String(info.episode.number)}
+      </h1>
+      <div
+        role="status"
+        className="mt-5 flex items-center gap-3 text-[16px] text-[var(--arc-text)]"
+      >
+        <span
+          aria-hidden="true"
+          data-testid="pending-spinner"
+          className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--arc-border)] border-t-[var(--arc-text)]"
+        />
+        <span>{label}</span>
+      </div>
+      {pending.seeders === null ? null : (
+        <p className="mt-2 text-[13px] text-[var(--arc-text-muted)]">
+          {pending.seeders === 1 ? '1 seeder' : `${String(pending.seeders)} seeders`}
+        </p>
+      )}
+      <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        It plays here as soon as it is ready.
+      </p>
+      <Link to={`/anime/${String(info.anime.id)}`} className={buttonClass('secondary', 'mt-7')}>
+        Back to the show
+      </Link>
+    </div>
+  )
+}
+
+/**
+ * Play on demand, refused (FR-A14, M20): the server's own sentence — not in
+ * the window, acquisition paused, storage held — and nothing spinning,
+ * because nothing was queued and nothing is on its way.
+ */
+function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: number | null }) {
+  return (
+    <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+      <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
+        {CANNOT_FETCH_TITLE}
+      </h1>
+      <p
+        role="alert"
+        className="mt-3 max-w-[52ch] text-[16px] leading-[1.55] text-[var(--arc-text-muted)]"
+      >
+        {refusal.message}
+      </p>
+      <Link
+        to={animeId === null ? '/' : `/anime/${String(animeId)}`}
+        className={buttonClass('secondary', 'mt-7')}
+      >
+        {animeId === null ? 'Back to home' : 'Back to the show'}
+      </Link>
+    </div>
+  )
+}
+
+/**
  * A neighbouring episode, as a glyph.
  *
  * One that is not ready is still shown, disabled, with its state as the
@@ -649,7 +730,9 @@ function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
  * still plays and pauses it.
  *
  * Three actions, in the order a viewer wants them. **Next episode** is the
- * primary and appears only when there is one and it is ready; when the next
+ * primary and appears only when there is one and it is ready, or can be
+ * fetched on demand (`next.fetchable`, M20: the button asks the server, then
+ * opens the waiting player); when the next
  * episode exists but is still being prepared, or there is no next episode, the
  * line above says which, and no dead button is drawn under a sentence that has
  * already explained itself. **Keep watching** puts the card away for the rest
@@ -661,12 +744,38 @@ function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
  */
 function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: () => void }) {
   const next = info.next
+  const navigate = useNavigate()
+  /**
+   * Next on an episode Arc can fetch on demand (FR-S5 item 2, FR-A14, M20):
+   * pressing it asks the server first, then opens the player, which waits
+   * with "Searching" / "Downloading n %". A refusal is said here, as the
+   * server words it, with no spinner.
+   */
+  const [asking, setAsking] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const fetchable = next !== null && !next.ready && next.fetchable === true
   const heading =
     next === null
       ? 'This was the last episode'
-      : next.ready
+      : next.ready || fetchable
         ? `Next: Episode ${String(next.number)}`
         : `Episode ${String(next.number)} isn’t ready yet`
+
+  const fetchNext = () => {
+    if (next === null || asking) return
+    setAsking(true)
+    setRefused(null)
+    void demandEpisode(next.id).then(
+      () => {
+        const state: WatchState = { demanded: true }
+        void navigate(`/watch/${String(next.id)}`, { state })
+      },
+      (error: unknown) => {
+        setAsking(false)
+        setRefused(demandRefusal(error)?.message ?? DEMAND_FAILED)
+      },
+    )
+  }
 
   return (
     <div
@@ -684,15 +793,29 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
         )}
       >
         <p className="text-[17px] font-semibold text-[var(--arc-text)]">{heading}</p>
+        {refused === null ? null : (
+          <p role="alert" className="mt-2 text-[14px] leading-[1.5] text-[var(--arc-warn)]">
+            {refused}
+          </p>
+        )}
         <div className="mt-4 flex flex-wrap items-center gap-2.5">
-          {next === null || !next.ready ? null : (
+          {next !== null && next.ready ? (
             <Link
               to={`/watch/${String(next.id)}`}
               className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
             >
               Next episode
             </Link>
-          )}
+          ) : fetchable && refused === null ? (
+            <button
+              type="button"
+              onClick={fetchNext}
+              disabled={asking}
+              className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
+            >
+              {asking ? 'Starting…' : 'Next episode'}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onKeepWatching}
@@ -719,7 +842,37 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
  * episode just finished.
  */
 function PlayerView({ id }: { id: number }) {
-  const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id)
+  /**
+   * Play on demand (FR-A14, M20). Opened from a play button on a not-ready
+   * episode (`state.demand`), the page asks the server to fetch it before it
+   * loads `/play`, which would otherwise answer 404 for an episode nobody
+   * wants yet. Opened on an episode that is already pending, it asks once too:
+   * the viewer pressing play is the demand, and a refusal (paused, storage
+   * held) is the only way to learn that nothing is coming. A refusal stops the
+   * poll and is shown as the server's sentence, with no spinner.
+   */
+  const location = useLocation()
+  const demandFirst = wantsDemand(location.state)
+  const demandedRef = useRef(alreadyDemanded(location.state))
+  const [demandSettled, setDemandSettled] = useState(!demandFirst)
+  const [refusal, setRefusal] = useState<DemandRefusal | null>(null)
+  /** A demand the server took (202): a 404 from `/play` right after it is the reconciler racing. */
+  const [demandAccepted, setDemandAccepted] = useState(alreadyDemanded(location.state))
+  const askToFetch = useCallback(() => {
+    if (demandedRef.current) return
+    demandedRef.current = true
+    void demandEpisode(id).then(
+      () => {
+        setDemandAccepted(true)
+        setDemandSettled(true)
+      },
+      (failure: unknown) => {
+        // No sentence (no network, a 5xx): `/play` says what it can.
+        setRefusal(demandRefusal(failure))
+        setDemandSettled(true)
+      },
+    )
+  }, [id])
   /**
    * This account's download of the episode, if any (FR-S9). Resolved before
    * the video mounts, so no tap ever waits on it: every `play()` below is
@@ -727,6 +880,23 @@ function PlayerView({ id }: { id: number }) {
    */
   const local = useLocalCopy(id)
   const localRecord = useDownload(id)
+  // A copy on this device plays from the file: nothing to fetch first.
+  const onDevice = local.checked && local.url !== null
+  const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id, {
+    // Not after a refusal: nothing was queued, so `/play` has nothing to say.
+    enabled: (demandSettled && refusal === null) || onDevice,
+    pollWhilePending: refusal === null,
+    retryNotFound: demandAccepted ? DEMAND_NOT_FOUND_RETRIES : 0,
+  })
+  useEffect(() => {
+    if (demandFirst && local.checked && local.url === null) askToFetch()
+  }, [demandFirst, local.checked, local.url, askToFetch])
+  // A pending episode with no copy on this device: pressing play is the demand.
+  const waitingOnServer =
+    data?.pending != null && data.playlist_url === null && local.checked && local.url === null
+  useEffect(() => {
+    if (waitingOnServer) askToFetch()
+  }, [waitingOnServer, askToFetch])
   // A watched copy is never removed while its episode is open here (owner,
   // 2026-10-08): it waits until the player is left.
   useEffect(() => downloads().enterPlayer(id), [id])
@@ -1259,6 +1429,12 @@ function PlayerView({ id }: { id: number }) {
     }
   }, [markedToast])
 
+  // Play on demand refused (FR-A14): said, not spun — unless there is
+  // something to play anyway (a copy here, or a stream that is ready).
+  if (refusal !== null && local.checked && local.url === null && !data?.playlist_url) {
+    return <DemandRefused refusal={refusal} animeId={data?.anime.id ?? null} />
+  }
+
   if (isPending || !local.checked) {
     return (
       <div className="fixed inset-0 flex items-center justify-center bg-black">
@@ -1315,6 +1491,10 @@ function PlayerView({ id }: { id: number }) {
   const info: PlayInfo = data
   const source = chooseSource(info, local.url)
   if (source.kind === 'none') {
+    // Wanted and on its way (FR-A14, M20): wait here, polling, until it streams.
+    if (info.pending != null && info.playlist_url === null) {
+      return <PendingView info={info} pending={info.pending} />
+    }
     // A trip-only episode with no copy here (or one still on its way): say
     // where it comes from. A copy that is here but would not open is the
     // unreadable case below, whichever kind of episode it is.

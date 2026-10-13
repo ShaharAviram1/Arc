@@ -71,6 +71,9 @@ export interface ManagerHarness {
   revokes: { count: number }
 }
 
+/** The device id a harness manager reports holdings under. */
+export const TEST_DEVICE_ID = '0b7c3f2e-5d3a-4c1b-9a8e-1f2d3c4b5a69'
+
 /** The server's answer when it has no small copy to give: download the full file. */
 export const NO_SMALL_COPY: OfflineCopyOut = {
   state: 'unavailable',
@@ -154,6 +157,10 @@ export function managerHarness(
     // The server knows of no completion unless a test says so; always reachable.
     loadCompleted: () => Promise.resolve([]),
     isOnline: () => true,
+    // Holdings (M20): the server always takes the report; nothing is kept on disk.
+    putHoldings: () => Promise.resolve(null),
+    deviceId: () => Promise.resolve(TEST_DEVICE_ID),
+    meta: memoryStore(),
     ...options,
   })
   return { manager, worker, workers, store, files, removed, covers, revokes }

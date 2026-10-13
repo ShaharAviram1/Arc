@@ -36,6 +36,7 @@ import { OutboxProblemRows } from '@/offline/OutboxProblems'
 import { outboxRowCount, useOutboxProblems } from '@/offline/useOutbox'
 import { useHealth } from '@/lib/health'
 import { usePrefersReducedMotion } from '@/lib/media'
+import type { WatchState } from '@/lib/playback'
 import { useRecs, type RecsPage } from '@/lib/recs'
 import {
   seasonLabel,
@@ -774,12 +775,25 @@ function EpisodeArt({ item }: { item: EpisodeItem }) {
   )
 }
 
+/**
+ * Whether pressing the tile has to ask Arc to fetch the episode first (FR-A14,
+ * M20): its files are gone (deleted after watching, swept) or not here yet,
+ * and no copy on this device plays it. The player demands it, then waits with
+ * "Searching" / "Downloading n %", or shows the server's sentence when it
+ * cannot.
+ */
+function needsDemand(item: EpisodeItem): boolean {
+  return item.episode.state !== 'ready' && !item.onDevice
+}
+
 function EpisodeTile({ item }: { item: EpisodeItem }) {
   const resuming = item.position !== null
+  const state: WatchState | undefined = needsDemand(item) ? { demand: true } : undefined
 
   return (
     <Link
       to={`/watch/${String(item.episode.id)}`}
+      state={state}
       aria-label={`${resuming ? 'Resume' : 'Play'} ${item.anime.title.preferred} episode ${String(item.episode.number)}`}
       className={cx('group block w-[280px] max-w-[78vw] rounded-art', FOCUS_RING)}
     >
