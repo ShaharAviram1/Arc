@@ -135,7 +135,7 @@ from arc.models import (
     Want,
     WatchProgress,
 )
-from arc.services.media.copies import encoding_episode_ids, served_recently
+from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids, served_recently
 from arc.services.media.names import offline_path_for, output_dir_for
 from arc.services.retention.rules import grace_period, unwatched_period, watched_grace_hours
 
@@ -871,7 +871,8 @@ async def retention_plan(
         else timedelta(hours=await watched_grace_hours(session))
     )
     facts = await _facts(session, now=moment, partial_window=await unwatched_period(session))
-    # A copy being made is reading the source right now (FR-P6). The episode
+    # A copy, a transcode or a remux (M20) is reading the source right now
+    # (FR-P6). The episode
     # waits for the next sweep; the deleter asks again before it acts.
     encoding = await encoding_episode_ids(session)
 
@@ -1172,7 +1173,9 @@ async def idle_copies(
     ).all()
     if not rows:
         return []
-    encoding = await encoding_episode_ids(session, [copy.episode_id for copy, _ in rows])
+    encoding = await encoding_episode_ids(
+        session, [copy.episode_id for copy, _ in rows], types=COPY_WRITER_TYPES
+    )
     roots = allowed_roots(settings)
     found: list[IdleCopy] = []
     for copy, moment in rows:

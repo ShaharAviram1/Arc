@@ -83,8 +83,11 @@ in it.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import os
+import re
 import stat
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -98,12 +101,20 @@ import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from sqlalchemy import or_, update
+from sqlalchemy import or_, select, update
 from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
 
 from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep, get_current_user
-from arc.models import Anime, Episode, EpisodeState, OfflineCopy, OfflineCopyState
+from arc.models import (
+    RENDITION_REMUX,
+    Anime,
+    Episode,
+    EpisodeState,
+    OfflineCopy,
+    OfflineCopyState,
+    Rendition,
+)
 from arc.services.catalog import preferred_title
 from arc.services.media.copies import may_fetch_copy, served_recently, touch_interval
 from arc.services.media.download import (
@@ -122,8 +133,23 @@ from arc.services.media.download import (
     slice_parts,
     stat_etag,
 )
-from arc.services.media.names import offline_path_for, output_dir_for
-from arc.services.media.plan import PLAYLIST_NAME
+from arc.services.media.names import (
+    REMUX_INFO_NAME,
+    SUBTITLES_VTT_NAME,
+    RemuxInfo,
+    offline_path_for,
+    output_dir_for,
+)
+from arc.services.media.plan import PLAYLIST_NAME, VIDEO_PLAYLIST_NAME
+from arc.services.media.subtitles import (
+    SUBTITLES_PLAYLIST_NAME,
+    Cue,
+    master_playlist,
+    segment_bounds,
+    subtitles_playlist,
+    vtt_segment,
+    vtt_to_cues,
+)
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +210,25 @@ RANGE_ERRORS: Final[dict[int, str]] = {
     status.HTTP_416_RANGE_NOT_SATISFIABLE: "that range is not inside the file",
 }
 
+
+#: WebVTT, for the generated subtitle segments of a remuxed rendition.
+SUBTITLE_TYPE: Final[str] = "text/vtt; charset=utf-8"
+
+#: ``sub_NNNNN.vtt`` → its index. The router's pattern has already matched the
+#: name, so this only extracts the number.
+_SUBTITLE_SEGMENT: Final = re.compile(r"\Asub_(\d{5})\.vtt\z")
+
+#: The largest WebVTT file a request will parse. A 24-minute episode's dialogue
+#: is tens of kilobytes; anything near this is not a file the remux wrote.
+MAX_VTT_BYTES: Final[int] = 8 << 20
+
+#: Why ``episode.mp4`` is refused for a remuxed rendition with a text track
+#: (FR-S7, owner 2026-10-13): one MP4 cannot carry the WebVTT track, and a
+#: full-size file that plays without its subtitles is worse than none.
+TEXT_SUBTITLES_REFUSED: Final[str] = (
+    "this episode's subtitles are a separate text track that a single file cannot carry; "
+    "use Keep offline for the small copy instead"
+)
 
 #: The whole-episode download's name (FR-S7). Not in :data:`SEGMENT_PATTERN`,
 #: so it can never be mistaken for a part, and registered before the segment
@@ -276,6 +321,25 @@ async def _ready_dir(session: SessionDep, settings: SettingsDep, episode_id: int
         )
         _miss()
     return directory
+
+
+async def _ready_rendition(
+    session: SessionDep, settings: SettingsDep, episode_id: int
+) -> tuple[Path, Rendition | None]:
+    """:func:`_ready_dir`, and the episode's ``renditions`` row when it has one.
+
+    The row says how the directory was made (M20): a ``remux`` has a
+    generated master playlist and possibly a text track; a ``transcode`` (or a
+    ready episode with no row, which predates nothing but is not worth a 500)
+    is served exactly as before.
+    """
+    directory = await _ready_dir(session, settings, episode_id)
+    rendition = await session.scalar(select(Rendition).where(Rendition.episode_id == episode_id))
+    return directory, rendition
+
+
+def _is_remux(rendition: Rendition | None) -> bool:
+    return rendition is not None and rendition.kind == RENDITION_REMUX
 
 
 def _etag(info: os.stat_result) -> str:
@@ -450,7 +514,12 @@ async def playlist(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
-    """Serve ``index.m3u8`` as written by the transcode.
+    """Serve ``index.m3u8``: as written by the transcode, or generated for a remux.
+
+    A remuxed rendition (M20, architecture.md §5.4a) has no ``index.m3u8`` on
+    disk: its master playlist is generated here from the ``renditions`` row
+    and the ``remux.json`` the remux left, naming ``video.m3u8`` and — when
+    the rendition has a text track — a subtitle rendition on by default.
 
     Registered before the segment route so the literal name wins the match: it
     is not in :data:`SEGMENT_PATTERN`, and the other order would answer a
@@ -459,14 +528,18 @@ async def playlist(
     ``user`` is asked for by name here — the router already requires a session
     — because the log line below is per playback and names who is watching.
     """
-    directory = await _ready_dir(session, settings, episode_id)
-    response = _serve(
-        request,
-        directory,
-        directory / PLAYLIST_NAME,
-        media_type=PLAYLIST_TYPE,
-        cache=PLAYLIST_CACHE,
-    )
+    directory, rendition = await _ready_rendition(session, settings, episode_id)
+    if _is_remux(rendition):
+        assert rendition is not None  # for the type checker: _is_remux says so
+        response = await _master(request, directory, rendition, episode_id)
+    else:
+        response = _serve(
+            request,
+            directory,
+            directory / PLAYLIST_NAME,
+            media_type=PLAYLIST_TYPE,
+            cache=PLAYLIST_CACHE,
+        )
     # One line per playback, not per segment: 237 segments an episode makes a
     # per-file log a way to lose the interesting line rather than to keep it.
     log.info(
@@ -474,6 +547,255 @@ async def playlist(
         extra={"user_id": user.id, "episode_id": episode_id, "status": response.status_code},
     )
     return response
+
+
+# --- A remuxed rendition's generated files (M20, §5.4a) -------------------------
+#
+# ``index.m3u8`` (master), ``subs.m3u8`` and ``sub_NNNNN.vtt`` exist only as
+# answers: they are computed from three files the remux wrote — ``video.m3u8``
+# (segment boundaries), ``subs.vtt`` (the whole track) and ``remux.json`` (the
+# first frame's timestamp, the bandwidth and codecs). Those three are read the
+# way the download reads its parts: the directory opened with ``O_NOFOLLOW``
+# and each file opened relative to it, again with ``O_NOFOLLOW``, so a link at
+# any of the names is a 404 and never a read of whatever it points at.
+
+
+@dataclass(frozen=True, slots=True)
+class _Read:
+    """One small file read under a rendition directory, and its ``fstat``."""
+
+    data: bytes
+    info: os.stat_result
+
+    def marker(self, name: str) -> tuple[str, int, int]:
+        """``(name, size, mtime_ns)`` for :func:`download_etag`."""
+        return name, self.info.st_size, self.info.st_mtime_ns
+
+
+def _read_files(
+    directory: Path, names: tuple[str, ...], limit: int = MAX_VTT_BYTES
+) -> dict[str, _Read]:
+    """Read ``names`` from ``directory``: the ones that exist, as plain files.
+
+    Blocking; run in a worker thread. A name that does not exist is simply
+    absent from the answer (the caller decides whether that is a 404). A name
+    that is a link, not a regular file, or larger than ``limit`` is the
+    router's one 404 — never followed, never read.
+    """
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        _miss()
+    try:
+        found: dict[str, _Read] = {}
+        for name in names:
+            try:
+                fd = _open_at(dir_fd, name)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                log.warning(
+                    "refusing a link or unreadable file under a rendition", extra={"part": name}
+                )
+                _miss()
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                    _miss()
+                found[name] = _Read(handle.read(limit + 1), info)
+        return found
+    finally:
+        os.close(dir_fd)
+
+
+def _generated(request: Request, body: str, etag: str, *, media_type: str, cache: str) -> Response:
+    """An answer computed rather than read: ``ETag``, ``If-None-Match``, no ranges."""
+    headers = {"Cache-Control": cache, "ETag": etag}
+    if _matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(content=body.encode("utf-8"), media_type=media_type, headers=headers)
+
+
+#: Rendition directories already warned about for a missing ``remux.json``:
+#: once per directory per process, not once per subtitle segment.
+_WARNED_NO_INFO: set[str] = set()
+
+
+def _info(files: dict[str, _Read], directory: Path) -> RemuxInfo:
+    """The remux's sidecar, or defaults (logged once) when it is missing or broken."""
+    found = files.get(REMUX_INFO_NAME)
+    if found is None:
+        if str(directory) not in _WARNED_NO_INFO:
+            _WARNED_NO_INFO.add(str(directory))
+            log.warning(
+                "a remuxed rendition has no remux.json; using defaults",
+                extra={"dir": str(directory)},
+            )
+        return RemuxInfo()
+    return RemuxInfo.from_json(found.data.decode("utf-8", "replace"))
+
+
+#: Rendition directories already warned about for a row that says "text
+#: track" with no ``subs.vtt`` beside it: once per directory per process.
+_WARNED_NO_TRACK: set[str] = set()
+
+
+def _track_on_disk(directory: Path, expected: bool = True) -> bool:
+    """Whether ``video.m3u8`` is there (else 404) and ``subs.vtt`` too.
+
+    Stats, not reads: the master names both but needs nothing in them. The
+    directory is opened without following a link and each name is looked up
+    relative to it, as everywhere else in this module. A ``video.m3u8`` that
+    is a link or missing is the router's 404; a ``subs.vtt`` that is missing,
+    a link or not a plain file is simply "no text track" (logged once per
+    directory), so the episode still plays, without subtitles, rather than
+    offering a track whose every segment would 404.
+    """
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        _miss()
+    try:
+        _regular_at(dir_fd, VIDEO_PLAYLIST_NAME)
+        try:
+            info = os.stat(SUBTITLES_VTT_NAME, dir_fd=dir_fd, follow_symlinks=False)
+            present = stat.S_ISREG(info.st_mode)
+        except OSError:
+            present = False
+    finally:
+        os.close(dir_fd)
+    if expected and not present and str(directory) not in _WARNED_NO_TRACK:
+        _WARNED_NO_TRACK.add(str(directory))
+        log.warning(
+            "a rendition marked with a text track has no usable subs.vtt; serving none",
+            extra={"dir": str(directory)},
+        )
+    return present
+
+
+async def _master(
+    request: Request, directory: Path, rendition: Rendition, episode_id: int
+) -> Response:
+    """The generated master playlist of a remuxed rendition (§5.4a)."""
+    expected = bool(rendition.text_subtitles)
+    track = await anyio.to_thread.run_sync(_track_on_disk, directory, expected)
+    files = await anyio.to_thread.run_sync(_read_files, directory, (REMUX_INFO_NAME,))
+    info = _info(files, directory)
+    subtitles = expected and track
+    body = master_playlist(
+        bandwidth=info.bandwidth or 1,
+        codecs=info.codecs,
+        resolution=(
+            (rendition.width, rendition.height)
+            if rendition.width is not None and rendition.height is not None
+            else None
+        ),
+        subtitle_name=(info.subtitle_name or "Subtitles") if subtitles else None,
+        subtitle_lang=rendition.subtitle_lang,
+    )
+    etag = download_etag([("index.m3u8", len(body), hash_text(body))])
+    return _generated(request, body, etag, media_type=PLAYLIST_TYPE, cache=PLAYLIST_CACHE)
+
+
+def hash_text(text: str) -> int:
+    """A stable integer digest of ``text``, for an ETag over generated content."""
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+
+
+def _target_duration(playlist_text: str, bounds: list[tuple[float, float]]) -> int:
+    """The video playlist's own ``#EXT-X-TARGETDURATION``, so the two agree.
+
+    Fixed for a rendition, as RFC 8216 asks; derived from the longest segment
+    only when the video playlist does not state one.
+    """
+    for line in playlist_text.splitlines():
+        if line.startswith("#EXT-X-TARGETDURATION:"):
+            try:
+                return max(int(line.split(":", 1)[1].strip()), 1)
+            except ValueError:
+                break
+    longest = max((end - start for start, end in bounds), default=1.0)
+    return max(math.ceil(longest), 1)
+
+
+#: Parsed ``subs.vtt`` files, by identity: a player asks for a few hundred
+#: segments of one track, and re-parsing it for each is waste. Bounded and
+#: keyed by inode, size and mtime, so a re-remux is a miss rather than stale.
+_CUE_CACHE: dict[tuple[int, int, int, int], list[Cue]] = {}
+_CUE_CACHE_SIZE: Final[int] = 8
+
+
+def _cues(found: _Read) -> list[Cue]:
+    key = (found.info.st_dev, found.info.st_ino, found.info.st_size, found.info.st_mtime_ns)
+    cached = _CUE_CACHE.get(key)
+    if cached is None:
+        cached = vtt_to_cues(found.data.decode("utf-8", "replace"))
+        if len(_CUE_CACHE) >= _CUE_CACHE_SIZE:
+            _CUE_CACHE.pop(next(iter(_CUE_CACHE)))
+        _CUE_CACHE[key] = cached
+    return cached
+
+
+async def _subtitle_file(
+    request: Request, directory: Path, rendition: Rendition | None, name: str
+) -> Response:
+    """``subs.m3u8`` or one ``sub_NNNNN.vtt`` of a remuxed rendition with a text track.
+
+    404 for a rendition that has none (a transcode, or a remux of a source
+    without usable subtitles), for a ``subs.vtt`` that is missing, and for a
+    segment index past the video's last segment.
+    """
+    if not _is_remux(rendition) or rendition is None or not rendition.text_subtitles:
+        _miss()
+    # No ``subs.vtt`` on disk is no text track, whatever the row says: the
+    # master does not offer one, and its playlist is not served either.
+    if not await anyio.to_thread.run_sync(_track_on_disk, directory):
+        _miss()
+    wanted: tuple[str, ...] = (VIDEO_PLAYLIST_NAME,)
+    segment = _SUBTITLE_SEGMENT.match(name)
+    if segment is not None:
+        wanted = (VIDEO_PLAYLIST_NAME, SUBTITLES_VTT_NAME, REMUX_INFO_NAME)
+    files = await anyio.to_thread.run_sync(_read_files, directory, wanted)
+    video = files.get(VIDEO_PLAYLIST_NAME)
+    if video is None:
+        _miss()
+    text = video.data.decode("utf-8", "replace")
+    bounds = segment_bounds(text)
+
+    if segment is None:
+        etag = download_etag([("subs", 0, 0), video.marker(VIDEO_PLAYLIST_NAME)])
+        if _matches(request.headers.get("if-none-match"), etag):
+            return _generated(request, "", etag, media_type=PLAYLIST_TYPE, cache=PLAYLIST_CACHE)
+        body = subtitles_playlist(
+            bounds, ended=True, target_duration=_target_duration(text, bounds)
+        )
+        return _generated(request, body, etag, media_type=PLAYLIST_TYPE, cache=PLAYLIST_CACHE)
+
+    index = int(segment.group(1))
+    track = files.get(SUBTITLES_VTT_NAME)
+    if track is None or index >= len(bounds):
+        _miss()
+    markers = [
+        (name, index, 0),
+        video.marker(VIDEO_PLAYLIST_NAME),
+        track.marker(SUBTITLES_VTT_NAME),
+    ]
+    if REMUX_INFO_NAME in files:
+        markers.append(files[REMUX_INFO_NAME].marker(REMUX_INFO_NAME))
+    etag = download_etag(markers)
+    # Revalidated, not immutable: a re-remux (a new subtitle language, FR-P5)
+    # rewrites ``subs.vtt`` under the same segment URLs, and a 304 is cheap.
+    if _matches(request.headers.get("if-none-match"), etag):
+        return _generated(request, "", etag, media_type=SUBTITLE_TYPE, cache=PLAYLIST_CACHE)
+    start, end = bounds[index]
+    if index == len(bounds) - 1:
+        # A cue that starts after the last segment's stated end (the track ran
+        # a little past the video) still belongs somewhere: the last segment.
+        end = math.inf
+    # Parsing a whole track is CPU work; it stays off the event loop.
+    cues = await anyio.to_thread.run_sync(_cues, track)
+    body = vtt_segment(cues, start, end, _info(files, directory).mpegts)
+    return _generated(request, body, etag, media_type=SUBTITLE_TYPE, cache=PLAYLIST_CACHE)
 
 
 # --- The whole episode as one file (FR-S7) --------------------------------------
@@ -554,8 +876,17 @@ def _regular_at(dir_fd: int, name: str) -> os.stat_result:
 
 
 def _read_playlist(dir_fd: int) -> str:
-    """``index.m3u8`` under ``dir_fd``, at most :data:`MAX_PLAYLIST_BYTES`."""
-    with os.fdopen(_open_at(dir_fd, PLAYLIST_NAME), "rb") as handle:
+    """The media playlist under ``dir_fd``, at most :data:`MAX_PLAYLIST_BYTES`.
+
+    ``video.m3u8`` when the rendition is a remux (M20), ``index.m3u8``
+    otherwise. Only a *missing* ``video.m3u8`` falls back: one that is a link
+    raises like any other refused part.
+    """
+    try:
+        fd = _open_at(dir_fd, VIDEO_PLAYLIST_NAME)
+    except FileNotFoundError:
+        fd = _open_at(dir_fd, PLAYLIST_NAME)
+    with os.fdopen(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             raise PlaylistError("the playlist is not a regular file")
         raw = handle.read(MAX_PLAYLIST_BYTES + 1)
@@ -743,10 +1074,17 @@ async def download(
 
     The demo account is refused before anything is looked up, so the 403 says
     nothing about which episodes exist.
+
+    A remuxed rendition with a text track is refused with a reason (FR-S7,
+    owner 2026-10-13): the WebVTT track cannot travel inside one MP4, and a
+    full-size file without subtitles is not what a device asked for. One
+    without a text track is concatenated from ``video.m3u8`` like any other.
     """
     if user.is_demo:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
-    directory = await _ready_dir(session, settings, episode_id)
+    directory, row = await _ready_rendition(session, settings, episode_id)
+    if _is_remux(row) and row is not None and row.text_subtitles:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=TEXT_SUBTITLES_REFUSED)
     # Both already loaded or one primary-key lookup away; :func:`_ready_dir`
     # has established the episode exists and is ready.
     episode = await session.get(Episode, episode_id)
@@ -949,9 +1287,21 @@ def _sends_bytes(request: Request, response: Response, size: int | None) -> bool
     return True
 
 
+SEGMENT_ROUTE: Final[str] = "/{episode_id}/{name}"
+
+#: A name with a separator in it (``..%2Fx.vtt`` decodes to ``../x.vtt``) does
+#: not match :data:`SEGMENT_ROUTE` at all, since ``{name}`` stops at ``/``. This
+#: second route catches it after the first, only to run the same pattern over
+#: it, so a traversal attempt is the same 422 as every other name the encoder
+#: never wrote rather than an unmatched path. Not ``{name:path}`` on the
+#: segment route itself: Starlette's path convertor would drop a trailing
+#: newline before the pattern saw it.
+SEPARATOR_ROUTE: Final[str] = "/{episode_id}/{name:path}"
+
+
 @router.get(
-    "/{episode_id}/{name}",
-    summary="One init or media segment (FR-S1)",
+    SEGMENT_ROUTE,
+    summary="One segment, or a remuxed rendition's media or subtitle playlist (FR-S1)",
     response_class=FileResponse,
     responses={
         206: {"description": "a byte range of the segment"},
@@ -966,7 +1316,13 @@ async def segment(
     episode_id: EpisodeId,
     name: Annotated[
         str,
-        PathParam(pattern=SEGMENT_PATTERN, description="``init.mp4`` or ``seg_NNNNN.m4s``"),
+        PathParam(
+            pattern=SEGMENT_PATTERN,
+            description=(
+                "``init.mp4``, ``seg_NNNNN.m4s``, and for a remuxed rendition "
+                "``video.m3u8``, ``subs.m3u8`` or ``sub_NNNNN.vtt``"
+            ),
+        ),
     ],
     request: Request,
     session: SessionDep,
@@ -983,10 +1339,30 @@ async def segment(
     No ``user`` parameter: the session is required by the router (241 segments
     an episode, and nothing here has anything to say about who asked).
     """
+    if name == VIDEO_PLAYLIST_NAME:
+        directory = await _ready_dir(session, settings, episode_id)
+        return _serve(
+            request, directory, directory / name, media_type=PLAYLIST_TYPE, cache=PLAYLIST_CACHE
+        )
+    if name == SUBTITLES_PLAYLIST_NAME or name.endswith(".vtt"):
+        directory, rendition = await _ready_rendition(session, settings, episode_id)
+        return await _subtitle_file(request, directory, rendition, name)
     directory = await _ready_dir(session, settings, episode_id)
     return _serve(
         request, directory, directory / name, media_type=SEGMENT_TYPE, cache=SEGMENT_CACHE
     )
+
+
+@router.get(SEPARATOR_ROUTE, include_in_schema=False)
+async def separated_name(
+    episode_id: EpisodeId,
+    name: Annotated[str, PathParam(pattern=SEGMENT_PATTERN)],
+) -> Response:
+    """Never answers 200: the pattern refuses any name with a ``/`` in it (422).
+
+    Should a name somehow pass, it is the router's one 404.
+    """
+    _miss()
 
 
 # HEAD as well as GET, on all three. A media element's first act is often to
@@ -1000,7 +1376,8 @@ for _route, _endpoint in (
     ("/{episode_id}/index.m3u8", playlist),
     (f"/{{episode_id}}/{DOWNLOAD_NAME}", download),
     (f"/{{episode_id}}/{OFFLINE_NAME}", offline_copy),
-    ("/{episode_id}/{name}", segment),
+    (SEGMENT_ROUTE, segment),
+    (SEPARATOR_ROUTE, separated_name),
 ):
     router.add_api_route(_route, _endpoint, methods=["HEAD"], include_in_schema=False)
 
@@ -1017,6 +1394,8 @@ __all__ = [
     "SEGMENT_CACHE",
     "SEGMENT_PATTERN",
     "SEGMENT_TYPE",
+    "SUBTITLE_TYPE",
+    "TEXT_SUBTITLES_REFUSED",
     "download_url",
     "offline_url",
     "playlist_url",

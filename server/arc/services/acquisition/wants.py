@@ -250,7 +250,7 @@ from arc.services.media.copies import episodes_with_sources, file_matches
 from arc.services.media.names import (
     OFFLINE_WHY_TRIP,
     enqueue_offline_encode,
-    enqueue_transcode,
+    enqueue_remux,
     latest_offline_jobs,
     latest_transcode_jobs,
     offline_path_for,
@@ -2026,10 +2026,11 @@ async def _promote(
     """Settle the wanted ``matched`` episodes the encode paths left behind (FR-A12).
 
     **Promotion.** A ``matched`` episode that is *not* trip-only, has no
-    rendition and no transcode queued or running is one a trip held back from
-    streaming — the link gave it an offline encode rather than a transcode —
+    rendition and no prepare job queued or running is one a trip held back from
+    streaming — the link gave it an offline encode rather than a rendition —
     and a normal want has since arrived on it. Its source is still here, so it
-    is transcoded now. (Once the source is gone the episode is ``not_wanted``
+    is remuxed now (M20; the remux hands over to the burn-in encode itself
+    when the source cannot be copied). (Once the source is gone the episode is ``not_wanted``
     and the ordinary search above fetches it again.) A transcode that has used
     up its attempts is left alone, as the startup sweep leaves it: that is a
     job for a person — and so is one an admin cancelled.
@@ -2066,7 +2067,7 @@ async def _promote(
                 or (job.status is JobStatus.FAILED and job.attempts >= job.max_attempts)
             ):
                 continue
-            await enqueue_transcode(session, episode_id)
+            await enqueue_remux(session, episode_id)
             promoted += 1
             log.info("trip episode promoted to streaming", extra={"episode_id": episode_id})
     for episode in matched:

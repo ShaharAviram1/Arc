@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -60,6 +60,11 @@ class MediaFile(Base):
     created_at: Mapped[datetime] = created_at()
 
 
+#: The two values of :attr:`Rendition.kind`.
+RENDITION_TRANSCODE = "transcode"
+RENDITION_REMUX = "remux"
+
+
 class Rendition(Base):
     """The HLS output for one episode: one rendition per episode (FR-P1)."""
 
@@ -81,6 +86,21 @@ class Rendition(Base):
     audio_lang: Mapped[str | None] = mapped_column(String(16))
     #: Set when the transcode finished; null while it is still preparing.
     ready_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: How the rendition was made (M20): ``remux`` (video copied, audio AAC,
+    #: subtitles as a WebVTT track, architecture.md §5.3c) or ``transcode``
+    #: (the burn-in encode, now the fallback, §5.3a). Every row written before
+    #: M20 is a transcode, which is what the default says.
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=RENDITION_TRANSCODE, server_default=RENDITION_TRANSCODE
+    )
+    #: True when the rendition carries a WebVTT subtitle track (``subs.vtt``
+    #: in its directory, served as an HLS subtitle rendition). Never true for a
+    #: transcode, whose subtitles are burned into the picture. FR-S7's
+    #: full-size file is refused for such a rendition: it would play without
+    #: the subtitles (owner, 2026-10-13).
+    text_subtitles: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class OfflineCopy(Base):

@@ -320,6 +320,20 @@ class Settings(BaseSettings):
     #: of the host's cores, not an editable rule, which is why it is here and
     #: not in the ``settings`` table.
     max_transcodes: int = Field(default=2, ge=1)
+    #: Concurrent remuxes in one worker process (M20, FR-P3). A remux copies
+    #: the video and converts only the audio, so it is seconds of one core
+    #: rather than minutes of all of them; it has a cap of its own so that a
+    #: full encode group never holds back an episode a remux would have made
+    #: playable in under a minute (:func:`arc.services.jobs.loop.process_caps`).
+    max_remuxes: int = Field(default=2, ge=1)
+    #: The AAC stereo bitrate a remux converts non-AAC audio to (FLAC, Opus,
+    #: AC-3). AAC sources are copied untouched. As ffmpeg writes it (``160k``).
+    remux_audio_bitrate: str = Field(default="160k", pattern=r"^[1-9][0-9]{1,3}k$")
+    #: How long one remux's ffmpeg may run before it is killed and the job
+    #: retried. Ten minutes: a remux copies the video, so a whole episode is
+    #: tens of seconds, and one still running after ten minutes is stuck (a
+    #: hung read, a dying disk), not slow. Far shorter than the transcode's.
+    remux_timeout_seconds: float = Field(default=600.0, gt=0)
 
     # --- Transcode (M7) ---------------------------------------------------
     #: The binaries. Names, resolved on ``PATH``, or absolute paths — a host

@@ -106,6 +106,7 @@ from arc.models import (
     Rendition,
     Setting,
 )
+from arc.models.media import RENDITION_TRANSCODE
 from arc.services.acquisition.states import transition
 from arc.services.jobs.queue import ACTIVE_STATUSES
 from arc.services.jobs.registry import JobContext, register
@@ -114,8 +115,10 @@ from arc.services.media.names import (
 )
 from arc.services.media.names import (
     OFFLINE_WHY_TRIP,
+    REMUX,
     TRANSCODE,
     enqueue_offline_encode,
+    enqueue_remux,
     enqueue_transcode,
     latest_offline_jobs,
     latest_transcode_jobs,
@@ -326,19 +329,28 @@ async def _save_rendition(
     height: int | None,
     subtitle_lang: str | None,
     audio_lang: str | None,
+    kind: str = RENDITION_TRANSCODE,
+    text_subtitles: bool = False,
+    playlist_name: str = PLAYLIST_NAME,
 ) -> Rendition:
     """Create or update the one ``renditions`` row for this episode.
 
     Written only on success, and only after the playlist has been checked: the
     row is Arc's statement that the episode is playable, and a row for an
     episode that is not is worse than no row at all.
+
+    ``kind``, ``text_subtitles`` and ``playlist_name`` are set on every write,
+    not only on insert: a burn-in encode that replaces a remux must not leave
+    the row saying it has a text track (M20).
     """
     rendition = await _rendition_for(session, episode_id)
     if rendition is None:
         rendition = Rendition(episode_id=episode_id, dir="", playlist_path="")
         session.add(rendition)
     rendition.dir = str(output_dir)
-    rendition.playlist_path = str(output_dir / PLAYLIST_NAME)
+    rendition.playlist_path = str(output_dir / playlist_name)
+    rendition.kind = kind
+    rendition.text_subtitles = text_subtitles
     rendition.duration = duration
     rendition.width = width
     rendition.height = height
@@ -486,6 +498,72 @@ def _discard(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+async def discard_stale_staging(
+    session: AsyncSession, output_dir: Path, episode_id: int, own_job_id: int
+) -> None:
+    """Remove the ``<id>.tmp-<job>`` directories dead jobs left behind.
+
+    Only dead ones: since M20 a remux and a transcode of one episode hold
+    different locks, so a staging directory whose job is ``running`` belongs
+    to an ffmpeg working right now, and deleting it would pull the floor out
+    from under it. This job's own directory (a retry) always goes.
+    """
+    for stale in output_dir.parent.glob(STAGING_GLOB.format(episode_id=episode_id)):
+        raw = stale.name.rpartition(".tmp-")[2]
+        try:
+            owner = int(raw)
+        except ValueError:
+            _discard(stale)
+            continue
+        if owner != own_job_id:
+            status = await session.scalar(select(Job.status).where(Job.id == owner))
+            if status is JobStatus.RUNNING:
+                continue
+        _discard(stale)
+
+
+#: Stages of a remux that is ``running`` but no longer writes the rendition:
+#: it handed the episode to the encode, stepped aside, or finished.
+REMUX_IDLE_STAGES: frozenset[str] = frozenset({"fallback", "deferred", STAGE_DONE})
+
+
+async def running_prepare_job(
+    session: AsyncSession,
+    job_type: str,
+    episode_id: int,
+    *,
+    exclude_job_id: int | None = None,
+    idle_stages: frozenset[str] = frozenset({STAGE_DONE}),
+) -> Job | None:
+    """A ``running`` job of ``job_type`` for this episode that is doing the work.
+
+    ``idle_stages`` are payload stages meaning the job is still ``running``
+    but no longer touches the rendition directory, so it does not count.
+    """
+    rows = await session.scalars(
+        select(Job).where(
+            Job.type == job_type,
+            Job.status == JobStatus.RUNNING,
+            Job.payload[KEY_EPISODE].astext == str(episode_id),
+        )
+    )
+    for job in rows.all():
+        if exclude_job_id is not None and job.id == exclude_job_id:
+            continue
+        if str((job.payload or {}).get(KEY_STAGE) or "") in idle_stages:
+            continue
+        return job
+    return None
+
+
+class PrepareDeferred(RuntimeError):
+    """Another prepare job is writing this episode's rendition right now.
+
+    Raised so the runner retries with its backoff (a remux is seconds long);
+    nothing on the episode is changed.
+    """
+
+
 def _publish(staging: Path, output_dir: Path, result: TranscodeResult) -> TranscodeResult:
     """Rename a validated encode into place; return the result relocated.
 
@@ -503,7 +581,9 @@ def _publish(staging: Path, output_dir: Path, result: TranscodeResult) -> Transc
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     _discard(output_dir)
     os.replace(staging, output_dir)
-    return replace(result, output_dir=output_dir, playlist=output_dir / PLAYLIST_NAME)
+    # The playlist keeps its own name: ``index.m3u8`` for the burn-in encode,
+    # ``video.m3u8`` for a remux (whose ``index.m3u8`` is generated on request).
+    return replace(result, output_dir=output_dir, playlist=output_dir / result.playlist.name)
 
 
 @register(TRANSCODE)
@@ -548,6 +628,17 @@ async def _prepare(ctx: JobContext, episode_id: int) -> None:
             extra={"episode_id": episode_id, "state": episode.state.value},
         )
         return
+    remux = await running_prepare_job(ctx.session, REMUX, episode_id, idle_stages=REMUX_IDLE_STAGES)
+    if remux is not None:
+        # A remux is writing this episode's rendition right now (M20; it holds
+        # a lock of its own). Not stepped aside: somebody asked for the
+        # burn-in encode, so it runs once the remux is done, and the runner's
+        # backoff is the wait. Nothing on the episode is touched.
+        ctx.log.info(
+            "a remux of this episode is running; retrying later",
+            extra={"episode_id": episode_id, "remux_job_id": remux.id},
+        )
+        raise PrepareDeferred(f"remux job {remux.id} is preparing this episode")
 
     payload = dict(ctx.payload)
     payload[KEY_EPISODE] = episode_id
@@ -597,8 +688,8 @@ async def _prepare(ctx: JobContext, episode_id: int) -> None:
     # Anything a hard-killed worker left behind for this episode. Ordinary
     # exits clean up after themselves in the ``finally`` below; a ``SIGKILL``
     # cannot, and the directory would then sit there until somebody looked.
-    for stale in output_dir.parent.glob(STAGING_GLOB.format(episode_id=episode_id)):
-        _discard(stale)
+    # Never a running job's (a remux's, since M20).
+    await discard_stale_staging(ctx.session, output_dir, episode_id, ctx.job.id)
     staging = output_dir.with_suffix(STAGING_SUFFIX.format(job_id=ctx.job.id))
 
     sub_lang, audio_lang = await language_rules(ctx.session)
@@ -723,7 +814,7 @@ async def _succeed(
 
 
 async def sweep_transcodes(session: AsyncSession) -> int:
-    """Queue the transcodes a restart would otherwise lose. Returns the count.
+    """Queue the remuxes and transcodes a restart would otherwise lose. Returns the count.
 
     Three cases, all of which are "the worker was not running when it should
     have been":
@@ -776,15 +867,23 @@ async def sweep_transcodes(session: AsyncSession) -> int:
                 continue
             if job.status is JobStatus.FAILED and job.attempts >= job.max_attempts:
                 log.info(
-                    "transcode has used up its attempts; not requeued",
-                    extra={"episode_id": episode.id, "job_id": job.id},
+                    "preparation has used up its attempts; not requeued",
+                    extra={"episode_id": episode.id, "job_id": job.id, "type": job.type},
                 )
                 continue
-        await enqueue_transcode(session, episode.id)
+        # Since M20 the remux is how an episode is prepared: a ``matched``
+        # episode with no prepare job at all, or whose last one was a remux, is
+        # remuxed (and the remux hands over to the burn-in encode itself when
+        # the source cannot be copied). One whose last job was a transcode — a
+        # fallback, or an admin's choice — is transcoded again.
+        if job is not None and job.type == TRANSCODE:
+            await enqueue_transcode(session, episode.id)
+        else:
+            await enqueue_remux(session, episode.id)
         queued += 1
     if queued:
         await session.commit()
-        log.info("transcodes queued at startup", extra={"count": queued})
+        log.info("prepare jobs queued at startup", extra={"count": queued})
     return queued
 
 
@@ -838,6 +937,11 @@ __all__ = [
     "NO_SOURCE",
     "PROGRESS_INTERVAL_SECONDS",
     "PROGRESS_STEP",
+    "REMUX",
+    "REMUX_IDLE_STAGES",
+    "PrepareDeferred",
+    "discard_stale_staging",
+    "running_prepare_job",
     "STAGE_DONE",
     "STAGING_GLOB",
     "STAGING_SUFFIX",
@@ -846,7 +950,10 @@ __all__ = [
     "TRANSCODE",
     "TRANSCODE_LOCK_KEY",
     "LANGUAGE_KEYS",
+    "_Reporter",
+    "_publish",
     "encode_options",
+    "enqueue_remux",
     "enqueue_transcode",
     "episode_lock",
     "language_rules",
@@ -855,4 +962,5 @@ __all__ = [
     "sweep_transcodes",
     "transcode_dedupe_key",
     "transcode_episode",
+    "validate_output",
 ]

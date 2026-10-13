@@ -63,7 +63,12 @@ Two Python processes share one codebase and one database:
   `WORKER_CONCURRENCY` — `transcode` and `offline_encode` together, capped by
   `MAX_TRANSCODES` (M19) — is not claimed at all while this process is already
   running its cap's worth, so an encode waiting for an ffmpeg slot never holds
-  a concurrency slot the short jobs need.
+  a concurrency slot the short jobs need. `remux` (M20) is a group of its own,
+  capped by `MAX_REMUXES` (default 2), so a full encode group does not by
+  itself hold back a remux — but every claim still needs one of the
+  `WORKER_CONCURRENCY` slots, so a remux runs beside a full encode group only
+  when `WORKER_CONCURRENCY` > `MAX_TRANSCODES` (both default 2; production
+  runs `WORKER_CONCURRENCY=3`, owner 2026-10-13).
 
 One arrow the diagram does not draw: the worker's writes **announce
 themselves** over Postgres `LISTEN`/`NOTIFY` on the `arc_events` channel, and
@@ -117,10 +122,14 @@ nothing depends on it — every page that reacts to an event also polls.
 - Per-process caps (`jobs/loop.py`, `process_caps`): the loop counts what it
   is running by type, adds the counts up per capped **group**
   (`full_types`), and passes every type of a group at its cap to the claim as
-  `exclude_types`, one `Job.type NOT IN (…)` clause. `{transcode,
-  offline_encode}` → `MAX_TRANSCODES` is the only entry (a group since M19,
+  `exclude_types`, one `Job.type NOT IN (…)` clause. Two entries:
+  `{transcode, offline_encode}` → `MAX_TRANSCODES` (a group since M19,
   2026-10-05: both run a whole-episode ffmpeg, and both take the one
-  `transcode_semaphore`). Nothing is reprioritised — an excluded
+  `transcode_semaphore`), and since M20 `{remux}` → `MAX_REMUXES` (a remux
+  copies the video and takes no semaphore; its own group so it does not count
+  against the encoders). The groups do not add slots: with the encode group
+  full, a remux is claimed only if `WORKER_CONCURRENCY` leaves one free, i.e.
+  `WORKER_CONCURRENCY` > `MAX_TRANSCODES`. Nothing is reprioritised — an excluded
   type keeps its place and is claimed in the usual order the moment a slot
   frees — and the media semaphore stays the safety net for what the loop
   cannot see (a second worker process, or `MAX_TRANSCODES` lowered under a
@@ -504,7 +513,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `anime` | id (internal identity PK), anilist_id (unique, nullable), mal_id (unique, nullable), summary_source / detail_source (anilist|mal), title_romaji, title_english, title_native, synonyms (JSONB), description (AniList HTML, stripped on output), format, episodes, status, season, season_year, cover_url, cover_large_url (AniList `coverImage.extraLarge`, a *summary* column; null on a MAL-filled row, whose biggest picture is 230 px), banner_url (AniList's 4.75:1 strip), backdrop_url (TMDB's 16:9 backdrop — **only** the TMDB enrichment ever writes it, §5.8, and it is what the 21:9 heroes and 16:9 cards prefer; null until the enrichment reaches the row), genres (array), tags (JSONB), studio, credits (JSONB `[{role, name}]`, studio first then Director / Series Composition / Character Design / Music / Original Creator from AniList staff; studio-only from MAL), relations (JSONB, anime-only), next_airing (JSONB), refreshed_at, popularity, average_score |
 | `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason, last_search_at / last_search_forms / last_search_results (FR-A7, 2026-09-14: when `search_release` last asked Nyaa about this episode, how many query forms ran and how many distinct releases they returned between them *before* the filter — smallints, nullable, no backfill, written on every attempt that reaches Nyaa and never cleared. Three columns rather than a blob because all three are rendered on one line of the show page, and because "6 forms, 0 results" is what separates a query that matches nothing from a filter that keeps nothing) |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
-| `renditions` | id, episode_id (unique), dir, playlist_path, duration, width, height, subtitle_lang, audio_lang, ready_at |
+| `renditions` | id, episode_id (unique), dir, playlist_path (`index.m3u8` for a transcode, `video.m3u8` for a remux), duration, width, height, subtitle_lang, audio_lang, ready_at, kind (VARCHAR(16) NOT NULL DEFAULT `'transcode'`; `remux` since M20 — how it was made, §5.3c), text_subtitles (BOOL NOT NULL DEFAULT false; a WebVTT track `subs.vtt` is in the directory and served as an HLS subtitle rendition; never true for a transcode) |
 | `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most every five minutes since M20 T8 — hourly before; the idle rule counts from it, else from ready_at, and retention's "copy being sent" hold reads it against a ten-minute window), error. M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at |
@@ -517,7 +526,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `trip_episodes` | trip_id + episode_id (PK, both FK CASCADE), state (`pending` \| `delivered` \| `expired` \| `cancelled`, default `pending`), available_at (copy first ready for this trip — the start of the `trip_copy_days` clock; stamped by the copy hook and by `create_trip` when a copy already exists), delivered_at (device confirmed; M19 T4 writes it — set and with released_at null, the episode is in that user's device-held set and the window skips it, without sliding past it; M20 T4, FR-A1/FR-A15, reversing 2026-10-06), released_at (device deleted its copy; T4 — the episode is back in the window from the next reconciliation). Index `ix_trip_episodes_episode_id`. "Available" is not a state: it is `pending` with a ready copy |
 | `torrents` | id, **episode_id (nullable — null exactly when `kind = 'batch'`, enforced by `ck_torrents_kind_episode`; a batch belongs to no single episode, which is what makes every existing query keyed on this column ignore one by default)**, info_hash (unique), magnet, title, group, resolution, seeders, trusted, qbit_state, progress, **kind (`single` \| `batch`, NOT NULL DEFAULT `single`)**, **save_path (container-side, as the client was told — a single's is `downloads/<episode id>` and derivable, a batch's is `downloads/batch/<info hash>` and is not)**, **total_size**, **wanted_bytes (the sum of the *selected* files — the only size figure any rule, log or reservation may use, FR-A11)**, **manual (bool NOT NULL DEFAULT false, revision `f1a6d3c08b52`: a person chose this release by hand, FR-A13)**, added_at, completed_at |
 | `torrent_files` | id, torrent_id (CASCADE), file_index (the index `torrents/files` reports and `torrents/filePrio` takes), path (as the torrent names it, relative to the save path), size, episode_id (nullable, SET NULL — the episode this file holds, per the filename parser at pick time), wanted (bool, NOT NULL DEFAULT false — whether Arc set its priority to 1), priority (what Arc last wrote, for the audit), progress (0..1, this file's own), completed_at. `UNIQUE (torrent_id, file_index)`; partial index on `episode_id` where not null; and a **partial unique index on `episode_id` where `wanted`** — an episode has at most one live claim anywhere, which is the invariant behind "one batch, several wants". Written only for a `kind = 'batch'` torrent: no rows at all continues to mean "the whole payload is one episode's", which is what every path written before FR-A11 assumes. |
-| `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at |
+| `jobs` | id, type, payload (JSONB), status, priority (lower runs first), attempts, max_attempts, run_after, locked_by, locked_at, last_error, created_at, started_at, finished_at. Partial expression index `ix_jobs_prepare_episode ON jobs ((payload->>'episode_id')) WHERE type IN ('transcode','remux')` behind `latest_transcode_jobs` / `latest_prepare_jobs` (M20; it replaced `ix_jobs_transcode_episode`, partial on `transcode` only, in revision `caf1811e8ee6`) |
 | `rec_runs` | id, user_id, prompt, candidates (JSONB), picks (JSONB), model, created_at |
 | `settings` | key (PK), value (JSONB) — admin-editable rules (preferred_groups, resolution, look_ahead_n, grace_days_g, unwatched_days_d, sub_lang, audio_lang, acquisition_paused, min_free_gb — FR-T6's storage floor in whole GB, default 10, 0..1000, 0 turning the guard off — slot_cap_k — FR-A10's per-user cap on shows fetching at once, default 5, 0..50, 0 meaning *unlimited*, which is the opposite of what 0 means for look_ahead_n, and batch_fallback — FR-A11's kill switch for FR-A4's batch exception, bool, default **true**, read in exactly one branch of `search_release` so that off leaves every other acquisition path byte-identical — it gates the attach as well as the pick, so no further file is enabled in a pack Arc already has, while a pack already downloading finishes the episodes it holds claims for, and offline_idle_days — FR-T7's idle rule for a ready episode's small offline copy, default 7, 1..365, read with a floor of 1, and trip_max_episodes — FR-A12's cap on one trip, default 50, 1..50 — and trip_copy_days — how long a trip's copy waits for the device, default 14, 1..365 — and trip_pack_min_seeders — the fewest listed Nyaa seeders a pack needs before a trip prefers it, default 10, 1..500, seeded by revision `e4b7c2a91f05` (owner incident 2026-10-06); all three read by `services/trips/rules.py`, clamped; and, from M20, watched_grace_hours — the delete-after-watching grace in hours after the last completion, default 6, 0..168 (0 = at the next hourly sweep), read by `retention/rules.watched_grace_hours` (behaviour in M20 T8) — and min_seeders_warn — fewer seeders than this on a fetch warns on the show, default 3, 0..100 (0 = never), read by `acquisition/rules.min_seeders_warn` (behaviour in M20 T9); both seeded by revision `a7d2e5c9f318` (`seed_m20_settings`), which also moves look_ahead_n from 2 to 1 where it is still exactly 2 — look_ahead_n's default is 1 since M20), plus per-show overrides under `override:anime:<id>` (`{preferred_groups?, resolution?}` — FR-A3, written by the M16 editor through `settings.write_override`/`delete_override`, which hold them to the same two validators the global keys use; a row naming neither field is deleted rather than stored). Written only through `arc/services/settings.py`, which validates every value (`validate` is a pure function, so the matrix is testable without HTTP) and logs one line per changed key with its previous value. The rule *readers* stay lenient by design — a hand-edited row is ignored with a warning rather than raising, because one bad row must not stop acquisition or shorten a grace period. |
 | `offline_anime` | id (surrogate BIGINT PK), anilist_id / mal_id (indexed, **not** unique — it is somebody else's file), kitsu_id, anidb_id, title, synonyms (JSONB), type, episodes, status, season, season_year, picture, thumbnail, studios (JSONB), tags (JSONB), score (`score.arithmeticMean`, 0–10), duration_seconds (normalised from `duration.{value,unit}`), related (JSONB, the `relatedAnime` source URLs as given), search_text (title + synonyms, lowercased, joined by `" \| "`, with a **pg_trgm GIN index** so `ILIKE '%q%'` over 41k rows is an index scan). Composite index on (season_year, season). Replaced whole by the weekly import (§5.0a) |
@@ -1645,7 +1654,12 @@ trip's `pending` episodes, and only episodes with nothing landed
    (`-dump_attachment`) before rendering so ASS styling renders correctly.
 
 ### 5.3a Transcode as built (M7)
-- Trigger: `link()` landing an episode in `matched` enqueues `transcode`
+**Since M20 this is the fallback path** (FR-P7): `link()` queues a `remux`
+(§5.3c), and the transcode runs only when the remux hands a source over that
+cannot be copied, when the startup sweep finds an episode whose last prepare
+job was a transcode, or when an admin asks (`?mode=transcode`, or `force`
+without a mode). Everything below describes the encode itself, unchanged.
+- Trigger (before M20): `link()` landing an episode in `matched` enqueued `transcode`
   (dedupe `transcode:<id>`, priority 10 × distance to the nearest wanting
   user's progress, capped 500, default 100); a worker-start sweep queues
   any `matched` episode without a rendition and re-queues `failed` ones
@@ -1693,7 +1707,9 @@ trip's `pending` episodes, and only episodes with nothing landed
   from one batched lookup; the latest transcode job per episode is found
   via a partial expression index on `jobs (payload->>'episode_id') WHERE
   type = 'transcode'` (`ix_jobs_transcode_episode`, migration 2 — the
-  squashed initial revision plus a straight chain from here on).
+  squashed initial revision plus a straight chain from here on; widened to
+  `type IN ('transcode','remux')` as `ix_jobs_prepare_episode` in M20, so the
+  newest job of either type is the one an episode row reads).
 - Local dev needs an ffmpeg with libass; Homebrew's `ffmpeg` lacks it, so
   `ffmpeg-full` (keg-only) is used via `FFMPEG_BIN`/`FFPROBE_BIN`. The
   Docker image's Debian ffmpeg has libass. The runner fails fast with a
@@ -1811,10 +1827,84 @@ codec strings — what the API and retention import), `media/offline.py` (the
   declare PlayRes 640×360; on the 1280×720 frame the dialogue sat bottom-centre
   at its intended proportion, in the release's own fonts.
 
-### 5.3c Remux (M20) — helpers
+### 5.3c Remux as built (M20)
 
-Stub for M20 T1; the job, routes and player land in T2 onward. Pure functions,
-no I/O, fully unit-tested (`server/tests/media/`):
+**The job (T2).** `remux` (`media/remux.py`, `@register(REMUX)`) is how a
+matched episode is prepared since M20 (FR-P1): `link()` and the trip promotion
+in `wants._promote` queue it (`enqueue_remux`: dedupe `remux:<id>`, priority =
+`transcode_priority`, `max_attempts` 2). Payload `{episode_id, force?}`; it
+adds `stage` (`probe` → `remux` → `done`, or `fallback`), `progress`,
+`error_tail`, `notes`, `audio` (`copy` | `aac`), and on a hand-over
+`fallback_reason` and `transcode_job_id`. Flow:
+
+1. Advisory lock `('remux', episode_id)` (`episode_lock(key=lock_key(REMUX))`)
+   before anything is read; a claim that cannot take it writes
+   `stage=deferred` and returns. Deliberately not the transcode's key: the
+   fallback queues a transcode while this lock is held. The two prepare jobs
+   are kept apart instead by `jobs.running_prepare_job`: a remux finding a
+   `running` transcode of the episode **steps aside** (`stage=deferred`,
+   `transcode_job_id`; `latest_transcode_jobs` skips `deferred` rows, so the
+   episode keeps showing the encode's progress), and a transcode finding a
+   `running` remux whose stage is not `fallback`/`deferred`/`done` **defers**
+   (`PrepareDeferred`, the runner's backoff — the encode was asked for, so it
+   runs after). Stale staging directories are removed only when their job is
+   not `running` (`jobs.discard_stale_staging`), so neither can delete the
+   other's work in progress.
+2. Idempotent short-circuit (without `force`): a rendition row plus a
+   directory that validates → `stage=done`, no ffmpeg.
+3. Probe the source and build the plan (`build_plan`, same language rules).
+   `copyable()` false → `enqueue_transcode` (deduped), `stage=fallback` with
+   the reason, job done; the episode is not moved (the transcode moves it to
+   `preparing`). When the queued transcode is `pending`, `fallback_reason` is
+   copied onto it — so `EpisodeOut.prepare_note` can say why it is a full
+   encode — and so is `force`, which a dedupe hit on a non-force row would
+   otherwise lose.
+4. Otherwise `→ preparing` (on `force` the old row and directory go now),
+   `mkdir renditions/<id>.tmp-<job>/_work` (ffmpeg creates neither), run
+   `remux_args(plan, RemuxOptions(HLS_SEGMENT_SECONDS, REMUX_AUDIO_BITRATE,
+   audio_copy), live=False)` with `REMUX_TIMEOUT_SECONDS` (600) and the
+   transcode's `_Reporter` for progress/heartbeat. No semaphore: the loop's
+   `MAX_REMUXES` group (§2) is the cap.
+5. `_work/sub.ass|srt` → `ass_to_cues`/`srt_to_cues` → `subs.vtt` (whole
+   track) when any dialogue is left; `_work/` removed. Validation: the
+   transcode's `validate_output` (which reads `video.m3u8` when present) plus
+   an ffprobe of `video.m3u8` that must show `h264` and, when the plan has
+   audio, `aac`.
+6. Sidecar `remux.json` (`names.RemuxInfo`): `mpegts` = round(90000 × the
+   video stream's `start_time` from that same ffprobe of `video.m3u8` — the
+   HLS demuxer opens `init.mp4` + `seg_00000.m4s`, so this is the first
+   frame's PTS, read **once per rendition** at remux time and never on a
+   request), `bandwidth` = the peak segment bitrate, `codecs` (RFC 6381 from
+   the source's profile/level: `avc1.640028`, and `mp4a.40.2` — or the
+   source's HE-AAC object type when audio is copied), `subtitle_name`
+   ("English"). Written inside the staging directory, so it is published with
+   the rest or not at all.
+7. `_publish` (rename into place), `renditions` row with `kind='remux'`,
+   `text_subtitles`, `playlist_path=…/video.m3u8`, `subtitle_lang` (null when
+   no dialogue survived), `audio_lang`; episode `ready`; `stage=done`.
+8. Any failure: `failed` + stderr tail committed before the raise, staging
+   removed, the runner's backoff, two attempts. A failure before `preparing`
+   (no source, unprobeable) passes through `preparing` so `failed` is legal —
+   except on a `ready` episode whose rendition still validates (a forced
+   remux whose source is gone): the failure goes on the job only and the
+   episode stays `ready`.
+
+On a 1080p SubsPlease episode ffmpeg takes well under a second per two
+minutes of video on the dev machine (the slow test, `test_remux_slow.py`).
+`latest_transcode_jobs` (alias `latest_prepare_jobs`) returns the newest job
+of either type, so the show page, the startup sweep, failures and the trip
+release read a remux exactly as they read a transcode. The startup sweep
+(`sweep_transcodes`) queues a remux for a `matched`/`preparing`/`failed`
+episode with no rendition whose last prepare job was a remux or that has
+none, and a transcode where the last one was a transcode. Retention's
+in-flight guard (`copies.encoding_episode_ids`) counts `remux` and
+`transcode` as well as `offline_encode` before deleting a source
+(`SOURCE_READER_TYPES`); the copy-only deleters ask about `offline_encode`
+alone (`COPY_WRITER_TYPES`). Admin: `POST /api/episodes/{id}/transcode?mode=
+remux|transcode` (no mode: `transcode` with `force`, else `remux`).
+
+**Helpers (T1).** Pure functions, no I/O, fully unit-tested
+(`server/tests/media/`):
 
 - `media/plan.py` — `copyable(payload, plan) -> Copyability(video, audio_copy,
   reason)` decides from the ffprobe JSON whether the plan's chosen video can be
@@ -1851,6 +1941,8 @@ no I/O, fully unit-tested (`server/tests/media/`):
   no-break space; `& < >` escaped; `\an7-9` (or a style with Alignment 7–9)
   becomes `line:5%`; exact duplicates removed, sorted by start. SRT: HTML
   stripped except `<i>`, entities decoded then re-escaped, `{\an8}` honoured.
+  `vtt_to_cues` (added in T2) reads `cues_to_vtt`'s own output back, for the
+  media route that cuts `subs.vtt` into segments.
 
 ### 5.4 Streaming
 - `GET /media/{episode_id}/index.m3u8` and `/media/{episode_id}/{segment}`
@@ -1865,6 +1957,47 @@ no I/O, fully unit-tested (`server/tests/media/`):
   §5.3b). See §5.4a.
 
 ### 5.4a Streaming and playback as built (M8)
+- **A remuxed rendition (M20 T2).** The name vocabulary under
+  `/media/{id}/` (`download.PART_NAME_PATTERN`, `\A…\z`) is `init.mp4`,
+  `seg_NNNNN.m4s`, `video.m3u8`, `subs.m3u8`, `sub_NNNNN.vtt`; `index.m3u8`,
+  `episode.mp4` and `offline.mp4` are literal routes. A name with a `/` in it
+  (`..%2Fx.vtt`) reaches a catch-all `{name:path}` route registered after the
+  segment route, only so the same pattern answers it with a 422. The disk
+  holds `video.m3u8`, `init.mp4`, segments, `subs.vtt` and `remux.json`; the
+  last two are never served as they are. For a `renditions.kind = 'remux'`
+  row: `index.m3u8` is a **master playlist generated on request**
+  (`subtitles.master_playlist`: `BANDWIDTH`/`CODECS` from `remux.json`,
+  `RESOLUTION` from the row, and — when `text_subtitles` — one
+  `EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="<lang>",NAME="English",
+  DEFAULT=YES,AUTOSELECT=YES,URI="subs.m3u8"`; `STREAM-INF` names
+  `video.m3u8`), `private, no-cache`, ETag over its content. `video.m3u8` is
+  served like a playlist file. `subs.m3u8` is generated from
+  `segment_bounds(video.m3u8)` (one `sub_NNNNN.vtt` per video segment, VOD +
+  ENDLIST, `TARGETDURATION` = the video playlist's own), `private, no-cache`,
+  ETag over `video.m3u8`'s size/mtime. `sub_NNNNN.vtt` is generated from
+  `subs.vtt` with `vtt_segment` (cues that **start** in that segment; the last
+  segment also takes cues starting after the video's stated end), header
+  `X-TIMESTAMP-MAP=MPEGTS:<remux.json mpegts>,LOCAL:00:00:00.000`,
+  `text/vtt`, `private, no-cache` (not immutable like a media segment: a
+  re-remux with another subtitle language rewrites `subs.vtt` under the same
+  URLs), ETag = digest of (name, index, size and mtime of `video.m3u8`,
+  `subs.vtt`, `remux.json`) so a 304 costs no parse; the track is parsed in a
+  worker thread and memoised (8 entries, keyed by inode/size/mtime); a missing
+  `remux.json` is logged once per directory and defaults are used. The master
+  only stats `video.m3u8` (a link is a 404) and `subs.vtt`: a row with
+  `text_subtitles` but no plain `subs.vtt` on disk is treated as no text track
+  (no `EXT-X-MEDIA`, `subs.m3u8` and segments 404; logged once). An index
+  past the last segment, a rendition without a text track, or a transcode →
+  404. The three source files are read with the directory opened
+  `O_DIRECTORY|O_NOFOLLOW` and each file opened relative to it with
+  `O_NOFOLLOW`, a regular-file check and a size cap, so a link at any of the
+  names is a 404 and never followed. `episode.mp4` concatenates the parts
+  `video.m3u8` names (else `index.m3u8`; a *linked* `video.m3u8` is refused,
+  not skipped) and **answers 404 with a reason for a remux with
+  `text_subtitles`** (FR-S7, Q7); `EpisodeOut.download_url` is null for one.
+  `EpisodeOut.rendition` carries `kind` and `subtitles` (= `text_subtitles`),
+  and `EpisodeOut.prepare_note` the payload's `fallback_reason` ("10-bit")
+  while a `matched`/`preparing` episode's prepare job is the burn-in fallback.
 - No playlist rewriting: ffmpeg writes bare relative URIs, so
   `/media/{id}/…` resolves by construction. Every media request carries the
   session cookie (same origin behind Caddy; Vite proxies `/media` in dev);
@@ -4012,8 +4145,8 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
-| `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex, path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native) |
-| `GET`/`HEAD /media/{id}/episode.mp4` | any but the demo account (403) | The whole ready episode as one MP4 (FR-S7): `init.mp4` + segments in playlist order, concatenated on the fly; parts checked like segments; 404 unless `ready` and every part is present and plain; `private, no-cache` + strong ETag over all parts/304; single Range → 206, multi-range → 200, JSON 400/416; `If-Range` honoured; `Content-Disposition: attachment` named from the database (§5.4a) |
+| `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s\|video.m3u8\|subs.m3u8\|sub_NNNNN.vtt}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex (a name with `/` is a 422 too), path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native). For a remux (M20): `index.m3u8` is a generated master (video + default WebVTT subtitle rendition), `subs.m3u8` and `sub_NNNNN.vtt` (`text/vtt`, `no-cache` + ETag/304) are generated from `subs.vtt`; 404 for a rendition without a text track (§5.4a) |
+| `GET`/`HEAD /media/{id}/episode.mp4` | any but the demo account (403) | The whole ready episode as one MP4 (FR-S7): `init.mp4` + segments in playlist order, concatenated on the fly; parts checked like segments; 404 unless `ready` and every part is present and plain; `private, no-cache` + strong ETag over all parts/304; single Range → 206, multi-range → 200, JSON 400/416; `If-Range` honoured; `Content-Disposition: attachment` named from the database (§5.4a). Parts come from `video.m3u8` for a remux; a remux with a text track is **404 with a reason** (M20, Q7) |
 | `GET`/`HEAD /media/{id}/offline.mp4` | any but the demo account (403, before any lookup) | The small offline copy (FR-P6, M19 T1) from `DATA_DIR/offline/<id>.mp4`: 404 unless its `offline_copies` row is `ready`, `copies.may_fetch_copy` agrees (a `ready` episode: anyone; a non-ready trip episode: only a user holding a `pending`/`delivered` trip row on it — M19 T4), and the file is a plain file inside `offline/` (a symlink is refused); `video/mp4`, `private, no-cache`, strong ETag `"<size hex>-<mtime_ns hex>"` (the row's `etag`)/304, Range → 206, JSON 400/416, `If-Range` (a mismatch answers 200 with the whole file), `Content-Disposition: attachment` named like `episode.mp4`'s. Touches `last_served_at` at most hourly (§5.4a) |
 | `POST /api/episodes/{id}/offline` | any but the demo account (403) | "Keep offline" asks for the small copy (FR-P6): **202 `OfflineOut`** = `{state: none\|queued\|preparing\|available\|failed\|unavailable, progress: 0..1 \| null (while queued/preparing), size: bytes \| null (once available), url: "/media/{id}/offline.mp4" \| null (once available), codecs: "avc1.640028" \| "hvc1.1.6.L93.B0" \| null}`. Queues `offline_encode` (deduped per episode, priority 520) and writes the `offline_copies` row as `queued` unless a matching ready copy exists (then `available`, nothing queued) or one is already queued/preparing. **409** when no usable copy can be made now — `{"detail": "source_gone"}` (the episode is ready but its source is not on disk and no copy is made or on its way) or `{"detail": "storage_held"}` (the data volume is under its FR-T6 floor) — and **429 `{"detail": "copy_queue_full"}`** when the caller has 10 copies queued or being made or the host has 30 (trip copies not counted); on all three the device takes `download_url`. `request_copy` locks the episode row `FOR UPDATE` against retention's deletion. 404 `episode not found or not ready` for an unknown or not-`ready` episode |
 | `POST /api/anime/{id}/trip` | any but the demo account (403 `demo_account`) | FR-A12, M19 T3: body `{count}` (strict int) → **201 `TripOut`** = `{id, anime_id, anime_title, first_number, last_number, count, state, created_at, deadline_at, episodes: [{episode_id, number, phase: searching\|downloading\|preparing\|available\|delivered\|expired\|unavailable\|waiting_space, progress, size, delivered, url: "/media/{eid}/offline.mp4" \| null (the copy is `ready` and phase is `available`/`delivered`)}]}`. 409 `trip_active` / `storage_held`; 422 `count_out_of_range` (1..`trip_max_episodes`) / `nothing_aired`; 404 unknown anime. Writes trip, rows, wants; starts searches (160) and queues copies at once; never writes a list entry or MAL (§5.4e) |
@@ -4032,7 +4165,7 @@ Mutating requests must carry an allowed `Origin`.
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `GET /api/progress/completed?episode_ids=…` | any (own rows) | FR-S9 item 9 (owner, 2026-10-08): `{completed: [{episode_id, completed_at}]}` — the caller's own `watch_progress` rows with `completed` among the ids (`completed_at`, or `updated_at` for a row older than that column), ordered by id; an unknown id or a list-only watched episode is simply absent. 1..200 repeated `episode_ids` (each 1..2⁶³−1), else 422. A read: no writes. The device marks its copies watched from it (§5.4d "Catching up") |
 | `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
-| `POST /api/episodes/{id}/transcode?force=` | admin | enqueue a transcode: retry a `failed`/`matched` episode, or re-encode a `ready` one with `force=true` (409 otherwise) |
+| `POST /api/episodes/{id}/transcode?force=&mode=` | admin | enqueue a remux or a transcode: retry a `failed`/`matched` episode, or redo a `ready` one with `force=true` (409 otherwise). `mode=remux\|transcode` (M20; anything else 422); no mode means `transcode` with `force` (the burn-in re-encode it always was) and `remux` without. Returns the `JobOut` (202; a dedupe hit returns the queued row) |
 | `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released" |
 | `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, offline_bytes, total}, episodes_retained}` (`offline_bytes`, M19: the small copies, `SUM(offline_copies.size)` over ready rows) — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows `paused`, active wants, searching, downloading, `retained_bytes`, plus (2026-09-13) `storage_held`/`free_bytes`/`min_free_bytes` — FR-T6's guard, read from the same measurement and the same `storage_hold` rule the guard itself uses, with an unmeasurable path reading as zeros and *not* held — `dormant_entries`, the count of `watching`/`planned` entries with `activated_at IS NULL` whose show is not `RELEASING` (FR-A9), and `waiting_shows`/`slot_cap_k` — FR-A10's cap, the (user, show) pairs it is holding back right now and K itself, counted by the reconciler's own `wants.slot_totals(session)` (one pass over every list, K returned with the count) so the panel cannot disagree with the next tick. No upstream call |
@@ -4215,6 +4348,9 @@ primary key, and a fallback named without its key are each a startup WARNING),
 provider chain as the recommendations, so it needs no key of its own; on in
 production with nothing in the chain configured is a startup ERROR),
 `QBIT_URL`, `QBIT_USER`, `QBIT_PASS`, `DATA_DIR`, `MAX_TRANSCODES`,
+`MAX_REMUXES` (2; concurrent remuxes per worker process, M20),
+`REMUX_AUDIO_BITRATE` (160k; what a remux converts non-AAC audio to),
+`REMUX_TIMEOUT_SECONDS` (600; a remux's ffmpeg is killed and retried after it),
 `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `MATCH_AUTO_THRESHOLD` (0.85),
 `MATCH_MIN_CANDIDATE` (0.40), `MATCH_MIN_TITLE_FOR_AUTO` (0.92; above the
 0.88 non-exact cap, so in practice auto-link needs an exact normalised title
@@ -6493,3 +6629,5 @@ asked*, so `make test` is exactly as fast as it was.
   `fetchable` only when needed, on real progress, and a demanded want
   outranks the trip branch. `device_holdings` loses the unused `etag` column
   and is indexed `(user_id, reported_at)` (same revision, not yet deployed).
+- 2026-10-13 (owner) — M20 T2: **remux replaces burn-in as the default preparation** (reverses the 2026-09-05 burn-in decision; burn-in transcode is the fallback for sources `copyable()` refuses). New job `remux` (`media/remux.py`, own lock key, own cap group `MAX_REMUXES`, 2 attempts), `REMUX_AUDIO_BITRATE`; revision `caf1811e8ee6` (`renditions_kind_prepare_index`, on `a7d2e5c9f318`): `renditions.kind`, `renditions.text_subtitles`, `ix_jobs_transcode_episode` → `ix_jobs_prepare_episode`. Generated master/subtitle playlists and WebVTT segments (§5.4a); first-frame PTS cached in a `remux.json` sidecar written at remux time (not on the row: no extra column, and it travels with the directory). `episode.mp4` refused for a remux with a text track (Q7). Retention's in-flight guard now counts remux and transcode jobs. No new dependency.
+- 2026-10-13 — M20 T2 review fixes: a remux steps aside for a running transcode (`stage=deferred`, skipped by `latest_transcode_jobs`) and a transcode defers (`PrepareDeferred`) to a running remux; stale staging is removed only when its job is not running; generated subtitle playlist and segments are `no-cache` + ETag, not immutable; `fallback_reason` travels to the queued transcode (with `force`) and out as `EpisodeOut.prepare_note`; `REMUX_TIMEOUT_SECONDS` (600) replaces the transcode's 3 h timeout for remuxes; FR-P3 states that a remux beside a full encode group needs `WORKER_CONCURRENCY` > `MAX_TRANSCODES`.

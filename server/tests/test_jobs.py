@@ -815,16 +815,99 @@ async def _does_nothing(ctx: JobContext) -> None:
     return None
 
 
-def test_the_only_capped_group_is_the_two_encoders(settings: Settings) -> None:
+def test_the_capped_groups_are_the_encoders_and_the_remux(settings: Settings) -> None:
     """The mapping is built from settings, so a cap cannot drift from its knob.
 
-    One group since M19 (2026-10-05): ``transcode`` and ``offline_encode``
-    both run a whole-episode ffmpeg, and share ``MAX_TRANSCODES`` between them.
+    One encoder group since M19 (2026-10-05): ``transcode`` and
+    ``offline_encode`` both run a whole-episode ffmpeg, and share
+    ``MAX_TRANSCODES`` between them. And the remux in a group of its own since
+    M20, under ``MAX_REMUXES``.
     """
     encoders = frozenset({media_names.TRANSCODE, media_names.OFFLINE_ENCODE})
-    assert process_caps(settings) == {encoders: settings.max_transcodes}
-    lowered = settings.model_copy(update={"max_transcodes": 1})
-    assert process_caps(lowered) == {encoders: 1}
+    remuxes = frozenset({media_names.REMUX})
+    assert process_caps(settings) == {
+        encoders: settings.max_transcodes,
+        remuxes: settings.max_remuxes,
+    }
+    lowered = settings.model_copy(update={"max_transcodes": 1, "max_remuxes": 1})
+    assert process_caps(lowered) == {encoders: 1, remuxes: 1}
+
+
+def test_a_full_encode_group_does_not_close_the_remux_group(settings: Settings) -> None:
+    caps = process_caps(settings.model_copy(update={"max_transcodes": 1, "max_remuxes": 2}))
+
+    assert media_names.REMUX not in full_types(caps, Counter({media_names.TRANSCODE: 1}))
+    assert full_types(caps, Counter({media_names.REMUX: 2})) == frozenset({media_names.REMUX})
+    assert media_names.TRANSCODE not in full_types(caps, Counter({media_names.REMUX: 2}))
+
+
+async def test_the_loop_never_runs_more_remuxes_than_max_remuxes(
+    jobs_factory: SessionFactory,
+    settings: Settings,
+    stub_handler: Callable[[str, JobHandler], None],
+) -> None:
+    """``MAX_REMUXES`` is the most remuxes one worker has running at once.
+
+    Four remuxes queued, concurrency four, a cap of two: the third stays
+    pending until one of the first two finishes. And an encode the encoder
+    group has room for is claimed alongside them, untouched by the remux cap.
+    """
+    running = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def fake_remux(ctx: JobContext) -> None:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        try:
+            await release.wait()
+        finally:
+            running -= 1
+
+    started: list[str] = []
+
+    async def fake_encoder(ctx: JobContext) -> None:
+        started.append(ctx.job.type)
+        await release.wait()
+
+    stub_handler(media_names.REMUX, fake_remux)
+    stub_handler(media_names.TRANSCODE, fake_encoder)
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    remuxes = [
+        await _enqueued(
+            jobs_factory, media_names.REMUX, {"episode_id": n}, priority=10, run_after=due
+        )
+        for n in range(1, 5)
+    ]
+    transcode = await _enqueued(
+        jobs_factory, media_names.TRANSCODE, {"episode_id": 9}, priority=50, run_after=due
+    )
+    capped = settings.model_copy(update={"max_remuxes": 2, "max_transcodes": 1})
+
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        run_worker_loop(
+            jobs_factory, capped, stop, worker_id=WORKER, concurrency=4, poll_interval=0.05
+        )
+    )
+    try:
+        await _wait_for_status(jobs_factory, transcode.id, JobStatus.RUNNING)
+        await asyncio.sleep(0.3)
+        assert peak == 2
+        waiting = [await _reload(jobs_factory, job.id) for job in remuxes[2:]]
+        assert all(job.status is JobStatus.PENDING for job in waiting)
+        assert started == [media_names.TRANSCODE]
+
+        release.set()
+        for job in remuxes:
+            await _wait_for_status(jobs_factory, job.id, JobStatus.DONE)
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(worker, timeout=5)
+
+    assert peak <= 2
 
 
 def test_a_group_is_full_when_its_members_add_up_to_the_cap(settings: Settings) -> None:

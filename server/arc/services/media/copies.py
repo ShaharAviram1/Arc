@@ -53,9 +53,11 @@ from arc.services.events import offline_copy_event, publish
 from arc.services.jobs.queue import ACTIVE_STATUSES
 from arc.services.media.download import stat_etag
 from arc.services.media.names import (
+    ENCODE_TYPES,
     EPISODE_KEY,
     OFFLINE_ENCODE,
     OFFLINE_WHY_REQUEST,
+    REMUX_TYPES,
     USER_KEY,
     WHY_KEY,
     enqueue_offline_encode,
@@ -249,19 +251,35 @@ def _offline_job_key() -> ColumnElement[str]:
     return cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
 
 
-async def encoding_episode_ids(
-    session: AsyncSession, episode_ids: list[int] | None = None
-) -> set[int]:
-    """Episodes with a pending or running ``offline_encode`` job.
+#: The job types that read an episode's source file while they run: the
+#: offline encode (FR-P6), the burn-in transcode and, since M20, the remux.
+#: What :func:`encoding_episode_ids` asks about by default, so no deleter can
+#: take a source out from under any of them.
+SOURCE_READER_TYPES: Final[frozenset[str]] = ENCODE_TYPES | REMUX_TYPES
 
-    Retention asks this before it deletes a source (FR-P6): a copy being made
-    is reading that file. A ``preparing`` row with **no** live job behind it is
-    an encode whose worker died, and it does not hold the source — otherwise a
+#: Only the job that writes the small copy itself; the guard for deleting a
+#: *copy* rather than a source.
+COPY_WRITER_TYPES: Final[frozenset[str]] = frozenset({OFFLINE_ENCODE})
+
+
+async def encoding_episode_ids(
+    session: AsyncSession,
+    episode_ids: list[int] | None = None,
+    *,
+    types: frozenset[str] = SOURCE_READER_TYPES,
+) -> set[int]:
+    """Episodes with a pending or running job of ``types``.
+
+    Retention asks this before it deletes a source (FR-P6): a copy being made,
+    a transcode or a remux (M20) is reading that file. ``types`` narrows it to
+    :data:`COPY_WRITER_TYPES` where the file at stake is the small copy rather
+    than the source. A ``preparing`` row with **no** live job behind it is an
+    encode whose worker died, and it does not hold the source — otherwise a
     crash could pin a file to the disk for ever. ``None`` asks about every
     episode.
     """
     key = _offline_job_key()
-    statement = select(key).where(Job.type == OFFLINE_ENCODE, Job.status.in_(ACTIVE_STATUSES))
+    statement = select(key).where(Job.type.in_(types), Job.status.in_(ACTIVE_STATUSES))
     if episode_ids is not None:
         if not episode_ids:
             return set()

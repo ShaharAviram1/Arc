@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import Episode, EpisodeState, OfflineCopy
-from arc.services.media.copies import encoding_episode_ids
+from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids
 from arc.services.media.names import offline_path_for
 from arc.services.retention.delete import delete_copy
 from arc.services.trips.names import (
@@ -134,7 +134,9 @@ async def settle_episode(
     due = settle_due(latest, now=now)
     if due is not None:
         return Settle(episode_id, "deferred", "a device confirmed it within the hour", due)
-    if await encoding_episode_ids(session, [episode_id]):
+    # What a settle deletes is the copy, so only the job that writes copies
+    # holds it (a remux or a transcode reads the source, never the copy).
+    if await encoding_episode_ids(session, [episode_id], types=COPY_WRITER_TYPES):
         return Settle(episode_id, "deferred", "an offline encode holds it", now + TRIP_SETTLE_RETRY)
 
     copy = await session.get(OfflineCopy, episode_id)

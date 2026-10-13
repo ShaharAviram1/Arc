@@ -59,6 +59,7 @@ from arc.services.media.plan import (
     INIT_NAME,
     PLAYLIST_NAME,
     SEGMENT_GLOB,
+    VIDEO_PLAYLIST_NAME,
     WORK_DIR,
     EncodeOptions,
     TranscodePlan,
@@ -562,9 +563,16 @@ async def extract_subtitle(plan: TranscodePlan, *, binary: str) -> str | None:
 
 
 def output_files(output_dir: Path) -> tuple[Path, Path, list[Path]]:
-    """``(playlist, init segment, segments)`` as they should be on disk."""
+    """``(playlist, init segment, segments)`` as they should be on disk.
+
+    The media playlist is ``video.m3u8`` when there is one — a remuxed
+    rendition (M20, architecture.md §5.3c), whose ``index.m3u8`` is a master
+    playlist generated on request and never written to disk — and
+    ``index.m3u8`` otherwise, which is what the burn-in encode writes.
+    """
+    video = output_dir / VIDEO_PLAYLIST_NAME
     return (
-        output_dir / PLAYLIST_NAME,
+        video if video.exists() else output_dir / PLAYLIST_NAME,
         output_dir / INIT_NAME,
         sorted(output_dir.glob(SEGMENT_GLOB)),
     )

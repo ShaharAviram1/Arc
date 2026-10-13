@@ -76,7 +76,7 @@ from arc.services.acquisition.claims import release_files
 from arc.services.acquisition.qbit import QbitClient
 from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import STALE_DROP_REASON
-from arc.services.media.copies import encoding_episode_ids
+from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids
 from arc.services.media.names import offline_path_for
 from arc.services.retention.sweep import (
     PROTECTED_STATES,
@@ -333,12 +333,13 @@ async def delete_episode_files(
         )
         return Removed(episode_id=episode.id, acted=False)
 
-    # A small copy being made is reading the source right now (FR-P6). Asked
-    # here, immediately before anything irreversible, and not only by the
-    # planner: an encode can be queued in the minutes between the two.
+    # A small copy, a transcode or a remux (M20) is reading the source right
+    # now (FR-P6). Asked here, immediately before anything irreversible, and
+    # not only by the planner: an encode can be queued in the minutes between
+    # the two.
     if await encoding_episode_ids(session, [episode.id]):
         log.info(
-            "an offline copy of this episode is being made; leaving its files alone",
+            "a job is reading this episode's source; leaving its files alone",
             extra={"episode_id": episode.id},
         )
         return Removed(episode_id=episode.id, acted=False)
@@ -421,7 +422,7 @@ async def delete_idle_copy(
     request. Flushed, not committed, like :func:`delete_episode_files`; the
     in-flight check is repeated here for the same reason as there.
     """
-    if await encoding_episode_ids(session, [idle.episode_id]):
+    if await encoding_episode_ids(session, [idle.episode_id], types=COPY_WRITER_TYPES):
         return False
     if dry_run:
         log.info(
@@ -460,7 +461,7 @@ async def delete_copy(
     derived from the id and re-checked against the data roots. Flushed, not
     committed.
     """
-    if await encoding_episode_ids(session, [episode_id]):
+    if await encoding_episode_ids(session, [episode_id], types=COPY_WRITER_TYPES):
         return False
     path = offline_path_for(settings, episode_id)
     removed = _remove_file(path, settings)

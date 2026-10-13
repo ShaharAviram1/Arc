@@ -45,7 +45,7 @@ from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import Job, JobStatus
 from arc.services.jobs.runner import claim_one, run_job
-from arc.services.media.names import ENCODE_TYPES
+from arc.services.media.names import ENCODE_TYPES, REMUX_TYPES
 
 log = logging.getLogger("arc.worker")
 
@@ -71,8 +71,14 @@ def process_caps(settings: Settings) -> dict[frozenset[str], int]:
     transcode_semaphore`). Which of the two goes first is the queue's ordinary
     priority order: every transcode sorts in front of every copy
     (:mod:`arc.services.media.names`).
+
+    And the **remux** has a group of its own since M20 (``MAX_REMUXES``): it
+    copies the video and is seconds of one core, so it must neither count
+    against the encoders nor wait behind them. A remux is claimed while the
+    encode group is full; that is what lets an episode become playable in
+    under a minute on a host that is busy making trip copies.
     """
-    return {ENCODE_TYPES: settings.max_transcodes}
+    return {ENCODE_TYPES: settings.max_transcodes, REMUX_TYPES: settings.max_remuxes}
 
 
 def full_types(caps: dict[frozenset[str], int], running: Counter[str]) -> frozenset[str]:

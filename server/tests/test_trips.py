@@ -67,6 +67,7 @@ from arc.services.media.download import stat_etag
 from arc.services.media.jobs import sweep_transcodes
 from arc.services.media.names import (
     OFFLINE_ENCODE,
+    REMUX,
     TRANSCODE,
     offline_path_for,
     output_dir_for,
@@ -384,9 +385,8 @@ async def test_an_overlapping_episode_gets_both_a_rendition_and_a_copy(
         db_session, media, anime_id=anime.id, episode_number=1, review_state=ReviewState.AUTO
     )
 
-    assert [job.payload["episode_id"] for job in await jobs_of(db_session, TRANSCODE)] == [
-        rows[0].id
-    ]
+    # Prepared by a remux since M20 (FR-P1).
+    assert [job.payload["episode_id"] for job in await jobs_of(db_session, REMUX)] == [rows[0].id]
     copies = await jobs_of(db_session, OFFLINE_ENCODE)
     assert [job.payload["episode_id"] for job in copies] == [rows[0].id]
     assert copies[0].priority == copy_priority(0)
@@ -410,6 +410,7 @@ async def test_a_trip_only_episode_is_copied_and_never_transcoded(
 
     assert rows[1].state is EpisodeState.MATCHED
     assert await jobs_of(db_session, TRANSCODE) == []
+    assert await jobs_of(db_session, REMUX) == []
     copies = await jobs_of(db_session, OFFLINE_ENCODE)
     assert [(job.payload["episode_id"], job.payload["why"]) for job in copies] == [
         (rows[1].id, "trip")
@@ -421,6 +422,7 @@ async def test_a_trip_only_episode_is_copied_and_never_transcoded(
     await db_session.flush()
     await sweep_transcodes(db_session)
     assert await jobs_of(db_session, TRANSCODE) == []
+    assert await jobs_of(db_session, REMUX) == []
     assert len(await jobs_of(db_session, OFFLINE_ENCODE)) == 2
     # And no HLS output ever appears.
     assert not (output_dir_for(settings, rows[1].id) / "index.m3u8").exists()
@@ -441,9 +443,7 @@ async def test_a_normal_want_on_a_trip_only_matched_episode_promotes_it(
     result = await compute_wants(db_session)
 
     assert result.promoted == 1
-    assert [job.payload["episode_id"] for job in await jobs_of(db_session, TRANSCODE)] == [
-        rows[2].id
-    ]
+    assert [job.payload["episode_id"] for job in await jobs_of(db_session, REMUX)] == [rows[2].id]
     assert await needs_rendition(db_session, rows[2].id)
     again = await compute_wants(db_session)
     assert again.promoted == 0, "the queued transcode is not queued twice"

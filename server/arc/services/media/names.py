@@ -1,4 +1,4 @@
-"""The transcode and offline-copy job types, their keys and priorities (FR-P1, FR-P3, FR-P6).
+"""The remux, transcode and offline-copy job types, their keys and priorities (FR-P1, FR-P3, FR-P6).
 
 Handler-free, like :mod:`arc.services.library.names` and
 :mod:`arc.services.acquisition.names`, and for the same reason: the API route
@@ -25,7 +25,9 @@ anything anybody is actually waiting for.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,8 +38,36 @@ from arc.config import Settings
 from arc.models import DEFAULT_PRIORITY, Episode, Job, ListEntry, Want
 from arc.services.jobs.queue import ACTIVE_STATUSES, enqueue
 
-#: Prepare one episode for playback: probe, plan, burn in, package (FR-P1).
+#: Prepare one episode for playback: probe, plan, burn in, package. Since M20
+#: the fallback for a source :func:`~arc.services.media.plan.copyable` refuses
+#: (FR-P7), and what an admin asks for with ``?mode=transcode`` or ``force``.
 TRANSCODE = "transcode"
+
+#: Prepare one episode for playback by copying its video, converting only the
+#: audio, and carrying the subtitles as a WebVTT track (FR-P1 since M20,
+#: architecture.md §5.3c). The default: about 20 s an episode, against twenty
+#: minutes of every core for the burn-in encode.
+REMUX = "remux"
+
+#: The job types a remux cap counts (:func:`arc.services.jobs.loop.
+#: process_caps`): ``MAX_REMUXES``, separate from the encode group's
+#: ``MAX_TRANSCODES``, so an encode running never holds a remux back.
+REMUX_TYPES: frozenset[str] = frozenset({REMUX})
+
+#: The two job types that prepare an episode's streamed rendition. What
+#: :func:`latest_transcode_jobs` reads and ``ix_jobs_prepare_episode`` covers.
+PREPARE_TYPES: frozenset[str] = frozenset({TRANSCODE, REMUX})
+
+#: Attempts a remux gets. Two: a remux that fails twice on the same file is
+#: not going to succeed a third time, and the burn-in path is an admin's
+#: ``?mode=transcode`` away.
+REMUX_MAX_ATTEMPTS = 2
+
+#: The payload stage a remux writes when it steps aside for another prepare
+#: job that is already writing the episode's rendition. Such a row says
+#: nothing about the episode, so :func:`latest_transcode_jobs` skips it and
+#: the episode keeps showing the job that is actually working.
+STAGE_DEFERRED = "deferred"
 
 #: Payload key holding the episode a transcode is for. The job row is where
 #: progress and the failure tail live (:mod:`arc.services.media.jobs` explains
@@ -173,6 +203,75 @@ def transcode_dedupe_key(episode_id: int) -> str:
     return f"{TRANSCODE}:{episode_id}"
 
 
+#: Two files a remux leaves in its rendition directory beside the HLS output
+#: (architecture.md §5.3c). Neither is in the media router's vocabulary, so
+#: neither is ever served as it is: ``subs.vtt`` is the whole WebVTT track the
+#: router cuts into ``sub_NNNNN.vtt`` segments on request, and ``remux.json``
+#: holds what the generated master playlist and those segments need
+#: (:class:`RemuxInfo`). Here, not beside the handler, because the router reads
+#: them and must not import the handler.
+SUBTITLES_VTT_NAME = "subs.vtt"
+REMUX_INFO_NAME = "remux.json"
+
+
+@dataclass(frozen=True, slots=True)
+class RemuxInfo:
+    """What a remuxed rendition's generated playlists need, read once at remux time.
+
+    ``mpegts`` is the 90 kHz timestamp of the first video frame (ffprobe of
+    the finished ``video.m3u8``, which opens ``init.mp4`` and
+    ``seg_00000.m4s``): the ``X-TIMESTAMP-MAP`` every subtitle segment
+    carries. Read once per rendition and kept here, so a request never runs
+    ffprobe. ``bandwidth`` is the peak segment bitrate in bits per second, and
+    ``codecs`` the RFC 6381 string, both for the master playlist's
+    ``EXT-X-STREAM-INF``; ``subtitle_name`` is the label a player shows for
+    the text track ("English").
+    """
+
+    mpegts: int = 0
+    bandwidth: int = 0
+    codecs: str = "avc1.640028,mp4a.40.2"
+    subtitle_name: str | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> RemuxInfo:
+        """Parse a sidecar; anything missing or of the wrong type is the default."""
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            return cls()
+        if not isinstance(raw, dict):
+            return cls()
+        default = cls()
+        mpegts = raw.get("mpegts")
+        bandwidth = raw.get("bandwidth")
+        codecs = raw.get("codecs")
+        name = raw.get("subtitle_name")
+        # ``bool`` is an ``int`` to Python; ``true`` is not a timestamp.
+        return cls(
+            mpegts=(
+                mpegts
+                if isinstance(mpegts, int) and not isinstance(mpegts, bool) and mpegts >= 0
+                else default.mpegts
+            ),
+            bandwidth=(
+                bandwidth
+                if isinstance(bandwidth, int) and not isinstance(bandwidth, bool) and bandwidth > 0
+                else 0
+            ),
+            codecs=codecs if isinstance(codecs, str) and codecs else default.codecs,
+            subtitle_name=name if isinstance(name, str) and name else None,
+        )
+
+
+def remux_dedupe_key(episode_id: int) -> str:
+    """One queued remux per episode, however many things ask for it."""
+    return f"{REMUX}:{episode_id}"
+
+
 def output_dir_for(settings: Settings, episode_id: int) -> Path:
     """``DATA_DIR/renditions/<episode id>`` — derived from the id, never input.
 
@@ -190,7 +289,14 @@ def output_dir_for(settings: Settings, episode_id: int) -> Path:
 async def latest_transcode_jobs(
     session: AsyncSession, episode_ids: Sequence[int]
 ) -> dict[int, Job]:
-    """The most recent ``transcode`` job for each of ``episode_ids``.
+    """The most recent prepare job — ``transcode`` or ``remux`` — for each of ``episode_ids``.
+
+    Both types since M20: a remux that handed over to the burn-in encode is
+    followed by a newer transcode row, and a remux that made the rendition is
+    the newest row there is, so "the newest of either" is always the job whose
+    progress and failure a user should see. Every caller (the show page, the
+    startup sweep, the trip promotion and release) asks the same question it
+    asked before and needs no change.
 
     One query for a whole show's episode list rather than one per row — the
     show page asks this of twelve episodes at a time, and the answer is what
@@ -198,7 +304,7 @@ async def latest_transcode_jobs(
 
     Matched on ``payload->>'episode_id'`` rather than on a column of its own:
     the payload is where the transcode's own state lives, and
-    ``ix_jobs_transcode_episode`` (:mod:`arc.models.job`) is the partial
+    ``ix_jobs_prepare_episode`` (:mod:`arc.models.job`) is the partial
     expression index that makes that as cheap as a column would have been.
 
     ``DISTINCT ON`` rather than "fetch them all and keep the last": an episode
@@ -210,9 +316,14 @@ async def latest_transcode_jobs(
         return {}
     wanted = {str(episode_id) for episode_id in episode_ids}
     key = cast(ColumnElement[str], Job.payload[EPISODE_KEY].astext)
+    stage = cast(ColumnElement[str], Job.payload["stage"].astext)
     rows = await session.scalars(
         select(Job)
-        .where(Job.type == TRANSCODE, key.in_(wanted))
+        .where(
+            Job.type.in_(PREPARE_TYPES),
+            key.in_(wanted),
+            func.coalesce(stage, "") != STAGE_DEFERRED,
+        )
         .distinct(key)
         .order_by(key, Job.id.desc())
     )
@@ -224,6 +335,11 @@ async def latest_transcode_jobs(
         except TypeError, ValueError:  # pragma: no cover - a hand-written row
             continue
     return latest
+
+
+#: The M20 name for :func:`latest_transcode_jobs`, which now spans both
+#: prepare job types. The old name stays so no caller has to change.
+latest_prepare_jobs = latest_transcode_jobs
 
 
 async def transcode_priority(session: AsyncSession, episode_id: int) -> int:
@@ -293,6 +409,35 @@ async def enqueue_transcode(
     )
 
 
+async def enqueue_remux(
+    session: AsyncSession,
+    episode_id: int,
+    *,
+    force: bool = False,
+    priority: int | None = None,
+) -> Job:
+    """Queue a remux for one episode, deduplicated on the episode (FR-P1).
+
+    Flushed, not committed, like :func:`enqueue_transcode`, and with the same
+    priority rule (FR-P3): the remux *is* the preparation now, so it sorts
+    where the transcode used to. ``force`` throws an existing rendition away
+    and remuxes again (FR-P5). Two attempts (:data:`REMUX_MAX_ATTEMPTS`).
+    """
+    payload: dict[str, Any] = {EPISODE_KEY: episode_id}
+    if force:
+        payload["force"] = True
+    if priority is None:
+        priority = await transcode_priority(session, episode_id)
+    return await enqueue(
+        session,
+        REMUX,
+        payload,
+        priority=priority,
+        max_attempts=REMUX_MAX_ATTEMPTS,
+        dedupe_key=remux_dedupe_key(episode_id),
+    )
+
+
 __all__ = [
     "ENCODE_TYPES",
     "EPISODE_KEY",
@@ -304,17 +449,28 @@ __all__ = [
     "OFFLINE_WHY",
     "OFFLINE_WHY_REQUEST",
     "OFFLINE_WHY_TRIP",
+    "PREPARE_TYPES",
     "PRIORITY_PER_EPISODE",
+    "REMUX",
+    "REMUX_INFO_NAME",
+    "REMUX_MAX_ATTEMPTS",
+    "REMUX_TYPES",
+    "STAGE_DEFERRED",
+    "SUBTITLES_VTT_NAME",
     "TRANSCODE",
+    "RemuxInfo",
     "USER_KEY",
     "WHY_KEY",
     "enqueue_offline_encode",
+    "enqueue_remux",
     "enqueue_transcode",
     "latest_offline_jobs",
+    "latest_prepare_jobs",
     "latest_transcode_jobs",
     "offline_dedupe_key",
     "offline_path_for",
     "output_dir_for",
+    "remux_dedupe_key",
     "transcode_dedupe_key",
     "transcode_priority",
 ]

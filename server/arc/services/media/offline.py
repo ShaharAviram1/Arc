@@ -62,6 +62,7 @@ from arc.core.text import keep_head_and_tail
 from arc.models import Episode, EpisodeState, OfflineCopy, OfflineCopyState, Rendition
 from arc.services.jobs.registry import JobContext, register
 from arc.services.media.copies import (
+    COPY_WRITER_TYPES,
     encoding_episode_ids,
     ensure_copy_row,
     file_matches,
@@ -603,7 +604,7 @@ async def sweep_offline_leftovers(session: AsyncSession, settings: Settings) -> 
     if not root.is_dir():
         return 0
     entries = list(root.iterdir())
-    live = await encoding_episode_ids(session)
+    live = await encoding_episode_ids(session, types=COPY_WRITER_TYPES)
     rows = set((await session.scalars(select(OfflineCopy.episode_id))).all())
     removed = 0
     for entry in entries:

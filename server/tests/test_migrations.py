@@ -26,7 +26,7 @@ from arc.models import (
     IN_PROGRESS_INDEX,
     OFFLINE_SEARCH_INDEX,
     ONE_ACTIVE_TRIP_INDEX,
-    TRANSCODE_EPISODE_INDEX,
+    PREPARE_EPISODE_INDEX,
     TRIP_EPISODE_INDEX,
     WANTED_CLAIM_INDEX,
     Base,
@@ -300,22 +300,79 @@ def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url
     assert script.get_current_head() == revisions[0].revision
 
 
-def test_the_transcode_episode_index_is_created_by_a_migration(
+def test_the_prepare_episode_index_is_created_by_a_migration(
     pg_engine: AsyncEngine, test_database_url: str
 ) -> None:
     """The one index autogenerate cannot write for itself.
 
     ``latest_transcode_jobs`` matches on ``payload->>'episode_id'``, which is an
-    expression, and the index is partial on ``type = 'transcode'``. Neither is
-    something a column-level model declaration can express, so both are written
-    out in the migration — and an index that exists only in a migration is an
-    index a future squash can silently drop. This is the assertion that notices.
+    expression, and the index is partial on the two prepare job types
+    (``transcode`` and, since M20, ``remux``). Neither is something a
+    column-level model declaration can express, so both are written out in the
+    migration — and an index that exists only in a migration is an index a
+    future squash can silently drop. This is the assertion that notices.
     """
-    definition = _index_definition(test_database_url, "jobs", TRANSCODE_EPISODE_INDEX)
+    definition = _index_definition(test_database_url, "jobs", PREPARE_EPISODE_INDEX)
 
-    assert definition is not None, f"{TRANSCODE_EPISODE_INDEX} is not on the jobs table"
+    assert definition is not None, f"{PREPARE_EPISODE_INDEX} is not on the jobs table"
     assert "payload ->> 'episode_id'" in definition
-    assert "WHERE" in definition and "'transcode'" in definition
+    assert "WHERE" in definition and "'transcode'" in definition and "'remux'" in definition
+    assert _index_definition(test_database_url, "jobs", "ix_jobs_transcode_episode") is None
+
+
+#: The revision that added ``renditions.kind`` and the prepare index (M20 T2).
+M20_REMUX = "caf1811e8ee6"
+
+
+def _columns(url: str, table: str) -> dict[str, tuple[str, str | None, str]]:
+    """``column → (data type, default, nullable)`` for one table."""
+
+    async def run() -> dict[str, tuple[str, str | None, str]]:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.execute(
+                    text(
+                        "SELECT column_name, data_type, column_default, is_nullable "
+                        "FROM information_schema.columns WHERE table_name = :table"
+                    ),
+                    {"table": table},
+                )
+                return {str(r[0]): (str(r[1]), r[2], str(r[3])) for r in rows.all()}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_the_remux_revision_upgrades_and_downgrades(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``renditions.kind``/``text_subtitles`` and the widened index, both ways.
+
+    Down: the columns are gone and the transcode-only index is back. Up again:
+    an existing row reads as a transcode with no text track, which is what
+    every rendition made before M20 is.
+    """
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, M20_SEED)
+        columns = _columns(test_database_url, "renditions")
+        assert "kind" not in columns and "text_subtitles" not in columns
+        old = _index_definition(test_database_url, "jobs", "ix_jobs_transcode_episode")
+        assert old is not None and "'remux'" not in old
+        assert _index_definition(test_database_url, "jobs", PREPARE_EPISODE_INDEX) is None
+
+        command.upgrade(config, M20_REMUX)
+        columns = _columns(test_database_url, "renditions")
+        assert columns["kind"][0] == "character varying"
+        assert "transcode" in str(columns["kind"][1]) and columns["kind"][2] == "NO"
+        assert columns["text_subtitles"][0] == "boolean"
+        assert "false" in str(columns["text_subtitles"][1])
+        assert columns["text_subtitles"][2] == "NO"
+        assert _index_definition(test_database_url, "jobs", PREPARE_EPISODE_INDEX) is not None
+    finally:
+        command.upgrade(config, "head")
 
 
 def test_the_in_progress_index_is_created_by_a_migration(
@@ -553,7 +610,7 @@ def test_show_pins_is_a_cascading_pair(pg_engine: AsyncEngine, test_database_url
     assert anime_fk is not None and "ON DELETE CASCADE" in anime_fk
 
 
-def _columns(url: str, table: str) -> dict[str, tuple[str, str]]:
+def _column_types(url: str, table: str) -> dict[str, tuple[str, str]]:
     """``column → (data_type, is_nullable)`` for one table, from the catalogue."""
 
     async def run() -> dict[str, tuple[str, str]]:
@@ -578,7 +635,7 @@ def test_wants_demanded_at_is_a_nullable_timestamp(
     pg_engine: AsyncEngine, test_database_url: str
 ) -> None:
     """``wants.demanded_at`` (FR-A14, M20): null for every want made before it."""
-    columns = _columns(test_database_url, "wants")
+    columns = _column_types(test_database_url, "wants")
 
     assert columns["demanded_at"] == ("timestamp with time zone", "YES")
 
@@ -587,7 +644,7 @@ def test_device_holdings_is_keyed_per_device_and_indexed_per_user_report(
     pg_engine: AsyncEngine, test_database_url: str
 ) -> None:
     """``device_holdings`` (FR-A15, M20): the shape the reconciler and the PUT rely on."""
-    columns = _columns(test_database_url, "device_holdings")
+    columns = _column_types(test_database_url, "device_holdings")
 
     assert columns == {
         "user_id": ("bigint", "NO"),

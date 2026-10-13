@@ -48,6 +48,7 @@ from arc.services.media.jobs import (
     transcode_episode,
 )
 from arc.services.media.names import (
+    REMUX,
     TRANSCODE,
     enqueue_transcode,
     latest_transcode_jobs,
@@ -823,8 +824,12 @@ async def test_the_enqueue_carries_the_priority_and_deduplicates(
 # --- The link hook ----------------------------------------------------------
 
 
-async def test_linking_a_file_queues_its_transcode(api_factory: SessionFactory) -> None:
-    """FR-P1: as soon as a file is matched, a transcode job runs."""
+async def test_linking_a_file_queues_its_remux(api_factory: SessionFactory) -> None:
+    """FR-P1: as soon as a file is matched, it is prepared — by a remux since M20.
+
+    No transcode is queued by the link: the remux hands over to one itself
+    when the source cannot be copied (FR-P7).
+    """
     async with api_factory() as session:
         anime = await make_anime(session, anilist_id=970030)
         await make_episodes(session, anime, 3)
@@ -841,9 +846,11 @@ async def test_linking_a_file_queues_its_transcode(api_factory: SessionFactory) 
         )
         await session.commit()
 
-        queued = list((await session.scalars(select(Job).where(Job.type == TRANSCODE))).all())
+        queued = list((await session.scalars(select(Job).where(Job.type == REMUX))).all())
         assert [job.payload["episode_id"] for job in queued] == [episode.id]
         assert episode.state is EpisodeState.MATCHED
+        transcodes = (await session.scalars(select(Job).where(Job.type == TRANSCODE))).all()
+        assert list(transcodes) == []
 
         # Linking the same file again does not queue a second encode.
         await link(
@@ -854,7 +861,7 @@ async def test_linking_a_file_queues_its_transcode(api_factory: SessionFactory) 
             review_state=ReviewState.CONFIRMED,
         )
         await session.commit()
-        again = list((await session.scalars(select(Job).where(Job.type == TRANSCODE))).all())
+        again = list((await session.scalars(select(Job).where(Job.type == REMUX))).all())
         assert len(again) == 1
 
 
@@ -876,7 +883,8 @@ async def test_linking_a_file_to_a_ready_episode_queues_nothing(
             review_state=ReviewState.CONFIRMED,
         )
         await session.commit()
-        assert list((await session.scalars(select(Job).where(Job.type == TRANSCODE))).all()) == []
+        queued = await session.scalars(select(Job).where(Job.type.in_((TRANSCODE, REMUX))))
+        assert list(queued.all()) == []
 
 
 # --- The startup sweep ------------------------------------------------------
@@ -933,11 +941,17 @@ async def test_the_sweep_queues_what_a_restart_would_have_lost(
 
         assert await sweep_transcodes(session) == 3
 
+        # Since M20 an episode with no prepare job is remuxed; one whose last
+        # job was a transcode (a fallback, an admin's choice) is transcoded.
         queued = await session.scalars(
             select(Job).where(Job.type == TRANSCODE, Job.status == JobStatus.PENDING)
         )
         ids = {job.payload["episode_id"] for job in queued.all()}
-        assert ids == {matched.id, preparing.id, failed.id, already.id}
+        assert ids == {failed.id, already.id}
+        remuxes = await session.scalars(
+            select(Job).where(Job.type == REMUX, Job.status == JobStatus.PENDING)
+        )
+        assert {job.payload["episode_id"] for job in remuxes.all()} == {matched.id, preparing.id}
 
         # Running it again queues nothing: everything now has an active job.
         assert await sweep_transcodes(session) == 0

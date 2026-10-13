@@ -26,7 +26,8 @@ from arc.models import (
     OfflineCopyState,
 )
 from arc.services.jobs.registry import JobContext
-from arc.services.media.names import OFFLINE_ENCODE, offline_path_for
+from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids
+from arc.services.media.names import OFFLINE_ENCODE, REMUX, TRANSCODE, offline_path_for
 from arc.services.retention.delete import delete_episode_files, delete_idle_copy
 from arc.services.retention.jobs import delete_files, retention_sweep
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
@@ -220,6 +221,37 @@ async def test_a_source_is_never_deleted_while_a_copy_is_being_made(
     assert source.exists()
     assert await db_session.scalar(select(MediaFile.id).where(MediaFile.episode_id == episode.id))
     assert episode.state is EpisodeState.READY
+
+
+@pytest.mark.parametrize("job_type", [REMUX, TRANSCODE])
+@pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.RUNNING])
+async def test_a_source_is_never_deleted_while_a_remux_or_transcode_reads_it(
+    db_session: AsyncSession, tmp_path: Path, job_type: str, status: JobStatus
+) -> None:
+    """M20: the remux reads the source too, and so does the burn-in fallback.
+
+    Neither the sweep's planner nor the deleter itself may take the file while
+    either is queued or running.
+    """
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session,
+        settings,
+        anilist_id=977020 + (job_type == TRANSCODE) * 2 + (status is JobStatus.PENDING),
+        ready_at=days_ago(30),
+    )
+    db_session.add(Job(type=job_type, payload={"episode_id": episode.id}, status=status))
+    await db_session.flush()
+    source = settings.downloads_dir / str(episode.id)
+
+    assert await candidates(db_session, settings, now=NOW) == []
+    assert await encoding_episode_ids(db_session, [episode.id]) == {episode.id}
+    assert await encoding_episode_ids(db_session, [episode.id], types=COPY_WRITER_TYPES) == set()
+    targets = await targets_for_episode(db_session, settings, episode.id)
+    removed = await delete_episode_files(db_session, settings, episode, targets)
+
+    assert removed.acted is False
+    assert source.exists()
 
 
 async def test_a_preparing_row_with_no_live_job_does_not_pin_the_source(

@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Anime, Episode, EpisodeState, MediaFile, ReviewState
 from arc.services.acquisition.states import TERMINAL_STATES, advance_to_matched
-from arc.services.media.names import OFFLINE_WHY_TRIP, enqueue_offline_encode, enqueue_transcode
+from arc.services.media.names import OFFLINE_WHY_TRIP, enqueue_offline_encode, enqueue_remux
 from arc.services.trips.names import enqueue_trip_release
 from arc.services.trips.rules import (
     ended_trip_leftover,
@@ -118,11 +118,14 @@ async def link(
     moved = advance_to_matched(episode, reason=f"media file {media_file.id} linked")
     await session.flush()
 
-    # FR-P1: "as soon as a MediaFile is matched to an episode, a transcode job
-    # runs". Enqueued in the caller's transaction, so the link and its
-    # consequence land together or neither does, and deduplicated on the
-    # episode, so confirming a review item for an episode whose first file was
-    # already queued does not queue a second encode. An episode already
+    # FR-P1: "as soon as a MediaFile is matched to an episode, it is prepared".
+    # Since M20 that is a ``remux`` (video copied, subtitles as a text track);
+    # the remux itself hands over to the burn-in ``transcode`` when the source
+    # cannot be copied (FR-P7), so nothing here has to probe. Enqueued in the
+    # caller's transaction, so the link and its consequence land together or
+    # neither does, and deduplicated on the episode, so confirming a review
+    # item for an episode whose first file was already queued does not queue a
+    # second one. An episode already
     # ``preparing`` or ``ready`` is left alone: ``advance_to_matched`` refused
     # to move it, and re-encoding what is already playable is exactly what
     # FR-P5 and the ``force`` path exist to make deliberate.
@@ -143,7 +146,7 @@ async def link(
     elif episode.state is EpisodeState.MATCHED:
         streaming = await needs_rendition(session, episode.id)
         if streaming:
-            queued = await enqueue_transcode(session, episode.id)
+            queued = await enqueue_remux(session, episode.id)
         if not streaming or await pending_episode_ids(session, [episode.id]):
             copy_job = await enqueue_offline_encode(
                 session,

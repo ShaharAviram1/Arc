@@ -316,6 +316,42 @@ def cues_to_vtt(cues: Iterable[Cue]) -> str:
     return "WEBVTT\n\n" + "\n".join(_cue_block(cue) for cue in cues)
 
 
+#: The timing line :func:`_cue_block` writes, read back by :func:`vtt_to_cues`.
+_VTT_TIMING: Final[re.Pattern[str]] = re.compile(
+    r"^(\d+):(\d{2}):(\d{2})\.(\d{3})\s+-->\s+(\d+):(\d{2}):(\d{2})\.(\d{3})(?:\s+(.*))?$"
+)
+
+
+def _vtt_seconds(hours: str, minutes: str, seconds: str, millis: str) -> float:
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
+
+
+def vtt_to_cues(text: str) -> list[Cue]:
+    """The cues of a WebVTT file :func:`cues_to_vtt` wrote, read back.
+
+    The remux stores one ``subs.vtt`` per rendition and the media route cuts
+    it into segments on request (:func:`vtt_segment`), so it has to read its
+    own output; it is not a general WebVTT parser (no ``NOTE``, ``STYLE`` or
+    cue identifiers, which :func:`cues_to_vtt` never writes). A block whose
+    timing line does not parse is skipped. Added in M20 T2.
+    """
+    cues: list[Cue] = []
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n")):
+        lines = block.strip("\n").split("\n")
+        if not lines:
+            continue
+        match = _VTT_TIMING.match(lines[0].strip())
+        if match is None:
+            continue
+        groups = match.groups()
+        start = _vtt_seconds(*groups[0:4])
+        end = _vtt_seconds(*groups[4:8])
+        body = "\n".join(line for line in lines[1:] if line.strip())
+        if body:
+            cues.append(Cue(start, end, body, groups[8] or None))
+    return cues
+
+
 def vtt_segment(cues: Iterable[Cue], start_s: float, end_s: float, mpegts: int) -> str:
     """One HLS subtitle segment: the cues that **start** in ``[start_s, end_s)``.
 
@@ -433,4 +469,5 @@ __all__ = [
     "subtitles_playlist",
     "vtt_segment",
     "vtt_timestamp",
+    "vtt_to_cues",
 ]

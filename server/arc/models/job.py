@@ -28,25 +28,34 @@ from arc.models.enums import JobStatus, enum_column
 DEFAULT_PRIORITY = 100
 DEFAULT_MAX_ATTEMPTS = 3
 
-#: The index behind :func:`arc.services.media.names.latest_transcode_jobs`.
+#: The index behind :func:`arc.services.media.names.latest_transcode_jobs`
+#: (alias ``latest_prepare_jobs``).
 #:
-#: A transcode's progress and failure tail live in ``payload`` rather than in
+#: A prepare job's progress and failure tail live in ``payload`` rather than in
 #: columns of their own (:mod:`arc.services.media.jobs` explains why), so the
 #: show page's "which job is this episode's?" is a lookup on
 #: ``payload->>'episode_id'`` — an expression, and one no ordinary index can
-#: serve. Partial on ``type = 'transcode'`` because that key exists on no other
-#: job type: the index then covers a fraction of the queue and stays small
-#: however many catalogue refreshes and ingest scans pass through the table.
+#: serve. Partial on the two job types that prepare a rendition — ``transcode``
+#: and, since M20, ``remux`` — so the index covers a fraction of the queue and
+#: stays small however many catalogue refreshes and ingest scans pass through
+#: the table. (It replaced ``ix_jobs_transcode_episode``, partial on
+#: ``transcode`` alone, in revision ``renditions_kind_prepare_index``.)
 #:
 #: Named as a constant because two other things spell it: the migration that
 #: creates it, and the test that proves it survived one.
-TRANSCODE_EPISODE_INDEX = "ix_jobs_transcode_episode"
+PREPARE_EPISODE_INDEX = "ix_jobs_prepare_episode"
 
 #: The expression and the predicate, as SQL. Shared with the migration for the
 #: same reason the name is — an index the models describe one way and the
 #: database another is an index autogenerate will offer to drop every time.
-TRANSCODE_EPISODE_EXPRESSION = "(payload ->> 'episode_id')"
-TRANSCODE_EPISODE_PREDICATE = "type = 'transcode'"
+PREPARE_EPISODE_EXPRESSION = "(payload ->> 'episode_id')"
+PREPARE_EPISODE_PREDICATE = "type IN ('transcode', 'remux')"
+
+#: The pre-M20 names, kept so older imports keep working; they now name the
+#: widened index.
+TRANSCODE_EPISODE_INDEX = PREPARE_EPISODE_INDEX
+TRANSCODE_EPISODE_EXPRESSION = PREPARE_EPISODE_EXPRESSION
+TRANSCODE_EPISODE_PREDICATE = PREPARE_EPISODE_PREDICATE
 
 
 class Job(Base):
@@ -56,9 +65,9 @@ class Job(Base):
     __table_args__ = (
         Index("ix_jobs_status_run_after_priority", "status", "run_after", "priority"),
         Index(
-            TRANSCODE_EPISODE_INDEX,
-            text(TRANSCODE_EPISODE_EXPRESSION),
-            postgresql_where=text(TRANSCODE_EPISODE_PREDICATE),
+            PREPARE_EPISODE_INDEX,
+            text(PREPARE_EPISODE_EXPRESSION),
+            postgresql_where=text(PREPARE_EPISODE_PREDICATE),
         ),
     )
 

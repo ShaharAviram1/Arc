@@ -86,6 +86,7 @@ from arc.services.mal import jobs as mal_jobs  # noqa: F401  (registers handlers
 from arc.services.mal.names import IMPORT_ALL as MAL_IMPORT_ALL
 from arc.services.mal.names import IMPORT_PRIORITY as MAL_IMPORT_PRIORITY
 from arc.services.media import offline as offline_copies  # noqa: F401  (registers handlers)
+from arc.services.media import remux as remux_jobs  # noqa: F401  (registers handlers)
 from arc.services.media.jobs import sweep_transcodes
 from arc.services.recs.factory import close_shared_model
 from arc.services.retention import jobs as retention_jobs  # noqa: F401  (registers handlers)

@@ -634,13 +634,25 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode number manually, or mark as "not anime / ignore".
 
 ### 4.4 Playback preparation
-- FR-P1 As soon as a MediaFile is matched to an episode, a transcode job runs.
-  Every file is fully transcoded to H.264 + AAC with the chosen subtitle
-  track **burned in**, and packaged as HLS (fMP4 segments, ~6 s). The one
-  exception is a **trip-only** episode (FR-A12): it gets the small offline
-  copy (FR-P6) instead and never an HLS rendition.
+- FR-P1 As soon as a MediaFile is matched to an episode, it is prepared for
+  streaming. **By default it is remuxed** (M20, owner 2026-10-13): the
+  source's H.264 video is copied as it is, the audio is copied when it is
+  already AAC and converted to stereo AAC otherwise, the chosen subtitle track
+  becomes a **WebVTT text track** (FR-P2), and the result is packaged as HLS
+  (fMP4 segments, ~6 s) — about 20 seconds of one core for a 1080p episode.
+  **Burn-in encoding is only the fallback** for a source that cannot be copied
+  (FR-P7): it is fully transcoded to H.264 + AAC with the subtitle track
+  burned into the picture, as every episode was before M20. The one exception
+  to both is a **trip-only** episode (FR-A12): it gets the small offline copy
+  (FR-P6) instead and never an HLS rendition.
 - FR-P2 Subtitle track choice: prefer the first English (or configured
   language) text track; fall back to no subtitles and flag the episode.
+  For a remuxed rendition the chosen track is converted to **WebVTT**: the
+  ASS styling and positioning are lost (italics and top placement survive),
+  and sign, song, karaoke and typesetting events are dropped, so only the
+  dialogue is shown. A track with no dialogue left after that leaves the
+  rendition without subtitles, and the episode is flagged as for a source
+  with none.
   Audio track choice: prefer Japanese (configurable); otherwise the
   **original** — any track that is not an English dub, the muxer's default
   track first; otherwise the muxer's default; and the first track only as a
@@ -656,11 +668,22 @@ that the course professor can log in at any time, and the owner uses it daily.
   for from a ready episode goes before a trip's, and a trip's go in episode
   order. Copies and transcodes share the host's encoder cap — at most
   `MAX_TRANSCODES` of the two together — and a copy already being made is
-  never interrupted for a transcode.
+  never interrupted for a transcode. **Remuxes have a cap of their own**
+  (`MAX_REMUXES`, M20) and do not count against the encoders: a remux can be
+  taken while the encode group is full, **provided the worker has a free
+  slot** — the worker runs at most `WORKER_CONCURRENCY` jobs of any kind, so
+  this holds only when `WORKER_CONCURRENCY` is larger than `MAX_TRANSCODES`
+  (the defaults are both 2; production runs `WORKER_CONCURRENCY=3`, owner
+  2026-10-13). Then a newly downloaded episode is playable in under a minute
+  however many burn-in encodes or copies are waiting.
 - FR-P4 Episode state visible to users: `preparing` (with %), `ready`,
-  `failed` (with retry).
-- FR-P5 The original source file is kept until retention removes it (so a
-  transcode can be redone with different settings).
+  `failed` (with retry). A remux is retried once (two attempts); a source
+  handed to the burn-in fallback (FR-P7) stays `matched` until the encode
+  starts, and the reason it could not be copied is recorded on the job.
+- FR-P5 The original source file is kept until retention removes it (so the
+  rendition can be redone with different settings, by remux or by the burn-in
+  encode). Nothing deletes a source while a remux, a transcode or a copy is
+  reading it.
 - FR-P6 **A small offline copy** (M19, owner 2026-10-05). On request, the
   server makes a second, smaller file of a `ready` episode for a device to
   keep (FR-S9): one MP4, at most 720 lines tall (a smaller source is never
@@ -695,10 +718,22 @@ that the course professor can log in at any time, and the owner uses it daily.
   file. A copy is deleted with its episode (FR-T1) and on its own when nobody
   has fetched it for `offline_idle_days` (FR-T7). Trips (FR-A12) build on
   it: a trip's episode gets its copy whether or not it is `ready`.
+- FR-P7 **Copyability and fallback** (M20, owner 2026-10-13). Before a remux,
+  the source is probed: video that every Safari and Chrome plays as it is —
+  H.264, 8-bit 4:2:0, Baseline/Main/High profile, level 5.1 at most, no larger
+  than 1080p, progressive — is copied. Anything else (10-bit "Hi10P", HEVC,
+  4:4:4, above 1080p, interlaced) is handed to the burn-in encode of FR-P1,
+  queued under `MAX_TRANSCODES`; the remux job finishes saying so, with the
+  reason ("10-bit"). Audio is never a reason to fall back: non-AAC audio is
+  converted in the remux. An admin can force either path for one episode.
 
 ### 4.5 Streaming and player
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
-  Playlists and segments are served by the server behind auth.
+  Playlists and segments are served by the server behind auth. A remuxed
+  rendition (FR-P1) is served with its **subtitle rendition**: the master
+  playlist offers the WebVTT track, on by default, and the subtitle playlist
+  and segments are cut from the stored track on request, each cue in the one
+  segment it starts in.
   **The player starts playing on its own** (owner, 2026-09-17): opening an
   episode is the decision, and the page presses play as soon as the source is
   attached and the resume seek (FR-S2) has been made. The browser's autoplay
@@ -773,7 +808,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   demo account is refused (403) and sees no offline control. Since M19 the
   route is **the fallback**, not the first choice: Keep offline takes the
   small copy (FR-P6) whenever the server can make one, and comes here only
-  when the episode's source is gone (owner, 2026-10-05).
+  when the episode's source is gone (owner, 2026-10-05). **A rendition with a
+  text subtitle track is refused** (404 with the reason, M20, owner
+  2026-10-13): one MP4 cannot carry the WebVTT track, so the full-size file
+  would play without subtitles; the payload sends no `download_url` for such
+  an episode and the device waits for the small copy. A burn-in rendition,
+  or a remux of a source with no subtitles, is joined as before.
 - FR-S8 **Progress made offline is kept and synced later** (owner,
   2026-10-04: "we gotta make sure we hold on to the records to sync them in
   later when ipad is back online"; revised 2026-10-05). When a progress
@@ -1453,8 +1493,9 @@ through the same edge, without the grace period.
   FR-A14's play on demand: it fetches only an episode the user's window
   already covers.) A
   "save the MP4 to Files" link is out too (owner, 2026-10-05).
-- Subtitle styling fidelity beyond burn-in; user-selectable subtitle tracks
-  at play time.
+- ASS styling and positioning in the streamed rendition (M20 shows dialogue
+  as plain WebVTT; only the burn-in fallback, FR-P7, and the small copy,
+  FR-P6, keep the styling).
 - Per-user private libraries.
 - Non-anime media.
 - Notifications (email/push). Possible later.
@@ -2553,3 +2594,13 @@ through the same edge, without the grace period.
   slot cap**, like a sample (a small call, flagged to the owner). **FR-A15:**
   a report purges the user's expired rows, and at most 10 devices per user are
   kept (small call).
+- 2026-10-13 (owner, M20 T2) — **Remux with text subtitles replaces burn-in
+  as the way an episode is prepared** (FR-P1, FR-P2, FR-P3, FR-P4, FR-P5,
+  FR-S1; new FR-P7). This **reverses the 2026-09-05 decision** "every file is
+  fully transcoded with subtitles burned in (styling fidelity over transcode
+  cost)": a burn-in encode was ~30 minutes of both CPUs per episode, a remux
+  is ~20 s. ASS styling is given up for dialogue as WebVTT; burn-in stays only
+  for sources that cannot be copied. **FR-S7's full-size file is refused for a
+  rendition with a text track** (Q7): it would play without subtitles. §8 no
+  longer excludes user-selectable subtitle tracks (the player's on/off lands in
+  M20 T3).

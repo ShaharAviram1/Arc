@@ -15,7 +15,12 @@ from arc.api.anime_schemas import MAX_FAILURE_CHARS
 from arc.core.text import ELISION
 from arc.db import SessionFactory
 from arc.models import EpisodeState, Job, JobStatus, Rendition, UserRole
-from arc.services.media.names import TRANSCODE, transcode_dedupe_key
+from arc.services.media.names import (
+    REMUX,
+    TRANSCODE,
+    remux_dedupe_key,
+    transcode_dedupe_key,
+)
 from arc.services.media.plan import NOTE_BITMAP_ONLY
 from tests.acquisition_helpers import make_anime, make_episodes
 from tests.conftest import add_user, api_transport, login
@@ -104,6 +109,9 @@ async def test_the_show_page_reports_preparation_state_per_episode(
         # No transcode job for this episode, so nothing to say — and an empty
         # list rather than null, so the client never writes the fallback.
         "notes": [],
+        # A rendition made before M20 is a burn-in transcode with no text track.
+        "kind": "transcode",
+        "subtitles": False,
     }
     assert ready["prepare_progress"] is None
     assert ready["failure_reason"] is None
@@ -286,8 +294,8 @@ async def test_an_admin_queues_a_transcode_for_a_matched_episode(
     await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
     async with api_transport(api_app) as client:
         await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
-        response = await client.post(f"/api/episodes/{ids[3]}/transcode")
-        again = await client.post(f"/api/episodes/{ids[3]}/transcode")
+        response = await client.post(f"/api/episodes/{ids[3]}/transcode?mode=transcode")
+        again = await client.post(f"/api/episodes/{ids[3]}/transcode?mode=transcode")
 
     assert response.status_code == 202
     body = response.json()
@@ -301,6 +309,42 @@ async def test_an_admin_queues_a_transcode_for_a_matched_episode(
     async with api_factory() as session:
         rows = await session.scalars(select(Job).where(Job.type == TRANSCODE))
         assert len([job for job in rows.all() if job.payload["episode_id"] == ids[3]]) == 1
+
+
+async def test_without_a_mode_an_admin_queues_a_remux(api_app, api_factory: SessionFactory) -> None:
+    """M20: the remux is how an episode is prepared, so it is the default."""
+    _, ids = await a_show(api_factory, anilist_id=971019)
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+    async with api_transport(api_app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        response = await client.post(f"/api/episodes/{ids[3]}/transcode")
+        explicit = await client.post(f"/api/episodes/{ids[3]}/transcode?mode=remux")
+        bogus = await client.post(f"/api/episodes/{ids[3]}/transcode?mode=burn")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["type"] == REMUX
+    assert body["max_attempts"] == 2
+    assert body["payload"]["dedupe_key"] == remux_dedupe_key(ids[3])
+    assert explicit.json()["id"] == body["id"]
+    assert bogus.status_code == 422
+
+
+async def test_force_without_a_mode_is_still_the_burn_in_encode(
+    api_app, api_factory: SessionFactory
+) -> None:
+    """``?force=true`` kept its meaning (FR-P5); ``mode=remux`` re-remuxes instead."""
+    _, ids = await a_show(api_factory, anilist_id=971020)
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+    async with api_transport(api_app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        forced = await client.post(f"/api/episodes/{ids[0]}/transcode?force=true")
+        remuxed = await client.post(f"/api/episodes/{ids[0]}/transcode?force=true&mode=remux")
+
+    assert forced.json()["type"] == TRANSCODE
+    assert forced.json()["payload"]["force"] is True
+    assert remuxed.json()["type"] == REMUX
+    assert remuxed.json()["payload"]["force"] is True
 
 
 async def test_a_failed_episode_can_be_retried_without_force(

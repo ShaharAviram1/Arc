@@ -38,13 +38,19 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote
 
-#: Every file name a rendition may contain apart from its playlist, as the
-#: media router's path pattern. ``\A``/``\z`` rather than ``^``/``$`` so a
-#: trailing newline cannot ride along (:mod:`arc.api.media_stream` explains
-#: why); both pydantic-core's Rust engine and Python 3.14's ``re`` read ``\z``
-#: as end-of-input, which is what lets one constant serve the router's path
-#: validation and the playlist check below.
-PART_NAME_PATTERN: Final[str] = r"\A(init\.mp4|seg_\d{5}\.m4s)\z"
+#: Every file name the media router serves under ``/media/{id}/`` apart from
+#: ``index.m3u8``, as its path pattern: the init and media segments, and since
+#: M20 a remuxed rendition's media playlist (``video.m3u8``), its subtitle
+#: playlist (``subs.m3u8``) and subtitle segments (``sub_NNNNN.vtt``), the last
+#: two generated on request (architecture.md §5.4a). ``\A``/``\z`` rather than
+#: ``^``/``$`` so a trailing newline cannot ride along (:mod:`arc.api.
+#: media_stream` explains why); both pydantic-core's Rust engine and Python
+#: 3.14's ``re`` read ``\z`` as end-of-input. The concatenation below is
+#: stricter still: :func:`playlist_parts` admits only ``init.mp4`` and
+#: ``seg_NNNNN.m4s`` as parts.
+PART_NAME_PATTERN: Final[str] = (
+    r"\A(init\.mp4|seg_\d{5}\.m4s|video\.m3u8|subs\.m3u8|sub_\d{5}\.vtt)\z"
+)
 
 _INIT_NAME: Final = re.compile(r"\Ainit\.mp4\z")
 _SEGMENT_NAME: Final = re.compile(r"\Aseg_\d{5}\.m4s\z")

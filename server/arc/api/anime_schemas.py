@@ -433,6 +433,15 @@ class RenditionOut(BaseModel):
     #: one that does can explain a rendition with no subtitles without the user
     #: having to ask an admin to read a log.
     notes: list[str] = Field(default_factory=list)
+    #: How the rendition was made (M20): ``remux`` (video copied, subtitles as
+    #: a text track the player can switch off) or ``transcode`` (subtitles
+    #: burned into the picture, the fallback for sources that cannot be
+    #: copied). Additive: an older client ignores it.
+    kind: str = "transcode"
+    #: Whether the rendition carries a WebVTT subtitle track, which the master
+    #: playlist offers on by default. False for a transcode (burned in) and
+    #: for a remux of a source with no usable text track.
+    subtitles: bool = False
 
     @classmethod
     def from_rendition(cls, rendition: Rendition, *, notes: Sequence[str] = ()) -> RenditionOut:
@@ -443,6 +452,8 @@ class RenditionOut(BaseModel):
             subtitle_lang=rendition.subtitle_lang,
             audio_lang=rendition.audio_lang,
             notes=list(notes),
+            kind=rendition.kind or "transcode",
+            subtitles=bool(rendition.text_subtitles),
         )
 
 
@@ -467,15 +478,24 @@ class PrepareState(BaseModel):
     progress: float | None = None
     failure_reason: str | None = None
     notes: list[str] = Field(default_factory=list)
+    #: Why this is the burn-in fallback rather than a remux (M20, FR-P7), from
+    #: the payload's ``fallback_reason`` — which the remux writes on its own
+    #: row and on the transcode it queues, so either one being the newest says
+    #: it. Only while ``matched`` or ``preparing``.
+    note: str | None = None
 
     @classmethod
     def from_job(cls, job: Job | None, state: EpisodeState) -> PrepareState:
         payload = job.payload if job is not None else {}
         notes = _notes(payload)
+        raw_note = payload.get("fallback_reason")
+        note = raw_note if isinstance(raw_note, str) and raw_note.strip() else None
+        if state is EpisodeState.MATCHED:
+            return cls(notes=notes, note=note)
         if state is EpisodeState.PREPARING:
             raw = payload.get("progress")
             value = float(raw) if isinstance(raw, int | float) else 0.0
-            return cls(progress=min(max(value, 0.0), 1.0))
+            return cls(progress=min(max(value, 0.0), 1.0), note=note)
         if state is EpisodeState.FAILED:
             detail = payload.get("error_tail")
             if not isinstance(detail, str) or not detail.strip():
@@ -615,6 +635,12 @@ class EpisodeOut(BaseModel):
     #: means "queued, or ffmpeg has not reported yet", not "stuck": the
     #: transcode reports every few seconds once it is encoding.
     prepare_progress: float | None = None
+    #: Why the episode is being prepared by the full burn-in encode rather than
+    #: a remux (M20, FR-P7): the reason the source could not be copied
+    #: ("10-bit", "HEVC", "above 1080p"). Set only while the episode is
+    #: ``matched`` or ``preparing`` and its prepare job is that fallback encode;
+    #: the client words it ("Preparing (full encode: 10-bit source)").
+    prepare_note: str | None = None
     #: The tail of the last transcode failure, trimmed for display. Only ever
     #: set while the state is ``failed`` (FR-P4); the whole thing is in the
     #: job's payload and in the admin queue view.
@@ -626,7 +652,8 @@ class EpisodeOut(BaseModel):
     #: download_url` beside the route that answers it, like the player's
     #: ``playlist_url``, so the client never assembles a media path itself. The
     #: demo account is sent it too and refused by the route; the show page
-    #: hides the control for it.
+    #: hides the control for it. Null for a remuxed rendition with a text
+    #: track (M20): one MP4 cannot carry the track, and the route refuses it.
     download_url: str | None = None
     #: The small offline copy (FR-P6), on a ``ready`` episode only — null on
     #: every other. What "Keep offline" downloads: ``available`` with a
@@ -705,9 +732,17 @@ class EpisodeOut(BaseModel):
             search=_search_out(episode, next_search_at),
             release=ReleaseOut.from_release(release) if release is not None else None,
             prepare_progress=prepare.progress,
+            prepare_note=prepare.note,
             failure_reason=prepare.failure_reason,
             rendition=rendition_out,
-            download_url=download_url(episode.id) if rendition_out is not None else None,
+            # Not for a remux with a text track: the route refuses it (FR-S7,
+            # owner 2026-10-13), so a link would only lead to a 404.
+            download_url=(
+                download_url(episode.id)
+                if rendition_out is not None
+                and not (rendition_out.kind == "remux" and rendition_out.subtitles)
+                else None
+            ),
             offline=offline if episode.state is EpisodeState.READY else None,
             # Never on a ``ready`` episode: that one streams, whoever's trip
             # also covers it.
