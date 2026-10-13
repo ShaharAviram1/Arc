@@ -1854,7 +1854,18 @@ owner's word.
       migration tests, Writer's full runs server 4571 / client 1216, lints
       clean, one alembic head 911eca1dfc62; merged e9a74b9. Small calls:
       floor order by last played, serving hold capped at 6 h.
-- [ ] T9: Remembered release and seeder warning
+- [x] T9: Remembered release and seeder warning — verified 2026-10-13:
+      Validator PASS (12 adversarial pg cases incl. a manual choice beating
+      the remembered one and a re-fetch the client already holds complete)
+      and Reviewer (no blockers; a dead re-fetch cannot loop; fixed: any
+      stall of a re-fetch searches at once, a re-fetch with progress is never
+      cut by the 15-min rule, only finished releases of non-failed episodes
+      are remembered, a held pack beats the remembered release, evicted rows
+      excluded from the poll and pruned after 180 days, pack seeders follow
+      the tracker); orchestrator: rebased last in the chain (244fbc2111f9
+      after caf1811e8ee6), full server suite on the merged tree 4781 passed,
+      client 1243, lints and whole-package mypy clean; merged 1f6868a.
+      Small calls: REMEMBER_DAYS 180; the remembered-but-unfinished rule.
 - [ ] T10: Integration and DoD pass
 - DoD: each task Writer → Validator (→ Reviewer where the plan says) →
   orchestrator verification; suites green; lint clean; alembic single head;
