@@ -38,7 +38,18 @@ import { downloads } from '@/offline/downloads'
 import { useOffline } from '@/offline/network'
 import { useDownload } from '@/offline/useDownloads'
 import { HlsVideo } from '@/player/HlsVideo'
-import { ProgressReporter, resolveDuration } from '@/player/ProgressReporter'
+import { ProgressReporter } from '@/player/ProgressReporter'
+import {
+  clampToFront,
+  fewSeeders,
+  liveStatusLabel,
+  measureDuration,
+  planSeek,
+  playableEdge,
+  readFront,
+  settlePending,
+  type PendingVerdict,
+} from '@/player/liveSeek'
 import { chooseSource, useLocalCopy } from '@/player/source'
 import { rememberSubtitles, subtitlesRemembered } from '@/player/subtitles'
 
@@ -93,6 +104,16 @@ import { rememberSubtitles, subtitlesRemembered } from '@/player/subtitles'
 
 /** ± this many seconds on an arrow key (FR-S6). */
 const SEEK_STEP = 5
+
+/**
+ * How often a live player re-reads the download front from the element and
+ * settles a pending seek (FR-P8, M20 T7). The numbers from the server arrive
+ * every 5 s with the `/play` poll; the element's playlist moves on its own.
+ */
+const FRONT_CHECK_MS = 1000
+
+/** Said under the download line when the release has few seeders (FR-P8). */
+const FEW_SEEDERS_NOTE = 'Few seeders — the download may be slow.'
 
 /** ± this many on the two round skip buttons. */
 const SKIP_STEP = 10
@@ -887,6 +908,8 @@ function PlayerView({ id }: { id: number }) {
     enabled: (demandSettled && refusal === null) || onDevice,
     pollWhilePending: refusal === null,
     retryNotFound: demandAccepted ? DEMAND_NOT_FOUND_RETRIES : 0,
+    // A copy on this device plays from the file: nothing live to follow.
+    pollWhileLive: !onDevice,
   })
   useEffect(() => {
     if (demandFirst && local.checked && local.url === null) askToFetch()
@@ -992,12 +1015,96 @@ function PlayerView({ id }: { id: number }) {
   /** The offline control's menu is open: the chrome stays while it is. */
   const [offlineMenuOpen, setOfflineMenuOpen] = useState(false)
 
-  const serverDuration = data?.duration ?? 0
   /**
    * A stream still being cut from a download (M20): its media duration grows
-   * with the download, so the server's is the only one used (FR-S4, C8).
+   * with the download, so the server's is the only one used (FR-S4, C8) — the
+   * episode's expected length, for as long as `live` is in the answer, ended
+   * or not. Every duration below goes through `measure`.
    */
-  const live = (data?.live ?? null) !== null
+  const liveInfo = data?.live ?? null
+  const live = liveInfo !== null
+  /**
+   * The expected duration of a `live` answer this page has seen. It outlives
+   * `live` itself: adopted between two polls, hls.js can still hold the
+   * partial playlist and its short duration, so the page keeps measuring by
+   * the expected one until the element's is at least 90 % of it (FR-S4,
+   * `measureDuration`). Set during render, the documented way to keep a
+   * value from an earlier render.
+   */
+  const [seenExpected, setSeenExpected] = useState<number | null>(null)
+  if (
+    liveInfo !== null &&
+    liveInfo.expected_duration > 0 &&
+    seenExpected !== liveInfo.expected_duration
+  ) {
+    setSeenExpected(liveInfo.expected_duration)
+  }
+  /**
+   * The live answer as the stream sees it: none for a copy on this device,
+   * which plays a whole file and has no front, no pending seeks and no poll.
+   */
+  const liveStream = liveInfo !== null && local.url === null ? liveInfo : null
+  /**
+   * The download is still going (FR-P8, M20 T7): the front bar, pending
+   * seeks, the clamps and the 5 s poll. Off once the playlist has its
+   * ENDLIST, off when the episode was adopted (`live` gone), and off for a
+   * device copy.
+   */
+  const liveActive = liveStream !== null && !liveStream.ended
+  const serverDuration =
+    liveInfo !== null && liveInfo.expected_duration > 0
+      ? liveInfo.expected_duration
+      : (data?.duration ?? 0)
+  const liveFrontSeconds = liveStream?.front_seconds ?? 0
+  /** Every duration the page uses, by FR-S4's rule (see `measureDuration`). */
+  const measure = useCallback(
+    (media: number, fallback: number) => measureDuration(media, fallback, { live, seenExpected }),
+    [live, seenExpected],
+  )
+  /**
+   * The front as the element last reported it — the end of its seekable
+   * range — or `null` while it has none, when the bar draws the server's
+   * `front_seconds` instead.
+   *
+   * Seeks are planned and settled against the **element's** front and the
+   * playhead, never the server's number: what the server has written is not
+   * what the player can reach. Safari holds back three target durations from
+   * the end of a live playlist, and undoes a seek past its seekable range —
+   * yet plays past that range, so where the playhead is (or was) is
+   * reachable too. hls.js's range is the loaded playlist, which lags the
+   * server by up to a reload. An element with no range reaches only what the
+   * playhead has passed. The arrow keys and End (which do not wait) are held
+   * to the larger of the element's front and the server's.
+   */
+  const [front, setFront] = useState<number | null>(null)
+  /**
+   * A seek past the front, waiting for the download (FR-P8): the target, and
+   * whether it was the resume (which gets its "Resumed from" receipt when the
+   * jump happens). The ref is what the timers read; the state is what draws.
+   */
+  const pendingRef = useRef<{ at: number; resume: boolean } | null>(null)
+  const [pendingSeek, setPendingSeek] = useState<number | null>(null)
+  const setPending = useCallback((next: { at: number; resume: boolean } | null) => {
+    pendingRef.current = next
+    setPendingSeek(next?.at ?? null)
+  }, [])
+  const [fewSeedersDismissed, setFewSeedersDismissed] = useState(false)
+  /** The element's seekable end now (0 with none). */
+  const frontNow = useCallback(() => readFront(videoRef.current?.seekable, 0), [])
+  /** What a key seek is held to: the element's front or the server's, the larger. */
+  const keyFront = useCallback(
+    () => Math.max(readFront(videoRef.current?.seekable, 0), liveFrontSeconds),
+    [liveFrontSeconds],
+  )
+  /**
+   * The position the reporter and the device are told: while a resume waits
+   * on the download (FR-S2), its target — the playhead parked at the front is
+   * not where the viewer is, and reporting it would overwrite their place.
+   */
+  const reportedPosition = useCallback((position: number) => {
+    const pending = pendingRef.current
+    return pending !== null && pending.resume ? pending.at : position
+  }, [])
   /**
    * The subtitle switch (FR-S10): on by default, the viewer's last choice on
    * this device once they have made one. Per account, like the position.
@@ -1203,17 +1310,39 @@ function PlayerView({ id }: { id: number }) {
     [],
   )
 
-  /** The one way the page moves the playhead; everything else calls this. */
+  /**
+   * The one way the page moves the playhead; everything else calls this.
+   *
+   * While the download is going (FR-P8), a target past `front − 1 s` is not
+   * asked of the element: the playhead goes to that edge now and the target
+   * is kept as a pending seek, which the front check below carries out once
+   * the front is six seconds past it. `fromResume` marks the resume (FR-S2).
+   */
   const seekTo = useCallback(
-    (seconds: number) => {
+    (seconds: number, fromResume = false) => {
       const video = videoRef.current
       if (video === null) return
-      const limit = resolveDuration(video.duration, serverDuration, live)
+      const limit = measure(video.duration, serverDuration)
       const clamped = Math.max(0, limit > 0 ? Math.min(seconds, limit) : seconds)
+      if (liveActive) {
+        const plan = planSeek(clamped, frontNow(), video.currentTime)
+        if (plan.pending === null) {
+          setPending(null)
+          video.currentTime = plan.now
+          setPosition(plan.now)
+          return
+        }
+        setPending({ at: plan.pending, resume: fromResume })
+        // A playhead already in the last second is left there, not pulled back.
+        if (video.currentTime < plan.now) video.currentTime = plan.now
+        setPosition(video.currentTime)
+        return
+      }
+      setPending(null)
       video.currentTime = clamped
       setPosition(clamped)
     },
-    [serverDuration, live],
+    [serverDuration, measure, liveActive, frontNow, setPending],
   )
 
   const skip = useCallback(
@@ -1241,27 +1370,38 @@ function PlayerView({ id }: { id: number }) {
           if (video.paused) playQuietly(video)
           else video.pause()
           return
+        // A key seek replaces a pending one, and while the download is going
+        // it is held to the front rather than made to wait (FR-S6).
         case 'ArrowLeft':
           event.preventDefault()
+          setPending(null)
           video.currentTime = Math.max(0, video.currentTime - SEEK_STEP)
           setPosition(video.currentTime)
           return
-        case 'ArrowRight':
+        case 'ArrowRight': {
           event.preventDefault()
-          video.currentTime = video.currentTime + SEEK_STEP
+          setPending(null)
+          const target = video.currentTime + SEEK_STEP
+          video.currentTime = liveActive
+            ? clampToFront(target, keyFront(), video.currentTime)
+            : target
           setPosition(video.currentTime)
           return
+        }
         case 'Home':
           event.preventDefault()
+          setPending(null)
           video.currentTime = 0
           setPosition(0)
           return
         case 'End': {
           event.preventDefault()
-          const limit = resolveDuration(video.duration, serverDuration, live)
+          const limit = measure(video.duration, serverDuration)
           if (limit <= 0) return
-          video.currentTime = limit
-          setPosition(limit)
+          setPending(null)
+          const target = liveActive ? clampToFront(limit, keyFront(), video.currentTime) : limit
+          video.currentTime = target
+          setPosition(target)
           return
         }
         case 'f':
@@ -1292,7 +1432,65 @@ function PlayerView({ id }: { id: number }) {
     return () => {
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [endOverlayShown, keepWatching, serverDuration, live, toggleFullscreen])
+  }, [
+    endOverlayShown,
+    keepWatching,
+    serverDuration,
+    measure,
+    liveActive,
+    keyFront,
+    setPending,
+    toggleFullscreen,
+  ])
+
+  /**
+   * The download front, re-read from the element every second while the
+   * download is going, and the pending seek settled against it (FR-P8, M20
+   * T7): the jump once the front is six seconds past the target; once the
+   * playlist has ended or the episode was adopted (`live` gone), as soon as
+   * the element's range is within six seconds of the target, or has caught
+   * up with the real end (a target past it resolves to the end); nothing at
+   * all when playback got there by itself. Adoption is no shortcut: hls.js
+   * may not have reloaded the playlist yet, so the element's range is still
+   * what decides. Every state change is in a timer callback, never in the
+   * effect's own body.
+   */
+  const adoptedDuration = liveStream === null ? (data?.duration ?? null) : null
+  useEffect(() => {
+    if (liveStream === null && pendingRef.current === null) return
+
+    const tick = () => {
+      const video = videoRef.current
+      if (video === null) return
+      const reach = readFront(video.seekable, 0)
+      if (liveStream !== null) setFront(reach > 0 ? reach : null)
+      const pending = pendingRef.current
+      if (pending === null) return
+      const ended = liveStream === null || liveStream.ended
+      const verdict: PendingVerdict = settlePending(pending.at, {
+        front: reach,
+        position: video.currentTime,
+        ended,
+        finalFront: liveStream === null ? adoptedDuration : ended ? liveStream.front_seconds : null,
+      })
+      if (verdict.action === 'wait') return
+      setPending(null)
+      if (verdict.action === 'drop') return
+      video.currentTime = verdict.at
+      setPosition(verdict.at)
+      if (pending.resume) setResumedAt(verdict.at)
+    }
+
+    const first = window.setTimeout(tick, 0)
+    const every =
+      (liveStream !== null && !liveStream.ended) || pendingRef.current !== null
+        ? window.setInterval(tick, FRONT_CHECK_MS)
+        : null
+    return () => {
+      window.clearTimeout(first)
+      if (every !== null) window.clearInterval(every)
+    }
+  }, [liveStream, adoptedDuration, setPending])
 
   // Any sign of a person brings the chrome back. Moves are throttled, because
   // a pointer move fires dozens of times a second and none of them need a
@@ -1445,7 +1643,9 @@ function PlayerView({ id }: { id: number }) {
     )
   }
 
-  if (isError) {
+  // A failed live poll (FR-P8) leaves the video playing on what it has: only
+  // an answer with nothing to play turns into one of the pages below.
+  if (isError && !data?.playlist_url) {
     // 404 is the server saying "no rendition"; anything else is Arc failing,
     // and telling the viewer their episode is not ready would be a statement
     // about their library that this client has no basis for. Only the second
@@ -1488,6 +1688,7 @@ function PlayerView({ id }: { id: number }) {
     )
   }
 
+  if (data === undefined) return null
   const info: PlayInfo = data
   const source = chooseSource(info, local.url)
   if (source.kind === 'none') {
@@ -1580,17 +1781,44 @@ function PlayerView({ id }: { id: number }) {
    * so there is nothing to switch there.
    */
   const hasSubtitles = (info.subtitles ?? null) !== null && source.kind !== 'file'
-  /** Where hls.js starts loading: the resume, by the same rule as the seek. */
-  const startPosition =
+  /**
+   * Where hls.js starts loading: the resume, by the same rule as the seek —
+   * held to the front while the download is going (a resume past it waits as
+   * a pending seek, FR-S2).
+   */
+  const resumeStart =
     info.resume_position !== null && shouldResume(info.resume_position, serverDuration)
       ? info.resume_position
       : 0
+  const startPosition =
+    liveStream !== null && !liveStream.ended
+      ? planSeek(resumeStart, liveStream.front_seconds).now
+      : resumeStart
+
+  /**
+   * The front bar (FR-P8): how much of the episode is downloaded, 0–1. The
+   * larger of the server's number and the element's range, so it never moves
+   * backwards when Safari's range (which trails its playlist) first appears.
+   */
+  const shownFront = Math.max(front ?? 0, liveFrontSeconds)
+  const frontFraction =
+    liveActive && total > 0 ? Math.min(1, Math.max(0, shownFront / total)) : null
+  /**
+   * Waiting on the download: a pending seek, or a playhead that has caught up
+   * with the front. Either way the viewer is told why nothing moves.
+   */
+  const waitingOnDownload =
+    liveStream !== null &&
+    liveActive &&
+    (pendingSeek !== null || position >= playableEdge(shownFront) - 1)
+  const showFewSeeders =
+    liveStream !== null && liveActive && fewSeeders(liveStream.seeders) && !fewSeedersDismissed
 
   function onReady(duration: number) {
     const video = videoRef.current
     if (video === null) return
 
-    setMediaDuration(resolveDuration(duration, 0, live))
+    setMediaDuration(measure(duration, 0))
 
     // A second `loadedmetadata` means the stream was rebuilt — a Retry after a
     // fatal error. The fresh media starts at zero, which would throw away the
@@ -1608,10 +1836,16 @@ function PlayerView({ id }: { id: number }) {
     resumedRef.current = true
 
     const start = info.resume_position
-    if (shouldResume(start, resolveDuration(duration, serverDuration, live)) && start !== null) {
-      video.currentTime = start
-      setPosition(start)
-      setResumedAt(start)
+    if (shouldResume(start, measure(duration, serverDuration)) && start !== null) {
+      if (liveActive) {
+        // A resume past the front waits (FR-S2); its receipt comes with the jump.
+        seekTo(start, true)
+        if (pendingRef.current === null) setResumedAt(start)
+      } else {
+        video.currentTime = start
+        setPosition(start)
+        setResumedAt(start)
+      }
     }
 
     // And then play, from wherever that left the playhead: autoplay comes
@@ -1667,26 +1901,38 @@ function PlayerView({ id }: { id: number }) {
         className={chromeShown ? '' : 'cursor-none'}
         onVideoClick={onVideoClick}
         startPosition={startPosition}
+        live={liveActive}
         subtitles={hasSubtitles ? subtitlesOn : undefined}
         onReady={onReady}
         onTimeUpdate={(nextPosition, duration) => {
-          reporterRef.current?.update(nextPosition, resolveDuration(duration, serverDuration, live))
+          reporterRef.current?.update(
+            reportedPosition(nextPosition),
+            measure(duration, serverDuration),
+          )
           if (Date.now() - lastLocalSaveRef.current >= LOCAL_POSITION_EVERY_MS) {
-            keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
+            keepPosition(reportedPosition(nextPosition), measure(duration, serverDuration))
           }
           setPosition(nextPosition)
-          setMediaDuration(resolveDuration(duration, 0, live))
-          setBuffered(
-            bufferedFraction(videoRef.current, resolveDuration(duration, serverDuration, live)),
-          )
+          setMediaDuration(measure(duration, 0))
+          setBuffered(bufferedFraction(videoRef.current, measure(duration, serverDuration)))
+          if (liveActive) {
+            const reachable = readFront(videoRef.current?.seekable, 0)
+            setFront(reachable > 0 ? reachable : null)
+          }
         }}
         onPlay={(nextPosition, duration) => {
-          reporterRef.current?.play(nextPosition, resolveDuration(duration, serverDuration, live))
+          reporterRef.current?.play(
+            reportedPosition(nextPosition),
+            measure(duration, serverDuration),
+          )
           setPlaying(true)
         }}
         onPause={(nextPosition, duration) => {
-          reporterRef.current?.pause(nextPosition, resolveDuration(duration, serverDuration, live))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
+          reporterRef.current?.pause(
+            reportedPosition(nextPosition),
+            measure(duration, serverDuration),
+          )
+          keepPosition(reportedPosition(nextPosition), measure(duration, serverDuration))
           setPlaying(false)
           // A pause is a sign of a person, so the bar comes back — but it no
           // longer *stays*: the idle timer runs while paused too, and takes it
@@ -1700,13 +1946,19 @@ function PlayerView({ id }: { id: number }) {
           if (!muted) setAutoplayMuted(false)
         }}
         onSeeked={(nextPosition, duration) => {
-          reporterRef.current?.seek(nextPosition, resolveDuration(duration, serverDuration, live))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
+          reporterRef.current?.seek(
+            reportedPosition(nextPosition),
+            measure(duration, serverDuration),
+          )
+          keepPosition(reportedPosition(nextPosition), measure(duration, serverDuration))
           setPosition(nextPosition)
         }}
         onEnded={(nextPosition, duration) => {
-          reporterRef.current?.end(nextPosition, resolveDuration(duration, serverDuration, live))
-          keepPosition(nextPosition, resolveDuration(duration, serverDuration, live))
+          reporterRef.current?.end(
+            reportedPosition(nextPosition),
+            measure(duration, serverDuration),
+          )
+          keepPosition(reportedPosition(nextPosition), measure(duration, serverDuration))
           setPlaying(false)
           setChrome(true)
           setEnded(true)
@@ -1737,6 +1989,21 @@ function PlayerView({ id }: { id: number }) {
             {resumeLabel(resumedAt)}
           </Notice>
         )}
+        {waitingOnDownload ? (
+          <p role="status" data-testid="live-status" className={PILL}>
+            {liveStatusLabel(liveStream, pendingSeek)}
+          </p>
+        ) : null}
+        {showFewSeeders ? (
+          <Notice
+            tone="warn"
+            onDismiss={() => {
+              setFewSeedersDismissed(true)
+            }}
+          >
+            {FEW_SEEDERS_NOTE}
+          </Notice>
+        ) : null}
       </div>
 
       <div
@@ -1872,6 +2139,18 @@ function PlayerView({ id }: { id: number }) {
                 FOCUS_RING,
               )}
             >
+              {/*
+                The download front (FR-P8), under everything else: how far a
+                seek can go now. Past it, a seek waits for the download.
+              */}
+              {frontFraction === null ? null : (
+                <span
+                  aria-hidden
+                  data-testid="live-front"
+                  className="absolute inset-y-0 left-0 rounded-full bg-[rgba(235,239,245,0.3)]"
+                  style={{ width: `${String(frontFraction * 100)}%` }}
+                />
+              )}
               <span
                 aria-hidden
                 className="absolute inset-y-0 left-0 rounded-full bg-[rgba(235,239,245,0.42)]"

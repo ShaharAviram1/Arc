@@ -1,7 +1,7 @@
 import { act, fireEvent, render, waitFor } from '@testing-library/react'
 import { createRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { HlsVideo } from '@/player/HlsVideo'
+import { HlsVideo, LIVE_SYNC_DURATION_S } from '@/player/HlsVideo'
 import { Events, instances, resetHls } from '@/test/hlsMock'
 
 vi.mock('hls.js', async () => await import('@/test/hlsMock'))
@@ -235,5 +235,94 @@ describe('HlsVideo — the subtitle switch on native HLS (FR-S10)', () => {
     fireEvent.loadedMetadata(video)
 
     expect(subs.mode).toBe('showing')
+  })
+})
+
+/**
+ * A growing (EVENT) playlist (M20 T7, architecture §5.4a): hls.js must not
+ * chase the download front, and Safari is put at the start position by hand,
+ * whatever its `duration` says.
+ */
+describe('HlsVideo — a live stream (M20 T7)', () => {
+  /** Safari's element after it read an EVENT playlist: at the edge, no end. */
+  function atTheEdge(video: HTMLVideoElement, edge: number): void {
+    let currentTime = edge
+    Object.defineProperties(video, {
+      currentTime: {
+        configurable: true,
+        get: () => currentTime,
+        set: (value: number) => {
+          currentTime = value
+        },
+      },
+      duration: { configurable: true, get: () => Number.POSITIVE_INFINITY },
+    })
+  }
+
+  it('configures hls.js never to chase the edge', async () => {
+    const videoRef = createRef<HTMLVideoElement>()
+    render(<HlsVideo src={SRC} videoRef={videoRef} label="Episode 1" startPosition={0} live />)
+
+    const hls = await hlsInstance()
+    expect(hls.config.startPosition).toBe(0)
+    expect(hls.config.liveSyncDuration).toBe(LIVE_SYNC_DURATION_S)
+    expect(hls.config.liveSyncDuration).toBeGreaterThanOrEqual(24 * 3600)
+    expect('liveMaxLatencyDuration' in hls.config).toBe(true)
+    expect(hls.config.liveMaxLatencyDuration).toBeUndefined()
+    expect(hls.config.maxLiveSyncPlaybackRate).toBe(1)
+  })
+
+  it('leaves hls.js its defaults for a whole episode', async () => {
+    renderVideo({ startPosition: 12 })
+
+    const hls = await hlsInstance()
+    expect(hls.config.liveSyncDuration).toBeUndefined()
+    expect('maxLiveSyncPlaybackRate' in hls.config).toBe(false)
+  })
+
+  it('on Safari, seeks to the start after loadedmetadata, ignoring an Infinity duration', () => {
+    stubNativeHls()
+    const onReady = vi.fn()
+    const videoRef = createRef<HTMLVideoElement>()
+    const { container } = render(
+      <HlsVideo
+        src={SRC}
+        videoRef={videoRef}
+        label="Episode 1"
+        startPosition={0}
+        live
+        onReady={onReady}
+      />,
+    )
+    const video = container.querySelector('video')
+    if (video === null) throw new Error('no video')
+    atTheEdge(video, 300)
+
+    fireEvent.loadedMetadata(video)
+
+    expect(video.currentTime).toBe(0)
+    expect(instances).toHaveLength(0)
+    // The duration is handed on as it is; the page decides not to trust it.
+    expect(onReady).toHaveBeenCalledWith(Number.POSITIVE_INFINITY)
+
+    // Safari reloading the playlist must not send the viewer back again.
+    video.currentTime = 120
+    fireEvent.loadedMetadata(video)
+    expect(video.currentTime).toBe(120)
+  })
+
+  it('on Safari, seeks to a resume start even though the duration is Infinity', () => {
+    stubNativeHls()
+    const videoRef = createRef<HTMLVideoElement>()
+    const { container } = render(
+      <HlsVideo src={SRC} videoRef={videoRef} label="Episode 1" startPosition={299} live />,
+    )
+    const video = container.querySelector('video')
+    if (video === null) throw new Error('no video')
+    atTheEdge(video, 0)
+
+    fireEvent.loadedMetadata(video)
+
+    expect(video.currentTime).toBe(299)
   })
 })

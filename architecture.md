@@ -2324,6 +2324,73 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   would let 90 % of what has downloaded complete the episode and write to
   MAL). Every report, local position, seek limit, `End` and the resume check
   go through it. T6 adds the server-side guard in `record_progress`.
+- **Live playback, client half (M20 T7, spec FR-P8, FR-S2, FR-S6).** "Live"
+  is `/play` carrying `live`; "active" is live, `!live.ended`, and the source
+  is the stream — a device copy of the episode (`kind: 'file'`) gets no live
+  UI, no clamps and no poll (`usePlayInfo`'s `pollWhileLive: false`). While
+  live, the player's server duration is `live.expected_duration` (falling
+  back to `duration` only if that is 0). **Duration after live**
+  (`measureDuration`): the page remembers the expected duration of any `live`
+  answer it saw (state, set during render) and, once `live` is gone (adopted
+  between two polls, with hls.js still holding the partial playlist), takes
+  the element's duration only when it is ≥ 90 % of that expected one, and the
+  larger of the two before — so no completion and no MAL write can come from
+  a stale, truncated duration. Every report, local position, seek limit, End
+  and the resume check go through `measure`. The pure rules are in
+  `client/src/player/liveSeek.ts`: `planSeek(target, front, current) → {now,
+  pending}` (immediate at or below `max(front − 1 s, current)`, else `{now:
+  that edge, pending: target}`); `settlePending(target, {front, position,
+  ended, finalFront})` → `jump` when `front ≥ target + 6`; once ended (or
+  adopted), `jump` held to `front − 1` when the front is within 6 s of the
+  target, or to the end once the element's front has reached `finalFront`
+  (the last `front_seconds`, or the adopted `duration`: a target past the real
+  end resolves there); `drop` when the playhead got there itself; else
+  `wait`; `clampToFront(target, front, current)` for → and End (held to
+  `max(front − 1, current)`); `readFront(video.seekable, fallback)` (the last
+  seekable range's end). **What a seek can reach** is the element's range or
+  the playhead, whichever is further: measured in Playwright WebKit
+  (2026-10-13, native HLS), Safari's seekable end trails the playlist's end by
+  three target durations (60 s at `TARGETDURATION:20`, 24 s at 8), it plays
+  past that end, and it reports no range at all at first; a seek beyond the
+  range is clamped by Safari to the range's end. The playhead counts, so a
+  backward seek from past Safari's range is always made. → and End are held to
+  the larger of the element's front and the server's `front_seconds`. The bar
+  draws `max(element front, front_seconds)`, so it never moves backwards when
+  Safari's range first appears. Adoption is not a shortcut for a pending seek:
+  it waits for the element's range like an ended download. `liveStatusLabel`
+  ("Downloading — 43 % · 12 seeders · will jump to 12:30"); `fewSeeders` (<
+  `FEW_SEEDERS` = 3, the default of `min_seeders_warn`, which `/play` does not
+  carry). In `Player.tsx`, `seekTo` (scrubber, ±10 buttons, the resume) plans
+  through `planSeek`; a pending target is a ref (read by timers) plus state
+  (drawn); a key seek clears it. While a **resume** is pending, the reporter
+  and the device's position are given the resume target, not the playhead
+  parked at the front (which would overwrite the viewer's place). A
+  `FRONT_CHECK_MS` (1 s) interval (running while active or while a seek is
+  pending), and a 0 ms timeout whenever the `live` object changes, re-reads the
+  front and settles the pending seek (all state set in timer callbacks; the
+  `react-hooks` set-state-in-effect rule). The resume beyond the front is a
+  pending seek marked `resume`, whose "Resumed from" notice comes with the
+  jump; hls.js's `startPosition` is `planSeek(resume, front_seconds).now`. The
+  scrubber's front bar (`data-testid="live-front"`, under the buffered bar)
+  and the status pill (`live-status`, shown with a pending seek or when the
+  playhead is within 2 s of the front) exist only while active. **Polling**
+  reuses `usePlayInfo`: `refetchInterval` returns `LIVE_POLL_MS` (5 s) while
+  the answer is live, not ended and has a playlist URL, and keeps polling
+  through a failed request (not a 404); the page renders its error states
+  only when the failed answer has no `playlist_url`, so a failed poll never
+  tears the video down. Ended or adopted (`live` gone) stops the poll; the
+  playlist URL is the same, so `HlsVideo` keeps its instance and nothing
+  reloads. **hls.js
+  config while live** (`HlsVideo`'s `live` prop, read at creation):
+  `liveSyncDuration: LIVE_SYNC_DURATION_S` (86 400 — the sync point is
+  clamped to the playlist start, so hls.js never seeks towards the front),
+  `liveMaxLatencyDuration: undefined` (with the count default of Infinity:
+  no "too far behind" seek), `maxLiveSyncPlaybackRate: 1` (no catch-up
+  rate). **Native (Safari):** on the first `loadedmetadata` per source,
+  `HlsVideo` puts the element at `startPosition` if it is more than 0.5 s
+  away (Safari may have honoured the edge rather than `EXT-X-START`);
+  `video.duration` (possibly `Infinity`) is never consulted for that, and
+  `measureDuration` ignores it.
 - **Autoplay, as built (M16 batch 4, FR-S1, owner 2026-09-17).** `onReady`
   (i.e. `loadedmetadata`) does the resume seek and then calls `beginPlayback`,
   behind a ref so it happens once per page and never in a loop: `await
@@ -7008,3 +7075,5 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-13 (owner, M20 T9) — **Remembered release, fast dead-swarm fallback, seeder warning** (§4 `torrents`, §5.1a, §5.7; spec FR-T3/FR-A6/FR-A7/FR-A16). Retention keeps a single's `torrents` row as `qbit_state = 'evicted'` with the new `evicted_at` (revision `244fbc2111f9` `torrents_evicted_at`, on `911eca1dfc62`) instead of deleting it; decided rows are still deleted, batches unchanged. `QBIT_EVICTED` joins `DECIDED_STATES`, not `DELETE_ON_SIGHT`. `search_release` re-adds the newest evicted single before any Nyaa request (`_remembered`/`_refetch`; 409-safe). `poll_qbit`: a re-fetch (live row with `evicted_at`) whose tracker reports an empty swarm stalls after `REFETCH_DEAD_MINUTES` (15) of `time_active` and queues `search_release` at once at its last search's priority (episode → `wanted`, not `unavailable`); `torrents.seeders` follows the tracker scrape. `few_seeders`/`seeders` on `EpisodeOut` from `min_seeders_warn`; the show row's Pin uses the T8 pin mutation. No new dependency. After review (same day): `remembers()` keeps only finished singles behind a non-failed episode; `_remembered` runs after `claim_existing`; any re-fetch stall searches at once and "nothing fetched" (metaDL, no bytes, dead swarm, `progress <= 0`) is judged at 15 min; `poll_qbit` skips `evicted` rows; `prune_remembered` forgets them after 180 days; `_poll_batch` writes pack seeders; re-add clears `seeders`.
 - 2026-10-13 — M20 T5: **device holdings reporting and play on demand, client side** (§5.4, §5.4d; spec FR-S9 item 10, FR-S5 item 2, FR-A14, §5 Home/Show/Player). IndexedDB v4 adds the `meta` store (`deviceId`, `holdings:<user>`). `DownloadManager.reportHoldings()` (5 s debounce, 10 min dedupe, a pending note replayed on the outbox's landed flush and on reconnect, demo skipped) PUTs the complete, unwatched downloads; `lib/playback.ts` gains `demandEpisode`, `demandRefusal`, `PlayInfo.pending`, `EpisodeRef.fetchable`, `pendingLabel`, `WatchState`; the player demands before loading (router state) or on a pending answer, polls `/play` every 3 s, and shows the server's sentence on a 409. Server: `EpisodeOut.fetchable` on the show payload (`coverable`, computed only when a row is not ready and the show can be in the caller's window). No new dependency, no migration.
 - 2026-10-13 (owner Q4/Q6/Q13/Q15, M20 T6) — **Progressive remux** (new §5.3d; §2 caps, §5.4a live branch, §5b `/play` and `/demand`, §7 live directory, §9 env; spec FR-P8, FR-A5, FR-A7, FR-L1, FR-L4, FR-S4). New job types `remux_live` (`media/live.py`; priority 5, dedupe per episode, advisory lock `('remux_live', id)`, own cap group `MAX_LIVE_REMUXES`=1, heartbeat 60 s) and `qbit_sequential` (`acquisition/jobs.py`; read-then-toggle + `topPrio`). `QbitClient.add(sequential=)`, `info`, `piece_states`, `properties`, `ensure_sequential`; `FileInfo.piece_range`; `TorrentInfo.seq_dl`/`f_l_piece_prio`. Every streaming single is added sequentially (trip-only unchanged). The front is `contiguous_bytes` over hash-checked pieces; `FrontGatedReader` never reads past it. Pre-match gate `library/prematch.py` (nothing indexed). EVENT playlists re-emitted by the router with a fixed target duration (8 after T7's WebKit check; first written 20) and `EXT-X-START` 0 (owner Q4). Adoption by `remux` (`adopt_live`, `os.replace` into `renditions/<id>`, no second ffmpeg); `sweep_live_leftovers` at worker start and in the hourly sweep; `live/` in retention's `allowed_roots`. Server-side completion guard in `record_progress` (0.9 × `expected_duration` on non-ready episodes). Config `live_dir`, `MAX_LIVE_REMUXES`, `LIVE_IDLE_MINUTES`, `LIVE_HEAD_BYTES`; production sets `WORKER_CONCURRENCY=3` (code default 2). Live state in the job payload — no table, no migration, no new dependency. After review (same day): no live remux without a header duration, and no completion on a live episode without one; pad-file layouts refused (`offset_agrees`); the first segment's PTS from `init.mp4` + `seg_00000.m4s`; the head grows to 64 MiB before "unreadable"; `drain` timeout and ffmpeg-exit detection; stdin closed once every piece is checked; the idle clock also on a short file; a 12-requeue cap; restarts over a served playlist cut into `live/<id>.new` and swap in; `/demand` no longer runs the pre-match (the job does) and never restarts a running or finished live remux; the remux never deletes or adopts under a running live job; servable needs a segment; `EpisodeOut.live_playable`; `open_confined`; `remux_live` in `SOURCE_READER_TYPES`. After the Validator's end-to-end run and T7's WebKit check (same day): `-flush_packets 1` on the live subtitle output (the ASS stayed empty until ffmpeg exited); the live target duration 20 → 8 (Safari's seekable range trails the end by 3 × the target); adoption commits `ready` before the rename, and the ready route falls back to `live/<id>` for that instant; adoption no longer holds a remux slot for two minutes (adopt at once on `ENDLIST`, else wait at most 15 s).
+- 2026-10-13 — M20 T7: **live playback, client half** (§5.4a; spec FR-P8 client part, FR-S2, FR-S6, §5 Player). New pure `client/src/player/liveSeek.ts` (`planSeek`, `settlePending` with the jump at target + 6 s, `clampToFront`, `readFront`, `liveStatusLabel`, `fewSeeders`). The player measures a live stream by `live.expected_duration`, draws the download front as a second scrubber bar, turns a seek past `front − 1 s` (and a resume past it) into a pending seek with "Downloading — 43 % · 12 seeders · will jump to 12:30", holds → and End to the front, and says "Few seeders" under a fixed 3 (`/play` does not carry `min_seeders_warn`). `usePlayInfo` polls every 5 s while live and not ended (same request path as T5's 3 s pending poll), rides out a failed poll, and stops on `ended` or adoption; a failed poll no longer replaces a playing video with an error page. `HlsVideo` takes `live`: `liveSyncDuration` 86 400, `liveMaxLatencyDuration` undefined, `maxLiveSyncPlaybackRate` 1; on native HLS it seeks to `startPosition` once after `loadedmetadata`, never reading `duration`. No new dependency, no server change.
+- 2026-10-13 — M20 T7 validation fixes (§5.4a): `measureDuration` keeps the expected duration after adoption until the element's is ≥ 90 % of it (a stale hls.js duration could otherwise complete the episode); seeks count the playhead as reachable (`planSeek`/`clampToFront` take `current`; Safari plays past its seekable end and reports none at first), and → / End are held to the larger of the element's and the server's front; a device copy gets no live UI and no poll (`pollWhileLive`); a pending resume reports its target; adoption and ENDLIST settle a pending seek against the element's range, and a target past the real end resolves to the end (`finalFront`); the front bar shows `max(element, server)` so it never moves back. Checked in Playwright WebKit at `TARGETDURATION:8`, native and hls.js.

@@ -37,7 +37,23 @@ import { applyHlsSubtitles, showTextTracks } from '@/player/subtitles'
  *   `TextTrack`'s `mode` on the native one (see `player/subtitles.ts`). It is
  *   applied after `loadedmetadata`, whenever hls.js updates or switches its
  *   subtitle tracks, whenever Safari adds one, and whenever the prop changes.
+ *
+ * And, for a stream still being cut from a download (`live`, M20 T7,
+ * architecture §5.4a), **that the edge is never chased**: hls.js is told its
+ * target latency is a day (`liveSyncDuration`), with no maximum latency and
+ * no catch-up playback rate, so it never seeks or speeds the viewer towards
+ * the download front. Safari is given the same start by hand: on the native
+ * path the element is put at `startPosition` once its metadata has loaded,
+ * whatever it made of `EXT-X-START`, and its `duration` (which may be
+ * `Infinity` on a growing playlist) is never consulted for it.
  */
+
+/**
+ * hls.js's target distance from the live edge on a growing stream: far more
+ * than any episode, so the sync point is always the playlist's start and
+ * nothing ever moves the viewer towards the front (M20 T7).
+ */
+export const LIVE_SYNC_DURATION_S = 86_400
 
 /** Asked of the element; only meaningful together with the MSE check above. */
 const HLS_MIME = 'application/vnd.apple.mpegurl'
@@ -100,6 +116,12 @@ export interface HlsVideoProps {
    * leaves the track alone (a stream with no text track, or a device copy).
    */
   subtitles?: boolean
+  /**
+   * A stream still being cut from a download (M20 T7): hls.js is configured
+   * not to chase the edge. Read when the instance is created; a stream that
+   * becomes whole keeps its instance (and its URLs) with no reload.
+   */
+  live?: boolean
 }
 
 export function HlsVideo({
@@ -120,6 +142,7 @@ export function HlsVideo({
   onVideoClick,
   startPosition = 0,
   subtitles,
+  live = false,
 }: HlsVideoProps) {
   const [mode, setMode] = useState<Loading>('loading')
   const [fatal, setFatal] = useState<string | null>(null)
@@ -132,10 +155,18 @@ export function HlsVideo({
    */
   const startRef = useRef(startPosition)
   const subtitlesRef = useRef(subtitles)
+  const liveRef = useRef(live)
   useEffect(() => {
     startRef.current = startPosition
     subtitlesRef.current = subtitles
+    liveRef.current = live
   })
+  /**
+   * The native path's one start seek has been made for this source (M20 T7):
+   * a second `loadedmetadata` (Safari reloading the playlist) must not throw
+   * the viewer back to where they started.
+   */
+  const nativeStartedRef = useRef(false)
 
   /**
    * The CC switch (FR-S10). hls.js owns the track's mode on its path, so it
@@ -188,6 +219,7 @@ export function HlsVideo({
     const hasMse = typeof window.MediaSource === 'function'
     if (!hasMse && video.canPlayType(HLS_MIME) !== '') {
       video.src = src
+      nativeStartedRef.current = false
       setMode('native')
       // Safari may add the subtitle rendition's track after the metadata has
       // loaded; the viewer's choice is applied to it as it appears.
@@ -222,6 +254,16 @@ export function HlsVideo({
           // From the resume position (or the start), never the live edge an
           // EVENT playlist would otherwise put the viewer at (M20).
           startPosition: startRef.current,
+          // A growing stream (M20 T7): never towards the download front. The
+          // sync point is the playlist's start, there is no maximum latency
+          // (hls.js's count default is Infinity), and no catch-up rate.
+          ...(liveRef.current
+            ? {
+                liveSyncDuration: LIVE_SYNC_DURATION_S,
+                liveMaxLatencyDuration: undefined,
+                maxLiveSyncPlaybackRate: 1,
+              }
+            : {}),
           // The remux's WebVTT track, drawn by the browser as a TextTrack so
           // `::cue` styles it (FR-S10).
           renderTextTracksNatively: true,
@@ -289,6 +331,16 @@ export function HlsVideo({
           if (kind === 'file') onSourceError?.()
         }}
         onLoadedMetadata={() => {
+          // Safari on an EVENT playlist (M20 T7): from the start position,
+          // never the edge, once per source. `duration` is not looked at — it
+          // may be Infinity while the stream grows.
+          const element = videoRef.current
+          if (mode === 'native' && element !== null && !nativeStartedRef.current) {
+            nativeStartedRef.current = true
+            if (Math.abs(element.currentTime - startRef.current) > 0.5) {
+              element.currentTime = startRef.current
+            }
+          }
           if (kind === 'hls') applySubtitles()
           onReady?.(videoRef.current?.duration ?? Number.NaN)
         }}

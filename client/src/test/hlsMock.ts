@@ -16,6 +16,9 @@ export interface FakeHlsConfig {
   xhrSetup?: (xhr: XMLHttpRequest, url: string) => void
   startPosition?: number
   renderTextTracksNatively?: boolean
+  liveSyncDuration?: number
+  liveMaxLatencyDuration?: number
+  maxLiveSyncPlaybackRate?: number
 }
 
 /** Only the events the player subscribes to, under hls.js's own names. */

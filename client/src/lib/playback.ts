@@ -516,6 +516,19 @@ function isStatus404(error: unknown): boolean {
 /** How often the pending player asks `/play` again (FR-A14, M20). */
 export const PENDING_POLL_MS = 3000
 
+/**
+ * How often a live player asks `/play` again for the download's numbers
+ * (FR-P8, M20 T7): the front, the percentage and the seeders, until the
+ * playlist has its ENDLIST (`live.ended`) or the episode is whole (`live`
+ * gone).
+ */
+export const LIVE_POLL_MS = 5000
+
+/** Whether this answer is a stream still being cut from a download. */
+function liveAndGrowing(answer: PlayInfo | undefined): boolean {
+  return answer?.live != null && !answer.live.ended && answer.playlist_url !== null
+}
+
 export interface PlayInfoOptions {
   /** False holds the request back (the player's own demand goes first). */
   enabled?: boolean
@@ -524,6 +537,11 @@ export interface PlayInfoOptions {
    * no `playlist_url` (FR-A14). Off once the player has been refused.
    */
   pollWhilePending?: boolean
+  /**
+   * Re-ask every {@link LIVE_POLL_MS} while the answer is a growing stream
+   * (FR-P8). Off when the episode plays from a copy on this device.
+   */
+  pollWhileLive?: boolean
   /**
    * How many 404s in a row to ask through, {@link PENDING_POLL_MS} apart,
    * before the answer stands: after an accepted demand, the reconciler may not
@@ -540,24 +558,37 @@ export function usePlayInfo(
   options: PlayInfoOptions = {},
 ): UseQueryResult<PlayInfo, Error> {
   const poll = options.pollWhilePending !== false
+  const pollLive = options.pollWhileLive !== false
   return useQuery<PlayInfo, Error>({
     queryKey: playQueryKey(episodeId),
     queryFn: () => loadPlayInfo(episodeId),
     enabled: Number.isInteger(episodeId) && episodeId > 0 && options.enabled !== false,
-    // The pending view's poll (FR-A14): until the playlist arrives, and only
-    // for an answer that is waiting on the server — never behind a video.
+    // Two polls, one request path. The pending view's (FR-A14): until the
+    // playlist arrives, for an answer that is waiting on the server. And the
+    // live player's (FR-P8, M20 T7): the download's numbers behind a video
+    // that is playing a growing stream, until it has ended or been adopted.
+    // Never behind a video that is playing a whole episode.
     refetchInterval: (query) => {
-      // TanStack keeps the last data after an error: a pending answer that
-      // turned into a 404 (the want dropped) must stop the poll, not loop on it.
-      if (query.state.status === 'error') return false
       const answer = query.state.data
+      if (query.state.status === 'error') {
+        // TanStack keeps the last data after an error: a pending answer that
+        // turned into a 404 (the want dropped) must stop the poll, not loop on
+        // it. A live stream rides out a failed poll — the video is still
+        // playing — and stops only on a 404.
+        return pollLive && liveAndGrowing(answer) && !isStatus404(query.state.error)
+          ? LIVE_POLL_MS
+          : false
+      }
+      if (liveAndGrowing(answer)) return pollLive ? LIVE_POLL_MS : false
       return poll && answer?.pending != null && answer.playlist_url === null
         ? PENDING_POLL_MS
         : false
     },
     // A 404 here means "not ready", which asking again will not change; the
     // resume position must also not be re-read behind a playing video, hence
-    // the infinite stale time for as long as the page is mounted. The one
+    // the infinite stale time for as long as the page is mounted (the live
+    // poll above re-reads it, but the player takes the resume once, on the
+    // first metadata, and never again). The one
     // exception is just after an accepted demand (FR-A14): the want may not be
     // visible to `/play` yet, so a 404 is asked again up to `retryNotFound`
     // times, one poll interval apart.

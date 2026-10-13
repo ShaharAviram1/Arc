@@ -815,6 +815,46 @@ that the course professor can log in at any time, and the owner uses it daily.
   second remux (the player's URLs do not change). The live remux restarts from
   the file's first byte whenever it starts, and its output is the same each
   time. One live remux at a time per worker (`MAX_LIVE_REMUXES`, 1).
+- FR-P8 **Playing while downloading — what the viewer sees** (M20 T7, the
+  client part; the server part — the progressive remux, the EVENT playlist,
+  the `live` numbers on `/play` — is T6's). While `/play` carries `live` and
+  the download has not ended, the player:
+  1. measures the episode by the server's **expected duration**, never the
+     media element's (FR-S4), so the bar, the clocks, the end overlay and every
+     progress report are against the whole episode;
+  2. starts at the resume position or 0, **never at the download front** —
+     hls.js is told not to chase the live edge, and Safari is put at the start
+     after its metadata loads;
+  3. draws the **download front** on the scrubber as a second, fainter bar
+     (the further of what has downloaded and what the player can reach; it
+     never moves backwards). Seeks follow what the player can reach — its
+     seekable range, or where the playhead already is, whichever is further —
+     not the server's number: Safari keeps three target durations back from
+     the end of a live playlist and plays past that point, so a seek back from
+     there is made at once (Safari clamps it to its range);
+  4. turns a seek past that reach (less 1 s) into a **pending seek**: the
+     playhead goes to just short of the front, a line over the picture says
+     "Downloading — 43 % · 12 seeders · will jump to 12:30", and the jump
+     happens once the front is 6 s past the target (once the download has
+     ended or the episode is adopted, as soon as the player's front is within
+     6 s of the target, or to the end when the target is past the file's real
+     end; dropped if playback reaches the target on its own). A later seek
+     replaces it. The same line, without the jump, shows when playback has
+     caught up with the front. While a **resume** waits this way, progress is
+     reported at the resume position, not at the front;
+  5. says **"Few seeders — the download may be slow."** (dismissable) while
+     the release has fewer than 3 seeders — the default of `min_seeders_warn`,
+     which the play payload does not carry;
+  6. asks `/play` again **every 5 s** for those numbers, and stops when the
+     playlist has ended or the episode has been adopted (`live` gone); a
+     failed ask leaves the video playing. When the episode becomes `ready`
+     the same URLs keep playing with no reload, and the live line, the front
+     bar and the clamps go away.
+  No completion receipt or completion is possible before 90 % of the expected
+  duration (FR-S4), however much the element thinks it has — also after the
+  episode was adopted, until the element's own duration is at least 90 % of
+  the expected one. A copy of the episode on this device (FR-S9) plays as a
+  whole file: none of the above applies to it, and `/play` is not polled.
 
 ### 4.5 Streaming and player
 - FR-S1 The client plays HLS in the browser (hls.js; native HLS on Safari).
@@ -839,7 +879,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   device and not yet synced, or newer than what the server holds, wins; a
   position another device moved on the server since this one last saw it wins
   over the device's; offline, the device's is used. The "Resumed from M:SS" notice auto-hides
-  after five seconds; Dismiss closes it sooner.
+  after five seconds; Dismiss closes it sooner. **While the episode is still
+  downloading** (FR-P8, M20 T7), a resume beyond the download front waits: the
+  player starts just short of the front, says it will jump, and makes the
+  resume (with its notice) once the front is 6 s past it.
 - FR-S3 Progress is reported every 10 s while playing and on pause/seek/close.
 - FR-S4 An episode counts as **watched** when position ≥ 90 % of duration.
   **The duration** is the media's own once it has one, else the server's
@@ -894,6 +937,9 @@ that the course professor can log in at any time, and the owner uses it daily.
      shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
      toast and the overlay render inside the fullscreen element.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
+  While the episode is still downloading (FR-P8, M20 T7), → and End are held
+  to the download front (1 s short of it) rather than waiting; a key seek
+  cancels a pending one.
 - FR-S7 **A prepared episode as one MP4 file** (owner, 2026-10-04; revised
   2026-10-05). The route that feeds Keep offline (FR-S9): any signed-in user
   except the demo account can fetch a `ready` episode as one MP4 file. **There
@@ -1522,7 +1568,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons (on a not-ready episode the viewer's window covers, a **Play** button that fetches it on demand and opens the waiting player — FR-A14, M20), and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too. An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9), autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too. An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. An episode still downloading plays as it arrives (FR-P8, M20 T7): the bar is the whole episode with the download front drawn on it, a seek past the front waits with "Downloading — 43 % · 12 seeders · will jump to 12:30", → and End stop at the front, "Few seeders" shows under 3, and the page asks again every 5 s until the download ends. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -2808,3 +2854,20 @@ through the same edge, without the grace period.
   download; a finished live stream is adopted at once, and a still-running one
   is waited for at most 15 s (not two minutes); the stream's URLs keep
   answering across the adoption.
+- 2026-10-13 (M20 T7) — **Playing while downloading, what the viewer sees**
+  (new FR-P8 client part; FR-S2, FR-S6, §5 Player). While the episode
+  downloads, the player is measured by the server's expected duration, starts
+  at the resume or 0 rather than the download front, draws the front on the
+  scrubber, makes a seek or resume past the front wait ("Downloading — 43 % ·
+  12 seeders · will jump to 12:30") and jump when the front is 6 s past it,
+  holds → and End to the front, says "Few seeders" under 3 (the
+  `min_seeders_warn` default; the player does not see the setting), and asks
+  `/play` every 5 s until the download ends or the episode is adopted, with no
+  reload. Small calls, reported for objection: the line also shows when playback has
+  caught up with the front; the few-seeders line is dismissable.
+- 2026-10-13 (M20 T7, validation) — FR-P8 tightened: after adoption the
+  expected duration still guards completion until the element's own is at
+  least 90 % of it; a seek back from past Safari's range is made at once; a
+  resume that waits is reported at its target; a target past the file's real
+  end resolves to the end; a device copy shows no live UI; the front bar never
+  moves backwards.
