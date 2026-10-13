@@ -1841,7 +1841,16 @@ owner's word.
       demanded trip episode); orchestrator: rebased onto T8 (migration
       603a536051f9 after 911eca1dfc62), full server suite on the merged tree
       4647 passed, 3 skipped, lints clean; merged 0350852.
-- [ ] T5: Device reporting and play-on-demand UI (client, non-live)
+- [x] T5: Device reporting and play-on-demand UI (client, non-live) —
+      verified 2026-10-13: Validator PASS (12 adversarial cases; the IndexedDB
+      v3 → v4 upgrade creates only the missing `meta` store and never drops a
+      record; two tabs, a 500, a 600-id set, a user switch, offline, the
+      reconciler race); fixed: the /play poll stops on error, up to three
+      polls through a 404 after an accepted demand, the cap keeps the newest
+      ids, a failed launch report retries on reconnect; orchestrator: client
+      1279, server show/demand/catalogue/playback/migration tests 228,
+      eslint/tsc/prettier/ruff/mypy clean; merged f539a7a. Small call:
+      opening the player on a pending episode counts as a demand.
 - [ ] T6: Progressive remux on a growing file (server)
 - [ ] T7: Player, part 2: live playback (client)
 - [x] T8: Delete after watching, pins, disk-floor eviction — verified
