@@ -1755,6 +1755,47 @@ codec strings — what the API and retention import), `media/offline.py` (the
   declare PlayRes 640×360; on the 1280×720 frame the dialogue sat bottom-centre
   at its intended proportion, in the release's own fonts.
 
+### 5.3c Remux (M20) — helpers
+
+Stub for M20 T1; the job, routes and player land in T2 onward. Pure functions,
+no I/O, fully unit-tested (`server/tests/media/`):
+
+- `media/plan.py` — `copyable(payload, plan) -> Copyability(video, audio_copy,
+  reason)` decides from the ffprobe JSON whether the plan's chosen video can be
+  copied. Copyable video is `h264`, `pix_fmt` `yuv420p`/`yuvj420p`, profile
+  Constrained Baseline / Main / High, level ≤ 51, ≤ 1920×1088, progressive
+  `field_order` (or absent/`unknown`). Otherwise `video=False` with a reason:
+  `10-bit`, `HEVC`, `4:4:4`, `above 1080p`, `interlaced`, or a generic one
+  naming the codec, pixel format, profile or level. Audio that is AAC LC or
+  HE-AAC(v2) is copied; anything else becomes `-c:a aac -b:a <bitrate> -ac 2`.
+  `remux_args(plan, RemuxOptions, *, live)` builds the ffmpeg vector in the
+  style of `encode_args` (no binary, `-nostdin -hide_banner -y`, `-progress
+  pipe:1 -nostats`): exactly one `-c:v copy`, never a `-vf`, fMP4 HLS
+  (`-hls_time 6`, `independent_segments+temp_file`, `init.mp4`,
+  `seg_%05d.m4s`) into `video.m3u8` as `vod`, or `event` with
+  `-f matroska -i pipe:0` when `live`; a chosen text subtitle track is a
+  second output (`-c:s copy -f ass|srt _work/sub.ass|srt`; non-SRT text
+  codecs are converted to SRT). ffmpeg does not create `_work/`, so the
+  remux job must `mkdir` it before running (without it ffmpeg exits 254).
+- `media/subtitles.py` — `ass_to_cues` / `srt_to_cues` → `Cue(start_s, end_s,
+  text, line)`; `cues_to_vtt`; `vtt_segment(cues, start, end, mpegts)` with
+  header `X-TIMESTAMP-MAP=MPEGTS:<mpegts>,LOCAL:00:00:00.000`, a cue only in
+  the segment it starts in; `segment_bounds(video.m3u8)` from the `#EXTINF`
+  sums; `subtitles_playlist(bounds, ended, target_duration=20)` (`sub_NNNNN.vtt`,
+  VOD + ENDLIST when ended, EVENT otherwise; the target duration is fixed by
+  the caller, never derived, since an EVENT playlist may not change it); `master_playlist(...)` with one
+  `EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",DEFAULT=YES,AUTOSELECT=YES,
+  URI="subs.m3u8"` and a `STREAM-INF` naming `video.m3u8`. ASS rules: fields
+  from the `[Events]` `Format:` line; `Comment:` skipped; an event is dropped
+  when its style matches, as a whole word after `_`/`-` become spaces,
+  `sign|signs|song|songs|op|ed|kara|karaoke|kfx|ts|title`, or its override
+  blocks hold `\pos(`, `\move(`, `\k`/`\K`/`\kf`/`\ko` or a `\p1`+ drawing;
+  `{…}` blocks are stripped, `\i1`/`\i0` and an italic style become
+  `<i>…</i>` (balanced per line); `\N`/`\n` are line breaks, `\h` a
+  no-break space; `& < >` escaped; `\an7-9` (or a style with Alignment 7–9)
+  becomes `line:5%`; exact duplicates removed, sorted by start. SRT: HTML
+  stripped except `<i>`, entities decoded then re-escaped, `{\an8}` honoured.
+
 ### 5.4 Streaming
 - `GET /media/{episode_id}/index.m3u8` and `/media/{episode_id}/{segment}`
   are served by the API with session auth; playlists are rewritten so segment
@@ -6293,3 +6334,5 @@ asked*, so `make test` is exactly as fast as it was.
   stays). The Show payload was not used: its `watched` also counts list
   progress and carries no time, so it cannot tell a rewatch download from a
   leftover. No schema change, no new dependency.
+- 2026-10-13 — M20 T1: pure remux/subtitle helpers landed; no behaviour change yet
+  (`copyable`, `remux_args`, `media/subtitles.py`; §5.3c).

@@ -722,6 +722,219 @@ def encode_args(plan: TranscodePlan, options: EncodeOptions | None = None) -> li
     return args
 
 
+# --- Remux (M20) ------------------------------------------------------------
+#
+# The streamed rendition copies the source's H.264 instead of re-encoding it,
+# converts only the audio (when it is not AAC already) and carries the
+# subtitles as a text track (architecture.md §5.3c). Whether a source may be
+# copied at all is :func:`copyable`'s call; a source it refuses goes to the
+# burn-in encode above.
+
+#: The media playlist the remux writes. ``index.m3u8`` is the master playlist,
+#: generated on request, which names this one and the subtitle playlist.
+VIDEO_PLAYLIST_NAME: Final[str] = "video.m3u8"
+
+#: Pixel formats Safari decodes in hardware: 8-bit 4:2:0, full or TV range.
+COPYABLE_PIX_FMTS: Final[frozenset[str]] = frozenset({"yuv420p", "yuvj420p"})
+
+#: H.264 profiles every Safari and Chrome plays.
+COPYABLE_PROFILES: Final[frozenset[str]] = frozenset({"Constrained Baseline", "Main", "High"})
+
+#: ffprobe's ``level`` is the level times ten: 51 is level 5.1.
+MAX_COPY_LEVEL: Final[int] = 51
+MAX_COPY_WIDTH: Final[int] = 1920
+#: 1088, not 1080: a 1080p H.264 stream is coded as 68 macroblock rows and
+#: some muxers report the coded height.
+MAX_COPY_HEIGHT: Final[int] = 1088
+
+#: ``field_order`` values that mean "progressive". ``unknown`` is what ffprobe
+#: prints when the stream does not say, which for H.264 means progressive.
+PROGRESSIVE_FIELD_ORDERS: Final[frozenset[str]] = frozenset({"progressive", "unknown", ""})
+
+#: AAC profiles copied as they are. Anything else is converted to AAC-LC.
+COPYABLE_AAC_PROFILES: Final[frozenset[str]] = frozenset({"LC", "HE-AAC", "HE-AACv2"})
+
+#: The reasons :func:`copyable` gives. Short: they go on the job payload and are
+#: shown on the episode ("Preparing (full encode: 10-bit source)").
+REASON_10_BIT: Final[str] = "10-bit"
+REASON_HEVC: Final[str] = "HEVC"
+REASON_444: Final[str] = "4:4:4"
+REASON_ABOVE_1080P: Final[str] = "above 1080p"
+REASON_INTERLACED: Final[str] = "interlaced"
+
+
+@dataclass(frozen=True, slots=True)
+class Copyability:
+    """Whether the chosen streams can go into the rendition without an encode.
+
+    ``video`` false means the remux cannot be used at all and ``reason`` says
+    why; ``audio_copy`` false only means the audio is converted to AAC, which
+    costs seconds and never forces the fallback.
+    """
+
+    video: bool
+    audio_copy: bool
+    reason: str | None = None
+
+
+def _raw_stream(payload: Mapping[str, Any], kind: str, stream: Stream) -> Mapping[str, Any]:
+    """The probe's own entry for a stream of the plan, by kind and type index."""
+    for raw, candidate in _by_type(payload).get(kind, ()):
+        if candidate.type_index == stream.type_index:
+            return raw
+    return {}
+
+
+def _video_refusal(raw: Mapping[str, Any]) -> str | None:
+    """Why this video stream cannot be copied, or ``None`` when it can.
+
+    Checked in an order that names the real cause: a Hi10P stream is reported
+    as "10-bit" rather than as an unknown profile, and an HEVC one as "HEVC"
+    whatever its pixel format.
+    """
+    codec = str(raw.get("codec_name") or "").lower()
+    profile = str(raw.get("profile") or "")
+    pix_fmt = str(raw.get("pix_fmt") or "").lower()
+    if codec in {"hevc", "h265"}:
+        return REASON_HEVC
+    if codec != "h264":
+        return f"{codec or 'unknown'} video"
+    if pix_fmt.endswith(("p10le", "p10be")) or profile.startswith("High 10"):
+        return REASON_10_BIT
+    if "444" in pix_fmt or "4:4:4" in profile:
+        return REASON_444
+    if pix_fmt not in COPYABLE_PIX_FMTS:
+        return f"{pix_fmt or 'unknown'} pixel format"
+    if profile not in COPYABLE_PROFILES:
+        return f"H.264 {profile or 'unknown'} profile"
+    width = _int(raw.get("width"))
+    height = _int(raw.get("height"))
+    if width is None or height is None:
+        return "unknown resolution"
+    if width > MAX_COPY_WIDTH or height > MAX_COPY_HEIGHT:
+        return REASON_ABOVE_1080P
+    level = _int(raw.get("level"))
+    if level is not None and level > MAX_COPY_LEVEL:
+        return f"H.264 level {level / 10:g}"
+    field_order = str(raw.get("field_order") or "").lower()
+    if field_order not in PROGRESSIVE_FIELD_ORDERS:
+        return REASON_INTERLACED
+    return None
+
+
+def copyable(payload: Mapping[str, Any], plan: TranscodePlan) -> Copyability:
+    """Can the plan's video be copied, and can its audio?
+
+    Pure: reads only ``payload``, the ffprobe JSON the plan was built from.
+    The video rule is what Safari plays natively — H.264, 8-bit 4:2:0, a
+    Baseline/Main/High profile, level 5.1 at most, no larger than 1080p,
+    progressive. The audio is copied when it is AAC-LC or HE-AAC; anything
+    else (FLAC, Opus, AC-3) is converted.
+    """
+    reason = _video_refusal(_raw_stream(payload, "video", plan.video))
+    audio_copy = False
+    if plan.audio is not None:
+        raw_audio = _raw_stream(payload, "audio", plan.audio)
+        audio_copy = (
+            str(raw_audio.get("codec_name") or "").lower() == "aac"
+            and str(raw_audio.get("profile") or "") in COPYABLE_AAC_PROFILES
+        )
+    return Copyability(video=reason is None, audio_copy=audio_copy, reason=reason)
+
+
+@dataclass(frozen=True, slots=True)
+class RemuxOptions:
+    """The knobs of the remux, in the shape :func:`remux_args` wants.
+
+    ``audio_copy`` is :attr:`Copyability.audio_copy`; ``extract_subtitles``
+    lets the caller skip the second output when it does not want the track.
+    """
+
+    segment_seconds: int = 6
+    audio_bitrate: str = "160k"
+    audio_copy: bool = False
+    extract_subtitles: bool = True
+
+
+#: The input a live remux reads: the growing file, fed to ffmpeg on stdin.
+LIVE_INPUT: Final[tuple[str, ...]] = ("-f", "matroska", "-i", "pipe:0")
+
+#: Subtitle codecs the ``ass`` / ``srt`` muxers take as they are.
+_COPYABLE_TO_SRT: Final[frozenset[str]] = frozenset({"subrip", "srt"})
+
+
+def remux_args(
+    plan: TranscodePlan, options: RemuxOptions | None = None, *, live: bool
+) -> list[str]:
+    """The ffmpeg arguments for the remux, without the binary.
+
+    Shaped like :func:`encode_args` — an argument vector, ``-nostdin``, no
+    shell — so the two paths read alike. The video is copied (exactly one
+    ``-c:v copy``, never a ``-vf``); the audio is copied or converted to
+    stereo AAC; the output is fMP4 HLS with ``temp_file`` so a segment only
+    appears under its name once it is complete. ``live`` reads Matroska from
+    stdin and writes an EVENT playlist; otherwise the source path is the input
+    and the playlist is VOD.
+
+    When the plan chose a text subtitle track it is written by the same pass
+    to ``_work/sub.ass`` or ``_work/sub.srt`` as a second output, for
+    :mod:`arc.services.media.subtitles` to turn into WebVTT.
+    """
+    options = options or RemuxOptions()
+    segment = max(int(options.segment_seconds), 1)
+
+    # ``-progress`` and ``-nostats`` are global: up front, so they cannot be
+    # read as options of the subtitle output that may follow the playlist.
+    args = ["-nostdin", "-hide_banner", "-y", "-progress", "pipe:1", "-nostats"]
+    args += list(LIVE_INPUT) if live else ["-i", str(plan.source)]
+    args += ["-map", f"0:v:{plan.video.type_index}"]
+    if plan.audio is not None:
+        args += ["-map", f"0:a:{plan.audio.type_index}"]
+    args += ["-c:v", "copy"]
+    if plan.audio is None:
+        args += ["-an"]
+    elif options.audio_copy:
+        args += ["-c:a", "copy"]
+    else:
+        args += ["-c:a", "aac", "-b:a", options.audio_bitrate, "-ac", "2"]
+    args += [
+        "-sn",
+        "-dn",
+        "-map_chapters",
+        "-1",
+        "-f",
+        "hls",
+        "-hls_time",
+        str(segment),
+        "-hls_segment_type",
+        "fmp4",
+        "-hls_flags",
+        "independent_segments+temp_file",
+        "-hls_fmp4_init_filename",
+        INIT_NAME,
+        "-hls_segment_filename",
+        SEGMENT_PATTERN,
+        "-hls_playlist_type",
+        "event" if live else "vod",
+        VIDEO_PLAYLIST_NAME,
+    ]
+
+    subtitle = plan.subtitle
+    if options.extract_subtitles and subtitle is not None and plan.subtitle_file is not None:
+        codec = (subtitle.codec or "").lower()
+        copy = subtitle.is_ass or codec in _COPYABLE_TO_SRT
+        args += [
+            "-map",
+            f"0:s:{subtitle.type_index}",
+            "-c:s",
+            "copy" if copy else "srt",
+            "-f",
+            "ass" if subtitle.is_ass else "srt",
+            plan.subtitle_file,
+        ]
+    return args
+
+
 #: The small copy's file name inside its staging directory (FR-P6). Relative,
 #: like everything else ffmpeg is told: it runs with the staging directory as
 #: its working directory, so the release name never reaches an output path.
@@ -890,6 +1103,9 @@ __all__ = [
     "ASS_CODECS",
     "ASS_FILE",
     "BITMAP_SUBTITLE_CODECS",
+    "COPYABLE_AAC_PROFILES",
+    "COPYABLE_PIX_FMTS",
+    "COPYABLE_PROFILES",
     "ENGLISH",
     "FONTS_DIR",
     "INIT_NAME",
@@ -902,25 +1118,35 @@ __all__ = [
     "OFFLINE_ENCODERS",
     "OFFLINE_OUTPUT",
     "PLAYLIST_NAME",
+    "REASON_10_BIT",
+    "REASON_444",
+    "REASON_ABOVE_1080P",
+    "REASON_HEVC",
+    "REASON_INTERLACED",
     "SEGMENT_GLOB",
     "SEGMENT_PATTERN",
     "SRT_FILE",
     "TEXT_SUBTITLE_CODECS",
+    "VIDEO_PLAYLIST_NAME",
     "WORK_DIR",
     "EncodeOptions",
     "OfflineOptions",
     "PlanError",
     "Stream",
     "TranscodePlan",
+    "Copyability",
+    "RemuxOptions",
     "attachment_name",
     "build_plan",
     "canonical_language",
+    "copyable",
     "encode_args",
     "font_extract_args",
     "language_matches",
     "normalise_language",
     "offline_encode_args",
     "offline_scale_filter",
+    "remux_args",
     "subtitle_extract_args",
     "subtitle_filter",
     "stream_duration",
