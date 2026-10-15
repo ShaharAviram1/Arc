@@ -1915,11 +1915,19 @@ owner's word.
       reconciled (one FR-P8, remux-by-default wording, §10 test layers,
       deploy README env table + WORKER_CONCURRENCY=3). Branch head: full
       server suite 4897, client 1335, make lint clean.
-- **Status 2026-10-14:** all eleven tasks verified and merged on
-  `m20-on-demand`. Left: the owner's real-iPad check (Safari cue rendering,
-  live play, pending seeks) and the merge to main + deploy on the owner's
-  word (set WORKER_CONCURRENCY=3 in the production .env, then resume
-  acquisition).
+- **Status 2026-10-15: MERGED AND DEPLOYED.** Course graded (99) on
+  2026-10-15; the owner cleared the demo account (user deleted with its
+  rows, its two demo-only One Piece episodes removed by `delete_episode_files`,
+  4.3 GB freed) and gave the word. Final run on the branch head before the
+  merge: server 4898 passed (1 deselected), client 1335, `make lint` clean.
+  `main` fast-forwarded 8557e3c → 00102d9 and pushed; production: backup
+  `arc-20261015T062633Z.sql.gz`, `WORKER_CONCURRENCY=3`, `make up`,
+  `alembic current` = 244fbc2111f9, health clean, worker up with
+  concurrency 3, acquisition resumed 06:28 UTC (the held search for
+  anime 273 ep 2 started downloading at once — the first episode to go
+  through the remux path in production). Left: the owner's real-iPad check
+  (Safari cue rendering, live play, pending seeks); findings are fixed on
+  main from here.
 - DoD: each task Writer → Validator (→ Reviewer where the plan says) →
   orchestrator verification; suites green; lint clean; alembic single head;
   manual iPad check for T7; deployed from branch m20-on-demand after merge to
