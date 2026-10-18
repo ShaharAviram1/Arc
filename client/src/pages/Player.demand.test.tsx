@@ -3,11 +3,24 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DEMAND_NOT_FOUND_RETRIES, PENDING_POLL_MS, type PlayInfo } from '@/lib/playback'
+import {
+  DEMAND_NOT_FOUND_RETRIES,
+  PENDING_POLL_MS,
+  type EpisodeRef,
+  type PlayInfo,
+  type SequelListState,
+} from '@/lib/playback'
 import { createQueryClient } from '@/lib/queryClient'
 import { Player } from '@/pages/Player'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
-import { mockApi, requestsMade, TEST_USER, type MockRoutes } from '@/test/apiMock'
+import {
+  callTo,
+  jsonBodyOf,
+  mockApi,
+  requestsMade,
+  TEST_USER,
+  type MockRoutes,
+} from '@/test/apiMock'
 import { instances, resetHls } from '@/test/hlsMock'
 
 vi.mock('hls.js', async () => await import('@/test/hlsMock'))
@@ -334,5 +347,196 @@ describe('the end overlay’s Next on a fetchable episode (FR-S5 item 2)', () =>
     expect(await screen.findByRole('alert')).toHaveTextContent('Storage is full.')
     expect(router.state.location.pathname).toBe('/watch/9001')
     expect(screen.queryByRole('button', { name: 'Next episode' })).not.toBeInTheDocument()
+  })
+})
+
+describe('Next season at a finished season’s end (FR-S5 item 3)', () => {
+  const CURRENT = `GET /api/episodes/9001/play`
+  const SEQUEL_EPISODE = 9101
+  const SEQUEL_PLAY = `GET /api/episodes/${String(SEQUEL_EPISODE)}/play`
+  const SEQUEL_DEMAND = `POST /api/episodes/${String(SEQUEL_EPISODE)}/demand`
+  const LIST_PUT = 'PUT /api/list/77'
+  const HEADING = 'Next season: Iruma-kun 3 · Episode 1'
+  const NOT_READY: Partial<EpisodeRef> = { state: 'not_wanted', ready: false, fetchable: true }
+
+  function lastEpisode(listState: SequelListState, episode: Partial<EpisodeRef> = {}): PlayInfo {
+    return {
+      ...PLAY_INFO,
+      next: null,
+      next_season: {
+        anime_id: 77,
+        title: 'Iruma-kun 3',
+        list_state: listState,
+        episode: {
+          id: SEQUEL_EPISODE,
+          number: 1,
+          state: 'ready',
+          ready: true,
+          fetchable: false,
+          ...episode,
+        },
+      },
+    }
+  }
+
+  function routesFor(info: PlayInfo): MockRoutes {
+    return {
+      'GET /api/auth/me': { body: TEST_USER },
+      'POST /api/progress': {
+        body: { completed: false, newly_completed: false, list_progress: null },
+      },
+      [CURRENT]: { body: info },
+      [LIST_PUT]: {
+        body: {
+          anime_id: 77,
+          status: 'watching',
+          progress: 0,
+          score: null,
+          updated_at: '2026-10-18T10:00:00Z',
+          dormant: false,
+        },
+      },
+      [SEQUEL_DEMAND]: { status: 202, body: { state: 'wanted' } },
+      [SEQUEL_PLAY]: {
+        body:
+          (info.next_season?.episode.ready ?? false)
+            ? {
+                ...PLAY_INFO_EPISODE_2,
+                episode: { ...PLAY_INFO_EPISODE_2.episode, id: SEQUEL_EPISODE },
+              }
+            : pendingInfo('wanted', null, null),
+      },
+    }
+  }
+
+  async function endEpisode() {
+    await waitFor(() => {
+      expect(instances).toHaveLength(1)
+    })
+    const video = document.querySelector('video')
+    if (video === null) throw new Error('no video element rendered')
+    fireEvent.ended(video)
+  }
+
+  it('offers the sequel’s episode 1 when the show has no next episode', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('active')), {
+      pathname: '/watch/9001',
+    })
+    await endEpisode()
+
+    expect(await screen.findByText(HEADING)).toBeInTheDocument()
+    expect(screen.queryByText('This was the last episode')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Keep watching' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to the show' })).toBeInTheDocument()
+
+    // Active and ready: a plain link, no list write and no demand.
+    await userEvent.setup().click(screen.getByRole('link', { name: 'Next season' }))
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(router.state.location.state).toBeNull()
+    expect(count(fetchMock, LIST_PUT)).toBe(0)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(0)
+  })
+
+  it('activates a dormant sequel, demands episode 1, then opens the waiting player', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('dormant', NOT_READY)), {
+      pathname: '/watch/9001',
+    })
+    await endEpisode()
+
+    expect(await screen.findByText(HEADING)).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Next season' }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(router.state.location.state).toEqual({ demanded: true })
+    expect(await screen.findByText('Searching')).toBeInTheDocument()
+    const made = requestsMade(fetchMock)
+    expect(made.indexOf(LIST_PUT)).toBeLessThan(made.indexOf(SEQUEL_DEMAND))
+    // The touch re-sends the entry unchanged, as "Fetch this show" does.
+    expect(jsonBodyOf(callTo(fetchMock, '/api/list/77'))).toEqual({})
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
+  })
+
+  it('adds an absent sequel to the list as Watching before demanding', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('absent', NOT_READY)), {
+      pathname: '/watch/9001',
+    })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(jsonBodyOf(callTo(fetchMock, '/api/list/77'))).toEqual({ status: 'watching' })
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
+  })
+
+  it('adds an absent, ready sequel and opens it without a demand', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('absent')), {
+      pathname: '/watch/9001',
+    })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(count(fetchMock, LIST_PUT)).toBe(1)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(0)
+  })
+
+  it('says the server’s sentence when the demand is refused', async () => {
+    const routes = routesFor(lastEpisode('dormant', NOT_READY))
+    routes[SEQUEL_DEMAND] = {
+      status: 409,
+      body: { detail: { code: 'acquisition_paused', message: PAUSED } },
+    }
+    const { router } = renderAt(routes, { pathname: '/watch/9001' })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(PAUSED)
+    expect(router.state.location.pathname).toBe('/watch/9001')
+    expect(screen.queryByRole('button', { name: 'Next season' })).not.toBeInTheDocument()
+  })
+
+  it('names the sequel without offering it when it can be neither played nor fetched', async () => {
+    renderAt(
+      routesFor(lastEpisode('active', { state: 'not_wanted', ready: false, fetchable: false })),
+      { pathname: '/watch/9001' },
+    )
+    await endEpisode()
+
+    expect(await screen.findByText('Iruma-kun 3 · Episode 1 isn’t ready yet')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next season' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Next season' })).not.toBeInTheDocument()
+  })
+
+  it('points the Next glyph at the sequel, under a Next season label', async () => {
+    renderAt(routesFor(lastEpisode('active')), { pathname: '/watch/9001' })
+
+    const glyph = await screen.findByRole('link', { name: HEADING })
+    expect(glyph).toHaveAttribute('href', `/watch/${String(SEQUEL_EPISODE)}`)
+    expect(screen.queryByRole('button', { name: 'Next episode' })).not.toBeInTheDocument()
+  })
+
+  it('runs the same touch and demand from the glyph', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('dormant', NOT_READY)), {
+      pathname: '/watch/9001',
+    })
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: HEADING }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(count(fetchMock, LIST_PUT)).toBe(1)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
   })
 })

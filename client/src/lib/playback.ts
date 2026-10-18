@@ -69,6 +69,26 @@ export interface EpisodeRef {
 }
 
 /**
+ * The viewer's list entry for a sequel (FR-A9): on the list and fetching,
+ * on it as an untouched MyAnimeList import, or not on it.
+ */
+export type SequelListState = 'active' | 'dormant' | 'absent'
+
+/**
+ * The sequel's first episode, offered at a finished season's last episode
+ * (FR-S5 item 3, 2026-10-18) when `next` is null. `episode.fetchable` is what
+ * a demand will accept once the press has made the entry active: the player
+ * adds an `absent` sequel as Watching, re-sends a `dormant` one, and then
+ * demands the episode (FR-A14).
+ */
+export interface NextSeasonRef {
+  anime_id: number
+  title: string
+  episode: EpisodeRef
+  list_state: SequelListState
+}
+
+/**
  * Where a wanted, not-ready episode stands (FR-A14, M20): what the pending
  * player shows while it polls `/play` for the playlist. `progress` is 0..1
  * of the download, null before anything was reported; `seeders` is the
@@ -144,6 +164,11 @@ export interface PlayInfo {
   resume_at?: string | null
   previous: EpisodeRef | null
   next: EpisodeRef | null
+  /**
+   * The sequel's first episode when the season ended here (FR-S5 item 3);
+   * null or absent otherwise, and from a server older than 2026-10-18.
+   */
+  next_season?: NextSeasonRef | null
   /**
    * The rendition's text track (FR-S10, M20), or null for one with none — a
    * burn-in transcode, or a source with no usable text track. The CC button

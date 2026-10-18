@@ -11,6 +11,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
+import { listErrorMessage, useSetListEntry } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
 import {
   alreadyDemanded,
@@ -29,6 +30,7 @@ import {
   WATCHED_BY_PROGRESS_HINT,
   type DemandRefusal,
   type EpisodeRef,
+  type NextSeasonRef,
   type PendingInfo,
   type PlayInfo,
   type WatchState,
@@ -197,6 +199,8 @@ const NOT_READY_BODY =
 const CANNOT_FETCH_TITLE = 'Can’t fetch this episode now'
 /** A demand that failed with no sentence from the server (no network, a 5xx). */
 const DEMAND_FAILED = 'Could not ask Arc for that episode. Try again shortly.'
+/** The sequel's first episode, at a finished season's end (FR-S5 item 3). */
+const NEXT_SEASON = 'Next season'
 const LOAD_FAILED_TITLE = 'Could not load this episode'
 const LOAD_FAILED_BODY = 'Could not load this episode. Try again shortly.'
 
@@ -613,6 +617,126 @@ function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: 
 }
 
 /**
+ * Pressing "Next season" (FR-S5 item 3, owner 2026-10-18): one press, end to end.
+ *
+ * An active sequel whose episode 1 is ready is a plain link. Otherwise the
+ * press is first a **touch** of the sequel's entry (FR-A9) through the same
+ * list write the show page uses — an `absent` sequel is added as Watching (an
+ * explicit status change, so it goes to MyAnimeList like any other), a
+ * `dormant` one is re-sent unchanged, which is all "Fetch this show" does —
+ * and then, for an episode that is not ready, the demand (FR-A14) and the
+ * waiting player, exactly as Next does. The demand works out the window
+ * itself, so the episode the write just brought into it is accepted on the
+ * spot; nothing waits for the reconciler.
+ *
+ * Offered only when the episode is ready or the server says it can be fetched
+ * once the entry is active (`episode.fetchable`). A failed write says the
+ * list's sentence; a refused demand says the server's.
+ */
+function useNextSeasonPress(season: NextSeasonRef | null | undefined) {
+  const navigate = useNavigate()
+  const setEntry = useSetListEntry()
+  const [asking, setAsking] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const episode = season?.episode ?? null
+  const offered = episode !== null && (episode.ready || episode.fetchable === true)
+  /** Nothing to do but go there: no touch, no fetch. */
+  const direct = season != null && season.list_state === 'active' && season.episode.ready
+
+  const press = async (sequel: NextSeasonRef) => {
+    const target = `/watch/${String(sequel.episode.id)}`
+    try {
+      if (sequel.list_state !== 'active') {
+        await setEntry.mutateAsync(
+          sequel.list_state === 'absent'
+            ? { animeId: sequel.anime_id, status: 'watching' }
+            : { animeId: sequel.anime_id },
+        )
+      }
+    } catch (error: unknown) {
+      setAsking(false)
+      setRefused(listErrorMessage(error))
+      return
+    }
+    if (sequel.episode.ready) {
+      void navigate(target)
+      return
+    }
+    try {
+      await demandEpisode(sequel.episode.id)
+    } catch (error: unknown) {
+      setAsking(false)
+      setRefused(demandRefusal(error)?.message ?? DEMAND_FAILED)
+      return
+    }
+    const state: WatchState = { demanded: true }
+    void navigate(target, { state })
+  }
+
+  return {
+    offered,
+    direct,
+    asking,
+    refused,
+    press: () => {
+      if (season == null || asking) return
+      setAsking(true)
+      setRefused(null)
+      void press(season)
+    },
+  }
+}
+
+/** "Next season: Iruma-kun 3 · Episode 1" — how the overlay and the glyph name it. */
+function nextSeasonName(season: NextSeasonRef): string {
+  return `${season.title} · Episode ${String(season.episode.number)}`
+}
+
+/**
+ * The Next glyph when the season ended here and a sequel is offered (FR-S5
+ * item 3): the same press as the overlay's "Next season". Disabled, with the
+ * reason as its tooltip, when the sequel's episode is neither ready nor
+ * fetchable, or after a refusal (whose sentence it also announces).
+ */
+function NextSeasonLink({ season, glyph }: { season: NextSeasonRef; glyph: ReactNode }) {
+  const { offered, direct, asking, refused, press } = useNextSeasonPress(season)
+  const name = `${NEXT_SEASON}: ${nextSeasonName(season)}`
+
+  if (offered && direct) {
+    return (
+      <Link
+        to={`/watch/${String(season.episode.id)}`}
+        aria-label={name}
+        title={name}
+        className={PLAYER_ICON}
+      >
+        {glyph}
+      </Link>
+    )
+  }
+  const usable = offered && refused === null
+  return (
+    <>
+      <button
+        type="button"
+        disabled={!usable || asking}
+        onClick={press}
+        aria-label={name}
+        title={refused ?? (usable ? name : `${nextSeasonName(season)} isn’t ready yet`)}
+        className={PLAYER_ICON}
+      >
+        {glyph}
+      </button>
+      {refused === null ? null : (
+        <span role="alert" className="sr-only">
+          {refused}
+        </span>
+      )}
+    </>
+  )
+}
+
+/**
  * A neighbouring episode, as a glyph.
  *
  * One that is not ready is still shown, disabled, with its state as the
@@ -763,7 +887,10 @@ function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
  * opens the waiting player); when the next
  * episode exists but is still being prepared, or there is no next episode, the
  * line above says which, and no dead button is drawn under a sentence that has
- * already explained itself. **Keep watching** puts the card away for the rest
+ * already explained itself. At a finished season's last episode, where there
+ * is no next row, the primary is **Next season** instead — the sequel's first
+ * episode (`next_season`, FR-S5 item 3), on the same ready / fetchable rule,
+ * pressed through {@link useNextSeasonPress}. **Keep watching** puts the card away for the rest
  * of this playback. **Back to the show** leaves.
  *
  * Nothing here is focused on mount: the playback shortcuts live on the window
@@ -772,6 +899,9 @@ function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
  */
 function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: () => void }) {
   const next = info.next
+  /** Only where the show itself has no next row (FR-S5 item 3). */
+  const season = next === null ? (info.next_season ?? null) : null
+  const sequel = useNextSeasonPress(season)
   const navigate = useNavigate()
   /**
    * Next on an episode Arc can fetch on demand (FR-S5 item 2, FR-A14, M20):
@@ -784,7 +914,11 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
   const fetchable = next !== null && !next.ready && next.fetchable === true
   const heading =
     next === null
-      ? 'This was the last episode'
+      ? season === null
+        ? 'This was the last episode'
+        : sequel.offered
+          ? `${NEXT_SEASON}: ${nextSeasonName(season)}`
+          : `${nextSeasonName(season)} isn’t ready yet`
       : next.ready || fetchable
         ? `Next: Episode ${String(next.number)}`
         : `Episode ${String(next.number)} isn’t ready yet`
@@ -821,13 +955,29 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
         )}
       >
         <p className="text-[17px] font-semibold text-[var(--arc-text)]">{heading}</p>
-        {refused === null ? null : (
+        {(refused ?? sequel.refused) === null ? null : (
           <p role="alert" className="mt-2 text-[14px] leading-[1.5] text-[var(--arc-warn)]">
-            {refused}
+            {refused ?? sequel.refused}
           </p>
         )}
         <div className="mt-4 flex flex-wrap items-center gap-2.5">
-          {next !== null && next.ready ? (
+          {season !== null && sequel.offered && sequel.direct ? (
+            <Link
+              to={`/watch/${String(season.episode.id)}`}
+              className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
+            >
+              {NEXT_SEASON}
+            </Link>
+          ) : season !== null && sequel.offered && sequel.refused === null ? (
+            <button
+              type="button"
+              onClick={sequel.press}
+              disabled={sequel.asking}
+              className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
+            >
+              {sequel.asking ? 'Starting…' : NEXT_SEASON}
+            </button>
+          ) : next !== null && next.ready ? (
             <Link
               to={`/watch/${String(next.id)}`}
               className={buttonClass('primary', 'h-11 px-5 text-[15px]')}
@@ -2273,7 +2423,11 @@ function PlayerView({ id }: { id: number }) {
                   label="Previous episode"
                   glyph={<SkipBackGlyph />}
                 />
-                <NeighbourLink episode={next} label="Next episode" glyph={<SkipForwardGlyph />} />
+                {next === null && info.next_season != null ? (
+                  <NextSeasonLink season={info.next_season} glyph={<SkipForwardGlyph />} />
+                ) : (
+                  <NeighbourLink episode={next} label="Next episode" glyph={<SkipForwardGlyph />} />
+                )}
               </nav>
               {watchedByList ? (
                 <button
