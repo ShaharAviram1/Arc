@@ -1932,6 +1932,30 @@ owner's word.
   orchestrator verification; suites green; lint clean; alembic single head;
   manual iPad check for T7; deployed from branch m20-on-demand after merge to
   main on the owner's word.
+- **Owner's real-iPad check, 2026-10-18:** direct streaming "works great, well
+  above my expectations" — speed, subtitles and quality all good. Three
+  findings, fixed on main as M20 follow-ups:
+  - [ ] **Next season at the end of a season** (owner approved 2026-10-18):
+    the last episode of Iruma-kun 2 offered no Next because `PlayInfo.next`
+    only knows the same show. Offer the sequel's episode 1 (the SEQUEL
+    relation resolved to a catalogue row) on the end-of-episode overlay and
+    the Next glyph; pressing it activates a dormant entry (FR-A9 touch) and
+    demands the episode (FR-A14). The halfway prefetch on a season's last
+    episode reaches into the sequel's episode 1 only when the sequel's entry
+    is already active on the list.
+  - [x] **Touch tap toggles the controls, never pauses** (owner approved
+    2026-10-18): on the iPad a tap with the controls showing paused the
+    video. Touch: tap toggles chrome, double-tap fullscreen, play/pause via
+    the button. Mouse unchanged. Shipped as a74aac1 (Writer; the hide waits
+    the double-tap window and yields to anything holding the chrome open;
+    also fixed: a finger's `pointerdown` + `touchstart` pair read the chrome
+    state twice, so every tap looked like a tap on shown chrome). Verified
+    by the orchestrator 2026-10-18: diff read, client 1340 passed, `make
+    lint` clean on main.
+  - [ ] **Fullscreen on the iPad**: the button does nothing in the installed
+    app and the status bar never hides. Owner 2026-10-18: handing the video
+    to Apple's native player is **not acceptable** — Arc's overlays stay.
+    Approach pending the owner's word (see the orchestrator's proposal).
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
