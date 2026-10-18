@@ -632,8 +632,22 @@ function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: 
  * Offered only when the episode is ready or the server says it can be fetched
  * once the entry is active (`episode.fetchable`). A failed write says the
  * list's sentence; a refused demand says the server's.
+ *
+ * One instance per player, in {@link PlayerView}: the end overlay and the
+ * Next glyph share it, so a press from either disables both and a refusal is
+ * known to both.
  */
-function useNextSeasonPress(season: NextSeasonRef | null | undefined) {
+interface NextSeasonPress {
+  /** The sequel on offer, or null where the show has a next row or no sequel. */
+  season: NextSeasonRef | null
+  offered: boolean
+  direct: boolean
+  asking: boolean
+  refused: string | null
+  press: () => void
+}
+
+function useNextSeasonPress(season: NextSeasonRef | null): NextSeasonPress {
   const navigate = useNavigate()
   const setEntry = useSetListEntry()
   const [asking, setAsking] = useState(false)
@@ -641,7 +655,7 @@ function useNextSeasonPress(season: NextSeasonRef | null | undefined) {
   const episode = season?.episode ?? null
   const offered = episode !== null && (episode.ready || episode.fetchable === true)
   /** Nothing to do but go there: no touch, no fetch. */
-  const direct = season != null && season.list_state === 'active' && season.episode.ready
+  const direct = season !== null && season.list_state === 'active' && season.episode.ready
 
   const press = async (sequel: NextSeasonRef) => {
     const target = `/watch/${String(sequel.episode.id)}`
@@ -674,12 +688,13 @@ function useNextSeasonPress(season: NextSeasonRef | null | undefined) {
   }
 
   return {
+    season,
     offered,
     direct,
     asking,
     refused,
     press: () => {
-      if (season == null || asking) return
+      if (season === null || asking) return
       setAsking(true)
       setRefused(null)
       void press(season)
@@ -693,13 +708,35 @@ function nextSeasonName(season: NextSeasonRef): string {
 }
 
 /**
- * The Next glyph when the season ended here and a sequel is offered (FR-S5
- * item 3): the same press as the overlay's "Next season". Disabled, with the
- * reason as its tooltip, when the sequel's episode is neither ready nor
- * fetchable, or after a refusal (whose sentence it also announces).
+ * Why the sequel's episode is not on offer: "hasn't aired yet" for a sequel
+ * that is only announced or whose episode 1 has not aired (`aired: false`),
+ * "isn't ready yet" otherwise.
  */
-function NextSeasonLink({ season, glyph }: { season: NextSeasonRef; glyph: ReactNode }) {
-  const { offered, direct, asking, refused, press } = useNextSeasonPress(season)
+function nextSeasonUnavailable(season: NextSeasonRef): string {
+  const why = season.aired === false ? 'hasn’t aired yet' : 'isn’t ready yet'
+  return `${nextSeasonName(season)} ${why}`
+}
+
+/**
+ * The Next glyph when the season ended here and a sequel is offered (FR-S5
+ * item 3): the same press as the overlay's "Next season" — the same instance
+ * of it. Disabled, with the reason as its label and tooltip, when the
+ * sequel's episode is neither ready nor fetchable, or after a refusal. The
+ * refusal is announced here only when the end overlay is not up to say it
+ * (`announce`), so a screen reader hears it once.
+ */
+function NextSeasonLink({
+  season,
+  sequel,
+  announce,
+  glyph,
+}: {
+  season: NextSeasonRef
+  sequel: NextSeasonPress
+  announce: boolean
+  glyph: ReactNode
+}) {
+  const { offered, direct, asking, refused, press } = sequel
   const name = `${NEXT_SEASON}: ${nextSeasonName(season)}`
 
   if (offered && direct) {
@@ -715,19 +752,20 @@ function NextSeasonLink({ season, glyph }: { season: NextSeasonRef; glyph: React
     )
   }
   const usable = offered && refused === null
+  const label = refused ?? (usable ? name : nextSeasonUnavailable(season))
   return (
     <>
       <button
         type="button"
         disabled={!usable || asking}
         onClick={press}
-        aria-label={name}
-        title={refused ?? (usable ? name : `${nextSeasonName(season)} isn’t ready yet`)}
+        aria-label={label}
+        title={label}
         className={PLAYER_ICON}
       >
         {glyph}
       </button>
-      {refused === null ? null : (
+      {refused === null || !announce ? null : (
         <span role="alert" className="sr-only">
           {refused}
         </span>
@@ -897,11 +935,19 @@ function UnmutePill({ onUnmute }: { onUnmute: () => void }) {
  * and must keep working (FR-S6), and space landing on a focused button instead
  * of the video would be exactly the theft this card is meant to avoid.
  */
-function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: () => void }) {
+function EndOverlay({
+  info,
+  sequel,
+  onKeepWatching,
+}: {
+  info: PlayInfo
+  /** The player's one {@link useNextSeasonPress}, shared with the Next glyph. */
+  sequel: NextSeasonPress
+  onKeepWatching: () => void
+}) {
   const next = info.next
   /** Only where the show itself has no next row (FR-S5 item 3). */
-  const season = next === null ? (info.next_season ?? null) : null
-  const sequel = useNextSeasonPress(season)
+  const season = next === null ? sequel.season : null
   const navigate = useNavigate()
   /**
    * Next on an episode Arc can fetch on demand (FR-S5 item 2, FR-A14, M20):
@@ -918,7 +964,7 @@ function EndOverlay({ info, onKeepWatching }: { info: PlayInfo; onKeepWatching: 
         ? 'This was the last episode'
         : sequel.offered
           ? `${NEXT_SEASON}: ${nextSeasonName(season)}`
-          : `${nextSeasonName(season)} isn’t ready yet`
+          : nextSeasonUnavailable(season)
       : next.ready || fetchable
         ? `Next: Episode ${String(next.number)}`
         : `Episode ${String(next.number)} isn’t ready yet`
@@ -1071,6 +1117,9 @@ function PlayerView({ id }: { id: number }) {
   useEffect(() => {
     if (demandFirst && local.checked && local.url === null) askToFetch()
   }, [demandFirst, local.checked, local.url, askToFetch])
+  // "Next season" at a finished season's end (FR-S5 item 3): one press for
+  // the end overlay and the Next glyph, so neither can start a second one.
+  const sequel = useNextSeasonPress(data?.next === null ? (data.next_season ?? null) : null)
   // A pending episode with no copy on this device: pressing play is the demand.
   const waitingOnServer =
     data?.pending != null && data.playlist_url === null && local.checked && local.url === null
@@ -2423,8 +2472,13 @@ function PlayerView({ id }: { id: number }) {
                   label="Previous episode"
                   glyph={<SkipBackGlyph />}
                 />
-                {next === null && info.next_season != null ? (
-                  <NextSeasonLink season={info.next_season} glyph={<SkipForwardGlyph />} />
+                {sequel.season !== null ? (
+                  <NextSeasonLink
+                    season={sequel.season}
+                    sequel={sequel}
+                    announce={!endOverlayShown}
+                    glyph={<SkipForwardGlyph />}
+                  />
                 ) : (
                   <NeighbourLink episode={next} label="Next episode" glyph={<SkipForwardGlyph />} />
                 )}
@@ -2514,7 +2568,9 @@ function PlayerView({ id }: { id: number }) {
         ) : null}
       </div>
 
-      {endOverlayShown ? <EndOverlay info={info} onKeepWatching={keepWatching} /> : null}
+      {endOverlayShown ? (
+        <EndOverlay info={info} sequel={sequel} onKeepWatching={keepWatching} />
+      ) : null}
     </div>
   )
 }

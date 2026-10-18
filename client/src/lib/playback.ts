@@ -86,6 +86,11 @@ export interface NextSeasonRef {
   title: string
   episode: EpisodeRef
   list_state: SequelListState
+  /**
+   * False when the sequel is only announced or its episode has not aired, so
+   * the player says "hasn't aired yet"; absent from a server that predates it.
+   */
+  aired?: boolean
 }
 
 /**

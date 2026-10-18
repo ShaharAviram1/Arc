@@ -506,6 +506,71 @@ describe('Next season at a finished season’s end (FR-S5 item 3)', () => {
     expect(screen.queryByRole('button', { name: 'Next season' })).not.toBeInTheDocument()
   })
 
+  it('says the list’s sentence when the list write fails, and neither demands nor leaves', async () => {
+    const routes = routesFor(lastEpisode('absent', NOT_READY))
+    routes[LIST_PUT] = { status: 500, body: { detail: 'boom' } }
+    const { fetchMock, router } = renderAt(routes, { pathname: '/watch/9001' })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not save that change. Try again.',
+    )
+    expect(count(fetchMock, LIST_PUT)).toBe(1)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(0)
+    expect(router.state.location.pathname).toBe('/watch/9001')
+  })
+
+  it('shares one press between the overlay and the glyph', async () => {
+    const routes = routesFor(lastEpisode('dormant', NOT_READY))
+    routes[SEQUEL_DEMAND] = {
+      status: 409,
+      body: { detail: { code: 'acquisition_paused', message: PAUSED } },
+    }
+    const { fetchMock } = renderAt(routes, { pathname: '/watch/9001' })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    // The overlay says it once; the glyph knows it too and offers no second press.
+    expect(await screen.findByRole('alert')).toHaveTextContent(PAUSED)
+    const glyph = screen.getByRole('button', { name: PAUSED })
+    expect(glyph).toBeDisabled()
+    expect(glyph).toHaveAttribute('title', PAUSED)
+    expect(count(fetchMock, LIST_PUT)).toBe(1)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
+  })
+
+  it('says a sequel that has not aired yet has not aired, on the overlay and the glyph', async () => {
+    const info = lastEpisode('absent', { state: 'not_wanted', ready: false, fetchable: false })
+    if (info.next_season == null) throw new Error('no sequel in the fixture')
+    info.next_season.aired = false
+    const { fetchMock } = renderAt(routesFor(info), { pathname: '/watch/9001' })
+
+    const unaired = 'Iruma-kun 3 · Episode 1 hasn’t aired yet'
+    const glyph = await screen.findByRole('button', { name: unaired })
+    expect(glyph).toBeDisabled()
+    expect(glyph).toHaveAttribute('title', unaired)
+
+    await endEpisode()
+    expect(await screen.findByText(unaired)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next season' })).not.toBeInTheDocument()
+    expect(count(fetchMock, LIST_PUT)).toBe(0)
+  })
+
+  it('gives a disabled glyph the same label and tooltip', async () => {
+    renderAt(
+      routesFor(lastEpisode('active', { state: 'not_wanted', ready: false, fetchable: false })),
+      { pathname: '/watch/9001' },
+    )
+
+    const notReady = 'Iruma-kun 3 · Episode 1 isn’t ready yet'
+    const glyph = await screen.findByRole('button', { name: notReady })
+    expect(glyph).toBeDisabled()
+    expect(glyph).toHaveAttribute('title', notReady)
+  })
+
   it('names the sequel without offering it when it can be neither played nor fetched', async () => {
     renderAt(
       routesFor(lastEpisode('active', { state: 'not_wanted', ready: false, fetchable: false })),
