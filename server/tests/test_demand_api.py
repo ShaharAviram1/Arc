@@ -212,6 +212,63 @@ async def test_demand_needs_an_allowed_origin(
     assert response.status_code == 403
 
 
+# --- Next season: the touch, then the demand (FR-S5 item 3, FR-A9, 2026-10-18) -------
+
+
+async def sequel_show(
+    factory: SessionFactory, user_id: int, *, anilist_id: int, entry: str
+) -> list[int]:
+    """A finished, freshly cached show; ``entry`` is ``absent`` or ``dormant``. Episode ids.
+
+    Fresh so ``PUT /api/list`` serves the cached row without asking a source.
+    """
+    async with factory() as session:
+        anime = await make_anime(session, anilist_id=anilist_id, status=FINISHED, episodes=12)
+        anime.refreshed_at = datetime.now(UTC)
+        anime.detail_source = "anilist"
+        rows = await make_episodes(session, anime, 12, aired_through=12)
+        if entry == "dormant":
+            user = await session.get(User, user_id)
+            assert user is not None
+            await make_entry(session, user, anime, activated=False)
+        await session.commit()
+        return [anime.id, *(row.id for row in rows)]
+
+
+@pytest.mark.parametrize(
+    ("entry", "touch"),
+    [("absent", {"status": "watching"}), ("dormant", {})],
+)
+async def test_after_the_touch_episode_one_is_covered_in_the_same_flow(
+    client: AsyncClient, user: User, api_factory: SessionFactory, entry: str, touch: dict[str, str]
+) -> None:
+    """No wait for the scheduled ``compute_wants``: the demand computes coverage itself.
+
+    Before the press the sequel's episode 1 is outside every window (not on the
+    list, or an untouched import), so a bare demand is refused. The player's
+    press is the list write and then the demand, and the demand right after
+    the write is accepted.
+    """
+    anime_id, *ids = await sequel_show(
+        api_factory, user.id, anilist_id=975050 + int(entry == "dormant"), entry=entry
+    )
+
+    refused = await client.post(f"/api/episodes/{ids[0]}/demand")
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == NOT_IN_WINDOW
+
+    written = await client.put(f"/api/list/{anime_id}", json=touch)
+    assert written.status_code == 200, written.text
+    assert written.json()["dormant"] is False
+    assert written.json()["status"] == "watching"
+
+    accepted = await client.post(f"/api/episodes/{ids[0]}/demand")
+    assert accepted.status_code == 202, accepted.text
+    async with api_factory() as session:
+        want = await session.get(Want, (user.id, ids[0]))
+        assert want is not None and want.demanded_at is not None
+
+
 # --- PUT /api/devices/{device_id}/holdings -------------------------------------------
 
 

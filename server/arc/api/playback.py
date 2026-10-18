@@ -63,6 +63,7 @@ from arc.api.playback_schemas import (
     CompletedOut,
     EpisodeRef,
     LiveOut,
+    NextSeasonRef,
     PendingOut,
     PlayInfo,
     ProgressIn,
@@ -90,6 +91,7 @@ from arc.services.media.names import (
     latest_live_with,
     payload_float,
 )
+from arc.services.playback.next_season import next_season
 from arc.services.playback.progress import (
     ProgressOutcome,
     record_progress,
@@ -197,6 +199,12 @@ async def play(
     route, so it flips once the user passes 50 %. It is false for a ready
     neighbour (nothing to fetch) and is not worked out while this episode is
     itself pending.
+
+    ``next_season`` (FR-S5 item 3, owner 2026-10-18) is the sequel's first
+    episode when the season ends here — no following row and the show finished
+    — and the sequel is a show Arc has; with the viewer's list state for it and
+    a ``fetchable`` that holds once the press has touched that entry. The rule
+    is :mod:`arc.services.playback.next_season`.
     """
     episode = await session.get(Episode, episode_id)
     if episode is None:
@@ -242,9 +250,35 @@ async def play(
     # ``fetchable`` costs a one-user plan, and the pending player polls this
     # route every few seconds: so it is worked out only when a neighbour exists
     # that is not ready, and not while this episode is itself still pending.
+    # Asked for at most once, by the neighbours or by the next season.
+    covered: frozenset[int] | None = None
+
+    async def covered_now() -> frozenset[int]:
+        nonlocal covered
+        if waiting:
+            return frozenset()
+        if covered is None:
+            covered = await coverable(session, user.id, now=at)
+        return covered
+
     if not waiting and any(ref is not None and not ref.ready for ref in (previous, following)):
-        fetchable = await coverable(session, user.id, now=at)
-        previous, following = _neighbours(siblings, episode, fetchable=fetchable)
+        previous, following = _neighbours(siblings, episode, fetchable=await covered_now())
+    # The sequel's first episode, at a finished season's end (FR-S5 item 3).
+    # Not while this episode is pending: the waiting player polls, and shows
+    # no end overlay to offer it on.
+    sequel = (
+        None
+        if waiting
+        else await next_season(
+            session,
+            user_id=user.id,
+            anime=anime,
+            episode=episode,
+            has_following=following is not None,
+            covered=covered_now,
+            now=at,
+        )
+    )
     pending: PendingOut | None = None
     live: LiveOut | None = None
     subtitles = None if not_ready else SubtitlesOut.from_rendition(rendition)
@@ -298,6 +332,7 @@ async def play(
         resume_at=progress.updated_at if progress is not None else None,
         previous=previous,
         next=following,
+        next_season=NextSeasonRef.build(sequel) if sequel is not None else None,
         subtitles=subtitles,
     )
 

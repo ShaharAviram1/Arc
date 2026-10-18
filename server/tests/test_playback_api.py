@@ -1342,6 +1342,212 @@ async def test_the_play_answer_says_when_the_position_was_written(
     assert datetime.fromisoformat(body["resume_at"]) == written
 
 
+# --- Next season (FR-S5 item 3, 2026-10-18) -------------------------------------
+
+
+async def link_sequel(
+    factory: SessionFactory,
+    anime_id: int,
+    *relations: tuple[int, str, str],
+) -> None:
+    """Give a show relations: ``(anilist id, relation type, format)`` each."""
+    async with factory() as session:
+        anime = await session.get(Anime, anime_id)
+        assert anime is not None
+        anime.relations = [
+            {
+                "anilist_id": anilist_id,
+                "mal_id": None,
+                "relation_type": relation_type,
+                "title": {"romaji": f"related {anilist_id}"},
+                "format": fmt,
+            }
+            for anilist_id, relation_type, fmt in relations
+        ]
+        await session.commit()
+
+
+async def activate(factory: SessionFactory, user: User, anime_id: int) -> None:
+    async with factory() as session:
+        entry = await session.get(ListEntry, (user.id, anime_id))
+        assert entry is not None
+        entry.activated_at = NOW
+        await session.commit()
+
+
+async def season_pair(
+    factory: SessionFactory,
+    *,
+    base: int,
+    sequel_ready: tuple[int, ...] = (1,),
+    status: str = "FINISHED",
+) -> tuple[dict[int, int], int, dict[int, int]]:
+    """A 12-episode season whose 12 is ready, and its finished sequel, linked.
+
+    ``(season ids, sequel anime id, sequel ids)``.
+    """
+    season_id, season = await add_show(
+        factory, anilist_id=base, title="Iruma-kun 2", ready=(12,), status=status
+    )
+    sequel_id, sequel = await add_show(
+        factory, anilist_id=base + 1, title="Iruma-kun 3", ready=sequel_ready, status="FINISHED"
+    )
+    await link_sequel(factory, season_id, (base + 1, "SEQUEL", "TV"), (base + 2, "PREQUEL", "TV"))
+    return season, sequel_id, sequel
+
+
+async def test_the_last_episode_of_a_finished_season_offers_the_sequel(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The owner's case: Iruma-kun 2's last episode, and season 3 is in Arc."""
+    season, sequel_id, sequel = await season_pair(api_factory, base=950700)
+    await follow(api_factory, user, sequel_id)
+    await activate(api_factory, user, sequel_id)
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next"] is None
+    assert body["next_season"] == {
+        "anime_id": sequel_id,
+        "title": "Iruma-kun 3",
+        "episode": {
+            "id": sequel[1],
+            "number": 1,
+            "state": "ready",
+            "ready": True,
+            "fetchable": False,
+        },
+        "list_state": "active",
+    }
+
+
+async def test_a_sequel_missing_from_the_catalogue_is_not_offered(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    season_id, season = await add_show(
+        api_factory, anilist_id=950710, ready=(12,), status="FINISHED"
+    )
+    await link_sequel(api_factory, season_id, (950719, "SEQUEL", "TV"))
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next"] is None
+    assert body["next_season"] is None
+
+
+async def test_an_airing_show_with_no_next_row_offers_no_sequel(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Episode 12 of 24 is the last row only because 13 has not been listed yet."""
+    season_id, season = await add_show(
+        api_factory, anilist_id=950720, ready=(12,), status="RELEASING", episode_count=24
+    )
+    await add_show(api_factory, anilist_id=950721, status="FINISHED")
+    await link_sequel(api_factory, season_id, (950721, "SEQUEL", "TV"))
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next"] is None
+    assert body["next_season"] is None
+
+
+async def test_reaching_the_stated_count_ends_a_season_still_marked_airing(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The source still says RELEASING the day the finale airs; the count says it ended."""
+    season, sequel_id, _sequel = await season_pair(api_factory, base=950730, status="RELEASING")
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next_season"]["anime_id"] == sequel_id
+
+
+async def test_an_episode_before_the_last_offers_no_sequel(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    season_id, season = await add_show(
+        api_factory, anilist_id=950740, ready=(11, 12), status="FINISHED"
+    )
+    await add_show(api_factory, anilist_id=950741, status="FINISHED")
+    await link_sequel(api_factory, season_id, (950741, "SEQUEL", "TV"))
+
+    body = (await client.get(f"/api/episodes/{season[11]}/play")).json()
+
+    assert body["next"]["id"] == season[12]
+    assert body["next_season"] is None
+
+
+async def test_an_unlisted_sequel_is_absent_and_fetchable_once_added(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Not on the list: the press adds it as Watching, so its episode 1 will be covered."""
+    season, _sequel_id, sequel = await season_pair(api_factory, base=950750, sequel_ready=())
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "absent"
+    assert offer["episode"] == {
+        "id": sequel[1],
+        "number": 1,
+        "state": "wanted",
+        "ready": False,
+        "fetchable": True,
+    }
+
+
+async def test_a_dormant_sequel_is_dormant_and_fetchable_once_touched(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """An imported, untouched entry (FR-A9): the press activates it first."""
+    season, sequel_id, _sequel = await season_pair(api_factory, base=950760, sequel_ready=())
+    await follow(api_factory, user, sequel_id, ListStatus.PLANNED)
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "dormant"
+    assert offer["episode"]["fetchable"] is True
+
+
+async def test_an_active_sequel_is_fetchable_through_the_ordinary_window(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    season, sequel_id, _sequel = await season_pair(api_factory, base=950770, sequel_ready=())
+    await follow(api_factory, user, sequel_id)
+    await activate(api_factory, user, sequel_id)
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "active"
+    assert offer["episode"]["fetchable"] is True
+
+
+async def test_a_dropped_sequel_cannot_be_fetched_from_the_player(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """A touch does not change a status: a dropped sequel stays out of the window."""
+    season, sequel_id, _sequel = await season_pair(api_factory, base=950780, sequel_ready=())
+    await follow(api_factory, user, sequel_id, ListStatus.DROPPED)
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "dormant"
+    assert offer["episode"]["fetchable"] is False
+
+
+async def test_a_sequel_already_started_is_not_fetchable_at_episode_one(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """The window starts after the viewer's progress; episode 1 is behind it."""
+    season, sequel_id, _sequel = await season_pair(api_factory, base=950790, sequel_ready=())
+    await follow(api_factory, user, sequel_id, progress=3)
+    await activate(api_factory, user, sequel_id)
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "active"
+    assert offer["episode"]["fetchable"] is False
+
+
 # --- /progress/completed (FR-S9 item 9, 2026-10-08) -----------------------------
 
 

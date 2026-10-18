@@ -1009,6 +1009,51 @@ async def coverable(
     return plan.covers.get(user_id, frozenset()) | frozenset(wanted)
 
 
+async def coverable_once_active(
+    session: AsyncSession,
+    user_id: int,
+    anime: Anime,
+    episodes: list[Episode],
+    entry: ListEntry | None,
+    *,
+    now: datetime | None = None,
+) -> frozenset[int]:
+    """What :func:`coverable` will say about ``anime`` once the user touches it. Read-only.
+
+    For the player's "Next season" (FR-S5 item 3): pressing it on a sequel
+    whose entry is dormant (FR-A9) activates it, and on one that is not on the
+    list adds it as Watching — and then demands its first episode (FR-A14). So
+    the offer needs the answer the demand will get **after** that touch: this
+    show's window, on the entry as the press leaves it (the status it has, or
+    Watching for none), before the device skip and the slot cap, exactly as
+    :func:`_plan_wants` builds ``covers``. The halfway prefetch is left out: it
+    only ever reaches one further, and a season nobody has started is not half
+    watched. A status that is neither watching nor planned covers nothing — a
+    touch does not change it.
+
+    ``episodes`` is the show's rows in number order (:func:`episodes_for`).
+    Nothing is written and no window is acted on: this predicts a demand, it
+    does not make one.
+    """
+    status = entry.status if entry is not None else ListStatus.WATCHING
+    if status not in WANTING_STATUSES:
+        return frozenset()
+    look_ahead, _ = await look_ahead_and_cap(session)
+    furthest = await _completed_through(session, {(user_id, anime.id)})
+    progress = watched_through(
+        entry.progress if entry is not None else 0, furthest.get((user_id, anime.id), 0)
+    )
+    covered = window(
+        episodes,
+        progress=progress,
+        look_ahead=look_ahead,
+        now=now or datetime.now(UTC),
+        anime_status=anime.status,
+        next_airing=anime.next_airing,
+    )
+    return frozenset(episode.id for episode in covered)
+
+
 async def lock_wants(session: AsyncSession) -> None:
     """Serialise a reconciliation and a demand (FR-A14) for this transaction.
 
@@ -2144,6 +2189,7 @@ __all__ = [
     "cancel_if_unwanted",
     "compute_wants",
     "coverable",
+    "coverable_once_active",
     "enqueue_cancel",
     "enqueue_compute_wants",
     "is_halfway",

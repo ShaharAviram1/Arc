@@ -10,12 +10,14 @@ restated, so the card the player renders above the video is the same
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
 from arc.api.deps import MAX_ID, MIN_ID
 from arc.models import Episode, EpisodeState, Rendition
+from arc.services.playback.next_season import NextSeason
 
 #: The language a text track is announced with when the source did not say
 #: (BCP 47's "undetermined").
@@ -56,6 +58,34 @@ class EpisodeRef(BaseModel):
             state=episode.state,
             ready=episode.state is EpisodeState.READY,
             fetchable=fetchable,
+        )
+
+
+class NextSeasonRef(BaseModel):
+    """The sequel's first episode, offered at a finished season's end (FR-S5 item 3).
+
+    Set only when the episode being played has no following row, its show is
+    finished there, and a ``SEQUEL`` relation resolves to a show Arc has.
+    ``episode`` is the same :class:`EpisodeRef` as ``next``. Its ``fetchable``
+    is what a demand will accept **once the press has touched the entry**:
+    for an ``active`` entry that is today's window, for a ``dormant`` or
+    ``absent`` one the window the entry will have after the touch (activated,
+    or added as Watching). ``list_state`` tells the client which touch to make
+    first: none, re-send the entry (FR-A9), or add it as Watching.
+    """
+
+    anime_id: int
+    title: str
+    episode: EpisodeRef
+    list_state: Literal["active", "dormant", "absent"]
+
+    @classmethod
+    def build(cls, found: NextSeason) -> NextSeasonRef:
+        return cls(
+            anime_id=found.anime.id,
+            title=found.title,
+            episode=EpisodeRef.from_episode(found.episode, fetchable=found.fetchable),
+            list_state=found.list_state,
         )
 
 
@@ -151,6 +181,9 @@ class PlayInfo(BaseModel):
     resume_at: datetime | None = None
     previous: EpisodeRef | None = None
     next: EpisodeRef | None = None
+    #: The sequel's first episode, when ``next`` is null because the season
+    #: ended here (FR-S5 item 3); null otherwise.
+    next_season: NextSeasonRef | None = None
     #: The rendition's text track (FR-S10), or null when it has none — a
     #: burn-in transcode, a remux of a source with no usable text track, or
     #: an episode with nothing to stream yet.
@@ -228,6 +261,7 @@ __all__ = [
     "CompletedEpisode",
     "CompletedOut",
     "EpisodeRef",
+    "NextSeasonRef",
     "PendingOut",
     "PlayInfo",
     "ProgressIn",
