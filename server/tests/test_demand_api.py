@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy import select
 
+from arc.config import Settings
 from arc.db import SessionFactory
 from arc.models import (
     DeviceHolding,
@@ -46,6 +47,7 @@ from tests.acquisition_helpers import (
     set_setting,
 )
 from tests.conftest import add_user, api_transport, login
+from tests.mal_helpers import link_user, log_rows
 
 pytestmark = pytest.mark.pg
 
@@ -267,6 +269,45 @@ async def test_after_the_touch_episode_one_is_covered_in_the_same_flow(
     async with api_factory() as session:
         want = await session.get(Want, (user.id, ids[0]))
         assert want is not None and want.demanded_at is not None
+
+
+@pytest.mark.parametrize("linked", [True, False])
+async def test_the_press_writes_to_mal_only_what_the_user_changed(
+    client: AsyncClient,
+    user: User,
+    api_factory: SessionFactory,
+    settings: Settings,
+    linked: bool,
+) -> None:
+    """FR-M7 on the press's list write: an add is one status write, a re-send is none.
+
+    The absent sequel's ``{status: watching}`` is an explicit status change, so a
+    MAL-linked user gets exactly one queued status row (progress 0 → 0 is not a
+    change) and an unlinked user none. The dormant watching entry's ``{}`` moves
+    nothing, so it queues nothing for anyone.
+    """
+    if linked:
+        await link_user(api_factory, settings, user_id=user.id)
+    absent_id, *_ = await sequel_show(
+        api_factory, user.id, anilist_id=975060 + 2 * int(linked), entry="absent"
+    )
+    dormant_id, *_ = await sequel_show(
+        api_factory, user.id, anilist_id=975061 + 2 * int(linked), entry="dormant"
+    )
+
+    resent = await client.put(f"/api/list/{dormant_id}", json={})
+    assert resent.status_code == 200, resent.text
+    assert await log_rows(api_factory, user.id) == []
+
+    added = await client.put(f"/api/list/{absent_id}", json={"status": "watching"})
+    assert added.status_code == 200, added.text
+    logged = await log_rows(api_factory, user.id)
+    if linked:
+        assert [(row.anime_id, row.field, row.old_value, row.new_value) for row in logged] == [
+            (absent_id, "status", None, "watching")
+        ]
+    else:
+        assert logged == []
 
 
 # --- PUT /api/devices/{device_id}/holdings -------------------------------------------
