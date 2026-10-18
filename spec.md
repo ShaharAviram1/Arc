@@ -417,7 +417,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   (FR-A8) is allowed on a dormant entry and fetches that one episode without
   activating it — one episode is the point of a sample; activation means the
   window. **A trip (FR-A12) is not a touch either**: it fetches its own
-  episodes and leaves the entry dormant.
+  episodes and leaves the entry dormant. **Pressing Next season** on the
+  end-of-episode overlay (FR-S5 item 3) is a touch that activates the
+  entry (and adds an absent sequel to the list as Watching).
 - FR-A10 At most K shows per user fetch at once (default 5; 0 = unlimited):
   shows already fetching keep their slot, free slots go to currently airing
   shows first and then to the most recently updated entries, and the rest wait
@@ -937,6 +939,26 @@ that the course professor can log in at any time, and the owner uses it daily.
      keeps playing underneath, the overlay takes no keyboard focus so the
      shortcuts of FR-S6 keep working, and nothing auto-advances. Both the
      toast and the overlay render inside the fullscreen element.
+  3. *The end of a season* (owner, 2026-10-18, after the real-iPad check).
+     When the episode has no next episode of its own show **and** the show
+     is finished there (its status is finished, or the episode's number
+     reaches the episode count the source states — never on an airing show
+     that simply has no next row yet), and the catalogue's `SEQUEL` relation
+     resolves to a show Arc has (a TV season first, then the earliest year;
+     a sequel not in Arc's catalogue is not offered), the overlay's primary
+     action is **Next season** — "Next season: {title} · Episode {n}", the
+     sequel's lowest-numbered regular episode — on the same ready / fetchable
+     rule as Next, and the control bar's Next glyph points at it too. When
+     the sequel's episode is neither, the overlay says it is not ready yet
+     instead. Pressing it on a sequel the viewer is already fetching and
+     whose episode is ready just opens it. Otherwise the press first makes
+     the sequel's entry active through the ordinary list write — **an absent
+     sequel is added to the list as Watching** (an explicit status change,
+     sent to MyAnimeList like any other), a dormant one is touched (FR-A9)
+     — and then, for an episode not ready, demands it (FR-A14) and opens the
+     waiting player. "Fetchable" here is what the demand will accept once the
+     entry is active. No special prefetch: an active sequel's episode 1 is
+     in the ordinary window (FR-A1) on its own.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
   While the episode is still downloading (FR-P8, M20 T7), → and End are held
   to the download front (1 s short of it) rather than waiting; a key seek
@@ -1569,7 +1591,7 @@ that the course professor can log in at any time, and the owner uses it daily.
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
 | Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons (on a not-ready episode the viewer's window covers, a **Play** button that fetches it on demand and opens the waiting player — FR-A14, M20), and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9); gestures on the picture: on touch a tap shows or hides the controls and a double-tap toggles fullscreen, with play/pause on the bar's centre button (a tap never pauses), and with a mouse a click plays/pauses and a double-click toggles fullscreen; autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too. An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. An episode still downloading plays as it arrives (FR-P8, M20 T7): the bar is the whole episode with the download front drawn on it, a seek past the front waits with "Downloading — 43 % · 12 seeders · will jump to 12:30", → and End stop at the front, "Few seeders" shows under 3, and the page asks again every 5 s until the download ends. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9); gestures on the picture: on touch a tap shows or hides the controls and a double-tap toggles fullscreen, with play/pause on the bar's centre button (a tap never pauses), and with a mouse a click plays/pauses and a double-click toggles fullscreen; autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too; at a finished season's last episode the overlay and the Next glyph offer **Next season** (the sequel's episode 1, FR-S5 item 3). An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. An episode still downloading plays as it arrives (FR-P8, M20 T7): the bar is the whole episode with the download front drawn on it, a seek past the front waits with "Downloading — 43 % · 12 seeders · will jump to 12:30", → and End stop at the front, "Few seeders" shows under 3, and the page asks again every 5 s until the download ends. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
 | Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
@@ -2874,3 +2896,7 @@ through the same edge, without the grace period.
   moves backwards.
 - 2026-10-18 — Touch tap toggles the controls and never pauses (owner, after
   the real-iPad check); mouse click unchanged.
+- 2026-10-18 — Next season offered at a season's last episode (owner, after
+  the real-iPad check): the sequel's episode 1, activating or adding the
+  sequel's entry on press and demanding the episode (FR-A14); no special
+  prefetch — an active sequel is already in the window.
