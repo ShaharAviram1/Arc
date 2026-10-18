@@ -207,8 +207,13 @@ function stubBrowserSupport(answer: CanPlayTypeResult, mediaSource: boolean): vo
  */
 let fullscreenStubbed = false
 
-function stubFullscreen(): { request: ReturnType<typeof vi.fn>; exit: ReturnType<typeof vi.fn> } {
-  const request = vi.fn(() => Promise.resolve())
+function stubFullscreen(refuse = false): {
+  request: ReturnType<typeof vi.fn>
+  exit: ReturnType<typeof vi.fn>
+} {
+  const request = vi.fn(() =>
+    refuse ? Promise.reject(new TypeError('not allowed')) : Promise.resolve(),
+  )
   const exit = vi.fn(() => Promise.resolve())
   Object.defineProperty(Element.prototype, 'requestFullscreen', {
     configurable: true,
@@ -234,6 +239,39 @@ function enterFullscreen(): void {
   fireEvent(document, new Event('fullscreenchange'))
 }
 
+/**
+ * Safari's prefixed API on its own, the way an older WebKit offers it: no
+ * standard request at all, and calls that return nothing.
+ */
+function stubPrefixedFullscreen(): {
+  request: ReturnType<typeof vi.fn>
+  exit: ReturnType<typeof vi.fn>
+} {
+  const request = vi.fn(() => undefined)
+  const exit = vi.fn(() => undefined)
+  Object.defineProperty(Element.prototype, 'webkitRequestFullscreen', {
+    configurable: true,
+    writable: true,
+    value: request,
+  })
+  Object.defineProperty(document, 'webkitExitFullscreen', {
+    configurable: true,
+    writable: true,
+    value: exit,
+  })
+  fullscreenStubbed = true
+  return { request, exit }
+}
+
+function setPrefixedFullscreenElement(element: Element | null): void {
+  Object.defineProperty(document, 'webkitFullscreenElement', {
+    configurable: true,
+    writable: true,
+    value: element,
+  })
+  fireEvent(document, new Event('webkitfullscreenchange'))
+}
+
 beforeEach(() => {
   resetHls()
   playMock = null
@@ -246,6 +284,9 @@ afterEach(() => {
     Reflect.deleteProperty(Element.prototype, 'requestFullscreen')
     Reflect.deleteProperty(document, 'exitFullscreen')
     Reflect.deleteProperty(document, 'fullscreenElement')
+    Reflect.deleteProperty(Element.prototype, 'webkitRequestFullscreen')
+    Reflect.deleteProperty(document, 'webkitExitFullscreen')
+    Reflect.deleteProperty(document, 'webkitFullscreenElement')
     fullscreenStubbed = false
   }
   vi.unstubAllGlobals()
@@ -2054,5 +2095,184 @@ describe('Player duration while live (FR-S4)', () => {
     for (const [, init] of posts) {
       expect(jsonBodyOf(init).duration_s).toBe(1440)
     }
+  })
+})
+
+/**
+ * The real-iPad finding (owner, 2026-10-18): an installed home-screen web app
+ * refuses element fullscreen and the button did nothing. The request is now
+ * made robustly — standard, then Safari's prefixed one — and a refusal is
+ * said, pointing at Safari, rather than swallowed.
+ */
+describe('Player fullscreen request', () => {
+  const REFUSED = "Fullscreen isn't available in this window. Open Arc in Safari for fullscreen."
+
+  async function flush(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  function pressFullscreen(): void {
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Fullscreen' }))
+    })
+  }
+
+  it('uses the standard request when the browser offers it', async () => {
+    const { request } = stubFullscreen()
+    const prefixed = stubPrefixedFullscreen().request
+    renderPlayer()
+    await readyVideo()
+
+    pressFullscreen()
+    await flush()
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(prefixed).not.toHaveBeenCalled()
+  })
+
+  it("falls back to Safari's prefixed request when the standard one is missing", async () => {
+    const { request } = stubPrefixedFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    pressFullscreen()
+    await flush()
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request.mock.instances[0]).toBeInstanceOf(HTMLElement)
+  })
+
+  it('falls back to the prefixed request when the standard one rejects', async () => {
+    const { request } = stubFullscreen(true)
+    const prefixed = stubPrefixedFullscreen().request
+    renderPlayer()
+    await readyVideo()
+
+    pressFullscreen()
+    await flush()
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(prefixed).toHaveBeenCalledTimes(1)
+  })
+
+  it('says so when the request is rejected', async () => {
+    stubFullscreen(true)
+    renderPlayer()
+    await readyVideo()
+
+    pressFullscreen()
+
+    const toast = await screen.findByText(REFUSED)
+    expect(toast).toHaveAttribute('role', 'status')
+
+    // It is dismissable.
+    await userEvent.click(toast)
+    expect(screen.queryByText(REFUSED)).toBeNull()
+  })
+
+  it('says so when a request resolves but nothing goes fullscreen', async () => {
+    stubFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      pressFullscreen()
+      await flush()
+      // Inside the grace nothing is said yet.
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(screen.queryByText(REFUSED)).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(screen.getByText(REFUSED)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says nothing when fullscreen succeeds, nor on leaving it', async () => {
+    const { exit } = stubFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      pressFullscreen()
+      await flush()
+      act(() => {
+        enterFullscreen()
+      })
+      act(() => {
+        vi.advanceTimersByTime(2000)
+      })
+      expect(screen.queryByText(REFUSED)).toBeNull()
+
+      act(() => {
+        fireEvent.click(screen.getByRole('button', { name: 'Exit fullscreen' }))
+      })
+      expect(exit).toHaveBeenCalledTimes(1)
+      act(() => {
+        Reflect.deleteProperty(document, 'fullscreenElement')
+        fireEvent(document, new Event('fullscreenchange'))
+      })
+      act(() => {
+        vi.advanceTimersByTime(2000)
+      })
+      expect(screen.getByRole('button', { name: 'Fullscreen' })).toBeInTheDocument()
+      expect(screen.queryByText(REFUSED)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the prefixed state and event back into the button', async () => {
+    stubPrefixedFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    act(() => {
+      setPrefixedFullscreenElement(document.body)
+    })
+    const leave = await screen.findByRole('button', { name: 'Exit fullscreen' })
+    expect(leave).toHaveAttribute('aria-pressed', 'true')
+
+    act(() => {
+      setPrefixedFullscreenElement(null)
+    })
+    expect(await screen.findByRole('button', { name: 'Fullscreen' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+  })
+
+  it('leaves through the prefixed exit when only that exists', async () => {
+    const { exit } = stubPrefixedFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    act(() => {
+      setPrefixedFullscreenElement(document.body)
+    })
+    await userEvent.click(await screen.findByRole('button', { name: 'Exit fullscreen' }))
+
+    expect(exit).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText(REFUSED)).toBeNull()
+  })
+
+  it('goes through the same request from the f key', async () => {
+    const { request } = stubFullscreen()
+    renderPlayer()
+    await readyVideo()
+
+    await userEvent.keyboard('f')
+
+    expect(request).toHaveBeenCalledTimes(1)
   })
 })

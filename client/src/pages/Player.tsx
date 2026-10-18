@@ -179,6 +179,25 @@ const MARKED_WATCHED = 'Marked as watched'
  */
 const TAP_TO_UNMUTE = 'Tap to unmute'
 
+/**
+ * What the page says when the window will not go fullscreen (owner,
+ * 2026-10-18). An installed home-screen web app on iPadOS refuses element
+ * fullscreen; Safari itself grants it, so the sentence points there rather
+ * than leaving a button that silently does nothing.
+ */
+const FULLSCREEN_REFUSED =
+  "Fullscreen isn't available in this window. Open Arc in Safari for fullscreen."
+
+/**
+ * How long a request that did not reject may take to produce a fullscreen
+ * element before the page calls it refused. Some windows resolve (or never
+ * settle) without ever going fullscreen, so the promise alone is not proof.
+ */
+const FULLSCREEN_GRACE_MS = 500
+
+/** How long the refusal stays up if nobody puts it away sooner. */
+const FULLSCREEN_REFUSED_MS = 6000
+
 /** The mark-watched control's two labels (FR-W3, owner 2026-09-17). */
 const MARK_WATCHED = 'Mark watched'
 const MARK_UNWATCHED = 'Mark unwatched'
@@ -892,6 +911,85 @@ function MarkedToast({ onDismiss }: { onDismiss: () => void }) {
 }
 
 /**
+ * The refusal, said rather than swallowed (owner, 2026-10-18): the same glass
+ * as the receipt, a click puts it away, and it takes itself away after a few
+ * seconds. Fullscreen stays the browser's element fullscreen with Arc's own
+ * chrome — no native player, no pseudo-fullscreen — so when the window says
+ * no, this is all the page does about it.
+ */
+function FullscreenRefusedToast({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      title="Dismiss"
+      onClick={onDismiss}
+      className={cx(PILL, 'cursor-pointer')}
+    >
+      {FULLSCREEN_REFUSED}
+    </div>
+  )
+}
+
+/**
+ * Safari's prefixed Fullscreen API, which the DOM library does not declare.
+ * Older WebKit returns nothing from these; newer returns a promise like the
+ * standard calls.
+ */
+interface PrefixedFullscreenElement extends HTMLElement {
+  webkitRequestFullscreen?: () => Promise<void> | undefined
+}
+
+interface PrefixedFullscreenDocument extends Document {
+  webkitFullscreenElement?: Element | null
+  webkitExitFullscreen?: () => Promise<void> | undefined
+}
+
+function fullscreenElement(): Element | null {
+  const doc: PrefixedFullscreenDocument = document
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null
+}
+
+/**
+ * Call a fullscreen method that may return a promise, may return nothing, or
+ * may throw, and get a promise back either way.
+ */
+function settle(call: () => Promise<void> | undefined): Promise<void> {
+  try {
+    return Promise.resolve(call())
+  } catch (error) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+  }
+}
+
+/**
+ * Ask for fullscreen on `element`: the standard request when the document
+ * offers it, then Safari's prefixed one if that is missing or says no. The
+ * promise rejects only when every way of asking was refused or absent.
+ */
+function requestFullscreenOn(element: PrefixedFullscreenElement): Promise<void> {
+  const prefixed = (): Promise<void> => {
+    const webkit = element.webkitRequestFullscreen
+    if (typeof webkit !== 'function') return Promise.reject(new Error('no fullscreen'))
+    return settle(() => webkit.call(element))
+  }
+  // `typeof` rather than truthiness: jsdom and older WebKit leave it out
+  // entirely, whatever the DOM library says.
+  if (typeof element.requestFullscreen === 'function' && document.fullscreenEnabled !== false) {
+    return settle(() => element.requestFullscreen()).catch(prefixed)
+  }
+  return prefixed()
+}
+
+function exitFullscreen(): Promise<void> {
+  const doc: PrefixedFullscreenDocument = document
+  if (typeof doc.exitFullscreen === 'function') return settle(() => doc.exitFullscreen())
+  const webkit = doc.webkitExitFullscreen
+  if (typeof webkit === 'function') return settle(() => webkit.call(doc))
+  return Promise.resolve()
+}
+
+/**
  * The offer to turn the sound on, after the browser refused to start with it
  * (owner, 2026-09-17).
  *
@@ -1215,6 +1313,10 @@ function PlayerView({ id }: { id: number }) {
   const [mediaDuration, setMediaDuration] = useState(0)
   const [buffered, setBuffered] = useState(0)
   const [fullscreen, setFullscreen] = useState(false)
+  /** The window said no to a fullscreen request (owner, 2026-10-18). */
+  const [fullscreenRefused, setFullscreenRefused] = useState(false)
+  /** The pending "did it actually go fullscreen?" check after a request. */
+  const fullscreenGraceRef = useRef<number | null>(null)
   /** A drag in progress; the chrome may not be taken away mid-scrub. */
   const [scrubbing, setScrubbing] = useState(false)
   const [chromeShown, setChromeShown] = useState(true)
@@ -1452,29 +1554,77 @@ function PlayerView({ id }: { id: number }) {
     }
   }, [id, report])
 
+  const clearFullscreenGrace = useCallback(() => {
+    if (fullscreenGraceRef.current !== null) {
+      window.clearTimeout(fullscreenGraceRef.current)
+      fullscreenGraceRef.current = null
+    }
+  }, [])
+
+  /**
+   * The one way into and out of fullscreen — the button, `f`, and the double
+   * click or tap all come here (owner, 2026-10-18, after the real-iPad check).
+   *
+   * Entering asks the browser for element fullscreen on the player, standard
+   * request first and Safari's prefixed one after, so Arc's own overlay stays
+   * on screen. A refusal is said, not swallowed: a rejected request puts the
+   * refusal up at once, and a request that did not reject still has to
+   * produce a fullscreen element within the grace, because some windows
+   * accept the call and simply never go fullscreen. Leaving asks nothing of
+   * the viewer and so never says anything.
+   */
   const toggleFullscreen = useCallback(() => {
     const container = containerRef.current
     if (container === null) return
-    if (document.fullscreenElement != null) {
-      void document.exitFullscreen?.()
+    clearFullscreenGrace()
+    if (fullscreenElement() != null) {
+      exitFullscreen().catch(() => {
+        // Already out, or the browser took it away first: nothing to say.
+      })
       return
     }
-    void container.requestFullscreen?.()
-  }, [])
+    setFullscreenRefused(false)
+    fullscreenGraceRef.current = window.setTimeout(() => {
+      fullscreenGraceRef.current = null
+      if (fullscreenElement() == null) setFullscreenRefused(true)
+    }, FULLSCREEN_GRACE_MS)
+    requestFullscreenOn(container).catch(() => {
+      clearFullscreenGrace()
+      setFullscreenRefused(true)
+    })
+  }, [clearFullscreenGrace])
 
   // The browser owns the fullscreen state — Escape and F11 move it without
   // asking — so the button's label is read off the document, never assumed.
+  // Safari before 16.4 only fires the prefixed event, so both are heard.
   useEffect(() => {
     function sync() {
-      setFullscreen(document.fullscreenElement != null)
+      const on = fullscreenElement() != null
+      setFullscreen(on)
+      if (on) setFullscreenRefused(false)
     }
 
     sync()
     document.addEventListener('fullscreenchange', sync)
+    document.addEventListener('webkitfullscreenchange', sync)
     return () => {
       document.removeEventListener('fullscreenchange', sync)
+      document.removeEventListener('webkitfullscreenchange', sync)
+      clearFullscreenGrace()
     }
-  }, [])
+  }, [clearFullscreenGrace])
+
+  // The refusal takes itself away, the way the receipt does.
+  useEffect(() => {
+    if (!fullscreenRefused) return
+
+    const timer = window.setTimeout(() => {
+      setFullscreenRefused(false)
+    }, FULLSCREEN_REFUSED_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [fullscreenRefused])
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current
@@ -2545,8 +2695,8 @@ function PlayerView({ id }: { id: number }) {
       </div>
 
       {/*
-        The shelf above the bar, where the page's two small messages live: the
-        unmute offer, and the completion receipt. A column rather than one
+        The shelf above the bar, where the page's small messages live: the
+        unmute offer, the completion receipt, and a refused fullscreen. A column rather than one
         corner each, so that on the occasion both are up neither is sitting on
         the other — and 108px up, the same shelf the fatal-error strip uses:
         clear of the bar whether the bar is showing or has faded out from
@@ -2563,6 +2713,13 @@ function PlayerView({ id }: { id: number }) {
           <MarkedToast
             onDismiss={() => {
               setMarkedToast(false)
+            }}
+          />
+        ) : null}
+        {fullscreenRefused ? (
+          <FullscreenRefusedToast
+            onDismiss={() => {
+              setFullscreenRefused(false)
             }}
           />
         ) : null}
