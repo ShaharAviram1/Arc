@@ -6,7 +6,11 @@ out, and the catalogue knows what comes next — ``anime.relations`` names the
 ``SEQUEL`` by AniList and MAL id, and the sequel is often a row of its own.
 
 Only a sequel **with a row in Arc** is offered: "not in the catalogue" means
-no offer. Nothing here fetches from a source to change that — a player that
+no offer. And only a **series** sequel is a next season — TV, TV short or
+ONA (:data:`SEASON_FORMATS`); a film, an OVA or a special that follows a
+season is not what "Next season" promises, so it is never offered.
+
+Nothing here fetches from a source to change any of that — a player that
 asked AniList about every last episode would spend the rate budget on a
 question the show page answers when somebody opens the sequel.
 
@@ -28,12 +32,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from arc.models import Anime, Episode
 from arc.services.catalog.airing import FINISHED
 
-#: The relation type the offer follows. A prequel, a side story or a movie is
-#: not "the next season".
+#: The relation type the offer follows. A prequel or a side story is not
+#: "the next season".
 SEQUEL = "SEQUEL"
 
-#: Preferred when several sequels resolve: a TV season over a film or an OVA.
-PREFERRED_FORMAT = "TV"
+#: The formats a "Next season" may be, in the order they are preferred when
+#: several sequels resolve (AniList's vocabulary, which MAL rows are mapped to).
+#: Only a TV-like series is a *season*: a ``MOVIE``, ``SPECIAL``, ``OVA`` or
+#: ``MUSIC`` sequel — or one whose format nobody stated — is never offered, even
+#: when it is the only sequel Arc has (orchestrator, 2026-10-18).
+SEASON_FORMATS: tuple[str, ...] = ("TV", "TV_SHORT", "ONA")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,16 +56,19 @@ class SequelCandidate:
 def season_ends_here(anime: Anime, episode: Episode, *, has_following: bool) -> bool:
     """Whether ``episode`` is the end of its show, so a sequel may be offered.
 
-    No following row, **and** the show is finished at this point: its status
-    says ``FINISHED``, or the episode's number reaches the count the source
-    states. An airing show that simply has no next row yet is not finished —
-    the next episode is coming, and offering the sequel there would skip it.
+    No following row, **and** the show is finished at this point. When the
+    source states a count, the episode's number must reach it — whatever the
+    status says, so a FINISHED show whose rows stop at 10 of 12 (a stale or
+    grown count, a row not listed yet) offers no sequel at 10. With no stated
+    count, the status must say ``FINISHED``. An airing show that simply has no
+    next row yet is not finished — the next episode is coming, and offering
+    the sequel there would skip it.
     """
     if has_following:
         return False
-    if anime.status == FINISHED:
-        return True
-    return anime.episodes is not None and anime.episodes > 0 and episode.number >= anime.episodes
+    if anime.episodes is not None and anime.episodes > 0:
+        return episode.number >= anime.episodes
+    return anime.status == FINISHED
 
 
 def sequel_ids(relations: Sequence[Any] | None) -> tuple[set[int], set[int]]:
@@ -82,9 +93,11 @@ def pick_sequel(
 
     ``rows`` is ``(source, external id) → candidate``, as :func:`find_sequel`
     reads it. Each ``SEQUEL`` relation resolves by its AniList id first and
-    its MAL id second (the show page's rule); one with no row is ignored.
-    Several resolved: a TV season first, then the earliest ``season_year``
-    (an unknown year last), then the lowest id so the answer is stable.
+    its MAL id second (the show page's rule); one with no row is ignored, and
+    so is one whose format (the relation's, else the row's) is not in
+    :data:`SEASON_FORMATS`. Several resolved: by :data:`SEASON_FORMATS`' order
+    (TV first), then the earliest ``season_year`` (an unknown year last), then
+    the lowest id so the answer is stable.
     """
     found: dict[int, SequelCandidate] = {}
     for raw in relations or []:
@@ -98,17 +111,18 @@ def pick_sequel(
         if row is None:
             continue
         stated = raw.get("format")
+        fmt = stated if isinstance(stated, str) and stated else row.format
+        if fmt not in SEASON_FORMATS:
+            continue
         found[row.anime_id] = SequelCandidate(
-            anime_id=row.anime_id,
-            format=stated if isinstance(stated, str) and stated else row.format,
-            season_year=row.season_year,
+            anime_id=row.anime_id, format=fmt, season_year=row.season_year
         )
     if not found:
         return None
     best = min(
         found.values(),
         key=lambda candidate: (
-            candidate.format != PREFERRED_FORMAT,
+            SEASON_FORMATS.index(candidate.format or ""),
             candidate.season_year is None,
             candidate.season_year or 0,
             candidate.anime_id,
@@ -150,7 +164,7 @@ async def find_sequel(session: AsyncSession, anime: Anime) -> Anime | None:
 
 
 __all__ = [
-    "PREFERRED_FORMAT",
+    "SEASON_FORMATS",
     "SEQUEL",
     "SequelCandidate",
     "find_sequel",

@@ -61,6 +61,38 @@ def test_a_tv_season_wins_over_a_film() -> None:
     assert pick_sequel(blob, found) == 20
 
 
+def test_a_film_or_an_ova_sequel_is_never_the_next_season() -> None:
+    blob = [relation(1, fmt="MOVIE"), relation(2, fmt="OVA"), relation(3, fmt="SPECIAL")]
+    found = rows(
+        ("anilist", 1, SequelCandidate(10, None, 2018)),
+        ("anilist", 2, SequelCandidate(20, None, 2019)),
+        ("anilist", 3, SequelCandidate(30, None, 2020)),
+    )
+    assert pick_sequel(blob, found) is None
+    assert (
+        pick_sequel(
+            [relation(4, fmt="MUSIC")], rows(("anilist", 4, SequelCandidate(40, "TV", 2020)))
+        )
+        is None
+    )
+
+
+def test_a_sequel_whose_format_nobody_states_is_not_offered() -> None:
+    found = rows(("anilist", 1, SequelCandidate(10, None, 2020)))
+    assert pick_sequel([relation(1)], found) is None
+
+
+def test_tv_short_and_ona_are_seasons_but_tv_comes_first() -> None:
+    found = rows(
+        ("anilist", 1, SequelCandidate(10, "ONA", 2019)),
+        ("anilist", 2, SequelCandidate(20, "TV_SHORT", 2018)),
+        ("anilist", 3, SequelCandidate(30, "TV", 2024)),
+    )
+    assert pick_sequel([relation(1), relation(2), relation(3)], found) == 30
+    assert pick_sequel([relation(1), relation(2)], found) == 20
+    assert pick_sequel([relation(1)], found) == 10
+
+
 def test_among_tv_seasons_the_earliest_year_wins_and_an_unknown_year_is_last() -> None:
     blob = [relation(1), relation(2), relation(3)]
     found = rows(
@@ -84,6 +116,13 @@ def test_a_finished_show_ends_at_its_last_row() -> None:
     anime = Anime(status="FINISHED", episodes=None)
     assert season_ends_here(anime, Episode(number=10), has_following=False)
     assert not season_ends_here(anime, Episode(number=10), has_following=True)
+
+
+def test_a_finished_show_with_a_stated_count_ends_only_at_that_count() -> None:
+    """Rows 1..10 of a FINISHED 12: a stale or grown count is not the end at 10."""
+    anime = Anime(status="FINISHED", episodes=12)
+    assert not season_ends_here(anime, Episode(number=10), has_following=False)
+    assert season_ends_here(anime, Episode(number=12), has_following=False)
 
 
 def test_an_airing_show_ends_only_at_its_stated_count() -> None:
