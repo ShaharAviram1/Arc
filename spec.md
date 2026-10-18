@@ -2917,3 +2917,8 @@ through the same edge, without the grace period.
 - 2026-10-18 — Fullscreen stays the browser's element fullscreen with Arc's own
   chrome; no native player, no pseudo-fullscreen (owner, after the real-iPad
   check); a refusal is said, not swallowed.
+- 2026-10-18 — Next season always offers the sequel's episode 1, never the
+  user's next unwatched episode of it (owner: a rewatch would skip the season).
+- 2026-10-18 — The installed web app on iPadOS 27 refuses element fullscreen
+  (owner saw the refusal toast); fullscreen there needs Safari or a native
+  shell — under consideration, no decision yet.

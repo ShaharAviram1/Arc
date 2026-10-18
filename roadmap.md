@@ -1949,7 +1949,10 @@ owner's word.
     only TV / TV short / ONA sequels count, one shared press for overlay and
     glyph, "hasn't aired yet" wording). Verified by the orchestrator
     2026-10-18: diff read, targeted tests 152, full server 4931 passed,
-    client 1361, `make lint` clean on main.
+    client 1361, `make lint` clean on main. Owner 2026-10-18: the offer stays
+    episode 1 even when the sequel was started before — a rewatch would
+    otherwise skip the whole season. Confirmed live on the iPad: the toast
+    appears in the installed app (element fullscreen refused on iPadOS 27).
   - [x] **Touch tap toggles the controls, never pauses** (owner approved
     2026-10-18): on the iPad a tap with the controls showing paused the
     video. Touch: tap toggles chrome, double-tap fullscreen, play/pause via
