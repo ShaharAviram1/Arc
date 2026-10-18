@@ -1537,12 +1537,8 @@ describe('Player video gestures', () => {
     expect(exit).toHaveBeenCalledTimes(1)
   })
 
-  /**
-   * On a touch screen the first tap is how the controls come back, and it has
-   * to mean only that: pausing as well would make the bar impossible to
-   * consult without interrupting the episode.
-   */
-  it('lets a touch tap bring the hidden controls back without pausing', async () => {
+  it('pauses on a single mouse click of a playing video, once the window passes', async () => {
+    stubFullscreen()
     renderPlayer()
 
     const video = await readyVideo()
@@ -1553,29 +1549,163 @@ describe('Player video gestures', () => {
         void video.play()
       })
       act(() => {
-        vi.advanceTimersByTime(2200)
-      })
-      expect(controlBar()).toBeNull()
-
-      act(() => {
-        fireEvent.touchStart(window)
+        fireEvent.pointerDown(window, { pointerType: 'mouse' })
         fireEvent.click(video)
       })
+      expect(video.paused).toBe(false)
+
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(video.paused).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** Hide the bar the way the page does: an idle pointer while it plays. */
+  function playUntilHidden(video: HTMLVideoElement): void {
+    act(() => {
+      void video.play()
+    })
+    act(() => {
+      vi.advanceTimersByTime(2200)
+    })
+    expect(controlBar()).toBeNull()
+  }
+
+  /** One finger press and release on the picture, as the iPad delivers it. */
+  function tap(video: HTMLVideoElement): void {
+    act(() => {
+      fireEvent.pointerDown(window, { pointerType: 'touch' })
+      fireEvent.touchStart(window)
+      fireEvent.click(video)
+    })
+  }
+
+  /**
+   * On touch a tap is about the controls and only the controls (owner,
+   * 2026-10-18, after the real-iPad check): play and pause are the bar's
+   * centre button. This replaces the old "the second tap pauses" behaviour.
+   */
+  it('lets a touch tap bring the hidden controls back without pausing', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      playUntilHidden(video)
+
+      tap(video)
       expect(controlBar()).toBeInTheDocument()
       act(() => {
         vi.advanceTimersByTime(400)
       })
+      expect(controlBar()).toBeInTheDocument()
+      expect(video.paused).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('hides the shown controls on a touch tap, and never pauses (touch no longer pauses)', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      playUntilHidden(video)
+      tap(video)
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(controlBar()).toBeInTheDocument()
+
+      // The bar is up: this tap takes it away, after the double-tap wait.
+      tap(video)
+      expect(controlBar()).toBeInTheDocument()
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(controlBar()).toBeNull()
       expect(video.paused).toBe(false)
 
-      // The next tap, with the bar already up, is an ordinary one.
+      // And a paused video stays paused: a tap does not play either.
+      act(() => {
+        video.pause()
+      })
+      expect(controlBar()).toBeInTheDocument()
+      tap(video)
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(controlBar()).toBeNull()
+      expect(video.paused).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the chrome at press time from a bare touchstart too', async () => {
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      playUntilHidden(video)
       act(() => {
         fireEvent.touchStart(window)
         fireEvent.click(video)
       })
       act(() => {
-        vi.advanceTimersByTime(400)
+        vi.advanceTimersByTime(300)
       })
-      expect(video.paused).toBe(true)
+      expect(controlBar()).toBeInTheDocument()
+
+      act(() => {
+        vi.advanceTimersByTime(100)
+        fireEvent.touchStart(window)
+        fireEvent.click(video)
+      })
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(controlBar()).toBeNull()
+      expect(video.paused).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('goes fullscreen on a touch double-tap, without pausing or hiding the bar', async () => {
+    const { request } = stubFullscreen()
+    renderPlayer()
+
+    const video = await readyVideo()
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      expect(controlBar()).toBeInTheDocument()
+
+      tap(video)
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+      tap(video)
+      expect(request).toHaveBeenCalledTimes(1)
+
+      act(() => {
+        vi.advanceTimersByTime(600)
+      })
+      expect(video.paused).toBe(false)
+      // The first tap's pending hide was cancelled with it.
+      expect(controlBar()).toBeInTheDocument()
     } finally {
       vi.useRealTimers()
     }
@@ -1691,6 +1821,33 @@ describe('Player progress reporting failures', () => {
         vi.advanceTimersByTime(10_000)
       })
       expect(screen.getByRole('group', { name: 'Player controls' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the bar up on a touch tap while the warning holds it', async () => {
+    const { fetchMock } = failingPlayer()
+    const video = await readyVideo()
+
+    await failWrites(video, fetchMock, [100, 200, 300])
+    await screen.findByText(PROGRESS_UNSAVED)
+
+    vi.useFakeTimers()
+    try {
+      act(() => {
+        void video.play()
+      })
+      act(() => {
+        fireEvent.pointerDown(window, { pointerType: 'touch' })
+        fireEvent.touchStart(window)
+        fireEvent.click(video)
+      })
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(screen.getByRole('group', { name: 'Player controls' })).toBeInTheDocument()
+      expect(video.paused).toBe(false)
     } finally {
       vi.useRealTimers()
     }

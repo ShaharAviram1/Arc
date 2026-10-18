@@ -128,6 +128,13 @@ const CHROME_HIDE_MS = 1500
  */
 const DOUBLE_CLICK_MS = 250
 
+/**
+ * How close a touch `pointerdown` and a `touchstart` have to be to count as
+ * one press. They are dispatched back to back; two real taps are never this
+ * close together.
+ */
+const SAME_PRESS_MS = 40
+
 /** Pointer moves are continuous; this is how often one is allowed to re-render. */
 const ACTIVITY_THROTTLE_MS = 400
 
@@ -951,12 +958,16 @@ function PlayerView({ id }: { id: number }) {
    */
   const chromeShownRef = useRef(true)
   const hiddenAtPressRef = useRef(false)
+  /** When the last press began, to pair a finger's pointerdown and touchstart. */
+  const lastPressRef = useRef(0)
   /** Touch and mouse want different things from a tap on the video. */
   const pointerTypeRef = useRef<string>('mouse')
   /** Whether the last thing the viewer did was press a key rather than aim. */
   const keyboardRef = useRef(false)
   /** The pending single click, waiting to find out if it is half of a double. */
   const clickTimerRef = useRef<number | null>(null)
+  /** `chromeHeld` (below) for the tap handler, which is declared before it. */
+  const chromeHeldRef = useRef(false)
 
   const [resumedAt, setResumedAt] = useState<number | null>(null)
   /**
@@ -1276,16 +1287,23 @@ function PlayerView({ id }: { id: number }) {
   /**
    * A click on the video itself.
    *
-   * A single one plays or pauses and a double one goes fullscreen, which are
-   * the two gestures every video on the web has — but a double click is two
-   * clicks, so the single has to wait a quarter of a second to find out
-   * whether it was the first half of one. Without that wait, double-clicking
-   * to go fullscreen would also pause the episode, which is exactly the moment
-   * a viewer least wants it to stop.
+   * With a mouse (or a pen), a single click plays or pauses and a double one
+   * goes fullscreen, which are the two gestures every video on the web has —
+   * but a double click is two clicks, so the single has to wait a quarter of a
+   * second to find out whether it was the first half of one. Without that
+   * wait, double-clicking to go fullscreen would also pause the episode,
+   * which is exactly the moment a viewer least wants it to stop.
    *
-   * One exception, for touch only: a tap that brought the hidden controls back
-   * has already done its job, and pausing as well would make the chrome
-   * impossible to consult without interrupting playback.
+   * On touch a single tap only toggles the controls and never plays or
+   * pauses (owner, 2026-10-18, after the real-iPad check): a tap on a bare
+   * picture means "show me the controls", and a tap with them up means "take
+   * them away", not "stop". Play and pause are the centre button in the bar.
+   * The press that started the tap has already shown the chrome (the
+   * activity effect below), so what matters is the state *at press time*:
+   * hidden then, the tap is done; shown then, it hides — after the same
+   * double-tap wait, so the first half of a double-tap to fullscreen does not
+   * blink the bar away, and only when nothing is holding the chrome open
+   * (`chromeHeld`). A double-tap still toggles fullscreen.
    */
   const onVideoClick = useCallback(() => {
     if (clickTimerRef.current !== null) {
@@ -1295,13 +1313,18 @@ function PlayerView({ id }: { id: number }) {
       return
     }
 
-    const revealedByTap = pointerTypeRef.current === 'touch' && hiddenAtPressRef.current
+    const touch = pointerTypeRef.current === 'touch'
+    const hiddenAtPress = hiddenAtPressRef.current
     clickTimerRef.current = window.setTimeout(() => {
       clickTimerRef.current = null
-      if (revealedByTap) return
-      togglePlay()
+      if (!touch) {
+        togglePlay()
+        return
+      }
+      if (hiddenAtPress || chromeHeldRef.current) return
+      setChrome(false)
     }, DOUBLE_CLICK_MS)
-  }, [toggleFullscreen, togglePlay])
+  }, [toggleFullscreen, togglePlay, setChrome])
 
   useEffect(
     () => () => {
@@ -1509,18 +1532,29 @@ function PlayerView({ id }: { id: number }) {
       show()
     }
 
-    function onPointerDown(event: PointerEvent) {
-      pointerTypeRef.current = event.pointerType === '' ? 'mouse' : event.pointerType
+    // A finger fires both a touch `pointerdown` and a `touchstart` for the
+    // same press, in an order browsers do not agree on. Whichever comes
+    // second must not read the chrome state again: the first one has
+    // already shown the chrome, so it would always see it up.
+    function press(pointerType: string) {
+      const now = Date.now()
+      const sameTouch =
+        pointerType === 'touch' &&
+        pointerTypeRef.current === 'touch' &&
+        now - lastPressRef.current < SAME_PRESS_MS
+      lastPressRef.current = now
+      pointerTypeRef.current = pointerType
       keyboardRef.current = false
-      hiddenAtPressRef.current = !chromeShownRef.current
+      if (!sameTouch) hiddenAtPressRef.current = !chromeShownRef.current
       show()
     }
 
+    function onPointerDown(event: PointerEvent) {
+      press(event.pointerType === '' ? 'mouse' : event.pointerType)
+    }
+
     function onTouchStart() {
-      pointerTypeRef.current = 'touch'
-      keyboardRef.current = false
-      hiddenAtPressRef.current = !chromeShownRef.current
-      show()
+      press('touch')
     }
 
     function onKeyDown() {
@@ -1553,6 +1587,9 @@ function PlayerView({ id }: { id: number }) {
    */
   const progressWarning = progressFailures >= PROGRESS_FAILURE_LIMIT && !progressWarningDismissed
   const chromeHeld = scrubbing || endOverlayShown || progressWarning || offlineMenuOpen
+  useEffect(() => {
+    chromeHeldRef.current = chromeHeld
+  }, [chromeHeld])
 
   /**
    * The chrome hides itself after a second and a half of an idle pointer, and
