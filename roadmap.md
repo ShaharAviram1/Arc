@@ -1935,14 +1935,21 @@ owner's word.
 - **Owner's real-iPad check, 2026-10-18:** direct streaming "works great, well
   above my expectations" — speed, subtitles and quality all good. Three
   findings, fixed on main as M20 follow-ups:
-  - [ ] **Next season at the end of a season** (owner approved 2026-10-18):
+  - [x] **Next season at the end of a season** (owner approved 2026-10-18):
     the last episode of Iruma-kun 2 offered no Next because `PlayInfo.next`
     only knows the same show. Offer the sequel's episode 1 (the SEQUEL
     relation resolved to a catalogue row) on the end-of-episode overlay and
     the Next glyph; pressing it activates a dormant entry (FR-A9 touch) and
-    demands the episode (FR-A14). The halfway prefetch on a season's last
-    episode reaches into the sequel's episode 1 only when the sequel's entry
-    is already active on the list.
+    demands the episode (FR-A14). No special prefetch: an active sequel's
+    episode 1 is already inside the ordinary window (owner informed
+    2026-10-18; the one edge is a full slot cap, where the press's demand
+    still fetches it). Shipped as b465d71…a7a7e4b (Writer + Reviewer: no
+    blockers; fixes — a non-wanting dormant entry is never written by the
+    press (MAL non-negotiable), the season ends only at a stated count,
+    only TV / TV short / ONA sequels count, one shared press for overlay and
+    glyph, "hasn't aired yet" wording). Verified by the orchestrator
+    2026-10-18: diff read, targeted tests 152, full server 4931 passed,
+    client 1361, `make lint` clean on main.
   - [x] **Touch tap toggles the controls, never pauses** (owner approved
     2026-10-18): on the iPad a tap with the controls showing paused the
     video. Touch: tap toggles chrome, double-tap fullscreen, play/pause via
@@ -1952,10 +1959,20 @@ owner's word.
     state twice, so every tap looked like a tap on shown chrome). Verified
     by the orchestrator 2026-10-18: diff read, client 1340 passed, `make
     lint` clean on main.
-  - [ ] **Fullscreen on the iPad**: the button does nothing in the installed
+  - [x] **Fullscreen on the iPad**: the button does nothing in the installed
     app and the status bar never hides. Owner 2026-10-18: handing the video
-    to Apple's native player is **not acceptable** — Arc's overlays stay.
-    Approach pending the owner's word (see the orchestrator's proposal).
+    to Apple's native player is **not acceptable**, and a CSS
+    pseudo-fullscreen is "a bad compromise" — Arc's overlays stay and
+    fullscreen remains the browser's element fullscreen. Shipped as
+    3605e7d/3a1ceeb: the request tries the standard API then Safari's
+    prefixed one, listens to both change events, and a refusal (rejection,
+    or no fullscreen element within 500 ms) shows "Fullscreen isn't
+    available in this window. Open Arc in Safari for fullscreen." instead of
+    doing nothing. Verified by the orchestrator 2026-10-18: diff read,
+    client 1361 passed, lint clean. Still open on the device: whether the
+    installed app on iPadOS 27 grants element fullscreen at all, and whether
+    the iPad is in Windowed Apps mode (status bar shown for every app) —
+    the owner's next check tells.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
