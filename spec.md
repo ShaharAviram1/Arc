@@ -418,8 +418,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   activating it — one episode is the point of a sample; activation means the
   window. **A trip (FR-A12) is not a touch either**: it fetches its own
   episodes and leaves the entry dormant. **Pressing Next season** on the
-  end-of-episode overlay (FR-S5 item 3) is a touch that activates the
-  entry (and adds an absent sequel to the list as Watching).
+  end-of-episode overlay (FR-S5 item 3) is a touch that activates a
+  watching or planned entry (and adds an absent sequel to the list as
+  Watching); an entry in any other status is not written to at all.
 - FR-A10 At most K shows per user fetch at once (default 5; 0 = unlimited):
   shows already fetching keep their slot, free slots go to currently airing
   shows first and then to the most recently updated entries, and the rest wait
@@ -941,24 +942,33 @@ that the course professor can log in at any time, and the owner uses it daily.
      toast and the overlay render inside the fullscreen element.
   3. *The end of a season* (owner, 2026-10-18, after the real-iPad check).
      When the episode has no next episode of its own show **and** the show
-     is finished there (its status is finished, or the episode's number
-     reaches the episode count the source states — never on an airing show
-     that simply has no next row yet), and the catalogue's `SEQUEL` relation
-     resolves to a show Arc has (a TV season first, then the earliest year;
-     a sequel not in Arc's catalogue is not offered), the overlay's primary
+     is finished there (the episode's number reaches the episode count the
+     source states, whatever the status; with no stated count, the status is
+     finished — never on an airing show that simply has no next row yet),
+     and the catalogue's `SEQUEL` relation resolves to a **series** Arc has
+     (TV, then TV short or ONA, then the earliest year; a film, OVA, special
+     or music sequel is never "the next season", and a sequel not in Arc's
+     catalogue is not offered), the overlay's primary
      action is **Next season** — "Next season: {title} · Episode {n}", the
      sequel's lowest-numbered regular episode — on the same ready / fetchable
      rule as Next, and the control bar's Next glyph points at it too. When
-     the sequel's episode is neither, the overlay says it is not ready yet
-     instead. Pressing it on a sequel the viewer is already fetching and
-     whose episode is ready just opens it. Otherwise the press first makes
-     the sequel's entry active through the ordinary list write — **an absent
-     sequel is added to the list as Watching** (an explicit status change,
-     sent to MyAnimeList like any other), a dormant one is touched (FR-A9)
-     — and then, for an episode not ready, demands it (FR-A14) and opens the
-     waiting player. "Fetchable" here is what the demand will accept once the
-     entry is active. No special prefetch: an active sequel's episode 1 is
-     in the ordinary window (FR-A1) on its own.
+     the sequel's episode is neither, the overlay (and the glyph's label)
+     says it "hasn't aired yet" for a sequel that is only announced or whose
+     episode has not aired, and "isn't ready yet" otherwise. Pressing it on a
+     sequel the viewer is already fetching and whose episode is ready just
+     opens it. Otherwise the press first makes the sequel's entry active
+     through the ordinary list write — **an absent sequel is added to the
+     list as Watching** (an explicit status change, sent to MyAnimeList like
+     any other), a dormant watching or planned one is touched (FR-A9) — and
+     then, for an episode not ready, demands it (FR-A14) and opens the
+     waiting player. A sequel entry in any other status (completed, on hold,
+     dropped) is never written by the press: a ready episode just opens, and
+     a not-ready one is offered only if it is already covered (a sample,
+     FR-A8). "Fetchable" here is what the demand will accept once the entry
+     is active. No special prefetch: an active sequel's episode 1 is in the
+     ordinary window (FR-A1) on its own. The offer is not worked out while
+     the opened episode is still pending or playing from its download
+     (FR-P8): a last episode watched that way shows it once it is ready.
 - FR-S6 Keyboard shortcuts: space, arrows (±5 s), f fullscreen, m mute.
   While the episode is still downloading (FR-P8, M20 T7), → and End are held
   to the download front (1 s short of it) rather than waiting; a key seek
@@ -2900,3 +2910,7 @@ through the same edge, without the grace period.
   the real-iPad check): the sequel's episode 1, activating or adding the
   sequel's entry on press and demanding the episode (FR-A14); no special
   prefetch — an active sequel is already in the window.
+- 2026-10-18 — Next season after review: the season ends at a stated count
+  even on a finished show; only a TV / TV short / ONA sequel is offered
+  (orchestrator's call); a sequel entry that is not watching or planned is
+  never written by the press; "hasn't aired yet" for an unaired sequel.
