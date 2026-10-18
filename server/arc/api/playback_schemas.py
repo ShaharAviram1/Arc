@@ -10,14 +10,13 @@ restated, so the card the player renders above the video is the same
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
 from arc.api.deps import MAX_ID, MIN_ID
 from arc.models import Episode, EpisodeState, Rendition
-from arc.services.playback.next_season import NextSeason
+from arc.services.playback.next_season import ListState, NextSeason
 
 #: The language a text track is announced with when the source did not say
 #: (BCP 47's "undetermined").
@@ -71,13 +70,17 @@ class NextSeasonRef(BaseModel):
     for an ``active`` entry that is today's window, for a ``dormant`` or
     ``absent`` one the window the entry will have after the touch (activated,
     or added as Watching). ``list_state`` tells the client which touch to make
-    first: none, re-send the entry (FR-A9), or add it as Watching.
+    first: none, re-send the entry (FR-A9), or add it as Watching; ``dormant``
+    is only ever a watching or planned entry, so that re-send never moves a
+    completed one. ``aired`` is false for a sequel that is only announced or
+    whose episode has not aired, so the player can say "hasn't aired yet".
     """
 
     anime_id: int
     title: str
     episode: EpisodeRef
-    list_state: Literal["active", "dormant", "absent"]
+    list_state: ListState
+    aired: bool = True
 
     @classmethod
     def build(cls, found: NextSeason) -> NextSeasonRef:
@@ -86,6 +89,7 @@ class NextSeasonRef(BaseModel):
             title=found.title,
             episode=EpisodeRef.from_episode(found.episode, fetchable=found.fetchable),
             list_state=found.list_state,
+            aired=found.aired,
         )
 
 

@@ -30,9 +30,11 @@ from arc.models import (
     Job,
     ListEntry,
     ListStatus,
+    MalWriteLog,
     Rendition,
     UpdatedBy,
     User,
+    Want,
     WatchProgress,
 )
 from arc.services.acquisition.names import COMPUTE_WANTS
@@ -1418,6 +1420,7 @@ async def test_the_last_episode_of_a_finished_season_offers_the_sequel(
             "fetchable": False,
         },
         "list_state": "active",
+        "aired": True,
     }
 
 
@@ -1524,14 +1527,156 @@ async def test_an_active_sequel_is_fetchable_through_the_ordinary_window(
 async def test_a_dropped_sequel_cannot_be_fetched_from_the_player(
     client: AsyncClient, api_factory: SessionFactory, user: User
 ) -> None:
-    """A touch does not change a status: a dropped sequel stays out of the window."""
+    """A touch does not change a status: a dropped sequel stays out of the window.
+
+    And it is ``active``, not ``dormant``, although nobody touched it in Arc:
+    ``dormant`` is what the client answers with a list write, and a dropped
+    entry must not be written to on the way past.
+    """
     season, sequel_id, _sequel = await season_pair(api_factory, base=950780, sequel_ready=())
     await follow(api_factory, user, sequel_id, ListStatus.DROPPED)
 
     offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
 
-    assert offer["list_state"] == "dormant"
+    assert offer["list_state"] == "active"
     assert offer["episode"]["fetchable"] is False
+
+
+@pytest.mark.parametrize("status", [ListStatus.COMPLETED, ListStatus.ON_HOLD])
+async def test_an_untouched_sequel_outside_watching_or_planned_is_active_and_not_written(
+    client: AsyncClient, api_factory: SessionFactory, user: User, status: ListStatus
+) -> None:
+    """The MAL non-negotiable: a dormant completed/on-hold entry needs no touch.
+
+    Reported ``dormant``, the client would ``PUT {}`` it on the press — and for
+    a completed entry that write raises progress to the count and queues a MAL
+    write nobody asked for. Reported ``active`` with a ready episode 1, the
+    press is a plain link; and reading ``/play`` itself writes nothing.
+    """
+    season, sequel_id, _sequel = await season_pair(
+        api_factory, base=950800 if status is ListStatus.COMPLETED else 950810
+    )
+    await follow(api_factory, user, sequel_id, status, progress=3)
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "active"
+    assert offer["episode"]["ready"] is True
+    entry = await entry_of(api_factory, user, sequel_id)
+    assert entry is not None
+    assert entry.status is status
+    assert entry.progress == 3
+    assert entry.activated_at is None
+    assert entry.mal_dirty is False
+    async with api_factory() as session:
+        logged = await session.scalars(select(MalWriteLog).where(MalWriteLog.user_id == user.id))
+        assert list(logged.all()) == []
+
+
+async def test_a_sample_want_on_a_dormant_sequel_makes_episode_one_fetchable(
+    client: AsyncClient, api_factory: SessionFactory, user: User
+) -> None:
+    """Existing coverage counts: a live "try episode 1" (FR-A8) is in ``coverable``.
+
+    A dormant completed entry predicts no window, but the demand would accept
+    an episode the viewer already sampled, so the offer must not refuse it.
+    """
+    season, sequel_id, sequel = await season_pair(api_factory, base=950830, sequel_ready=())
+    await follow(api_factory, user, sequel_id, ListStatus.ON_HOLD)
+    async with api_factory() as session:
+        session.add(Want(user_id=user.id, episode_id=sequel[1], sample=True))
+        await session.commit()
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["list_state"] == "active"
+    assert offer["episode"]["fetchable"] is True
+
+
+async def test_a_pending_last_episode_carries_no_offer_and_plans_nothing(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The waiting player polls ``/play``: no plan per poll, so no offer (FR-P8)."""
+    season, _sequel_id, _sequel = await season_pair(api_factory, base=950840, sequel_ready=())
+    async with api_factory() as session:
+        episode = await session.get(Episode, season[12])
+        assert episode is not None
+        episode.state = EpisodeState.DOWNLOADING
+        session.add(Want(user_id=user.id, episode_id=season[12], demanded_at=NOW))
+        await session.commit()
+
+    async def no_plan(*_args: object, **_kwargs: object) -> frozenset[int]:
+        raise AssertionError("no plan while the opened episode is pending")
+
+    monkeypatch.setattr("arc.api.playback.coverable", no_plan)
+    monkeypatch.setattr("arc.services.playback.next_season.coverable_once_active", no_plan)
+
+    response = await client.get(f"/api/episodes/{season[12]}/play")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["pending"] is not None
+    assert body["next"] is None
+    assert body["next_season"] is None
+
+
+async def test_a_show_naming_itself_as_its_sequel_offers_nothing(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """A source's self-referential SEQUEL relation is ignored, not followed in a loop."""
+    season_id, season = await add_show(
+        api_factory, anilist_id=950850, ready=(12,), status="FINISHED"
+    )
+    await link_sequel(api_factory, season_id, (950850, "SEQUEL", "TV"))
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next"] is None
+    assert body["next_season"] is None
+
+
+async def test_an_announced_sequel_has_not_aired_and_cannot_be_fetched(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """NOT_YET_RELEASED: episode 1 is offered by name, ``aired`` false, not fetchable."""
+    season_id, season = await add_show(
+        api_factory, anilist_id=950860, ready=(12,), status="FINISHED"
+    )
+    sequel_id, sequel = await add_show(
+        api_factory, anilist_id=950861, ready=(), status="NOT_YET_RELEASED"
+    )
+    async with api_factory() as session:
+        for number, episode_id in sequel.items():
+            episode = await session.get(Episode, episode_id)
+            assert episode is not None
+            episode.air_at = NOW + timedelta(weeks=number + 4)
+        await session.commit()
+    await link_sequel(api_factory, season_id, (950861, "SEQUEL", "TV"))
+
+    offer = (await client.get(f"/api/episodes/{season[12]}/play")).json()["next_season"]
+
+    assert offer["anime_id"] == sequel_id
+    assert offer["list_state"] == "absent"
+    assert offer["aired"] is False
+    assert offer["episode"]["ready"] is False
+    assert offer["episode"]["fetchable"] is False
+
+
+async def test_a_film_sequel_is_not_the_next_season(
+    client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    season_id, season = await add_show(
+        api_factory, anilist_id=950870, ready=(12,), status="FINISHED"
+    )
+    await add_show(api_factory, anilist_id=950871, status="FINISHED")
+    await link_sequel(api_factory, season_id, (950871, "SEQUEL", "MOVIE"))
+
+    body = (await client.get(f"/api/episodes/{season[12]}/play")).json()
+
+    assert body["next_season"] is None
 
 
 async def test_a_sequel_already_started_is_not_fetchable_at_episode_one(

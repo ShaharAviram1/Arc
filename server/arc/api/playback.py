@@ -264,8 +264,9 @@ async def play(
     if not waiting and any(ref is not None and not ref.ready for ref in (previous, following)):
         previous, following = _neighbours(siblings, episode, fetchable=await covered_now())
     # The sequel's first episode, at a finished season's end (FR-S5 item 3).
-    # Not while this episode is pending: the waiting player polls, and shows
-    # no end overlay to offer it on.
+    # Not while this episode is pending or playing from its download (FR-P8):
+    # that player polls this route, so a last episode watched while it still
+    # downloads gets the offer only once the poll stops (it is ready then).
     sequel = (
         None
         if waiting
