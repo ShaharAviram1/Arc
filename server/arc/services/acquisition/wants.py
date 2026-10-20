@@ -106,7 +106,14 @@ the point. A user who watched episode 5 has moved past it: the completion is in
 ``watch_progress``, retention reads *that* as the anchor, and the want row has
 nothing left to say. So the rule is one line — a want whose (user, show) still
 has a ``watching``/``planned`` list entry left the window and is deleted;
-anything else stopped being wanted and is dropped.
+anything else stopped being wanted and is dropped. The one exception (owner
+2026-10-20) is a row whose episode is still ``downloading`` and which the user
+has not watched past: a window that shrank under it — a thinly seeded show
+(FR-A1) that stopped counting as thin, N turned down to anything but 0 — does
+not cancel the download; the row goes on the first run after the episode is
+no longer ``downloading`` (``downloaded``/``matching``, before it is ready),
+and from then on its files are retention's, as for any ready episode outside
+the window. A search is not protected: releasing it loses no bytes.
 
 Cancelling (2026-09-13). A want going away is also allowed to stop work that
 has already started. An episode in ``wanted``/``searching``/``unavailable``
@@ -196,7 +203,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, tuple_
+from sqlalchemy import and_, delete, func, or_, select, tuple_, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -213,6 +220,7 @@ from arc.models import (
     OfflineCopyState,
     Rendition,
     Torrent,
+    TorrentFile,
     Trip,
     TripEpisode,
     TripEpisodeState,
@@ -240,7 +248,7 @@ from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_CANCELLED
 from arc.services.acquisition.rules import (
     is_paused,
     is_storage_held,
-    look_ahead_and_cap,
+    window_rules,
 )
 from arc.services.acquisition.slots import SETTLED, SlotShow, assign_slots
 from arc.services.acquisition.states import transition
@@ -262,6 +270,19 @@ from arc.services.trips.names import TRIP_SEARCH_PRIORITY, enqueue_trip_release
 from arc.services.trips.rules import delivered_to, pending_episode_ids, trip_copy_priority
 
 log = logging.getLogger(__name__)
+
+#: How many thinly seeded show ids the reconciliation names in its log line;
+#: past this it gives only the count.
+THIN_IDS_LOGGED: int = 10
+
+#: Episode states whose want is **in flight** (owner 2026-10-20): deleting it
+#: would cancel a download with its files. Such a want is not deleted merely
+#: because the window shrank — a thin show that stopped counting as thin, or N
+#: turned down to anything but 0 — and goes on the first run after the episode
+#: leaves this state (:func:`_reconcile`). Not ``searching``: releasing a
+#: search loses no bytes, and a kept one would keep FR-A6's retry loop alive
+#: for an episode outside the window.
+IN_FLIGHT: frozenset[EpisodeState] = frozenset({EpisodeState.DOWNLOADING})
 
 #: The list states that generate wants (FR-A1). Everything else is FR-W4's
 #: "no acquisition wants": ``on_hold`` is in that group deliberately — a show
@@ -509,6 +530,80 @@ async def _completed_through(
     return furthest
 
 
+def show_look_ahead(look_ahead: int, look_ahead_slow: int, *, thin: bool) -> int:
+    """The N one show's window uses (FR-A1, owner 2026-10-20).
+
+    ``look_ahead_n`` for every show, deepened to ``look_ahead_slow`` for a
+    thinly seeded one (:func:`_thin_shows`). N = 0 stays "fetch nothing", and a
+    slow figure below N never shrinks anything.
+    """
+    if look_ahead <= 0:
+        return 0
+    return max(look_ahead, look_ahead_slow) if thin else look_ahead
+
+
+def _thin_threshold(look_ahead: int, look_ahead_slow: int, slow_seeders: int) -> int:
+    """The seeder figure :func:`_thin_shows` compares against, or 0 for "skip it".
+
+    0 whenever thinness could not change any window: the setting is off, N is
+    0, or the slow look-ahead is no deeper than N.
+    """
+    if slow_seeders <= 0 or look_ahead <= 0 or look_ahead_slow <= look_ahead:
+        return 0
+    return slow_seeders
+
+
+async def _thin_shows(
+    session: AsyncSession, anime_ids: Collection[int], *, below: int
+) -> frozenset[int]:
+    """The shows among ``anime_ids`` that are thinly seeded (FR-A1). Read-only.
+
+    A show is thin when its newest ``torrents`` row **with a seeder figure**
+    (``added_at`` then ``id``, both descending) recorded fewer than ``below``.
+    A single counts through ``torrents.episode_id``, a batch through its
+    ``torrent_files``; a re-fetch row whose figure was cleared (``seeders``
+    null) is skipped rather than allowed to hide the last real one, and an
+    unreadable batch tombstone has no files and so no show. Derived on every
+    call and stored nowhere, like the halfway prefetch.
+
+    One statement; none at all when ``below`` is 0 or there is nothing to ask
+    about.
+    """
+    if below <= 0 or not anime_ids:
+        return frozenset()
+    ids = list(set(anime_ids))
+    singles = (
+        select(
+            Episode.anime_id.label("anime_id"),
+            Torrent.added_at.label("added_at"),
+            Torrent.id.label("torrent_id"),
+            Torrent.seeders.label("seeders"),
+        )
+        .join(Episode, Episode.id == Torrent.episode_id)
+        .where(Torrent.seeders.is_not(None), Episode.anime_id.in_(ids))
+    )
+    batches = (
+        select(
+            Episode.anime_id.label("anime_id"),
+            Torrent.added_at.label("added_at"),
+            Torrent.id.label("torrent_id"),
+            Torrent.seeders.label("seeders"),
+        )
+        .join(TorrentFile, TorrentFile.torrent_id == Torrent.id)
+        .join(Episode, Episode.id == TorrentFile.episode_id)
+        .where(Torrent.seeders.is_not(None), Episode.anime_id.in_(ids))
+    )
+    rows = union_all(singles, batches).subquery()
+    newest = (
+        select(rows.c.anime_id, rows.c.seeders)
+        .distinct(rows.c.anime_id)
+        .order_by(rows.c.anime_id, rows.c.added_at.desc(), rows.c.torrent_id.desc())
+    )
+    return frozenset(
+        anime_id for anime_id, seeders in (await session.execute(newest)).all() if seeders < below
+    )
+
+
 def window(
     episodes: list[Episode],
     *,
@@ -593,6 +688,12 @@ class _Plan:
     #: non-dormant watching/planned show. What play on demand may ask for
     #: (FR-A14); never used to create a want by itself.
     covers: Mapping[int, frozenset[int]] = field(default_factory=dict)
+    #: The shows whose window this run was deepened to ``look_ahead_slow``
+    #: because they are thinly seeded (:func:`_thin_shows`, FR-A1).
+    thin: frozenset[int] = frozenset()
+    #: N as it stands (``look_ahead_n``). 0 is the hard stop: the in-flight
+    #: rule in :func:`_reconcile` does not apply.
+    look_ahead: int = 0
 
     @property
     def held_back(self) -> int:
@@ -764,6 +865,8 @@ async def _plan_wants(
     now: datetime,
     look_ahead: int,
     cap: int,
+    look_ahead_slow: int = 0,
+    slow_seeders: int = 0,
     user_ids: Collection[int] | None = None,
 ) -> _Plan:
     """Read every list and work out what ought to be wanted, in one pass.
@@ -775,7 +878,9 @@ async def _plan_wants(
        deleted. It is not a candidate for a slot either — a show that is not
        fetching because nobody has picked it up is not a show waiting for
        room.
-    2. **The window** (FR-A1). ``p+1 … p+N`` of the episodes that have aired,
+    2. **The window** (FR-A1). ``p+1 … p+N`` of the episodes that have aired
+       — N being ``look_ahead_slow`` for a thinly seeded show
+       (:func:`_thin_shows`, :func:`show_look_ahead`) —
        one further while the user is half-way through ``p+1``
        (:func:`_halfway`), minus what a device of theirs holds
        (:func:`_device_held`) — without sliding past it. The window *before*
@@ -810,6 +915,11 @@ async def _plan_wants(
         stmt = stmt.where(ListEntry.user_id.in_(user_ids))
     rows = await session.execute(stmt.order_by(ListEntry.user_id, ListEntry.anime_id))
     entries = list(rows.all())
+    thin = await _thin_shows(
+        session,
+        {anime.id for _, anime in entries},
+        below=_thin_threshold(look_ahead, look_ahead_slow, slow_seeders),
+    )
     furthest = await _completed_through(
         session, {(entry.user_id, entry.anime_id) for entry, _ in entries}
     )
@@ -871,10 +981,11 @@ async def _plan_wants(
         touches[key] = _Touch(at=entry.updated_at, by=entry.updated_by)
         first_id = firsts.get(key)
         prefetch = first_id is not None and (entry.user_id, first_id) in halfway
+        n_show = show_look_ahead(look_ahead, look_ahead_slow, thin=anime.id in thin)
         unskipped = window(
             episodes.get(anime.id, []),
             progress=progress_of[key],
-            look_ahead=look_ahead,
+            look_ahead=n_show,
             now=now,
             anime_status=anime.status,
             next_airing=anime.next_airing,
@@ -886,7 +997,7 @@ async def _plan_wants(
         picked = window(
             episodes.get(anime.id, []),
             progress=progress_of[key],
-            look_ahead=look_ahead,
+            look_ahead=n_show,
             now=now,
             anime_status=anime.status,
             next_airing=anime.next_airing,
@@ -899,7 +1010,7 @@ async def _plan_wants(
         # it an occupant, and is wanted even while the show waits. Otherwise
         # the show the user is watching right now would lose its prefetch, and
         # its slot, the moment K was full.
-        extra = [episode for episode in picked if episode.number > progress_of[key] + look_ahead]
+        extra = [episode for episode in picked if episode.number > progress_of[key] + n_show]
         extras[key] = extra
         extra_ids = {episode.id for episode in extra}
         shows[entry.user_id].append(
@@ -953,6 +1064,8 @@ async def _plan_wants(
         fetching=fetching,
         cap=cap,
         covers={user_id: frozenset(ids) for user_id, ids in covers.items()},
+        thin=thin,
+        look_ahead=look_ahead,
     )
     if plan.held_back:
         log.info(
@@ -968,13 +1081,18 @@ async def _current_plan(
     now: datetime | None = None,
     user_ids: Collection[int] | None = None,
 ) -> _Plan:
-    """:func:`_plan_wants` with N and K read for you, in one query. Writes nothing."""
-    look_ahead, cap = await look_ahead_and_cap(session)
+    """:func:`_plan_wants` with N, K and the thin-swarm pair read in one query.
+
+    Writes nothing.
+    """
+    rules = await window_rules(session)
     return await _plan_wants(
         session,
         now=now or datetime.now(UTC),
-        look_ahead=look_ahead,
-        cap=cap,
+        look_ahead=rules.n,
+        cap=rules.cap,
+        look_ahead_slow=rules.slow_n,
+        slow_seeders=rules.slow_seeders,
         user_ids=user_ids,
     )
 
@@ -1026,7 +1144,8 @@ async def coverable_once_active(
     the offer needs the answer the demand will get **after** that touch: this
     show's window, on the entry as the press leaves it (the status it has, or
     Watching for none), before the device skip and the slot cap, exactly as
-    :func:`_plan_wants` builds ``covers``. The halfway prefetch is left out: it
+    :func:`_plan_wants` builds ``covers`` — a thinly seeded show's deeper N
+    included. The halfway prefetch is left out: it
     only ever reaches one further, and a season nobody has started is not half
     watched. A status that is neither watching nor planned covers nothing — a
     touch does not change it.
@@ -1038,7 +1157,11 @@ async def coverable_once_active(
     status = entry.status if entry is not None else ListStatus.WATCHING
     if status not in WANTING_STATUSES:
         return frozenset()
-    look_ahead, _ = await look_ahead_and_cap(session)
+    rules = await window_rules(session)
+    thin = await _thin_shows(
+        session, {anime.id}, below=_thin_threshold(rules.n, rules.slow_n, rules.slow_seeders)
+    )
+    look_ahead = show_look_ahead(rules.n, rules.slow_n, thin=anime.id in thin)
     furthest = await _completed_through(session, {(user_id, anime.id)})
     progress = watched_through(
         entry.progress if entry is not None else 0, furthest.get((user_id, anime.id), 0)
@@ -1160,6 +1283,14 @@ async def compute_wants(
     # guard in :func:`_reconcile` compares ``demanded_at`` against.
     planned_at = datetime.now(UTC)
     plan = await _current_plan(session, now=moment)
+    if plan.thin:
+        log.info(
+            "thinly seeded shows get the deeper look-ahead",
+            extra={
+                "shows": len(plan.thin),
+                "anime_ids": sorted(plan.thin) if len(plan.thin) <= THIN_IDS_LOGGED else None,
+            },
+        )
     # The samples are the one kind of want no list can account for, so they are
     # added to the plan rather than worked out inside it (FR-A8).
     desired = dict(plan.desired)
@@ -1182,6 +1313,7 @@ async def compute_wants(
         trips=trips,
         now=moment,
         planned_at=planned_at,
+        keep_in_flight=plan.look_ahead > 0,
     )
     result = replace(result, waiting=plan.held_back)
     result = await _drop_stale(session, result, now=moment, exclude=trips.keys())
@@ -1282,7 +1414,8 @@ async def _demanded_wants(session: AsyncSession, plan: _Plan) -> dict[tuple[int,
     episode leaves the covered set — the user watched past it, N was turned
     down, the show left watching/planned — it is no longer added here and ends
     the way any want of that kind ends (:func:`_reconcile` deletes or shelves
-    it; on a show held by the cap, :func:`_watched_past` deletes it).
+    it — on a followed show, once its episode is no longer downloading; on a show
+    held by the cap, :func:`_watched_past` deletes it).
 
     A demanded row that is **not** covered but is a trip's or a sample's keeps
     being wanted through :func:`_trip_wants` / :func:`_sample_wants` — and is
@@ -1325,6 +1458,7 @@ async def _reconcile(
     trips: Mapping[tuple[int, int], _Touch] | None = None,
     now: datetime,
     planned_at: datetime | None = None,
+    keep_in_flight: bool = False,
 ) -> WantsResult:
     """Make ``wants`` equal ``desired``: insert, revive, drop, delete.
 
@@ -1357,6 +1491,24 @@ async def _reconcile(
     period from) is already in ``watch_progress``. A row whose show is not in
     ``wanting`` at all stopped being wanted, and is **dropped**
     (:data:`REASON_NOT_WANTING`) so that retention has the moment it stopped.
+
+    **An in-flight row is not deleted for leaving the window** (owner
+    2026-10-20), when ``keep_in_flight`` is set — :func:`compute_wants` sets
+    it whenever N is not 0, because N = 0 is the hard stop and cancels what is
+    running as it always did. A live want on a followed show whose episode is
+    :data:`IN_FLIGHT` (``downloading``) and **above** the user's progress is
+    kept when the window no longer reaches it — the show stopped counting as
+    thinly seeded, N was turned down, a device now holds it, a demand left the
+    covered set — because deleting it would cancel the download with its
+    files, and a thin-swarm figure that moves with every tracker scrape would
+    cancel and restart the same fetch. The first run after the episode is no
+    longer ``downloading`` (``downloaded``/``matching``, before it is ready)
+    deletes it as above, and from then on its files are retention's, as for
+    any ready episode outside the window. A ``searching`` episode is not
+    protected: releasing a search loses no bytes. Every other ending is
+    unchanged: watched past is still deleted, and a show that left
+    ``wanting`` (dormant, dropped, on hold, off the list) is still shelved and
+    cancelled.
 
     A row that is *already* dropped keeps its ``dropped_at`` — restamping it
     would push the deletion date away every quarter of an hour for as long as
@@ -1418,14 +1570,20 @@ async def _reconcile(
     for key in trip_only:
         wanted_now[key] = trip_touches[key]
     rows = await session.execute(
-        select(Want, Episode.anime_id, Episode.number).join(Episode, Episode.id == Want.episode_id)
+        select(Want, Episode.anime_id, Episode.number, Episode.state).join(
+            Episode, Episode.id == Want.episode_id
+        )
     )
-    # The episode *number* is only read for the held-show exception below, and
-    # it comes off this query rather than a second one: the join is already
-    # here for the anime id.
+    # The episode *number* is read for the held-show exception and the
+    # in-flight rule below, and the *state* for the latter; both come off this
+    # query rather than a second one: the join is already here for the anime id.
+    found_rows = rows.all()
     existing = {
         (want.user_id, want.episode_id): (want, anime_id, number)
-        for want, anime_id, number in rows.all()
+        for want, anime_id, number, _ in found_rows
+    }
+    in_flight = {
+        (want.user_id, want.episode_id) for want, _, _, state in found_rows if state in IN_FLIGHT
     }
     # Trip-only before this run (FR-A12): read before the loop rewrites the
     # flags, so the end of the run can say which stopped being so.
@@ -1501,6 +1659,18 @@ async def _reconcile(
                 removed.append(key)
             continue
         if pair in wanting:
+            if (
+                keep_in_flight
+                and key in in_flight
+                and want.dropped_at is None
+                and number > watched_through.get(pair, 0)
+            ):
+                # Downloading and not watched past (owner 2026-10-20): the
+                # window shrank under it — the show stopped counting as thinly
+                # seeded, or N was turned down (not to 0). Deleting the row
+                # would cancel the download with its files; it is kept, and the
+                # first run after the episode stops downloading deletes it.
+                continue
             removed.append(key)
             continue
         if want.sample and want.dropped_at is not None:
