@@ -2990,3 +2990,24 @@ through the same edge, without the grace period.
 - 2026-10-18 — The installed web app on iPadOS 27 refuses element fullscreen
   (owner saw the refusal toast); fullscreen there needs Safari or a native
   shell — under consideration, no decision yet.
+- 2026-10-20 — **Slow swarms** (owner, after Iruma-kun 3: 12-seeder singles
+  took 39–126 minutes behind the Mullvad exit, which stays — no inbound
+  peers by design — while the SubsPlease season pack had 76). FR-A4/FR-A11:
+  on a finished show with `batch_fallback` on, a pack covering the episode
+  with ≥ `batch_prefer_ratio` × (default 3) the chosen single's seeders and
+  ≥ 4 is taken file by file instead of the single, at the preferred or
+  fallback resolution as configured, never a dub over a subbed single, the
+  trip pack floor still applying; the pack forms are asked beside the singles
+  (≤ 3 cached requests); a pack that fails to start falls through to the
+  single in the same run, and a range-less pack that misses the episode is
+  not remembered as unreadable. 0 restores "a single always wins". FR-A6: a
+  stalled pack retries its pending episodes at once (hash barred) unless
+  chosen by hand. FR-A14/FR-P8: a demanded episode served by a pack waits for
+  its file rather than streaming while downloading (orchestrator's call: 76
+  seeders finish before 12 can stream; the owner may reverse). FR-A1: a show
+  whose newest fetched release with a seeder figure recorded fewer than
+  `slow_swarm_seeders` (20) keeps `max(look_ahead_n, look_ahead_slow)` (3)
+  episodes ahead, derived at each `compute_wants` and stored nowhere; a
+  downloading want above the user's progress is not cancelled merely because
+  the window shrank (its row goes once the download ends; a searching want
+  is), and N = 0 still stops everything. FR-D2: the three keys.

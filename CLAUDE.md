@@ -64,7 +64,9 @@ directly. Anything with logic goes through a Writer.
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
 - **Acquisition:** only the next N unwatched episodes of shows a user is
-  watching or has planned (plus one more once the user is halfway through
+  watching or has planned (N per show: the admin's default, or the deeper
+  `look_ahead_slow` while the show's newest release recorded fewer than
+  `slow_swarm_seeders` seeders — FR-A1, M20.2; plus one more once the user is halfway through
   the first, and skipping an episode already sitting unwatched on one of the
   user's devices — FR-A1, M20), an episode inside that window the user
   explicitly pressed play on (FR-A14), a single first episode a user

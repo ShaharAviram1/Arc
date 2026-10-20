@@ -1976,6 +1976,55 @@ owner's word.
     installed app on iPadOS 27 grants element fullscreen at all, and whether
     the iPad is in Windowed Apps mode (status bar shown for every app) —
     the owner's next check tells.
+- **M20.2 — Slow swarms (owner 2026-10-20).** Iruma-kun 3 (finished,
+  2022): its 12-seeder singles took 39–126 minutes to arrive behind the
+  Mullvad exit (no inbound peers, by design) while the SubsPlease season
+  pack had 76 seeders and current-season shows arrive in ~2 minutes. Owner:
+  the VPN stays; seeders may beat the single-versus-batch rule; look-ahead
+  goes back to 3 "only on shows that have no seeders anymore".
+  - [x] **T0 settings plumbing** (ca9580a): `batch_prefer_ratio` (3, 0..20,
+        0 = never), `slow_swarm_seeders` (20, 0..500, 0 = never),
+        `look_ahead_slow` (3, 0..10); lenient readers, one-query
+        `window_rules`, validators, data-only revision c4b8e1f2a9d6, Admin →
+        Rules fields, FR-D2. Verified by the orchestrator 2026-10-20: 286
+        targeted server tests, Admin.test.tsx 69, `make lint` clean.
+  - [x] **A — a well-seeded pack beats a thin single** (FR-A4/FR-A11): on a
+        finished show with `batch_fallback` on, a pack covering the episode
+        with ≥ `batch_prefer_ratio` × the best takeable single's seeders and
+        ≥ 4 seeders is taken file by file instead, in the packs' existing
+        rank order; never a dubbed pack over a subbed single, never below the
+        fallback resolution, the trip thin-pack floor still applies; a pack
+        that fails to start falls through to the single in the same run; a
+        stalled preferred pack that handed nothing to the library retries at
+        once (the hash barred, so the single). Batch forms are asked beside
+        the singles on a finished show (≤ 3 cached requests). Shipped as
+        ff8bdc1 (Writer; Validator PASS on all nine criteria with twelve
+        extra tests; Reviewer: no blockers, fixed — the no-single fallback is
+        gated on `not ranked` so a barred single never admits any pack, a
+        range-less pack that misses the episode is not tombstoned on the
+        preferred path, a manual pack keeps its "release you chose stalled"
+        ending, a pack that already handed the library a file still retries
+        its pending episodes). Verified by the orchestrator 2026-10-20:
+        diff read, targeted 651, full server 5060 passed on merged main,
+        client 1362, `make lint` clean.
+  - [x] **B — deeper look-ahead for thinly seeded shows** (FR-A1): a show
+        whose newest torrent row with a seeder count recorded fewer than
+        `slow_swarm_seeders` keeps `max(look_ahead_n, look_ahead_slow)`
+        episodes ahead; derived at each `compute_wants`, stored nowhere;
+        prefetch, device skip, cap and dormancy unchanged; an in-flight want
+        is never cancelled merely because the show stopped counting as thin.
+        Shipped as eb4be88 (Writer; Validator PASS on all six criteria with
+        eight extra tests; Reviewer blocker fixed — a `searching` want is
+        not kept, since it would keep FR-A6's retry loop alive and could
+        start a download outside the window days later; N = 0 stops
+        in-flight downloads too). Verified by the orchestrator 2026-10-20:
+        diff read, targeted 228, full server 5060 passed on merged main,
+        `make lint` clean.
+  - DoD: Writer → Validator → Reviewer (acquisition) → orchestrator
+    verification for A and B; full suites green; lint clean; single Alembic
+    head; deployed; a production check on Iruma-kun 3 (the next episode's
+    search picks the pack, and the show's window is 3 while its newest row
+    is thin).
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
