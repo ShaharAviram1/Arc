@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import delete, select
@@ -82,6 +83,7 @@ from arc.services.acquisition.wants import cancel_if_unwanted
 from arc.services.jobs.queue import DEDUPE_FIELD
 from arc.services.jobs.registry import JobContext
 from arc.services.library.names import MATCH_FILE
+from arc.services.media.names import REMUX_LIVE
 from tests.acquisition_helpers import (
     NyaaStub,
     QbitStub,
@@ -3224,11 +3226,13 @@ async def test_a_film_is_offered_no_batch(
 async def test_a_single_however_thin_beats_every_pack(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``not ranked`` is the gate, not "fewer than three": the episode wins.
+    """With ``batch_prefer_ratio`` at 0, ``not ranked`` is the only gate.
 
     One seeder, no preferred group — it is still the episode, and the batch
-    branch is never reached.
+    branch is never reached. (With the ratio at its default the pack below
+    wins on seeders: the twin that follows.)
     """
+    await set_setting(db_session, acquisition_rules.BATCH_PREFER_RATIO_KEY, 0)
     wired, episode = await _finished(
         db_session,
         monkeypatch,
@@ -3249,6 +3253,630 @@ async def test_a_single_however_thin_beats_every_pack(
     torrent = await db_session.scalar(select(Torrent))
     assert torrent is not None
     assert torrent.kind is TorrentKind.SINGLE and torrent.info_hash == "e" * 40
+
+
+async def test_a_pack_far_better_seeded_beats_a_thin_single(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The twin, at the default ratio of 3: 900 seeders against one."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962139,
+        email="batch20b@arc.test",
+        pool=_batch_pool(
+            (DEAD_SINGLE, "e" * 40, 1),
+            (BATCH_TITLE, BATCH_HASH, 900),
+        ),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [BATCH_HASH]
+    assert not any("urls" in added for added in wired.qbit.added), "no magnet is added"
+    torrent = await db_session.scalar(select(Torrent))
+    assert torrent is not None
+    assert torrent.kind is TorrentKind.BATCH and torrent.info_hash == BATCH_HASH
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+# --- A pack well seeded beyond the single (FR-A4, owner 2026-10-20) ----------
+#
+# Production: Iruma-kun 3 (finished, 2022) singles had about 12 seeders and
+# arrived in 39-126 minutes, while the SubsPlease season pack had 76. On a
+# finished show a pack with ``batch_prefer_ratio`` (3) times the chosen
+# single's seeders, and at least 4, is taken file by file instead.
+
+#: The single every test below compares a pack with.
+PREFER_SINGLE_HASH = "e" * 40
+
+
+def _single_and_pack(
+    single: int, pack: int, *, pack_title: str = BATCH_TITLE, pack_hash: str = BATCH_HASH
+) -> str:
+    """A pool of one acceptable single and one pack, with these seeders."""
+    return _batch_pool((DEAD_SINGLE, PREFER_SINGLE_HASH, single), (pack_title, pack_hash, pack))
+
+
+async def _single_row(session: AsyncSession) -> Torrent | None:
+    return await session.scalar(select(Torrent).where(Torrent.kind == TorrentKind.SINGLE))
+
+
+async def _pack_forms(session: AsyncSession, episode: Episode) -> list[str]:
+    anime = await session.get(Anime, episode.anime_id)
+    assert anime is not None
+    return nyaa_module.batch_queries(anime)
+
+
+async def test_a_pack_with_far_more_seeders_is_taken_instead_of_the_single(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """76 against 12: the pack, one file selected, the reason said, no single row."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962300,
+        email="prefer1@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    for form in await _pack_forms(db_session, episode):
+        assert wired.nyaa.queries.count(form) == 1, form
+    assert wired.nyaa.fetched == [f"https://nyaa.test/download/{BATCH_HASH}.torrent"]
+    assert [(call["priority"], call["indices"]) for call in wired.qbit.priorities] == [
+        (0, list(range(28))),
+        (1, [6]),
+    ]
+    assert wired.qbit.started == [BATCH_HASH]
+    assert not any("urls" in added for added in wired.qbit.added), "no magnet is added"
+    assert await _single_row(db_session) is None
+    assert episode.state is EpisodeState.DOWNLOADING
+    pack = await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    assert pack is not None and pack.kind is TorrentKind.BATCH
+    rows = await _torrent_files(db_session, pack.id)
+    assert [row.file_index for row in rows if row.wanted] == [6]
+
+    chosen = next(row for row in caplog.records if row.getMessage() == "batch chosen")
+    reason = "preferred to a single with 12 seeders (76 ≥ 3×12)"
+    assert reason in chosen.__dict__["reasons"]
+    compared = next(
+        row for row in caplog.records if row.getMessage() == "batch preferred to the single"
+    )
+    assert compared.__dict__["single"] == DEAD_SINGLE
+    assert compared.__dict__["single_seeders"] == 12
+    assert compared.__dict__["best_eligible_seeders"] == 76
+    assert compared.__dict__["ratio"] == 3
+    assert compared.__dict__["outcome"] == "batch"
+
+
+@pytest.mark.parametrize(
+    ("ratio", "pack_seeders"),
+    [(3, 30), (3, 35), (0, 76), (0, 900)],
+)
+async def test_a_pack_not_far_enough_ahead_leaves_the_single(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    ratio: int,
+    pack_seeders: int,
+) -> None:
+    """Under 3x the single's 12, or the ratio at 0 (never): the single, as before."""
+    await set_setting(db_session, acquisition_rules.BATCH_PREFER_RATIO_KEY, ratio)
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=963301 + pack_seeders + ratio,
+        email=f"prefer-under{ratio}-{pack_seeders}@arc.test",
+        pool=_single_and_pack(12, pack_seeders),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+    assert episode.state is EpisodeState.DOWNLOADING
+    forms = await _pack_forms(db_session, episode)
+    if ratio == 0:
+        assert not any(form in wired.nyaa.queries for form in forms), "no pack form asked"
+    else:
+        compared = next(
+            row for row in caplog.records if row.getMessage() == "no batch beats the single"
+        )
+        assert compared.__dict__["best_eligible_seeders"] == pack_seeders
+        assert compared.__dict__["single_seeders"] == 12
+
+
+async def test_with_the_fallback_off_the_pack_is_not_even_asked_for(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    await set_setting(db_session, acquisition_rules.BATCH_FALLBACK_KEY, False)
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962320,
+        email="prefer-off@arc.test",
+        pool=_single_and_pack(12, 900),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert not any(form in wired.nyaa.queries for form in await _pack_forms(db_session, episode))
+    assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+
+
+async def test_an_unreadable_preferred_pack_is_tombstoned_and_the_single_taken_at_once(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No file in it claims episode 7: refused, remembered, and the single in the same run."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962321,
+        email="prefer-unreadable@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(1, 2, 3))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    pack = await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    assert pack is not None and pack.qbit_state == QBIT_UNREADABLE
+    assert wired.qbit.started == [], "the pack never started"
+    assert wired.qbit.priorities == [], "not one priority written to it"
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert any(row.getMessage() == "preferred batch not taken" for row in caplog.records)
+
+
+async def test_a_held_pack_serves_the_next_episode_before_any_query(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Episode 8 attaches to the pack preferred for episode 7, for no request."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962322,
+        email="prefer-held@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+    assert wired.qbit.started == [BATCH_HASH]
+
+    eight = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eight is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    db_session.add(Want(user_id=want.user_id, episode_id=eight.id))
+    eight.state = EpisodeState.WANTED
+    await db_session.flush()
+    wired.nyaa.queries.clear()
+    wired.nyaa.fetched.clear()
+
+    await search_release(context(db_session, wired.settings, {"episode_id": eight.id}, job_id=2))
+
+    assert wired.nyaa.queries == [] and wired.nyaa.fetched == []
+    assert eight.state is EpisodeState.DOWNLOADING
+    assert len(wired.qbit.uploaded) == 1
+    assert await _single_row(db_session) is None
+
+
+async def test_a_remembered_single_is_fetched_again_before_any_pack_is_weighed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-T3 first: the evicted single comes back with no Nyaa request at all."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962323,
+        email="prefer-remembered@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    remembered = Torrent(
+        episode_id=episode.id,
+        kind=TorrentKind.SINGLE,
+        info_hash=PREFER_SINGLE_HASH,
+        title=DEAD_SINGLE,
+        magnet=f"magnet:?xt=urn:btih:{PREFER_SINGLE_HASH}",
+        seeders=12,
+        qbit_state=qbit_module.QBIT_EVICTED,
+        evicted_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    db_session.add(remembered)
+    await db_session.flush()
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.queries == [] and wired.nyaa.fetched == []
+    assert wired.qbit.uploaded == []
+    assert [added["urls"] for added in wired.qbit.added] == [remembered.magnet]
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+#: A dubbed pack: ranked below every subbed release by FR-A3, whatever its seeders.
+DUB_PACK = "[Yameii] Sousou no Frieren - 01 ~ 28 [English Dub] [1080p] [BATCH]"
+
+
+async def test_a_dubbed_pack_never_beats_a_subbed_single(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962324,
+        email="prefer-dub@arc.test",
+        pool=_single_and_pack(12, 900, pack_title=DUB_PACK),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+    compared = next(
+        row for row in caplog.records if row.getMessage() == "no batch beats the single"
+    )
+    assert compared.__dict__["batches"] == 1, "the dub pack was found"
+    assert compared.__dict__["eligible"] == 0, "and never compared"
+
+
+@pytest.mark.parametrize(("resolution", "preferred"), [("480p", False), ("720p", True)])
+async def test_a_pack_below_the_fallback_resolution_never_beats_the_single(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    resolution: str,
+    preferred: bool,
+) -> None:
+    """1080p preferred, 720p the fallback: a 720p pack may win, a 480p one never."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962325 if preferred else 962326,
+        email=f"prefer-{resolution}@arc.test",
+        pool=_single_and_pack(
+            12, 900, pack_title=f"[Erai-raws] Sousou no Frieren - 01 ~ 28 [{resolution}][BATCH]"
+        ),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    if preferred:
+        assert wired.qbit.started == [BATCH_HASH]
+        assert await _single_row(db_session) is None
+    else:
+        assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+        single = await _single_row(db_session)
+        assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+        compared = next(
+            row for row in caplog.records if row.getMessage() == "no batch beats the single"
+        )
+        assert compared.__dict__["batches"] == 1, "the pack was found"
+        assert compared.__dict__["eligible"] == 0, "and filtered out before the ratio"
+
+
+@pytest.mark.parametrize(("pack_seeders", "preferred"), [(8, False), (10, True)])
+async def test_a_trip_only_episode_keeps_the_thin_pack_floor(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    pack_seeders: int,
+    preferred: bool,
+) -> None:
+    """8 is 4x a single of 2 and above 4, but under ``trip_pack_min_seeders`` (10)."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962327 + pack_seeders,
+        email=f"prefer-trip{pack_seeders}@arc.test",
+        pool=_single_and_pack(2, pack_seeders),
+    )
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    want.trip = True
+    await db_session.flush()
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    with caplog.at_level(logging.INFO):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    if preferred:
+        assert wired.qbit.started == [BATCH_HASH]
+        assert await _single_row(db_session) is None
+    else:
+        assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+        single = await _single_row(db_session)
+        assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+        compared = next(
+            row for row in caplog.records if row.getMessage() == "no batch beats the single"
+        )
+        assert compared.__dict__["batches"] == 1, "the pack was found"
+        assert compared.__dict__["eligible"] == 0, "and filtered out before the ratio"
+
+
+async def test_a_pack_a_sibling_just_took_is_attached_to_rather_than_the_single(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The race: episode 8's search took the pack while episode 7's was asking Nyaa.
+
+    The hash now has a row, so the take skips it as already tried; the episode
+    attaches to that pack instead of falling to the thin single.
+    """
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962340,
+        email="prefer-sibling@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    real_search = acquisition_jobs.search_for_episode
+
+    async def sibling_takes_it_meanwhile(*args: Any, **kwargs: Any) -> nyaa_module.Search:
+        found = await real_search(*args, **kwargs)
+        pack = Torrent(
+            kind=TorrentKind.BATCH,
+            info_hash=BATCH_HASH,
+            title=BATCH_TITLE,
+            seeders=76,
+            qbit_state="downloading",
+            save_path=f"/data/downloads/batch/{BATCH_HASH}",
+        )
+        db_session.add(pack)
+        await db_session.flush()
+        db_session.add(
+            TorrentFile(
+                torrent_id=pack.id,
+                file_index=6,
+                path=_pack_names(7)[0],
+                size=4096,
+                episode_id=episode.id,
+                wanted=False,
+                priority=0,
+            )
+        )
+        await db_session.flush()
+        return found
+
+    monkeypatch.setattr(acquisition_jobs, "search_for_episode", sibling_takes_it_meanwhile)
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.fetched == [] and wired.qbit.uploaded == [], "not fetched a second time"
+    assert not any("urls" in added for added in wired.qbit.added), "nor the single"
+    assert await _single_row(db_session) is None
+    assert episode.state is EpisodeState.DOWNLOADING
+    row = await db_session.scalar(select(TorrentFile).where(TorrentFile.episode_id == episode.id))
+    assert row is not None and row.wanted
+    assert len(await queued(db_session, QBIT_RESELECT)) == 1
+
+
+async def test_a_stalled_preferred_pack_searches_again_at_once_and_takes_the_single(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing handed off: deleted, the episode back to wanted, the single next."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962341,
+        email="prefer-stalled@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+    pack = await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    assert pack is not None and wired.qbit.started == [BATCH_HASH]
+
+    _dead_swarm(wired)
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert pack.qbit_state == QBIT_STALLED
+    assert {"hashes": BATCH_HASH, "deleteFiles": "true"} in wired.qbit.deleted
+    assert episode.state is EpisodeState.WANTED, "not a day unavailable"
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert [int(job.payload["episode_id"]) for job in jobs] == [episode.id]
+    assert jobs[0].priority == SEARCH_RELEASE_PRIORITY
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}, job_id=9))
+
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert len(wired.qbit.uploaded) == 1, "the stalled pack is not taken again"
+    assert pack.qbit_state == QBIT_STALLED
+
+
+async def test_a_demanded_episode_served_by_a_preferred_pack_waits_for_its_file(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-P8: a batch waits. Downloading, and no live remux queued."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962342,
+        email="prefer-demand@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    want.demanded_at = datetime.now(UTC)
+    await db_session.flush()
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [BATCH_HASH]
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert await queued(db_session, REMUX_LIVE) == []
+
+
+async def test_a_single_already_tried_does_not_open_the_no_single_fallback(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The only single is barred: no release, as before — not a thin 480p pack.
+
+    ``Search.batches`` is filled beside the singles now, and the no-single
+    fallback must still only open where no single was acceptable at all.
+    """
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962350,
+        email="prefer-barred@arc.test",
+        pool=_single_and_pack(
+            12, 2, pack_title="[Erai-raws] Sousou no Frieren - 01 ~ 28 [480p][BATCH]"
+        ),
+    )
+    db_session.add(
+        Torrent(
+            episode_id=episode.id,
+            kind=TorrentKind.SINGLE,
+            info_hash=PREFER_SINGLE_HASH,
+            title=DEAD_SINGLE,
+            qbit_state=QBIT_STALLED,
+        )
+    )
+    await db_session.flush()
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.fetched == [] and wired.qbit.uploaded == []
+    assert await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH)) is None
+    assert episode.state is EpisodeState.SEARCHING
+    assert len(await queued(db_session, SEARCH_RELEASE)) == 1, "the ordinary retry"
+
+
+async def test_a_rangeless_preferred_pack_that_lacks_the_episode_leaves_no_tombstone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Its name never claimed episode 7; another episode or show may still take it."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962351,
+        email="prefer-rangeless@arc.test",
+        pool=_single_and_pack(12, 76, pack_title=SECOND_TITLE, pack_hash=SECOND_HASH),
+    )
+    wired.qbit.add_files(SECOND_HASH, _pack_names(1, 2, 3, group="Judas"))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.nyaa.fetched == [f"https://nyaa.test/download/{SECOND_HASH}.torrent"]
+    assert wired.qbit.started == [] and wired.qbit.priorities == []
+    assert {"hashes": SECOND_HASH, "deleteFiles": "true"} in wired.qbit.deleted
+    assert (
+        await db_session.scalar(select(Torrent).where(Torrent.info_hash == SECOND_HASH))
+    ) is None, "no tombstone"
+    single = await _single_row(db_session)
+    assert single is not None and single.info_hash == PREFER_SINGLE_HASH
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+async def test_an_unreachable_client_on_the_preferred_path_propagates(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runner retries the whole search; nothing selected, started or recorded."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962352,
+        email="prefer-down@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    wired.qbit.down = True
+
+    with pytest.raises(QbitUnavailable):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.priorities == [] and wired.qbit.started == []
+    assert await _single_row(db_session) is None
+
+
+async def test_a_pack_another_search_reserves_first_on_the_preferred_path_propagates(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``BatchTaken``, as on the fallback path: the retry attaches to the winner."""
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962353,
+        email="prefer-taken@arc.test",
+        pool=_single_and_pack(12, 76),
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 29)))
+    fetch = nyaa_module.NyaaClient.torrent_file
+
+    async def racing(self: nyaa_module.NyaaClient, url: str) -> bytes:
+        blob = await fetch(self, url)
+        db_session.add(
+            Torrent(
+                kind=TorrentKind.BATCH,
+                episode_id=None,
+                info_hash=BATCH_HASH,
+                qbit_state="added",
+                save_path=f"/data/downloads/batch/{BATCH_HASH}",
+            )
+        )
+        await db_session.flush()
+        return blob
+
+    monkeypatch.setattr(nyaa_module.NyaaClient, "torrent_file", racing)
+
+    with pytest.raises(batch_module.BatchTaken):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.priorities == [] and wired.qbit.started == []
+    assert await _single_row(db_session) is None
 
 
 async def test_a_pack_with_too_many_files_is_refused(
@@ -3790,8 +4418,11 @@ async def test_a_stalled_batch_that_has_fetched_nothing_goes_with_its_files(
 
     await _poll(db_session, wired)
 
-    assert episode.state is EpisodeState.UNAVAILABLE
-    assert episode.unavailable_reason == "no seeders after 6 hours"
+    # Searched again at once (owner 2026-10-20), not a day ``unavailable``: the
+    # pack's hash is barred by its ``stalled`` row, so the retry looks elsewhere.
+    assert episode.state is EpisodeState.WANTED
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert [int(job.payload["episode_id"]) for job in jobs] == [episode.id]
     assert torrent.qbit_state == QBIT_STALLED
     assert wired.qbit.deleted == [{"hashes": BATCH_HASH, "deleteFiles": "true"}]
     assert not next(
@@ -3804,9 +4435,10 @@ async def test_a_stalled_batch_keeps_the_file_the_library_already_has(
 ) -> None:
     """A pack is not a single: one episode can be in while another's swarm dies.
 
-    Episode 7's file is handed off; episode 8's swarm is empty. Episode 8 takes
-    FR-A6's ordinary retry with the stall sentence on it (FR-A7) and gives its
-    claim back, and the pack is **stopped** rather than deleted with its files —
+    Episode 7's file is handed off; episode 8's swarm is empty. Episode 8 gives
+    its claim back and searches again at once (2026-10-20: holding a library
+    file decides only stop versus delete), and the pack is **stopped** rather
+    than deleted with its files —
     ``deleteFiles=true`` would take episode 7's file out from under the library
     and leave a ``media_files`` row pointing at nothing. Those bytes are
     retention's to measure and delete per episode (FR-T1).
@@ -3832,8 +4464,9 @@ async def test_a_stalled_batch_keeps_the_file_the_library_already_has(
     _dead_swarm(wired)
     await _poll(db_session, wired)
 
-    assert neighbour.state is EpisodeState.UNAVAILABLE
-    assert neighbour.unavailable_reason == "no seeders after 6 hours"
+    assert neighbour.state is EpisodeState.WANTED, "searched for again at once"
+    jobs = await queued(db_session, SEARCH_RELEASE)
+    assert [int(job.payload["episode_id"]) for job in jobs] == [neighbour.id]
     assert episode.state is EpisodeState.MATCHING, "what arrived is left alone"
     assert video.exists(), "and so is the file the library is holding"
     assert torrent.qbit_state == QBIT_STALLED
@@ -3854,6 +4487,25 @@ async def test_a_stalled_batch_keeps_the_file_the_library_already_has(
     await _poll(db_session, wired)
     assert wired.qbit.deleted == []
     assert video.exists()
+
+
+async def test_a_stalled_pack_chosen_by_hand_keeps_its_sentence_and_waits(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-A13: "the release you chose stalled" stays, as for a manual single."""
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962209, email="poll-batch-manual@arc.test"
+    )
+    torrent.manual = True
+    await db_session.flush()
+    _dead_swarm(wired)
+
+    await _poll(db_session, wired)
+
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == "the release you chose stalled: no seeders after 6 hours"
+    assert await queued(db_session, SEARCH_RELEASE) == []
+    assert torrent.qbit_state == QBIT_STALLED
 
 
 async def test_a_batch_gone_from_the_client_gives_up_the_same_way(

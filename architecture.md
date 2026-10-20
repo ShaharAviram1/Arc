@@ -875,7 +875,8 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
 - **Batch with selective download (FR-A4/FR-A11, owner 2026-09-18).** After the
   title forms and the group-narrowed forms, **only for a `deep_search` entry**
   and **only when `Search.ranked` is empty** — no acceptable single at all, a
-  stricter bar than the narrowing's "fewer than three" — **the pack is asked
+  stricter bar than the narrowing's "fewer than three" — or when the caller
+  passes **`with_batches=True`** (below, 2026-10-20) — **the pack is asked
   for**: `nyaa.batch_queries` builds up to three more forms with **no episode
   number on any of them** — `<romaji base>`, `<romaji base> BATCH` and
   `<english base> BATCH` — de-duplicated against the forms already asked, each
@@ -1037,6 +1038,43 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   are **unchanged**: the
   torrent is started only after its selection is written, so it never sits in
   `metaDL` and `time_active` clocks it exactly as it clocks a single.
+  **A pack preferred to a single on seeders** (FR-A4, owner 2026-10-20).
+  `search_release` reads `rules.batch_prefer_ratio` (default 3, 0 = never) next
+  to `batch_fallback` and calls `search_for_episode(…, with_batches=fallback and
+  ratio > 0)`: the gate becomes `deep_search and not single and (not ranked or
+  with_batches)`, so the three `batch_queries` forms are asked beside the
+  singles of a finished show (cached ten minutes, so a show's siblings share
+  them) and `Search.batches` is filled beside `ranked`; the default `False`
+  leaves every other caller byte-identical. After `_pick` returns a single and
+  before `_drop_held`/`_record_torrent`, `jobs._prefer_batch` filters
+  `found.batches` — `resolution_rank <= 1`, no dub over a subbed single, a
+  trip-only episode's `trip_pack_min_seeders` floor — and keeps those
+  `nyaa.batch_beats_single(batch, chosen.item.seeders, ratio=)` accepts
+  (`ratio > 0`, `seeders >= BATCH_PREFER_MIN_SEEDERS` (4), `seeders >= ratio ×
+  single`), each given a reason with `dataclasses.replace` ("preferred to a
+  single with 12 seeders (76 ≥ 3×12)"), and hands them in rank order to the
+  same `_take_batch` sequence with `over_single=True`, under which a range-less
+  pack whose plan cannot find the episode is abandoned **without** a tombstone
+  (as the trip branch already does), since its name never claimed it. Started → `_drop_held` and return (no
+  `_queue_live_if_demanded`: a batch waits, FR-P8; the episode reads
+  downloading through `batch.start_downloading`). Not started →
+  `batch.claim_existing` once more (a sibling's search may have taken one of
+  these packs since this one began, so `_add_stopped` skipped it as already
+  tried; otherwise it finds nothing); then the log line `preferred batch not
+  taken` and the single is recorded and added as before, in the same run.
+  Every evaluation logs the comparison (single title and seeders,
+  `best_eligible_seeders` after the filters, the ratio, the outcome). The
+  no-single fallback (`chosen is None`) is offered `found.batches` **only when
+  `ranked` is empty**: with every single already tried it schedules the
+  ordinary retry rather than taking a pack none of these checks has seen. `claim_existing` and the remembered
+  release still run before any search. **A stalled pack** now puts every pending episode straight back to `wanted`
+  (`_retry_stalled_pack_episodes`, widened from the trip-only
+  `_retry_trip_episodes`): a trip-only one at `TRIP_SEARCH_PRIORITY`, any other
+  at `_search_priority`'s answer; the `stalled` row bars the hash, so the retry
+  takes the single. Whether the pack holds a library file (`holds_files`)
+  decides only stop versus delete, not the retry. A `manual` pack (FR-A13)
+  skips the retry for its non-trip-only episodes, which keep `MANUAL_STALL`'s
+  sentence and FR-A6's daily retry.
   `settings.batch_fallback` (bool, default true, FR-D2) is the kill switch and
   gates **both** the pick and the attach — enabling a file in a pack Arc already
   holds is still fetching more — while a pack already downloading finishes the
@@ -1158,10 +1196,11 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   → no limit) has fewer than `SINGLE_SEEDER_RATIO` (3) × its seeders.
   Resolution is not compared. `Search.forms` for a taken pack counts the pack
   and title forms asked. Nothing offered → the ordinary path continues on
-  the same pool (singles; FR-A11's batch fallback only when no single is
-  acceptable). **A stalled trip pack**: `_poll_batch`'s stall branch, when
+  the same pool (singles; FR-A11's batch fallback when no single is
+  acceptable or a pack far outseeds it). **A stalled trip pack**: `_poll_batch`'s stall branch, when
   the pack has handed nothing off (so it is deleted with its files), calls
-  `_retry_trip_episodes`: each pending row's episode that is trip-only and
+  `_retry_trip_episodes` (since 2026-10-20 `_retry_stalled_pack_episodes`,
+  which retries every pending episode, see the batch bullet): each pending row's episode that is trip-only and
   now `unavailable` (after `_give_up_on` released its claim) is moved to
   `wanted` through `wants.start_search(retry_now=True,
   priority=TRIP_SEARCH_PRIORITY)`. The pack's `torrents` row stays `stalled`
