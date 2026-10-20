@@ -274,15 +274,18 @@ that the course professor can log in at any time, and the owner uses it daily.
   the only seeded releases are often batches: *Kimetsu no Yaiba* episode 10
   came back under seven title forms and six group-narrowed ones with no
   season-one single among them and several complete-season packs. So where a
-  **finished** show's search ends with **no acceptable single at all**, Arc may
-  take a batch that covers the wanted episode — and it downloads **only that
-  episode's file**. The pack has to be **asked for by name**: every query form
+  **finished** show's search ends with **no acceptable single at all** — or
+  with a single a pack far outseeds (below) — Arc may take a batch that covers
+  the wanted episode, and it downloads **only that episode's file**. The pack has to be **asked for by name**: every query form
   above carries the episode number and no batch release name carries one, so a
   numbered search never returns a pack at all (16 results and none for *One
   Week Friends* episode 3, 13 and none for *Chivalry of a Failed Knight*, 10
   and none for *Dagashi Kashi 2*). Up to three more queries are made, with no
   number on any of them — the title bare, and the title with the word batch in
-  the two languages — and they are the last requests the search makes, inside
+  the two languages — asked where no single was found and, with
+  `batch_prefer_ratio` above 0, beside the singles too (below; a show's sibling
+  searches share them through the ten-minute cache), and they are the last
+  requests the search makes, inside
   the same per-episode ceiling as every other form, with those last three
   **reserved**: the search by release group stops three short of the ceiling
   so that a show with many ways of writing its title still gets to ask for a
@@ -316,6 +319,26 @@ that the course professor can log in at any time, and the owner uses it daily.
   (FR-D2, default on), which stops both halves: no new pack is taken and no
   further file is enabled in one Arc already has, while a pack already
   downloading finishes the episodes it was taken for.
+  **A batch well seeded beyond the single** (owner 2026-10-20). *Iruma-kun 3*
+  (finished, 2022) had singles with about 12 seeders that took 39 to 126
+  minutes each, beside a SubsPlease season pack with 76. So on a finished show,
+  once the ordinary pick has chosen a single, a pack that covers the episode is
+  taken **instead** when Nyaa lists at least `batch_prefer_ratio` (FR-D2,
+  default 3, 0 = never) times the chosen single's seeders **and** at least 4 of
+  its own. Never a dubbed pack over a subbed single (FR-A3), only at the
+  preferred or fallback resolution as configured, and for an episode
+  wanted only by a trip not below `trip_pack_min_seeders`. It is taken file by
+  file exactly as above — only the wanted files are selected, verified, then
+  started — and the candidates are tried in their ranking's order. A pack that
+  cannot be read, is refused or cannot be added leaves the single to be taken
+  in the same search (a pack whose name gives no range and whose files do not
+  hold the episode is removed without being remembered as unreadable: it may
+  serve another episode), and a pack that a sibling episode's search took in
+  the meantime is attached to instead. Where every single was already tried
+  the no-single exception above still applies only if no single was
+  acceptable at all. The pack Arc already holds and the
+  remembered release (FR-A6) still come first, before any query.
+  `batch_fallback` off turns this off too.
   **A trip on a finished show prefers a pack** (FR-A12, owner 2026-10-05):
   when the episode being searched is wanted only by trips, the show has
   finished airing, `batch_fallback` is on and at least `TRIP_BATCH_MIN` (4)
@@ -348,14 +371,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   after the pack forms (once — they are not asked again). Resolution is not
   compared: a 720p pack is fine for a trip. Otherwise the search continues
   exactly as if no pack had covered enough — singles by FR-A3, and FR-A11's
-  ordinary batch fallback only when no acceptable single exists at all.
+  ordinary batch fallback when no acceptable single exists at all or a pack
+  far outseeds the single (above).
   FR-A3's own seeder floor is unchanged. **A trip pack that stalls** (FR-A6)
   having handed nothing to the library is deleted with its files like any
   other, its claims are released, and its **trip-only** episodes go straight
   back to `wanted` with a search at the trip's priority instead of waiting for
   the daily retry; the pack's `torrents` row stays as the `stalled` record, so
   that hash is neither attached to nor taken again and the retry takes
-  singles. Episodes also wanted for streaming keep FR-A6's ordinary ending.
+  singles. **Since 2026-10-20 this holds for every pack** (FR-A6): episodes
+  wanted for streaming go straight back to `wanted` too, at their last search's
+  priority, because the pack may have been preferred to a single that is still
+  seeded — except a pack chosen by hand (FR-A13), whose non-trip episodes keep
+  "the release you chose stalled".
   **A trip-only episode takes no thin pack by any route**: it does not attach
   to a pack Arc already holds whose recorded seeders are below the floor (or
   unknown) or that is stopped before finishing (so a trip cancelled and asked
@@ -390,7 +418,17 @@ that the course professor can log in at any time, and the owner uses it daily.
   not failed at anything. A release Arc has already tried is never chosen
   again, and a release with no seeders is never chosen at all. Torrents
   stopped by hand, and torrents queued behind the client's own download
-  limit, are never touched by this. **The remembered release goes first**
+  limit, are never touched by this. **A pack that stalls** (FR-A11) is the
+  exception to "unavailable" (owner 2026-10-20): its episodes still waiting go
+  straight back to `wanted` with a search at once, and since its hash is
+  barred that search takes a single where one exists — a pack may now have
+  been preferred to a seeded single (FR-A4). That holds also for a pack that
+  already gave the library a file: whether it did decides only whether the
+  pack is stopped (its delivered file kept) or deleted with its files, and the
+  episodes still pending gain nothing from waiting a day either way. A pack
+  chosen by hand (FR-A13) keeps "the release you chose stalled" for its
+  episodes that are not trip-only, as a manual single does. **The remembered
+  release goes first**
   (M20 T9): an episode whose files retention deleted is fetched again from the
   same release, re-added to the client before any search, with no Nyaa
   request at all (FR-T3) — after a pack Arc already holds has been asked
@@ -451,8 +489,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   halfway prefetch** (M20): the extra episode never makes a show hungry for a
   slot or an occupant of one, and is fetched even while the show waits, so the
   show a user is watching right now keeps its next episode when K is full.
-- FR-A11 A batch taken under FR-A4's exception — or preferred for a trip
-  (FR-A4's trip amendment, FR-A12) — is held as **one** torrent
+- FR-A11 A batch taken under FR-A4's exception — or preferred on seeders
+  (FR-A4), or preferred for a trip (FR-A4's trip amendment, FR-A12) — is held
+  as **one** torrent
   record with no episode of its own and one file record per file, each carrying
   the episode it holds, whether Arc asked for it, and its own progress. An
   episode is complete when **its file** is; the torrent is complete when every
@@ -818,7 +857,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   the single is fetched sequentially (FR-A5) and a **live remux** feeds the
   file's bytes to the same remux as FR-P1 as they arrive, publishing a growing
   (EVENT) playlist that the player streams up to the download front. Only
-  when all of these hold: the download is a **single** (a batch waits), its
+  when all of these hold: the download is a **single** (a batch waits — also
+  one preferred to the episode's single on seeders, FR-A4), its
   video file is **Matroska** (an MP4 waits: its index may be at the end), the
   head of the file is **copyable** (FR-P7), and the file's name passes the
   **pre-match gate** (FR-L4's stated exception); the head must also **state
@@ -1589,7 +1629,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   2026-10-20):
   - `batch_prefer_ratio` (default 3, 0..20, 0 = never prefer a batch over a
     single) — on a finished show, a season pack whose seeders are at least
-    this many times the best single's (and at least 4) is taken file by file
+    this many times the chosen single's (and at least 4) is taken file by file
     instead of the single (FR-A4, FR-A11).
   - `slow_swarm_seeders` (default 20, 0..500, 0 = never) — a show whose newest
     fetched release recorded fewer seeders than this is "thinly seeded" (FR-A1).

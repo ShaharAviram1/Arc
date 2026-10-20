@@ -139,7 +139,9 @@ class Torrent(Base):
 
     A ``single`` is what every row written before then is: one release whose
     whole payload is one episode's, with :attr:`episode_id` set. A ``batch`` is
-    the exception a **finished** show with no acceptable single earns — one
+    the exception a **finished** show earns when it has no acceptable single,
+    or when a pack has ``batch_prefer_ratio`` times the single's seeders (owner
+    2026-10-20), or for a trip (FR-A12) — one
     release covering several episodes, with :attr:`episode_id` **null** and one
     :class:`TorrentFile` row per file saying which episode it holds and whether
     Arc asked for it. Only the asked-for files are ever downloaded.

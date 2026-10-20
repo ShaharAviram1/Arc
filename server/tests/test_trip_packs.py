@@ -41,7 +41,7 @@ from arc.services.acquisition.jobs import (
     search_release,
     trip_pack_need,
 )
-from arc.services.acquisition.names import QBIT_RESELECT, QBIT_TOP
+from arc.services.acquisition.names import QBIT_RESELECT, QBIT_TOP, SEARCH_RELEASE_PRIORITY
 from arc.services.acquisition.nyaa import (
     MAX_REQUESTS,
     NyaaClient,
@@ -351,6 +351,8 @@ async def test_a_pack_naming_too_few_is_skipped_and_singles_are_taken(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     single = "[SubsPlease] Sousou no Frieren - 01 (1080p) [AB12CD34].mkv"
+    # About the trip's pass alone, not the seeders preference (FR-A4, 2026-10-20).
+    await set_setting(db_session, acquisition_rules.BATCH_PREFER_RATIO_KEY, 0)
     wired, episodes, anime = await _trip(
         db_session,
         monkeypatch,
@@ -382,6 +384,7 @@ async def test_a_pack_whose_files_hold_too_few_is_removed_without_a_tombstone(
 ) -> None:
     """The plan gate: a pack naming no range is read, holds 2 of 12, and goes."""
     single = "[SubsPlease] Sousou no Frieren - 01 (1080p) [AB12CD34].mkv"
+    await set_setting(db_session, acquisition_rules.BATCH_PREFER_RATIO_KEY, 0)
     wired, episodes, anime = await _trip(
         db_session,
         monkeypatch,
@@ -1071,10 +1074,13 @@ async def test_a_stalled_trip_pack_is_deleted_and_its_episodes_search_singles(
 
 
 @pg
-async def test_a_stalled_pack_for_a_normal_want_still_waits_out_the_retry(
+async def test_a_stalled_pack_for_a_normal_want_searches_again_at_once_too(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Only trip-only episodes are put straight back; the rest keep FR-A6's ending."""
+    """Widened (owner 2026-10-20): every episode of a dead pack is put straight back.
+
+    A trip-only episode at the trip's priority, the rest at their last search's.
+    """
     wired, episodes, _anime = await _trip(
         db_session,
         monkeypatch,
@@ -1088,10 +1094,51 @@ async def test_a_stalled_pack_for_a_normal_want_still_waits_out_the_retry(
     await db_session.execute(update(Want).values(trip=False))
     entry = next(t for t in wired.qbit.torrents if t["hash"] == BATCH_HASH)
     entry |= {"state": "stalledDL", "progress": 0.0, "dlspeed": 0, "time_active": 7 * 3600}
+    await search_jobs_cleared(db_session)
 
     await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
 
-    assert all(episodes[n].state is EpisodeState.UNAVAILABLE for n in range(1, 13))
+    assert all(episodes[n].state is EpisodeState.WANTED for n in range(1, 13))
+    jobs = (await db_session.scalars(select(Job).where(Job.type == "search_release"))).all()
+    assert {int(job.payload["episode_id"]) for job in jobs} == {
+        episodes[n].id for n in range(1, 13)
+    }
+    assert {job.priority for job in jobs} == {SEARCH_RELEASE_PRIORITY}
+
+
+@pg
+async def test_a_pack_the_trip_pass_held_is_reused_when_it_beats_the_single(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Held for holding too few trip episodes, then preferred on seeders: one add.
+
+    The range-less pack holds 3 of the trip's 12 (the need is 4), so the trip's
+    pass keeps it stopped; its 60 seeders are 5x the single's 12, so the
+    seeders preference takes it from ``trip.held`` with no second fetch or add.
+    """
+    single = "[SubsPlease] Sousou no Frieren - 01 (1080p) [AB12CD34].mkv"
+    wired, episodes, _anime = await _trip(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962670,
+        email="held-preferred@arc.test",
+        pool=_batch_pool((single, "a" * 40, 12), (SECOND_TITLE, SECOND_HASH, 60)),
+    )
+    wired.qbit.add_files(SECOND_HASH, _pack_names(1, 2, 3, group="Judas"))
+
+    await _search(db_session, wired, episodes[1])
+
+    assert len(wired.qbit.uploaded) == 1, "added once, by the trip's pass"
+    assert wired.nyaa.fetched == [f"https://nyaa.test/download/{SECOND_HASH}.torrent"]
+    assert wired.qbit.started == [SECOND_HASH]
+    assert wired.qbit.deleted == [], "not deleted as held-and-not-taken"
+    pack = await db_session.scalar(select(Torrent).where(Torrent.info_hash == SECOND_HASH))
+    assert pack is not None and pack.kind is TorrentKind.BATCH
+    assert (
+        await db_session.scalar(select(Torrent).where(Torrent.kind == TorrentKind.SINGLE))
+    ) is None
+    assert episodes[1].state is EpisodeState.DOWNLOADING
 
 
 async def search_jobs_cleared(session: AsyncSession) -> None:

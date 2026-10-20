@@ -100,7 +100,7 @@ import logging
 import time
 import zlib
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -162,6 +162,7 @@ from arc.services.acquisition.qbit import (
 )
 from arc.services.acquisition.rules import (
     batch_fallback,
+    batch_prefer_ratio,
     is_paused,
     is_storage_held,
     load_rules,
@@ -1014,6 +1015,7 @@ async def _take_batch(
     offset: int | None,
     trip: TripPass | None = None,
     prefer: bool = False,
+    over_single: bool = False,
 ) -> BatchAttempt:
     """Take the best batch whose files Arc can read (FR-A4's exception, FR-A11).
 
@@ -1095,6 +1097,13 @@ async def _take_batch(
     written (:func:`_lock_targets`), so two searches of one show running at
     once cannot both claim an episode.
 
+    ``over_single`` says the packs are being weighed **against a single that
+    exists** (:func:`_prefer_batch`, FR-A4, owner 2026-10-20): then too a pack
+    whose name gives no range and whose file list cannot identify the episode is
+    removed **without** a tombstone and not counted as refused — its name never
+    claimed the episode, and it may be exactly right for another episode or
+    another show.
+
     A manual choice (FR-A13, :mod:`arc.services.acquisition.manual`) comes in
     through here too, with its pack already added stopped and read and handed
     over as ``trip.held`` — so it is selected, verified and started by exactly
@@ -1130,9 +1139,9 @@ async def _take_batch(
                 _remember_contents(anime.id, info_hash, plan.episodes)
             if plan.refused_reason is not None:
                 last_reason = plan.refused_reason
-                if trip is not None and not chosen.candidate.covers:
+                if (trip is not None or over_single) and not chosen.candidate.covers:
                     # A pack naming no range never claimed this episode, and
-                    # may be exactly right for the next one (FR-A12).
+                    # may be exactly right for the next one (FR-A12, FR-A4).
                     await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=False)
                     continue
                 await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=True)
@@ -1528,6 +1537,133 @@ async def _refetch(ctx: JobContext, episode: Episode, torrent: Torrent) -> None:
     )
 
 
+async def _prefer_batch(
+    ctx: JobContext,
+    episode: Episode,
+    anime: Anime,
+    chosen: Ranked,
+    batches: Sequence[Ranked],
+    *,
+    ratio: int,
+    min_seeders: int | None,
+    attachable: Mapping[int, Episode],
+    offset: int | None,
+    trip: TripPass | None,
+) -> bool:
+    """Take a season pack **instead of** the chosen single, if one beats it (FR-A4).
+
+    Owner 2026-10-20, from production: *Iruma-kun 3*'s singles had about 12
+    seeders and took up to two hours each, while the SubsPlease season pack
+    had 76. On a finished show (``batches`` is only ever filled for one) a pack
+    is a candidate when :func:`~arc.services.acquisition.nyaa.batch_beats_single`
+    says so against ``chosen`` — the single :func:`_pick` would take, not the
+    top of the ranking — and when it is no worse a copy of the episode:
+
+    * never a dub over a subbed single (FR-A3);
+    * only at the preferred or fallback resolution (``resolution_rank <= 1``);
+    * for a trip-only episode, not below the thin-pack floor ``min_seeders``
+      (``trip_pack_min_seeders``, FR-A12).
+
+    The candidates go through :func:`_take_batch` in their rank order — the
+    same fetch, add stopped, select, verify and start, so not a byte of an
+    unwanted file is fetched. Answers whether the episode is now served from a
+    pack. ``False`` leaves the single to the caller, in the same run: a pack
+    that could not be read, was refused or is gone is no reason to wait.
+
+    One race is closed here too: a sibling episode's search may have taken
+    one of these packs since this search began (its hash now has a row, so
+    :func:`_take_batch` skipped it as already tried). Then the episode is
+    attached to that pack (:func:`~arc.services.acquisition.batch.claim_existing`)
+    rather than fetched a second time as a thin single.
+    """
+    single_seeders = chosen.item.seeders
+    eligible = [
+        entry
+        for entry in batches
+        if entry.resolution_rank <= 1
+        and (chosen.dubbed or not entry.dubbed)
+        and (min_seeders is None or entry.item.seeders >= min_seeders)
+    ]
+    pool = [
+        replace(
+            entry,
+            reasons=(
+                *entry.reasons,
+                f"preferred to a single with {single_seeders} seeders"
+                f" ({entry.item.seeders} \u2265 {ratio}\u00d7{single_seeders})",
+            ),
+        )
+        for entry in eligible
+        if nyaa_module.batch_beats_single(entry.item.seeders, single_seeders, ratio=ratio)
+    ]
+    comparison = {
+        "episode_id": episode.id,
+        "anime_id": anime.id,
+        "number": episode.number,
+        "single": chosen.item.title,
+        "single_seeders": single_seeders,
+        "batches": len(batches),
+        # After the dub, resolution and trip-floor filters: the pack the ratio
+        # was actually measured against.
+        "best_eligible_seeders": max((entry.item.seeders for entry in eligible), default=None),
+        "eligible": len(eligible),
+        "candidates": len(pool),
+        "ratio": ratio,
+        "min_seeders": nyaa_module.BATCH_PREFER_MIN_SEEDERS,
+        "trip_min_seeders": min_seeders,
+    }
+    if not pool:
+        ctx.log.info("no batch beats the single", extra={**comparison, "outcome": "single"})
+        return False
+
+    attempt = await _take_batch(
+        ctx,
+        episode,
+        anime,
+        pool,
+        attachable=attachable,
+        offset=offset,
+        trip=trip,
+        over_single=True,
+    )
+    if attempt.started:
+        ctx.log.info(
+            "batch preferred to the single",
+            extra={
+                **comparison,
+                "outcome": "batch",
+                "batch": attempt.torrent and attempt.torrent.title,
+            },
+        )
+        return True
+
+    # A sibling's search may have taken one of these packs since this one
+    # began; ``claim_existing`` attaches to it if so, and finds nothing if not.
+    claimed = await batch.claim_existing(ctx.session, episode, trip_min_seeders=min_seeders)
+    if claimed is not None:
+        ctx.log.info(
+            "batch preferred to the single; attached to the pack a sibling took",
+            extra={
+                **comparison,
+                "outcome": "attached",
+                "torrent_id": claimed.torrent_id,
+                "path": claimed.path,
+            },
+        )
+        return True
+
+    ctx.log.info(
+        "preferred batch not taken",
+        extra={
+            **comparison,
+            "outcome": "single",
+            "refused": attempt.refused,
+            "reason": attempt.reason,
+        },
+    )
+    return False
+
+
 @register(SEARCH_RELEASE)
 async def search_release(ctx: JobContext) -> None:
     """Find a release for one episode and start it downloading (FR-A3..A6).
@@ -1606,6 +1742,11 @@ async def search_release(ctx: JobContext) -> None:
     # has claims for — those bytes are in flight and stranding them is not what
     # a kill switch is for.
     fallback = await batch_fallback(ctx.session)
+    # How much better seeded a season pack must be before a finished show takes
+    # it instead of its single (FR-A4, owner 2026-10-20); 0 means never. Under
+    # the same kill switch as every other pack.
+    ratio = await batch_prefer_ratio(ctx.session)
+    prefer_packs = fallback and ratio > 0
     trip_only = episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
     # A trip-only search takes no thinly seeded pack, by any route (owner
     # incident 2026-10-06): not preferred, not attached to, not as fallback.
@@ -1730,6 +1871,7 @@ async def search_release(ctx: JobContext) -> None:
         offset=offset,
         wanted_numbers=tuple(sorted(attachable)),
         prefer=prefer,
+        with_batches=prefer_packs,
     )
     ranked = found.ranked
     # Every attempt, before anything is decided about it: the pair of numbers
@@ -1767,11 +1909,14 @@ async def search_release(ctx: JobContext) -> None:
     chosen = await _pick(ctx, episode, ranked) if ranked else None
     if chosen is None:
         # No single, and nothing left to try. A **finished** show may still
-        # have a batch that covers the episode (FR-A4's exception, FR-A11);
-        # ``Search.batches`` is empty for every airing show, every film and
-        # every search that found a single, so this branch is unreachable for
-        # any of them and the ordinary retry below is what they take.
-        offered_batches = found.batches
+        # have a batch that covers the episode (FR-A4's exception, FR-A11) —
+        # but only where **no single was acceptable at all** (``not ranked``).
+        # ``Search.batches`` is now also filled beside the singles
+        # (``with_batches``, 2026-10-20), so a search whose every single was
+        # already tried would otherwise take any pack here with none of
+        # ``_prefer_batch``'s ratio, resolution or dub checks. Empty for every
+        # airing show and every film too, so they take the ordinary retry.
+        offered_batches = found.batches if not ranked else []
         if min_seeders is not None and offered_batches:
             # FR-A11's fallback, for a trip-only episode, refuses a thin pack
             # too (owner incident 2026-10-06): better FR-A6's retry than a
@@ -1830,6 +1975,23 @@ async def search_release(ctx: JobContext) -> None:
             now=now,
             reason=batch.UNREADABLE_BATCH if preferred_refused else NO_RELEASE,
         )
+        return
+
+    if prefer_packs and await _prefer_batch(
+        ctx,
+        episode,
+        anime,
+        chosen,
+        found.batches,
+        ratio=ratio,
+        min_seeders=min_seeders,
+        attachable=attachable,
+        offset=offset,
+        trip=trip,
+    ):
+        # Served from a pack, file by file. No live remux is queued for a
+        # demanded episode (FR-P8: a batch waits); its row says downloading.
+        await _drop_held(ctx, trip)
         return
 
     await _drop_held(ctx, trip)
@@ -2339,37 +2501,63 @@ def _give_up_on(
     return given_up
 
 
-async def _retry_trip_episodes(
+async def _retry_stalled_pack_episodes(
     ctx: JobContext,
     rows: Sequence[TorrentFile],
     episodes: Mapping[int, Episode],
     *,
     now: datetime,
+    manual: bool = False,
 ) -> int:
-    """Put a dead trip pack's trip-only episodes straight back to searching (FR-A12).
+    """Put a dead pack's episodes straight back to searching (FR-A6, FR-A11).
 
-    Owner incident 2026-10-06: a trip's pack that stalls with nothing handed
-    off is deleted with its files like any other, but its trip-only episodes
-    do not wait out :data:`~arc.services.acquisition.wants.UNAVAILABLE_RETRY`
-    — a trip has a deadline. :func:`_give_up_on` has already released their
-    claims and moved them to ``unavailable`` with the stall's reason; this
-    takes them on to ``wanted`` with a search at the trip's priority, through
-    the reconciler's own :func:`~arc.services.acquisition.wants.start_search`.
+    Owner incident 2026-10-06, for a trip: a trip's pack that stalls with
+    nothing handed off is deleted with its files like any other, but its
+    episodes do not wait out
+    :data:`~arc.services.acquisition.wants.UNAVAILABLE_RETRY` — a trip has a
+    deadline. **Widened to every pack** (owner 2026-10-20): since a finished
+    show may now take a well-seeded pack *instead of* a single that exists
+    (FR-A4), a pack that dies is no evidence that nothing else does, and the
+    episode should not sit a day ``unavailable`` while the single it passed
+    over is still seeded. :func:`_give_up_on` has already released the claims
+    and moved the episodes to ``unavailable`` with the stall's reason; this
+    takes them on to ``wanted`` with a search at once, through the reconciler's
+    own :func:`~arc.services.acquisition.wants.start_search` — a trip-only
+    episode at the trip's priority, any other at its last search's
+    (:func:`_search_priority`).
+
+    **Whether or not the pack already handed a file to the library**
+    (orchestrator decision 2026-10-20): that decides only whether the pack is
+    stopped or deleted. The episodes still pending gain nothing from waiting a
+    day either way, and the hash is barred in both cases.
+
+    **A pack chosen by hand** (``manual``, FR-A13) is the exception for an
+    episode that is not trip-only: it keeps "the release you chose stalled" on
+    its row and waits, as a manual single does, because the person who chose it
+    is the one to choose again. A trip-only episode still retries at once.
 
     The pack's hash is **excluded** from that search by its ``torrents`` row,
     which stays as the ``stalled`` tombstone: the batch path skips any hash that
     already has a row (``_add_stopped``), and ``batch.claim_existing`` never
-    attaches to a decided pack. So the next search falls through to singles.
+    attaches to a decided pack. So the next search falls through to singles
+    (or to another pack, where no single exists).
     """
     ids = {row.episode_id for row in rows if row.episode_id is not None}
     trip_only = await trip_only_episode_ids(ctx.session, ids)
     retried = 0
-    for episode_id in sorted(trip_only):
+    for episode_id in sorted(ids):
         episode = episodes.get(episode_id)
         if episode is None or episode.state is not EpisodeState.UNAVAILABLE:
             continue
+        if manual and episode_id not in trip_only:
+            continue
+        priority = (
+            TRIP_SEARCH_PRIORITY
+            if episode_id in trip_only
+            else await _search_priority(ctx.session, episode_id)
+        )
         started, _ = await start_search(
-            ctx.session, episode, now=now, retry_now=True, priority=TRIP_SEARCH_PRIORITY
+            ctx.session, episode, now=now, retry_now=True, priority=priority
         )
         retried += int(started)
     return retried
@@ -2608,7 +2796,11 @@ async def _poll_batch(
     # and a pack that has just given the library a file is one whose files must
     # not be deleted with it.
     holds_files = any(row.completed_at is not None for row in rows)
-    retried = 0 if holds_files else await _retry_trip_episodes(ctx, pending, episodes, now=now)
+    # Whether or not it holds a library file (which decides only stop versus
+    # delete): the pending episodes look again at once, the hash barred.
+    retried = await _retry_stalled_pack_episodes(
+        ctx, pending, episodes, now=now, manual=torrent.manual
+    )
     ctx.log.warning(
         "a batch is going nowhere and has been given up on",
         extra={
@@ -2620,7 +2812,7 @@ async def _poll_batch(
             "swarm_seeds": info.swarm_seeds,
             "swarm_peers": info.swarm_peers,
             "episodes": given_up,
-            "trip_episodes_retried": retried,
+            "episodes_retried": retried,
             "reason": reason,
             # The one thing a reader needs to know about the bytes.
             "kept_files": holds_files,

@@ -3394,6 +3394,109 @@ async def test_the_batch_forms_are_not_asked_when_a_single_was_found(
     assert found.batches == []
 
 
+# --- A pack better seeded than the single (owner 2026-10-20) -----------------
+
+
+@pytest.mark.parametrize(
+    ("batch", "single", "ratio", "expected"),
+    [
+        (76, 12, 3, True),  # Iruma-kun 3, the production case
+        (76, 12, 0, False),  # 0 is never
+        (900, 1, 0, False),
+        (36, 12, 3, True),  # exactly ratio x
+        (35, 12, 3, False),  # just under
+        (3, 1, 3, False),  # 3 >= 3x1, but under the floor of 4
+        (4, 1, 3, True),  # the floor exactly
+        (4, 0, 3, True),
+        (3, 0, 3, False),
+        (24, 12, 2, True),
+        (23, 12, 2, False),
+    ],
+)
+def test_a_batch_beats_a_single_on_seeders(
+    batch: int, single: int, ratio: int, expected: bool
+) -> None:
+    assert nyaa_module.BATCH_PREFER_MIN_SEEDERS == 4
+    assert nyaa_module.batch_beats_single(batch, single, ratio=ratio) is expected
+
+
+async def test_with_batches_a_finished_show_asks_for_the_pack_beside_its_single(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both lists, and the three pack forms asked last and once."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {
+            KIMETSU_FIRST_QUERY: feed_of(HORRIBLESUBS_1080P, *HORRIBLESUBS_SIBLINGS, seeders=6),
+            **{form: feed_of_seeded((KIMETSU_BATCH, 76)) for form in KIMETSU_BATCH_FORMS},
+        },
+        default=KIMETSU_FRANCHISE,
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        found = await search_for_episode(client, KIMETSU_S1, 10, Rules(), with_batches=True)
+
+    assert stub.queries == [*KIMETSU_QUERIES, *KIMETSU_BATCH_FORMS]
+    assert found.forms == len(KIMETSU_QUERIES)
+    assert found.requests == len(KIMETSU_QUERIES) + len(KIMETSU_BATCH_FORMS)
+    assert found.ranked[0].item.title == HORRIBLESUBS_1080P
+    assert KIMETSU_BATCH in [entry.item.title for entry in found.batches]
+    assert all(entry.is_batch for entry in found.batches)
+    assert not any(entry.is_batch for entry in found.ranked)
+
+
+async def test_with_batches_a_shows_siblings_share_the_pack_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten-minute cache: a second episode's search asks no pack form again."""
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {form: feed_of_seeded((KIMETSU_BATCH, 76)) for form in KIMETSU_BATCH_FORMS},
+        default=feed_of(
+            HORRIBLESUBS_1080P,
+            "[HorribleSubs] Kimetsu no Yaiba - 11 [1080p].mkv",
+            *HORRIBLESUBS_SIBLINGS,
+            seeders=6,
+        ),
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        first = await search_for_episode(client, KIMETSU_S1, 10, Rules(), with_batches=True)
+        second = await search_for_episode(client, KIMETSU_S1, 11, Rules(), with_batches=True)
+
+    for form in KIMETSU_BATCH_FORMS:
+        assert stub.queries.count(form) == 1, form
+    assert first.batches and second.batches
+    assert first.ranked and second.ranked
+
+
+async def test_with_batches_an_airing_show_and_a_film_are_offered_no_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(nyaa_module, "_sleep", no_sleep([]))
+    stub = NyaaStub(
+        {form: feed_of_seeded((KIMETSU_BATCH, 300)) for form in KIMETSU_BATCH_FORMS},
+        default=feed_of(HORRIBLESUBS_1080P, KIMETSU_BATCH, seeders=6),
+    )
+    film = Anime(
+        anilist_id=99998,
+        title_romaji="Servamp Movie: Alice in the Garden",
+        title_english="Servamp Movie: Alice in the Garden",
+        format="MOVIE",
+        status="FINISHED",
+        episodes=1,
+        season_year=2018,
+    )
+
+    async with NyaaClient("https://nyaa.test", transport=stub.transport()) as client:
+        airing = await search_for_episode(client, KIMETSU_AIRING, 10, Rules(), with_batches=True)
+        assert stub.queries == KIMETSU_QUERIES, "not one pack form"
+        assert airing.ranked and airing.batches == []
+        found = await search_for_episode(client, film, 1, Rules(), with_batches=True)
+
+    assert found.batches == []
+
+
 async def test_an_airing_show_asks_no_batch_form_either(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

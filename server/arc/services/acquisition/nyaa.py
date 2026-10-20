@@ -257,9 +257,10 @@ BATCH_WORD: Final[str] = "BATCH"
 
 #: Most forms one search may spend on finding a pack: the bare title, the
 #: title with :data:`BATCH_WORD`, and the english title with it. Three,
-#: because these are asked **only** when everything else has failed — a
-#: finished show with no acceptable single at all — and they are asked after
-#: the narrowed forms have had their turn.
+#: because these are asked only of a finished show — one with no acceptable
+#: single at all, or (``with_batches``, owner 2026-10-20) one whose caller may
+#: prefer a well-seeded pack to its single — and they are asked after the
+#: narrowed forms have had their turn.
 #:
 #: It is also the **reservation**: the group narrowing stops this many
 #: requests short of :data:`MAX_REQUESTS` for any entry that could still ask
@@ -321,6 +322,40 @@ def pack_worth_preferring(pack_seeders: int, best_single: int | None, *, min_see
     if pack_seeders < min_seeders:
         return False
     return best_single is None or best_single < SINGLE_SEEDER_RATIO * pack_seeders
+
+
+#: Fewest listed seeders a season pack needs before it may be taken **instead
+#: of** a single on a finished show (:func:`batch_beats_single`, owner
+#: 2026-10-20). Its own number rather than the trip's
+#: :data:`~arc.services.trips.names.TRIP_BATCH_MIN`, which counts episodes: a
+#: ratio against a single with one seeder would otherwise prefer a pack with
+#: three, and a pack that thin is no better a bet than the single.
+BATCH_PREFER_MIN_SEEDERS: Final[int] = 4
+
+
+# The trip's rule above (:data:`SINGLE_SEEDER_RATIO`, fixed) asks whether a
+# preferred pack is not far *worse* than the single; this one (the
+# ``batch_prefer_ratio`` setting) asks whether it is far *better*.
+def batch_beats_single(batch_seeders: int, single_seeders: int, *, ratio: int) -> bool:
+    """Whether a pack listed with ``batch_seeders`` beats the chosen single (FR-A4).
+
+    The owner's rule of 2026-10-20, on Nyaa's listed seeders and nothing else:
+    on a finished show a season pack is taken file by file instead of the
+    single when it has at least ``ratio`` times the single's seeders **and** at
+    least :data:`BATCH_PREFER_MIN_SEEDERS` of its own. ``ratio`` is the
+    ``batch_prefer_ratio`` setting; 0 means never. Production's case:
+    *Iruma-kun 3*'s singles had about 12 seeders and took up to two hours each,
+    while the SubsPlease season pack had 76.
+
+    Pure, and only the seeders: which packs are even compared (dub, resolution,
+    a trip's floor) is the caller's filter, and whether one is taken is still
+    settled by its file list.
+    """
+    return (
+        ratio > 0
+        and batch_seeders >= BATCH_PREFER_MIN_SEEDERS
+        and batch_seeders >= ratio * single_seeders
+    )
 
 
 #: Punctuation a release group drops and a catalogue keeps. Every one of these
@@ -2253,7 +2288,7 @@ def batch_queries(anime: Anime) -> list[str]:
 
     Pure, like :func:`queries` and :func:`group_queries`, and asked only where
     :func:`search_for_episode` asks them — a finished show, not a film, with
-    no acceptable single at all.
+    no acceptable single at all or with ``with_batches``.
     """
     bases: list[str] = []
     for name in (anime.title_romaji, anime.title_english):
@@ -2306,14 +2341,16 @@ class Search:
     #: narrower (:func:`group_queries`) or had to ask for a pack
     #: (:func:`batch_queries`).
     requests: int
-    #: Batch releases worth considering, ranked, and **only** where ``ranked``
-    #: is empty: a finished show with no acceptable single at all (FR-A11,
-    #: 2026-09-18). Always empty for an airing show, for a film and for any
-    #: search that found a single, however poorly seeded. It costs no extra
-    #: request — these come out of the pool the title and narrowed forms had
-    #: already merged — and it is a *list of candidates*, not a decision:
-    #: whether one is taken is ``search_release``'s, which reads the torrent's
-    #: contents before it fetches anything.
+    #: Batch releases worth considering, ranked, for a finished show (FR-A11,
+    #: 2026-09-18): where ``ranked`` is empty — no acceptable single at all —
+    #: and, with ``with_batches`` (owner 2026-10-20), beside the singles too, so
+    #: the caller can prefer a pack far better seeded than the single
+    #: (:func:`batch_beats_single`). Always empty for an airing show and for a
+    #: film, and empty for a search that found a single without
+    #: ``with_batches``. The pack forms (:func:`batch_queries`) cost up to three
+    #: more requests; this is a *list of candidates*, not a decision: whether
+    #: one is taken is ``search_release``'s, which reads the torrent's contents
+    #: before it fetches anything.
     batches: list[Ranked] = field(default_factory=list)
     #: True when a **preferred** pack was taken (``prefer``, FR-A12's trip
     #: packs) and the search stopped there: no title form was asked, ``forms``
@@ -2337,6 +2374,7 @@ async def search_for_episode(
     offset: int | None = None,
     wanted_numbers: Collection[int] = (),
     prefer: PackPreference | None = None,
+    with_batches: bool = False,
 ) -> Search:
     """Run **every** :func:`queries` form, merge by info hash, filter and rank.
 
@@ -2392,9 +2430,10 @@ async def search_for_episode(
     (``Search.batches``, FR-A11, 2026-09-18) — the last question this function
     asks, of the pool it already has:
 
-    * ``not ranked``, literally "no acceptable single exists". Stricter than
-      the narrowing's "fewer than three": a single, however poorly seeded,
-      always wins, because it is the episode and nothing else;
+    * ``not ranked``, literally "no acceptable single exists" — or
+      ``with_batches`` (below). Stricter than the narrowing's "fewer than
+      three": without ``with_batches`` a single, however poorly seeded, always
+      wins, because it is the episode and nothing else;
     * :func:`deep_search`, so ``FINISHED`` only. An airing show never sees a
       batch — its own week's release is inside the newest 75 — and a null
       status reads as not-finished, which is the airing show's answer;
@@ -2423,6 +2462,14 @@ async def search_for_episode(
     ``wanted_numbers`` are that show's currently wanted episodes, supplied by
     the caller because it is the caller that has a session, and they only
     order the batch list (:func:`covered_wanted`). Empty is neutral.
+
+    **``with_batches`` asks for the packs even when a single exists** (owner
+    2026-10-20): the same three :func:`batch_queries` forms, last, inside the
+    same ceiling and the same ten-minute cache (so a show's sibling searches
+    share them), and ``Search.batches`` filled beside ``ranked``. It is what
+    lets ``search_release`` take a pack far better seeded than the single
+    (:func:`batch_beats_single`); the search itself decides nothing. False —
+    the default, and every caller but that one — is byte-identical to before.
 
     **A trip on a finished show turns the order round** (``prefer``, FR-A12,
     owner 2026-10-05). Twelve episodes for a device are one pack with twelve
@@ -2646,7 +2693,7 @@ async def search_for_episode(
 
     batches: list[Ranked] = []
     narrowed = requests - len(counts) - preferred_forms
-    if not ranked and deep_search(anime) and not single:
+    if deep_search(anime) and not single and (not ranked or with_batches):
         # A pack has to be **asked for** (:func:`batch_queries`, corrected
         # 2026-09-18): every form above carries the episode number, no batch
         # name carries one, and Nyaa ANDs the words of a query — so the pool
@@ -2667,8 +2714,9 @@ async def search_for_episode(
                 extra={"query": query, "anime_id": anime.id, "number": number},
             )
             await ask(query)
-        # ``only_batches`` keeps the two lists apart: a single always wins, so
-        # there is nothing for a mixed ranking to decide.
+        # ``only_batches`` keeps the two lists apart: which of a single and a
+        # pack is taken is the caller's comparison (``batch_beats_single``),
+        # not something a mixed ranking should decide.
         batches = packs(wanted_numbers)
 
     log.info(
@@ -2716,6 +2764,7 @@ def as_dict(ranked: Ranked) -> dict[str, Any]:
 __all__ = [
     "ABSOLUTE_COUNTED_FORMATS",
     "ABSOLUTE_SKIPPED_FORMATS",
+    "BATCH_PREFER_MIN_SEEDERS",
     "BATCH_WORD",
     "BENCODE_DICT_PREFIX",
     "CACHE_TTL",
@@ -2756,6 +2805,7 @@ __all__ = [
     "anime_season",
     "anime_titles",
     "as_dict",
+    "batch_beats_single",
     "batch_queries",
     "close_shared_client",
     "covered_wanted",
