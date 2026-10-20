@@ -152,8 +152,23 @@ that the course professor can log in at any time, and the owner uses it daily.
 - FR-A1 For each user and each show in status `watching` or `planned` **whose
   entry is not dormant** (FR-A9), the server keeps the next **N** unwatched
   episodes available (N configurable by admin, **default 1**, owner
-  2026-10-13), counted from that user's furthest watched episode. For airing
-  shows, the newest aired episode is fetched on its air day. **Halfway
+  2026-10-13), counted from that user's furthest watched episode. **Thinly
+  seeded shows** (owner 2026-10-20): a show whose newest fetched release with a
+  seeder figure — single or season pack, a re-fetch whose figure was cleared
+  skipped — recorded fewer than `slow_swarm_seeders` seeders keeps
+  `look_ahead_slow` episodes ahead instead (default 3; never fewer than N, and
+  N = 0 still fetches nothing and stops what is running). It is derived at every reconciliation and
+  stored nowhere, like the halfway prefetch below, and everything else here
+  (prefetch, device skip, FR-A9, FR-A10) applies to that show's N unchanged. A
+  want whose episode is already **downloading** is **not cancelled** because
+  the window shrank under it — the show stopped counting as thin, or N was
+  turned down to anything but 0; it ends on the first reconciliation after the
+  episode stops downloading (downloaded or matching, before it is ready), and
+  from then on its files are retention's, as for any ready episode outside the
+  window. So a swarm figure that moves with each tracker scrape cannot cancel
+  and restart one download. A search is not protected (releasing it loses no
+  bytes). For
+  airing shows, the newest aired episode is fetched on its air day. **Halfway
   prefetch** (M20): while the user's position on the first episode of the
   window is at least 50 % and below the 90 % completion mark (FR-S4), the
   window reaches one episode further (`p+1 … p+N+1`), if that episode has
@@ -556,7 +571,8 @@ that the course professor can log in at any time, and the owner uses it daily.
 - FR-A14 **Play on demand** (M20, owner 2026-10-13). Pressing play on an
   episode that is not ready asks the server to fetch it now, at the top of
   the search queue. Allowed only for an episode the user's window covers
-  **before** the device skip and the slot cap — the next N and, once the user
+  **before** the device skip and the slot cap — the next N (the show's N:
+  `look_ahead_slow` for a thinly seeded show, FR-A1) and, once the user
   is actually half-way through the first of them, the halfway prefetch; an
   episode a device holds is demandable only when it falls inside that reach
   (a Keep-offline copy of an episode further ahead is not) — or one they
@@ -567,7 +583,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   when the show waits for a slot (FR-A10), and it is **re-checked on every
   reconciliation**: it ends when the episode leaves that covered set — the
   user watched past it, rewound below half-way, N was lowered, the show left
-  watching/planned — or as FR-T2 and FR-W4 end any want. A demanded episode
+  watching/planned — or as FR-T2 and FR-W4 end any want (on a show still
+  followed, not while the episode is downloading and N is not 0 — it ends on
+  the first reconciliation after the download finishes, FR-A1's no-cancel
+  rule). A demanded episode
   that is a trip's but outside the window stays the trip's (small copy only)
   and ends with the trip. A demand on an episode that is already ready does
   nothing. A download already in flight is moved to the top of the torrent
