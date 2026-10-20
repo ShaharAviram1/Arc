@@ -60,10 +60,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from arc.models import DEFAULT_SETTINGS, Anime, Setting
 from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import (
+    MAX_BATCH_PREFER_RATIO,
     MAX_LOOK_AHEAD,
     MAX_MIN_FREE_GB,
     MAX_MIN_SEEDERS_WARN,
     MAX_SLOT_CAP,
+    MAX_SLOW_SWARM_SEEDERS,
     OVERRIDE_PREFIX,
     PAUSED_KEY,
     override_key,
@@ -217,6 +219,12 @@ _VALIDATORS: Final[dict[str, Any]] = {
     "preferred_resolution": lambda value: _one_of(value, RESOLUTIONS),
     "fallback_resolution": lambda value: _one_of(value, RESOLUTIONS),
     "look_ahead_n": lambda value: _bounded_int(value, low=0, high=MAX_LOOK_AHEAD),
+    # Episodes ahead for a thinly seeded show (FR-A1, owner 2026-10-20). Same
+    # bounds as N, which is the ceiling the reader clamps at.
+    "look_ahead_slow": lambda value: _bounded_int(value, low=0, high=MAX_LOOK_AHEAD),
+    # Seeders below which a show is thinly seeded (FR-A1). 0 is legal and
+    # means "no show ever is".
+    "slow_swarm_seeders": lambda value: _bounded_int(value, low=0, high=MAX_SLOW_SWARM_SEEDERS),
     # K — shows one user may have fetching at once (FR-A10). 0 is legal and
     # means *unlimited*, unlike N's 0 above, which means "fetch nothing"; the
     # ceiling is the figure the reader clamps at, so the panel cannot accept a
@@ -234,6 +242,10 @@ _VALIDATORS: Final[dict[str, Any]] = {
     # hand-edited row, and the panel is the one place a mistake can still be
     # reported to the person making it.
     "batch_fallback": _boolean,
+    # How many times the best single's seeders a pack needs before a finished
+    # show takes it instead (FR-A4/FR-A11, owner 2026-10-20). 0 is legal and
+    # means "never prefer a batch over a single".
+    "batch_prefer_ratio": lambda value: _bounded_int(value, low=0, high=MAX_BATCH_PREFER_RATIO),
     # The storage floor in whole GB (FR-T6). 0 is a legal value and means "no
     # reserve, fetch until the disk is full"; the ceiling is the same defensive
     # figure the reader clamps at, so what the panel accepts and what

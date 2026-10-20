@@ -101,6 +101,27 @@ MIN_FREE_KEY: Final[str] = "min_free_gb"
 #: the pause decides whether a new search runs.
 BATCH_FALLBACK_KEY: Final[str] = "batch_fallback"
 
+#: On a finished show, a season pack whose seeders are at least this many times
+#: the best single's (and at least 4) is taken file by file instead of the
+#: single (FR-A4/FR-A11, owner 2026-10-20). 0 never prefers a batch over a
+#: single, which is the behaviour before the key existed.
+BATCH_PREFER_RATIO_KEY: Final[str] = "batch_prefer_ratio"
+
+#: Ceiling on the ratio. Twenty times the seeders is already "the single is
+#: dead"; a higher figure is a pack that would never be preferred.
+MAX_BATCH_PREFER_RATIO: Final[int] = 20
+
+#: A show whose newest fetched release recorded fewer seeders than this is
+#: "thinly seeded" (FR-A1, owner 2026-10-20). 0: no show ever is.
+SLOW_SWARM_SEEDERS_KEY: Final[str] = "slow_swarm_seeders"
+
+#: Ceiling on the thin-swarm threshold, the same 500 the trip pack floor uses.
+MAX_SLOW_SWARM_SEEDERS: Final[int] = 500
+
+#: How many episodes ahead Arc keeps for a thinly seeded show instead of N
+#: (FR-A1, owner 2026-10-20). Clamped at :data:`MAX_LOOK_AHEAD`, like N.
+LOOK_AHEAD_SLOW_KEY: Final[str] = "look_ahead_slow"
+
 #: Fewer seeders than this on a fetch raises the "few seeders" notice on the
 #: show (FR-A16, M20 T9). 0 never warns.
 MIN_SEEDERS_WARN_KEY: Final[str] = "min_seeders_warn"
@@ -236,20 +257,78 @@ async def slot_cap_k(session: AsyncSession) -> int:
     return _whole_number(stored, key=SLOT_CAP_KEY, ceiling=MAX_SLOT_CAP)
 
 
-async def look_ahead_and_cap(session: AsyncSession) -> tuple[int, int]:
-    """``(N, K)`` in **one** query, for the reconciler that needs both.
+async def look_ahead_slow(session: AsyncSession) -> int:
+    """Episodes ahead kept for a thinly seeded show (FR-A1, owner 2026-10-20).
 
-    The two are read together on every ``compute_wants`` and on every show page
-    that carries a slot picture, and they live in the same table: two round
-    trips for two rows of the same four-row query is a cost with nothing to
-    show for it. The clamping is the readers' own, so this cannot disagree with
-    them.
+    Lenient and clamped at :data:`MAX_LOOK_AHEAD`, the same ceiling as N.
     """
-    stored = await _values(session, [LOOK_AHEAD_KEY, SLOT_CAP_KEY])
-    return (
-        _whole_number(stored.get(LOOK_AHEAD_KEY), key=LOOK_AHEAD_KEY, ceiling=MAX_LOOK_AHEAD),
-        _whole_number(stored.get(SLOT_CAP_KEY), key=SLOT_CAP_KEY, ceiling=MAX_SLOT_CAP),
+    stored = (await _values(session, [LOOK_AHEAD_SLOW_KEY])).get(LOOK_AHEAD_SLOW_KEY)
+    return _whole_number(stored, key=LOOK_AHEAD_SLOW_KEY, ceiling=MAX_LOOK_AHEAD)
+
+
+async def slow_swarm_seeders(session: AsyncSession) -> int:
+    """Seeders below which a show counts as thinly seeded (FR-A1).
+
+    Lenient and clamped like the other counts; 0 is returned as 0, "never".
+    """
+    stored = (await _values(session, [SLOW_SWARM_SEEDERS_KEY])).get(SLOW_SWARM_SEEDERS_KEY)
+    return _whole_number(stored, key=SLOW_SWARM_SEEDERS_KEY, ceiling=MAX_SLOW_SWARM_SEEDERS)
+
+
+async def batch_prefer_ratio(session: AsyncSession) -> int:
+    """How many times a single's seeders a pack needs to be preferred (FR-A11).
+
+    Lenient and clamped like the other counts; 0 is returned as 0, "never
+    prefer a batch over a single".
+    """
+    stored = (await _values(session, [BATCH_PREFER_RATIO_KEY])).get(BATCH_PREFER_RATIO_KEY)
+    return _whole_number(stored, key=BATCH_PREFER_RATIO_KEY, ceiling=MAX_BATCH_PREFER_RATIO)
+
+
+@dataclass(frozen=True, slots=True)
+class WindowRules:
+    """The numbers that shape a user's acquisition window (FR-A1, FR-A10)."""
+
+    #: N — episodes ahead to keep (``look_ahead_n``).
+    n: int
+    #: K — shows one user may have fetching at once; 0 is unlimited.
+    cap: int
+    #: Episodes ahead for a thinly seeded show (``look_ahead_slow``).
+    slow_n: int
+    #: Seeders below which a show is thinly seeded; 0 is never.
+    slow_seeders: int
+
+
+async def window_rules(session: AsyncSession) -> WindowRules:
+    """N, K and the thin-swarm pair in **one** query.
+
+    Read together on every ``compute_wants`` and on every show page that
+    carries a slot picture, and they live in the same table: one round trip
+    for four rows. The clamping is the single readers' own, so this cannot
+    disagree with them.
+    """
+    stored = await _values(
+        session,
+        [LOOK_AHEAD_KEY, SLOT_CAP_KEY, LOOK_AHEAD_SLOW_KEY, SLOW_SWARM_SEEDERS_KEY],
     )
+    return WindowRules(
+        n=_whole_number(stored.get(LOOK_AHEAD_KEY), key=LOOK_AHEAD_KEY, ceiling=MAX_LOOK_AHEAD),
+        cap=_whole_number(stored.get(SLOT_CAP_KEY), key=SLOT_CAP_KEY, ceiling=MAX_SLOT_CAP),
+        slow_n=_whole_number(
+            stored.get(LOOK_AHEAD_SLOW_KEY), key=LOOK_AHEAD_SLOW_KEY, ceiling=MAX_LOOK_AHEAD
+        ),
+        slow_seeders=_whole_number(
+            stored.get(SLOW_SWARM_SEEDERS_KEY),
+            key=SLOW_SWARM_SEEDERS_KEY,
+            ceiling=MAX_SLOW_SWARM_SEEDERS,
+        ),
+    )
+
+
+async def look_ahead_and_cap(session: AsyncSession) -> tuple[int, int]:
+    """``(N, K)`` in one query; :func:`window_rules` without the thin-swarm pair."""
+    rules = await window_rules(session)
+    return rules.n, rules.cap
 
 
 async def is_paused(session: AsyncSession) -> bool:
@@ -462,30 +541,40 @@ async def load_rules(session: AsyncSession, anime_id: int | None = None) -> Rule
 
 __all__ = [
     "BATCH_FALLBACK_KEY",
+    "BATCH_PREFER_RATIO_KEY",
     "BYTES_PER_GB",
     "LOOK_AHEAD_KEY",
+    "LOOK_AHEAD_SLOW_KEY",
+    "MAX_BATCH_PREFER_RATIO",
     "MAX_LOOK_AHEAD",
     "MAX_MIN_FREE_GB",
     "MAX_MIN_SEEDERS_WARN",
     "MAX_SLOT_CAP",
+    "MAX_SLOW_SWARM_SEEDERS",
     "MIN_FREE_KEY",
     "MIN_SEEDERS_WARN_KEY",
     "OVERRIDE_PREFIX",
     "PAUSED_KEY",
     "RULE_KEYS",
     "SLOT_CAP_KEY",
+    "SLOW_SWARM_SEEDERS_KEY",
     "Rules",
+    "WindowRules",
     "batch_fallback",
+    "batch_prefer_ratio",
     "is_paused",
     "is_storage_held",
     "load_rules",
     "look_ahead_and_cap",
     "look_ahead_n",
+    "look_ahead_slow",
     "min_free_bytes",
     "min_free_gb",
     "min_seeders_warn",
     "override_key",
     "set_paused",
     "slot_cap_k",
+    "slow_swarm_seeders",
     "storage_hold",
+    "window_rules",
 ]

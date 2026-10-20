@@ -13,11 +13,24 @@ import logging
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import DEFAULT_SETTINGS, Setting, Want
-from arc.services.acquisition.rules import MAX_MIN_SEEDERS_WARN, look_ahead_n, min_seeders_warn
+from arc.services.acquisition.rules import (
+    MAX_BATCH_PREFER_RATIO,
+    MAX_LOOK_AHEAD,
+    MAX_MIN_SEEDERS_WARN,
+    MAX_SLOW_SWARM_SEEDERS,
+    WindowRules,
+    batch_prefer_ratio,
+    look_ahead_and_cap,
+    look_ahead_n,
+    look_ahead_slow,
+    min_seeders_warn,
+    slow_swarm_seeders,
+    window_rules,
+)
 from arc.services.acquisition.wants import compute_wants
 from arc.services.retention.rules import MAX_WATCHED_GRACE_HOURS, watched_grace_hours
 from arc.services.settings import SettingsInvalid, validate
@@ -132,6 +145,87 @@ async def test_a_mangled_seeder_warning_reads_as_the_default_and_says_so(
     with caplog.at_level(logging.WARNING, logger="arc.services.acquisition.rules"):
         assert await min_seeders_warn(db_session) == 3
     assert any("using the default" in record.getMessage() for record in caplog.records)
+
+
+# --- The swarm rules (owner 2026-10-20) ---------------------------------------
+
+#: key → (reader, default, ceiling).
+SWARM_READERS: dict[str, tuple[Any, int, int]] = {
+    "batch_prefer_ratio": (batch_prefer_ratio, 3, MAX_BATCH_PREFER_RATIO),
+    "slow_swarm_seeders": (slow_swarm_seeders, 20, MAX_SLOW_SWARM_SEEDERS),
+    "look_ahead_slow": (look_ahead_slow, 3, MAX_LOOK_AHEAD),
+}
+
+
+def test_the_swarm_defaults_and_ceilings() -> None:
+    assert DEFAULT_SETTINGS["batch_prefer_ratio"] == 3
+    assert DEFAULT_SETTINGS["slow_swarm_seeders"] == 20
+    assert DEFAULT_SETTINGS["look_ahead_slow"] == 3
+    assert MAX_BATCH_PREFER_RATIO == 20
+    assert MAX_SLOW_SWARM_SEEDERS == 500
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("key", sorted(SWARM_READERS))
+async def test_a_swarm_rule_reads_the_row_and_is_clamped(
+    db_session: AsyncSession, key: str
+) -> None:
+    reader, default, ceiling = SWARM_READERS[key]
+    assert await reader(db_session) == default
+    await set_setting(db_session, key, 0)
+    assert await reader(db_session) == 0
+    await set_setting(db_session, key, ceiling)
+    assert await reader(db_session) == ceiling
+    await set_setting(db_session, key, 10_000)
+    assert await reader(db_session) == ceiling
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("key", sorted(SWARM_READERS))
+async def test_a_missing_swarm_rule_reads_as_the_default(
+    db_session: AsyncSession, key: str
+) -> None:
+    reader, default, _ = SWARM_READERS[key]
+    await db_session.execute(delete(Setting).where(Setting.key == key))
+    assert await reader(db_session) == default
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("key", sorted(SWARM_READERS))
+@pytest.mark.parametrize("stored", ["3", True, -1, 3.5, [3], {"n": 3}])
+async def test_a_mangled_swarm_rule_reads_as_the_default_and_says_so(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture, key: str, stored: Any
+) -> None:
+    reader, default, _ = SWARM_READERS[key]
+    await set_setting(db_session, key, stored)
+    with caplog.at_level(logging.WARNING, logger="arc.services.acquisition.rules"):
+        assert await reader(db_session) == default
+    assert any("using the default" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.pg
+async def test_window_rules_reads_all_four_in_one_query(db_session: AsyncSession) -> None:
+    await set_setting(db_session, "look_ahead_n", 2)
+    await set_setting(db_session, "slot_cap_k", 0)
+    await set_setting(db_session, "look_ahead_slow", 99)
+    await set_setting(db_session, "slow_swarm_seeders", "lots")
+
+    statements: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *rest: object) -> None:
+        statements.append(statement)
+
+    engine = db_session.bind.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        rules = await window_rules(db_session)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert len(statements) == 1, statements
+    # Clamped and lenient exactly as the single readers are.
+    assert rules == WindowRules(n=2, cap=0, slow_n=MAX_LOOK_AHEAD, slow_seeders=20)
+    assert await look_ahead_and_cap(db_session) == (2, 0)
 
 
 # --- N's new default ----------------------------------------------------------

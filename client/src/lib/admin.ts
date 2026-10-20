@@ -118,6 +118,10 @@ export interface SettingsValues {
   preferred_resolution: string | null
   fallback_resolution: string | null
   look_ahead_n: number
+  /** Episodes ahead kept for a thinly seeded show instead of N (FR-A1): 0..10. */
+  look_ahead_slow: number
+  /** Fewer seeders than this on a show's newest fetch makes it thinly seeded (FR-A1): 0..500, 0 = never. */
+  slow_swarm_seeders: number
   /** K — shows one user may have fetching at once (FR-A10); 0 is no cap. */
   slot_cap_k: number
   grace_days_g: number
@@ -140,6 +144,12 @@ export interface SettingsValues {
    * downloads.
    */
   batch_fallback: boolean
+  /**
+   * On a finished show, a pack with at least this many times the best single's
+   * seeders (and at least 4) is taken instead of the single (FR-A4, FR-A11):
+   * 0..20, 0 = never prefer a pack.
+   */
+  batch_prefer_ratio: number
   /** Days a ready episode's small offline copy may go unfetched before the sweep deletes it (FR-T7, M19). */
   offline_idle_days: number
   /** The most episodes one trip may take (FR-A12, M19): 1..50. */
@@ -180,6 +190,8 @@ export interface SettingsPayload {
  */
 export const NUMBER_BOUNDS: Record<
   | 'look_ahead_n'
+  | 'look_ahead_slow'
+  | 'slow_swarm_seeders'
   | 'slot_cap_k'
   | 'grace_days_g'
   | 'unwatched_days_d'
@@ -189,13 +201,18 @@ export const NUMBER_BOUNDS: Record<
   | 'offline_idle_days'
   | 'trip_max_episodes'
   | 'trip_copy_days'
-  | 'trip_pack_min_seeders',
+  | 'trip_pack_min_seeders'
+  | 'batch_prefer_ratio',
   {
     min: number
     max: number
   }
 > = {
   look_ahead_n: { min: 0, max: 10 },
+  // Owner 2026-10-20: the slow window shares N's `MAX_LOOK_AHEAD`;
+  // `MAX_SLOW_SWARM_SEEDERS` = 500, 0 is "no show is ever thinly seeded".
+  look_ahead_slow: { min: 0, max: 10 },
+  slow_swarm_seeders: { min: 0, max: 500 },
   // `MAX_SLOT_CAP` = 50. Fifty simultaneous shows is not a cap; past that the
   // honest setting is 0, which means no cap at all.
   slot_cap_k: { min: 0, max: 50 },
@@ -214,6 +231,8 @@ export const NUMBER_BOUNDS: Record<
   trip_copy_days: { min: 1, max: 365 },
   // Owner incident 2026-10-06: `TRIP_PACK_MIN_SEEDERS_CEILING` = 500.
   trip_pack_min_seeders: { min: 1, max: 500 },
+  // Owner 2026-10-20: `MAX_BATCH_PREFER_RATIO` = 20; 0 never prefers a pack.
+  batch_prefer_ratio: { min: 0, max: 20 },
 }
 
 /** "0–365", for a hint under the field that carries the same numbers. */

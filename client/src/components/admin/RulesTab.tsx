@@ -85,6 +85,20 @@ const NUMBER_FIELDS: {
       'more once you are halfway through it (M20) (FR-A1).',
   },
   {
+    key: 'look_ahead_slow',
+    label: 'Look-ahead for thinly seeded shows',
+    help:
+      'How many unwatched episodes ahead to keep instead of N for a show whose torrents have few ' +
+      'seeders, so slow downloads have time to finish. The larger of this and N is used (FR-A1).',
+  },
+  {
+    key: 'slow_swarm_seeders',
+    label: 'Thinly seeded (below)',
+    help:
+      'A show whose most recently fetched episode had fewer seeders than this counts as thinly ' +
+      'seeded and gets the longer look-ahead above. 0 means no show ever does (FR-A1).',
+  },
+  {
     key: 'slot_cap_k',
     label: 'Shows fetching at once (per user)',
     help:
@@ -150,6 +164,14 @@ const NUMBER_FIELDS: {
       'A trip prefers one season pack to separate episodes only when Nyaa lists at least this ' +
       'many seeders for it, and the best single episode does not have three times as many ' +
       '(FR-A12).',
+  },
+  {
+    key: 'batch_prefer_ratio',
+    label: 'Prefer a season pack (times the seeders)',
+    help:
+      'For a show that has finished airing, a season pack with at least this many times the ' +
+      'seeders of the best single episode (and at least 4) is used instead, downloading only the ' +
+      'wanted episode’s file. 0 means always take the single when there is one (FR-A4, FR-A11).',
   },
 ]
 

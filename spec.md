@@ -1566,7 +1566,16 @@ that the course professor can log in at any time, and the owner uses it daily.
   hourly sweep) — the grace in hours after the last completion before a
   watched episode's files are deleted (FR-T1 as revised by M20 T8); and
   `min_seeders_warn` (default 3, 0..100, 0 = never) — below this many seeders
-  a fetch warns on the show (FR-A16, written with M20 T9).
+  a fetch warns on the show (FR-A16, written with M20 T9). Three more (owner
+  2026-10-20):
+  - `batch_prefer_ratio` (default 3, 0..20, 0 = never prefer a batch over a
+    single) — on a finished show, a season pack whose seeders are at least
+    this many times the best single's (and at least 4) is taken file by file
+    instead of the single (FR-A4, FR-A11).
+  - `slow_swarm_seeders` (default 20, 0..500, 0 = never) — a show whose newest
+    fetched release recorded fewer seeders than this is "thinly seeded" (FR-A1).
+  - `look_ahead_slow` (default 3, 0..10) — how many episodes ahead Arc keeps
+    for a thinly seeded show instead of `look_ahead_n` (FR-A1).
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
 - FR-D4 Match-review queue across all users.
 - FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as

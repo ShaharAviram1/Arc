@@ -22,7 +22,13 @@ from sqlalchemy import select, text
 from arc.db import SessionFactory
 from arc.models import DEFAULT_SETTINGS, Job, UserRole
 from arc.services.acquisition.names import COMPUTE_WANTS
-from arc.services.acquisition.rules import load_rules, look_ahead_n, override_key
+from arc.services.acquisition.rules import (
+    batch_prefer_ratio,
+    load_rules,
+    look_ahead_n,
+    override_key,
+    window_rules,
+)
 from arc.services.retention.rules import grace_days, unwatched_days
 from arc.services.settings import FALLBACK_EQUALS_PREFERRED, UNKNOWN_KEY
 from tests.acquisition_helpers import make_anime
@@ -152,6 +158,34 @@ async def test_the_values_written_are_the_ones_the_rule_readers_use(
         assert await unwatched_days(session) == 30
 
     assert (await admin_client.get("/api/settings")).json()["values"]["sub_lang"] == "pt-br"
+
+
+async def test_the_swarm_rules_round_trip_to_their_readers(
+    admin_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """The three 2026-10-20 rules: listed, written, and read back."""
+    before = (await admin_client.get("/api/settings")).json()["values"]
+    assert before["batch_prefer_ratio"] == 3
+    assert before["slow_swarm_seeders"] == 20
+    assert before["look_ahead_slow"] == 3
+
+    body = await put(
+        admin_client,
+        {"batch_prefer_ratio": 0, "slow_swarm_seeders": 50, "look_ahead_slow": 6},
+    )
+    assert body["values"]["batch_prefer_ratio"] == 0
+    assert body["values"]["slow_swarm_seeders"] == 50
+    assert body["values"]["look_ahead_slow"] == 6
+    assert body["defaults"]["look_ahead_slow"] == 3
+    assert (await admin_client.get("/api/settings")).json() == body
+
+    async with api_factory() as session:
+        assert await batch_prefer_ratio(session) == 0
+        rules = await window_rules(session)
+        assert (rules.slow_n, rules.slow_seeders) == (6, 50)
+
+    refused = await admin_client.put("/api/settings", json={"batch_prefer_ratio": 21})
+    assert refused.status_code == 422
 
 
 async def test_pausing_through_the_settings_api_is_the_same_switch(

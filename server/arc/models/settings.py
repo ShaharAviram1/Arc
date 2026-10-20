@@ -34,6 +34,12 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # fetched once the current one is half watched (M20 T4). The initial
         # migration seeded 2; ``seed_m20_settings`` moves a row still at 2.
         "look_ahead_n": 1,
+        # How many episodes ahead to keep instead of N for a thinly seeded show
+        # (FR-A1, owner 2026-10-20); the window takes the larger of the two.
+        "look_ahead_slow": 3,
+        # Fewer seeders than this on a show's newest fetched release marks the
+        # show "thinly seeded" (FR-A1, owner 2026-10-20). 0: never.
+        "slow_swarm_seeders": 20,
         # K — how many shows one user may have fetching at once (FR-A10).
         # 0 means *unlimited*, which is the opposite of what 0 means for N
         # above. Five is what one disk and qBittorrent's handful of download
@@ -75,6 +81,10 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # ``search_release``'s batch branch reads it, and a batch already in
         # flight is unaffected.
         "batch_fallback": True,
+        # On a finished show, a season pack with at least this many times the
+        # best single's seeders (and at least 4) is taken file by file instead
+        # of the single (FR-A4/FR-A11, owner 2026-10-20). 0: never prefer one.
+        "batch_prefer_ratio": 3,
         # How long a ready episode's small offline copy (FR-P6) may go
         # unfetched before it is deleted, counted from the last time the media
         # route served it, else from when it was made. Seven days: long enough

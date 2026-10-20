@@ -137,6 +137,9 @@ def _execute(url: str, sql: str, params: dict[str, Any] | None = None) -> None:
 BEFORE_M20_SEED = "f1a6d3c08b52"
 M20_SEED = "a7d2e5c9f318"
 M20_KEYS = ("watched_grace_hours", "min_seeders_warn")
+BEFORE_SWARM_SEED = "244fbc2111f9"
+SWARM_SEED = "c4b8e1f2a9d6"
+SWARM_KEYS = ("batch_prefer_ratio", "slow_swarm_seeders", "look_ahead_slow")
 
 
 def _set_look_ahead(url: str, value: int) -> None:
@@ -197,6 +200,38 @@ def test_the_m20_seed_keeps_values_set_by_hand(
             )
 
 
+def test_the_swarm_seed_inserts_defaults_and_keeps_values_set_by_hand(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The 2026-10-20 seed: defaults where absent, a hand-set row kept."""
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, BEFORE_SWARM_SEED)
+        assert not set(SWARM_KEYS) & set(_fetch_settings(test_database_url))
+        _execute(
+            test_database_url,
+            "INSERT INTO settings (key, value) VALUES ('batch_prefer_ratio', '0'::jsonb)",
+        )
+
+        command.upgrade(config, SWARM_SEED)
+
+        seeded = _fetch_settings(test_database_url)
+        assert seeded["batch_prefer_ratio"] == 0
+        assert seeded["slow_swarm_seeders"] == 20
+        assert seeded["look_ahead_slow"] == 3
+
+        command.downgrade(config, BEFORE_SWARM_SEED)
+        assert not set(SWARM_KEYS) & set(_fetch_settings(test_database_url))
+    finally:
+        command.upgrade(config, "head")
+        for key in SWARM_KEYS:
+            _execute(
+                test_database_url,
+                "UPDATE settings SET value = CAST(:value AS jsonb) WHERE key = :key",
+                {"key": key, "value": str(DEFAULT_SETTINGS[key])},
+            )
+
+
 @pytest.mark.parametrize(("before", "after"), [(1, 2), (3, 3), (2, 2)])
 def test_the_m20_seed_downgrade_restores_2_only_where_1(
     pg_engine: AsyncEngine, test_database_url: str, before: int, after: int
@@ -241,7 +276,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 18
+    assert len(seeded) == 21
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -278,6 +313,10 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     # warning below three seeders.
     assert seeded["watched_grace_hours"] == 6
     assert seeded["min_seeders_warn"] == 3
+    # And the three swarm rules (FR-A1, FR-A11, owner 2026-10-20).
+    assert seeded["batch_prefer_ratio"] == 3
+    assert seeded["slow_swarm_seeders"] == 20
+    assert seeded["look_ahead_slow"] == 3
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:

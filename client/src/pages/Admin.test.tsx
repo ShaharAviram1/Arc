@@ -613,6 +613,49 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     })
   })
 
+  it('shows the three swarm rules with their bounds and saves them (FR-A1, FR-A11)', async () => {
+    const { fetchMock } = await openRules()
+
+    const slowN = screen.getByLabelText('Look-ahead for thinly seeded shows')
+    expect(slowN).toHaveValue(3)
+    // MAX_LOOK_AHEAD, the same ceiling as N.
+    expect(slowN).toHaveAttribute('min', '0')
+    expect(slowN).toHaveAttribute('max', '10')
+    expect(
+      within(fieldOf('Look-ahead for thinly seeded shows')).getByText(/Allowed: 0–10\./),
+    ).toBeVisible()
+
+    const thin = screen.getByLabelText('Thinly seeded (below)')
+    expect(thin).toHaveValue(20)
+    // MAX_SLOW_SWARM_SEEDERS; 0 means no show is ever thinly seeded.
+    expect(thin).toHaveAttribute('min', '0')
+    expect(thin).toHaveAttribute('max', '500')
+    expect(within(fieldOf('Thinly seeded (below)')).getByText(/Allowed: 0–500\./)).toBeVisible()
+
+    const ratio = screen.getByLabelText('Prefer a season pack (times the seeders)')
+    expect(ratio).toHaveValue(3)
+    // MAX_BATCH_PREFER_RATIO; 0 never prefers a pack over a single.
+    expect(ratio).toHaveAttribute('min', '0')
+    expect(ratio).toHaveAttribute('max', '20')
+    expect(
+      within(fieldOf('Prefer a season pack (times the seeders)')).getByText(/Allowed: 0–20\./),
+    ).toBeVisible()
+
+    fireEvent.change(slowN, { target: { value: '5' } })
+    fireEvent.change(thin, { target: { value: '0' } })
+    fireEvent.change(ratio, { target: { value: '4' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({
+      look_ahead_slow: 5,
+      slow_swarm_seeders: 0,
+      batch_prefer_ratio: 4,
+    })
+  })
+
   it('saves the per-user slot cap like any other rule (FR-A10)', async () => {
     const { fetchMock } = await openRules()
 

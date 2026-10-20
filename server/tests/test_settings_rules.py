@@ -31,9 +31,11 @@ from arc.services.acquisition.rules import (
     BYTES_PER_GB as GB,
 )
 from arc.services.acquisition.rules import (
+    MAX_BATCH_PREFER_RATIO,
     MAX_LOOK_AHEAD,
     MAX_MIN_FREE_GB,
     MAX_SLOT_CAP,
+    MAX_SLOW_SWARM_SEEDERS,
     storage_hold,
 )
 from arc.services.settings import (
@@ -282,6 +284,30 @@ def test_the_trip_pack_seeder_floor_takes_1_to_500(value: int) -> None:
 @pytest.mark.parametrize("value", [0, -1, 501, "10", 10.5, None, True])
 def test_a_bad_trip_pack_seeder_floor_is_refused(value: Any) -> None:
     assert "trip_pack_min_seeders" in refused({"trip_pack_min_seeders": value})
+
+
+# --- The swarm rules (FR-A1, FR-A11, owner 2026-10-20) -----------------------
+
+SWARM_CEILINGS: dict[str, int] = {
+    "batch_prefer_ratio": MAX_BATCH_PREFER_RATIO,
+    "slow_swarm_seeders": MAX_SLOW_SWARM_SEEDERS,
+    "look_ahead_slow": MAX_LOOK_AHEAD,
+}
+
+
+@pytest.mark.parametrize("key", sorted(SWARM_CEILINGS))
+def test_a_swarm_rule_takes_0_to_its_ceiling(key: str) -> None:
+    """0 is legal for all three: never prefer a pack, never thin, N alone."""
+    ceiling = SWARM_CEILINGS[key]
+    for value in (0, 1, ceiling):
+        assert validate({key: value}) == {key: value}
+
+
+@pytest.mark.parametrize("key", sorted(SWARM_CEILINGS))
+@pytest.mark.parametrize("value", [-1, "past", "3", 3.5, None, True, False, [3]])
+def test_a_bad_swarm_rule_is_refused(key: str, value: Any) -> None:
+    sent = SWARM_CEILINGS[key] + 1 if value == "past" else value
+    assert key in refused({key: sent})
 
 
 # --- storage_hold(), pure ---------------------------------------------------
