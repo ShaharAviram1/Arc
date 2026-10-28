@@ -70,6 +70,10 @@ class TripEpisodeOut(BaseModel):
     * ``url`` — where the device downloads the copy
       (``/media/{episode_id}/offline.mp4``) while it is ``ready``: phase
       ``available``, or ``delivered`` until the settle deletes it; else null.
+    * ``etag`` — the copy's strong ETag (what ``GET`` on ``url`` answers
+      with) whenever ``url`` is set; else null. A device holding a copy of
+      the episode under a different ETag holds one made before the copy was
+      re-made (``remake-copies``, owner 2026-10-28) and replaces it.
     """
 
     episode_id: int
@@ -79,6 +83,7 @@ class TripEpisodeOut(BaseModel):
     size: int | None = None
     delivered: bool = False
     url: str | None = None
+    etag: str | None = None
 
 
 class TripOut(BaseModel):
@@ -120,6 +125,7 @@ class TripOut(BaseModel):
                     size=row.size,
                     delivered=row.delivered,
                     url=offline_url(row.episode_id) if row.fetchable else None,
+                    etag=row.etag,
                 )
                 for row in facts.episodes
             ],

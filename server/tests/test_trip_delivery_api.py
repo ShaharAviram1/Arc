@@ -396,3 +396,8 @@ async def test_the_url_is_null_without_a_ready_copy(
     by_id = {row["episode_id"]: row for row in current["episodes"]}
     assert by_id[ids[1]]["url"] is None
     assert by_id[ids[2]]["url"] == f"/media/{ids[2]}/offline.mp4"
+    # The ETag rides with the URL: what the media route answers with, so a
+    # device can tell a copy re-made since from the one it holds.
+    assert by_id[ids[1]]["etag"] is None
+    served = await owner_client.head(f"/media/{ids[2]}/offline.mp4")
+    assert by_id[ids[2]]["etag"] == served.headers["etag"]
