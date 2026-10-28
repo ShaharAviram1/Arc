@@ -2025,6 +2025,48 @@ owner's word.
     head; deployed; a production check on Iruma-kun 3 (the next episode's
     search picks the pack, and the show's window is 3 while its newest row
     is thin).
+- **M20.3 — Sharper copies, many trips (owner 2026-10-28).** The 720p
+  H.264 CRF 26 trip copies looked soft on the iPad. Measured on the real
+  Iruma-kun 3 source (SubsPlease 1080p, 8 Mbit/s, 24.5 min): 720p H.264
+  CRF 26 = 227 MB (matches production's copy within 2 %), 1080p H.264
+  CRF 28 = 315 MB at 1.8× the encode time, 1080p HEVC CRF 28 = 254 MB at
+  3.8×. Owner: "make the change" (the recommended 1080p HEVC CRF 28),
+  "order all the episodes in the current trip to switch to the new
+  settings", and "let me start as many trips as I want, granted I have
+  enough place in my iPad".
+  - [x] **T0 production settings** (no code): `OFFLINE_CODEC=hevc`,
+        `OFFLINE_HEIGHT=1080`, `OFFLINE_CRF=28` in the host's `.env`,
+        stack restarted 2026-10-28 17:10 UTC (health 200; the worker reads
+        them; episode 15 of trip 4 encoding as `libx265 -preset fast -crf
+        28`). Episodes 12–14 had already been made at 720p. First HEVC copy
+        measured: episode 15, 262 MB, 51.5 min on the 2-core host (3090 s;
+        4.0× the 720p encodes' 10–13 min), `hvc1`, level 4.0, 1.32 Mbit/s
+        video — the 254 MB / 3.8× estimate held.
+  - [ ] **A — codec string by height; stale copies re-made** (FR-P6,
+        FR-A12): `codec_string(codec, height)` (HEVC L93/L120/L153, H.264
+        4.0/5.1); `trips/remake.remake_stale` + CLI `remake-copies --trip
+        ID | --all` removes a trip's copies whose `settings_key` is not the
+        host's, re-pends delivered rows the device still holds (released,
+        cancelled and expired rows untouched) and queues a reconciliation;
+        `TripEpisodeOut.etag`; the device replaces a held small copy whose
+        ETag changed (`adoptTrip`). Docs: FR-P6/§5.3b no longer say 720p /
+        100 MB.
+  - [ ] **B — any number of active trips per user, one per show**
+        (FR-A12): partial unique index on `(user_id, anime_id)` where
+        active (new revision), `GET /api/trips` list replaces `/current`,
+        auto-keep over every active trip, show page refusal only for the
+        same show, Downloads lists every trip; copy size estimate from the
+        server (median of the last 20 ready copies with the current
+        `settings_key`, fallback 260 MB) and the fit check subtracts the
+        other trips' undelivered episodes. CLAUDE.md non-negotiable
+        reworded.
+  - [ ] **C — production**: deploy; `remake-copies --trip 4` so episodes
+        12–14 are re-made at 1080p HEVC and the iPad swaps them; first
+        HEVC copy measured (size, encode time on the 2-core host).
+  - DoD: Writer → Validator → Reviewer (A and B both touch
+    acquisition/retention paths) → orchestrator verification; full suites
+    green; lint clean; single Alembic head; deployed; trip 4's early
+    episodes re-made and replaced on the iPad.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
