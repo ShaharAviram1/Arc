@@ -999,10 +999,13 @@ def offline_encode_args(plan: TranscodePlan, options: OfflineOptions | None = No
     sharpness; burning them in at the source's and scaling the result would
     blur every edge of the text and spend the bitrate on that blur.
 
-    H.264 is written at level 4.0 up to 1080 lines and 5.1 above, the levels
+    H.264 is written at level 4.0 up to 1080 lines and 5.1 above, counted on
+    the picture the copy will have — ``min(cap, source height)``, what the row
+    records as ``height`` — so it is the level
     :func:`~arc.services.media.copies.codec_string` names for the client.
     """
     options = options or OfflineOptions()
+    out_height = min(options.height, plan.height) if plan.height else options.height
     encoder = OFFLINE_ENCODERS.get(options.codec)
     if encoder is None:
         raise ValueError(f"unknown offline codec {options.codec!r}")
@@ -1032,7 +1035,7 @@ def offline_encode_args(plan: TranscodePlan, options: OfflineOptions | None = No
             "-profile:v",
             "high",
             "-level",
-            "4.0" if options.height <= 1080 else "5.1",
+            "4.0" if out_height <= 1080 else "5.1",
             "-pix_fmt",
             "yuv420p",
         ]
