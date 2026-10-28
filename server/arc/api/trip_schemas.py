@@ -102,15 +102,11 @@ class TripOut(BaseModel):
     #: ``created_at + trip_copy_days``.
     deadline_at: datetime
     episodes: list[TripEpisodeOut]
-    #: :attr:`TripLimits.copy_estimate_bytes`, so the device can count what
-    #: this trip still has to bring against its free space.
-    copy_estimate_bytes: int
 
     @classmethod
-    def build(cls, facts: TripFacts, *, copy_estimate_bytes: int) -> TripOut:
+    def build(cls, facts: TripFacts) -> TripOut:
         trip = facts.trip
         return cls(
-            copy_estimate_bytes=copy_estimate_bytes,
             id=trip.id,
             anime_id=trip.anime_id,
             anime_title=preferred_title(facts.anime),

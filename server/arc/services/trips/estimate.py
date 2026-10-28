@@ -11,9 +11,9 @@ settings, else :data:`FALLBACK_COPY_BYTES`. Queries only.
 from __future__ import annotations
 
 from statistics import median
-from typing import Final
+from typing import Final, cast
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -31,15 +31,18 @@ async def copy_estimate_bytes(session: AsyncSession, settings: Settings) -> int:
 
     "The way copies are made now" is the copy's ``settings_key`` against the
     key the current ``OFFLINE_*`` settings and language rules give, so a copy
-    made before an admin changed the codec or the height does not count.
+    made before an admin changed the codec or the height does not count. A
+    copy keyed by its rendition's own recorded languages (which can differ from
+    the current rules) does not count either; that only narrows the sample.
     """
     sub_lang, audio_lang = await language_rules(session)
     key = settings_key(offline_options(settings), sub_lang=sub_lang, audio_lang=audio_lang)
-    sizes = [
-        int(size)
-        for size in (
+    # ``size`` is nullable on the model; the WHERE below rules the nulls out.
+    size = cast(ColumnElement[int], OfflineCopy.size)
+    sizes = list(
+        (
             await session.scalars(
-                select(OfflineCopy.size)
+                select(size)
                 .where(
                     OfflineCopy.state == OfflineCopyState.READY,
                     OfflineCopy.settings_key == key,
@@ -50,8 +53,7 @@ async def copy_estimate_bytes(session: AsyncSession, settings: Settings) -> int:
                 .limit(ESTIMATE_SAMPLE)
             )
         ).all()
-        if size is not None
-    ]
+    )
     if not sizes:
         return FALLBACK_COPY_BYTES
     return int(median(sizes))

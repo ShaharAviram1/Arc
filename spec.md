@@ -1246,7 +1246,9 @@ that the course professor can log in at any time, and the owner uses it daily.
      copies — about 254 MB at 1080p HEVC; 2026-10-28) beside what the browser
      reports free, and one action. When the browser reports room for fewer
      episodes than the cap (at the estimate plus a tenth each, after setting
-     aside what the user's other active trips still have to bring), the card
+     aside — at the same rate — what the user's other active trips still have
+     to bring: less what this device already holds of them, and nothing for
+     an episode the viewer took off this device by hand), the card
      says "The browser reports room for about N episodes on this iPad (X free
      of Y, about Z of it kept for your other trips). It is an estimate: the
      iPad's own storage can fill up first." and the stepper stops at N; with

@@ -95,7 +95,7 @@ async def test_a_trip_is_created_and_read_back(
     }
     assert body["episodes"][0]["delivered"] is False
     assert body["episodes"][0]["url"] is None, "no copy yet"
-    assert body["copy_estimate_bytes"] == FALLBACK_COPY_BYTES, "no copy made yet"
+    assert "copy_estimate_bytes" not in body, "the estimate rides on trip_limits only"
 
     listed = await user_client.get("/api/trips")
     assert listed.status_code == 200
@@ -278,3 +278,38 @@ async def test_the_show_page_carries_the_trip_cap(
         await session.commit()
     body = (await user_client.get(f"/api/anime/{anime_id}")).json()
     assert body["trip_limits"]["max_episodes"] == 7
+
+
+async def test_the_show_page_reads_the_estimate_for_everyone_but_the_demo(
+    api_app: FastAPI,
+    api_factory: SessionFactory,
+    user_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The demo account can never make a trip: it is sent the fallback, unread."""
+    from arc.api import anime as anime_api
+
+    calls: list[int] = []
+
+    async def measured(session: object, settings: object) -> int:
+        calls.append(1)
+        return 254_000_000
+
+    monkeypatch.setattr(anime_api, "copy_estimate_bytes", measured)
+    anime_id = await a_show(api_factory, anilist_id=981091)
+
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+    assert body["trip_limits"]["copy_estimate_bytes"] == 254_000_000
+    assert calls == [1]
+
+    await add_user(api_factory, "demo-estimate@arc.test", "demopassword123")
+    async with api_factory() as session:
+        demo = await session.scalar(select(User).where(User.email == "demo-estimate@arc.test"))
+        assert demo is not None
+        demo.is_demo = True
+        await session.commit()
+    async with api_transport(api_app) as client:
+        await login(client, "demo-estimate@arc.test", "demopassword123")
+        demo_body = (await client.get(f"/api/anime/{anime_id}")).json()
+    assert demo_body["trip_limits"]["copy_estimate_bytes"] == FALLBACK_COPY_BYTES
+    assert calls == [1], "no estimate query for the demo account"

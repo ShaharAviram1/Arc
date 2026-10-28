@@ -59,7 +59,6 @@ from arc.services.trips.create import (
     create_trip,
 )
 from arc.services.trips.deliver import ask_again, confirm_delivered, release_delivered
-from arc.services.trips.estimate import copy_estimate_bytes
 from arc.services.trips.view import trip_facts
 
 log = logging.getLogger(__name__)
@@ -113,10 +112,7 @@ async def start_trip(
     except TripError as exc:
         raise _http(exc) from exc
     await session.commit()
-    return TripOut.build(
-        await trip_facts(session, settings, created.trip),
-        copy_estimate_bytes=await copy_estimate_bytes(session, settings),
-    )
+    return TripOut.build(await trip_facts(session, settings, created.trip))
 
 
 @router.get(
@@ -125,13 +121,9 @@ async def start_trip(
     summary="The caller's active trips, oldest first (FR-A12)",
 )
 async def active(user: CurrentUser, session: SessionDep, settings: SettingsDep) -> list[TripOut]:
-    trips = await active_trips(session, user.id)
-    if not trips:
-        return []
-    estimate = await copy_estimate_bytes(session, settings)
     return [
-        TripOut.build(await trip_facts(session, settings, trip), copy_estimate_bytes=estimate)
-        for trip in trips
+        TripOut.build(await trip_facts(session, settings, trip))
+        for trip in await active_trips(session, user.id)
     ]
 
 
@@ -220,10 +212,7 @@ async def again(
     except TripError as exc:
         raise _http(exc) from exc
     await session.commit()
-    return TripOut.build(
-        await trip_facts(session, settings, trip),
-        copy_estimate_bytes=await copy_estimate_bytes(session, settings),
-    )
+    return TripOut.build(await trip_facts(session, settings, trip))
 
 
 __all__ = ["router"]
