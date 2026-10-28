@@ -54,6 +54,7 @@ Run it from ``server/``::
     uv run python -m arc.cli import-catalogue
     uv run python -m arc.cli prune-unfinished-media --dry-run
     uv run python -m arc.cli remake-copies --trip 4
+    uv run python -m arc.cli remake-copies --trip 4 --delivered-before 2026-10-28T12:00:00Z
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -563,6 +564,15 @@ async def cmd_prune_unfinished_media(
 # --- remake-copies ----------------------------------------------------------
 
 
+def utc_timestamp(raw: str) -> datetime:
+    """An ISO 8601 timestamp for argparse; one with no offset is read as UTC."""
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not an ISO 8601 timestamp: {raw!r}") from exc
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
 async def cmd_remake_copies(
     session: AsyncSession, settings: Settings, args: argparse.Namespace
 ) -> int:
@@ -575,8 +585,14 @@ async def cmd_remake_copies(
     exit 1 and nothing written. ``--all`` with no active trip prints that and
     exits 0. Copies a device is fetching right now are counted ``held`` and
     left for a later run.
+
+    ``--delivered-before ISO8601`` (the time the encode settings changed)
+    also re-pends a delivered, unreleased, unwatched row delivered before it
+    whose copy the settle already deleted: a settled copy leaves no record of
+    how it was made. A timestamp with no offset is read as UTC.
     """
     now = datetime.now(UTC)
+    cutoff: datetime | None = getattr(args, "delivered_before", None)
     if args.all:
         ids = list(
             (
@@ -596,7 +612,9 @@ async def cmd_remake_copies(
             print(f"no trip with id {trip_id}", file=sys.stderr)
             return EXIT_FAILED
         try:
-            report = await remake_stale(session, settings, trip=trip, now=now)
+            report = await remake_stale(
+                session, settings, trip=trip, now=now, delivered_before=cutoff
+            )
         except TripConflict:
             await session.rollback()
             print(f"trip {trip_id} is not active", file=sys.stderr)
@@ -707,6 +725,16 @@ def build_parser() -> argparse.ArgumentParser:
     which = remake.add_mutually_exclusive_group(required=True)
     which.add_argument("--trip", type=int, metavar="ID", help="the one active trip to remake")
     which.add_argument("--all", action="store_true", help="every active trip")
+    remake.add_argument(
+        "--delivered-before",
+        type=utc_timestamp,
+        metavar="ISO8601",
+        default=None,
+        help=(
+            "when the encode settings changed: also re-pend episodes delivered before it "
+            "whose copy was already settled (a timestamp without an offset is UTC)"
+        ),
+    )
     remake.set_defaults(handler=cmd_remake_copies)
 
     return parser

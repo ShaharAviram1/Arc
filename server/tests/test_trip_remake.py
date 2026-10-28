@@ -62,7 +62,7 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
 
 
 def args(**values: Any) -> Any:
-    return type("Args", (), {"trip": None, "all": False, **values})()
+    return type("Args", (), {"trip": None, "all": False, "delivered_before": None, **values})()
 
 
 async def record(
@@ -524,3 +524,143 @@ async def test_the_command_refuses_an_unknown_or_ended_trip(
     err = capsys.readouterr().err
     assert f"no trip with id {missing}" in err
     assert f"trip {trip_id} is not active" in err
+
+
+# --- Copies the settle already took (--delivered-before) ------------------------
+
+
+async def settle_away(session: AsyncSession, settings: Settings, episode: Episode) -> None:
+    """What the settle leaves an hour after a confirmation: no copy row, no file."""
+    copy = await session.get(OfflineCopy, episode.id)
+    assert copy is not None
+    await session.delete(copy)
+    offline_path_for(settings, episode.id).unlink(missing_ok=True)
+    await session.flush()
+
+
+async def test_a_settled_copy_delivered_before_the_time_is_fetched_again(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """Production, trip 4: episodes 13 and 14 delivered, settled, held at 720p."""
+    episodes = await show(db_session, 990120, count=5)
+    user, trip = await trip_with_copies(db_session, settings, episodes, "r20@arc.test", count=5)
+    for episode in episodes[:4]:
+        await deliver(db_session, trip, episode)
+    changed_at = now()
+    # 0: before the time. 1: after it. 2: before, released. 3: before, watched.
+    for episode in (episodes[0], episodes[2], episodes[3]):
+        (await row_of(db_session, trip, episode)).delivered_at = changed_at - timedelta(hours=5)
+    (await row_of(db_session, trip, episodes[1])).delivered_at = changed_at + timedelta(minutes=5)
+    (await row_of(db_session, trip, episodes[2])).released_at = changed_at - timedelta(hours=1)
+    db_session.add(
+        WatchProgress(user_id=user.id, episode_id=episodes[3].id, position_s=1400.0, completed=True)
+    )
+    for episode in episodes[:4]:
+        await settle_away(db_session, settings, episode)
+    await forget_compute_wants(db_session)
+    at = changed_at + timedelta(hours=1)
+
+    report = await remake_stale(
+        db_session, settings, trip=trip, now=at, delivered_before=changed_at
+    )
+
+    assert counts(report) == (3, 1, 0, 0, 2)
+    again = await row_of(db_session, trip, episodes[0])
+    assert again.state is TripEpisodeState.PENDING
+    assert again.delivered_at is None and again.available_at == at
+    for episode in episodes[1:4]:
+        assert (await row_of(db_session, trip, episode)).state is TripEpisodeState.DELIVERED
+    assert len(await jobs_of(db_session, COMPUTE_WANTS)) == 1
+
+
+async def test_without_the_time_a_settled_copy_is_left_alone(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    episodes = await show(db_session, 990121, count=3)
+    _, trip = await trip_with_copies(db_session, settings, episodes, "r21@arc.test", count=2)
+    await deliver(db_session, trip, episodes[0])
+    await settle_away(db_session, settings, episodes[0])
+    await forget_compute_wants(db_session)
+
+    report = await remake_stale(db_session, settings, trip=trip, now=now())
+
+    assert counts(report) == (0, 0, 0, 0, 0)
+    assert (await row_of(db_session, trip, episodes[0])).state is TripEpisodeState.DELIVERED
+    assert await jobs_of(db_session, COMPUTE_WANTS) == []
+
+
+async def test_a_current_copy_is_left_alone_whenever_it_was_delivered(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    episodes = await show(db_session, 990122, count=3)
+    _, trip = await trip_with_copies(db_session, settings, episodes, "r22@arc.test", count=2)
+    await record(db_session, settings, episodes[:1], stale=False)
+    await deliver(db_session, trip, episodes[0])
+    (await row_of(db_session, trip, episodes[0])).delivered_at = now() - timedelta(days=1)
+    await db_session.flush()
+
+    report = await remake_stale(db_session, settings, trip=trip, now=now(), delivered_before=now())
+
+    assert counts(report) == (0, 0, 0, 0, 0)
+    assert (await row_of(db_session, trip, episodes[0])).state is TripEpisodeState.DELIVERED
+    assert await db_session.get(OfflineCopy, episodes[0].id) is not None
+
+
+async def test_another_users_settled_delivery_follows_the_time_too(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    episodes = await show(db_session, 990123, count=3)
+    _, mine = await trip_with_copies(db_session, settings, episodes, "r23a@arc.test", count=2)
+    _, theirs = await trip_with_copies(db_session, settings, episodes, "r23b@arc.test", count=2)
+    await deliver(db_session, mine, episodes[0])
+    await deliver(db_session, theirs, episodes[0])
+    await settle_away(db_session, settings, episodes[0])
+    changed_at = now() + timedelta(minutes=1)
+
+    report = await remake_stale(
+        db_session, settings, trip=mine, now=changed_at, delivered_before=changed_at
+    )
+
+    assert counts(report) == (1, 1, 0, 0, 0)
+    assert (await row_of(db_session, theirs, episodes[0])).state is TripEpisodeState.PENDING
+
+
+def test_the_command_reads_the_time_as_utc() -> None:
+    parser = build_parser()
+
+    zulu = parser.parse_args(
+        ["remake-copies", "--trip", "4", "--delivered-before", "2026-10-28T12:00:00Z"]
+    )
+    naive = parser.parse_args(
+        ["remake-copies", "--all", "--delivered-before", "2026-10-28T12:00:00"]
+    )
+    offset = parser.parse_args(
+        ["remake-copies", "--trip", "4", "--delivered-before", "2026-10-28T14:00:00+02:00"]
+    )
+
+    expected = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    assert zulu.delivered_before == expected
+    assert naive.delivered_before == expected, "no offset reads as UTC"
+    assert offset.delivered_before == expected
+    assert parser.parse_args(["remake-copies", "--trip", "4"]).delivered_before is None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["remake-copies", "--trip", "4", "--delivered-before", "yesterday"])
+
+
+async def test_the_command_passes_the_time_on(
+    db_session: AsyncSession, settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    episodes = await show(db_session, 990124, count=3)
+    _, trip = await trip_with_copies(db_session, settings, episodes, "r24@arc.test", count=2)
+    await deliver(db_session, trip, episodes[0])
+    await settle_away(db_session, settings, episodes[0])
+    await db_session.commit()
+
+    cutoff = now() + timedelta(minutes=1)
+    exit_code = await cmd_remake_copies(
+        db_session, settings, args(trip=trip.id, delivered_before=cutoff)
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f"trip {trip.id}: 1 stale, 1 re-pended, 0 cleared, 0 held, 0 skipped" in out
