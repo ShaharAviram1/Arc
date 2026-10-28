@@ -181,7 +181,7 @@ async def test_a_confirmation_is_204_and_idempotent(
         settles = (await session.scalars(select(Job).where(Job.type == OFFLINE_SETTLE))).all()
     assert len(settles) == 1, "one settle, however often it is confirmed"
 
-    current = (await owner_client.get("/api/trips/current")).json()
+    (current,) = (await owner_client.get("/api/trips")).json()
     phases = {
         row["episode_id"]: (row["phase"], row["delivered"], row["url"])
         for row in current["episodes"]
@@ -268,7 +268,7 @@ async def test_again_on_an_ended_trip_is_409(
     response = await owner_client.post(f"/api/trips/{trip_id}/episodes/{ids[1]}/again")
 
     assert (response.status_code, response.json()["detail"]) == (409, TRIP_NOT_ACTIVE)
-    assert (await owner_client.get("/api/trips/current")).json() is None, "current = active only"
+    assert (await owner_client.get("/api/trips")).json() == [], "active trips only"
 
 
 # --- The copy's authorisation -----------------------------------------------
@@ -392,7 +392,7 @@ async def test_the_url_is_null_without_a_ready_copy(
         await session.delete(copy)
         await session.commit()
 
-    current = (await owner_client.get("/api/trips/current")).json()
+    (current,) = (await owner_client.get("/api/trips")).json()
     by_id = {row["episode_id"]: row for row in current["episodes"]}
     assert by_id[ids[1]]["url"] is None
     assert by_id[ids[2]]["url"] == f"/media/{ids[2]}/offline.mp4"

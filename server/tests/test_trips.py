@@ -83,6 +83,8 @@ from arc.services.trips.create import (
     TripForbidden,
     TripInvalid,
     TripNotFound,
+    active_trip,
+    active_trips,
     create_trip,
     pick_episodes,
 )
@@ -233,26 +235,42 @@ async def test_the_demo_account_cannot_make_a_trip(
         await create_trip(db_session, settings, user=user, anime_id=anime.id, count=2, now=now())
 
 
-async def test_one_active_trip_per_user(db_session: AsyncSession, settings: Settings) -> None:
+async def test_one_active_trip_per_show_and_any_number_of_shows(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """Owner, 2026-10-28: a trip on another show is allowed; the same show is not."""
     first, _ = await show(db_session, 980003)
     second, _ = await show(db_session, 980004)
     user = await make_user(db_session, "trip-one@arc.test")
-    await create_trip(db_session, settings, user=user, anime_id=first.id, count=2, now=now())
+    one = await create_trip(db_session, settings, user=user, anime_id=first.id, count=2, now=now())
+    two = await create_trip(
+        db_session, settings, user=user, anime_id=second.id, count=2, now=now() + timedelta(1)
+    )
 
     with pytest.raises(TripConflict) as refused:
-        await create_trip(db_session, settings, user=user, anime_id=second.id, count=2, now=now())
+        await create_trip(db_session, settings, user=user, anime_id=first.id, count=2, now=now())
     assert str(refused.value) == TRIP_ACTIVE
+    assert [trip.id for trip in await active_trips(db_session, user.id)] == [
+        one.trip.id,
+        two.trip.id,
+    ]
+    assert await active_trip(db_session, user.id, first.id) is one.trip
+    assert await active_trip(db_session, user.id, second.id) is two.trip
 
 
-async def test_the_database_holds_one_active_trip_per_user(db_session: AsyncSession) -> None:
+async def test_the_database_holds_one_active_trip_per_show_per_user(
+    db_session: AsyncSession,
+) -> None:
     anime, _ = await show(db_session, 980005)
+    other, _ = await show(db_session, 980015)
     user = await make_user(db_session, "trip-index@arc.test")
+    someone = await make_user(db_session, "trip-index-2@arc.test")
     at = now()
 
-    def trip(state: TripState) -> Trip:
+    def trip(state: TripState, anime_id: int = anime.id, user_id: int = user.id) -> Trip:
         return Trip(
-            user_id=user.id,
-            anime_id=anime.id,
+            user_id=user_id,
+            anime_id=anime_id,
             first_number=1,
             last_number=2,
             count=2,
@@ -261,7 +279,13 @@ async def test_the_database_holds_one_active_trip_per_user(db_session: AsyncSess
         )
 
     db_session.add_all(
-        [trip(TripState.CANCELLED), trip(TripState.FINISHED), trip(TripState.ACTIVE)]
+        [
+            trip(TripState.CANCELLED),
+            trip(TripState.FINISHED),
+            trip(TripState.ACTIVE),
+            trip(TripState.ACTIVE, anime_id=other.id),
+            trip(TripState.ACTIVE, user_id=someone.id),
+        ]
     )
     await db_session.flush()
     with pytest.raises(IntegrityError):

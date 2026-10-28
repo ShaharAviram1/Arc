@@ -84,6 +84,14 @@ TRIP_SETTLE_DELAY: Final[timedelta] = timedelta(hours=1)
 TRIP_SETTLE_RETRY: Final[timedelta] = timedelta(minutes=15)
 
 
+#: What one trip copy is guessed to weigh before any copy has been made with
+#: the current settings (:mod:`arc.services.trips.estimate`, owner
+#: 2026-10-28). The 1080p HEVC CRF 28 copies the host has made since
+#: 2026-10-28 measured about 254 MB per episode on real sources (227 MB at the
+#: earlier 720p H.264), so a little above that: a trip said to fit should fit.
+FALLBACK_COPY_BYTES: Final[int] = 260_000_000
+
+
 def copy_priority(position: int) -> int:
     """A trip copy's queue priority: 600 + 10 × its place in the trip (FR-P3)."""
     return OFFLINE_TRIP_PRIORITY + PRIORITY_PER_EPISODE * max(position, 0)
@@ -144,6 +152,7 @@ async def enqueue_trip_sweep(session: AsyncSession) -> Job:
 
 
 __all__ = [
+    "FALLBACK_COPY_BYTES",
     "OFFLINE_SETTLE",
     "OFFLINE_SETTLE_PRIORITY",
     "TRIP_BATCH_MIN",

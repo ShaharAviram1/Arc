@@ -52,7 +52,7 @@ from arc.services.catalog.airing import (
     out_of_order,
 )
 from arc.services.playback.watched import WatchedSource, watched_source
-from arc.services.trips.names import TRIP_MAX_EPISODES_KEY
+from arc.services.trips.names import FALLBACK_COPY_BYTES, TRIP_MAX_EPISODES_KEY
 
 
 class TitleOut(BaseModel):
@@ -1003,8 +1003,9 @@ class AnimeDetail(AnimeCore):
     sample: SampleOut | None = None
     #: The caller's active trip on this show, or null (FR-A12).
     trip: TripOut | None = None
-    #: What a trip may ask for (FR-A12): ``{max_episodes}``, the
-    #: ``trip_max_episodes`` setting. Sent to every caller.
+    #: What a trip may ask for (FR-A12): ``{max_episodes, copy_estimate_bytes}``
+    #: — the ``trip_max_episodes`` setting and the server's guess at one copy's
+    #: size. Sent to every caller.
     trip_limits: TripLimits
     #: This show's per-show rule override (FR-A3), **for an admin only** — null
     #: for everybody else and for a show that follows the global rules (M16,
@@ -1092,7 +1093,10 @@ class AnimeDetail(AnimeCore):
             sample=sample,
             trip=trip,
             trip_limits=trip_limits
-            or TripLimits(max_episodes=int(DEFAULT_SETTINGS[TRIP_MAX_EPISODES_KEY])),
+            or TripLimits(
+                max_episodes=int(DEFAULT_SETTINGS[TRIP_MAX_EPISODES_KEY]),
+                copy_estimate_bytes=FALLBACK_COPY_BYTES,
+            ),
             override=override,
             pinned=pinned,
             episodes=[

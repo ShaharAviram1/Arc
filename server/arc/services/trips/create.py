@@ -5,7 +5,9 @@ user's progress, each made into a small offline copy for the device. Five
 refusals, each a sentence the show page can say:
 
 * the demo account (403) — FR-D5: no trips;
-* an active trip already (409) — one per user, also a database index;
+* an active trip on this show already (409) — one per show per user, also a
+  database index (owner, 2026-10-28: any number of shows may each have one;
+  the device's free space is the only other limit, and the user's call);
 * the disk under its floor (409) — FR-T6: a trip starts fetching at once,
   which is exactly what a hold forbids;
 * a count outside 1..``trip_max_episodes`` (422);
@@ -111,12 +113,31 @@ class TripCreated:
     requested: int
 
 
-async def active_trip(session: AsyncSession, user_id: int) -> Trip | None:
-    """The user's active trip, if they have one (there is at most one)."""
+async def active_trip(session: AsyncSession, user_id: int, anime_id: int) -> Trip | None:
+    """The user's active trip on this show, if they have one (there is at most one)."""
     found: Trip | None = await session.scalar(
-        select(Trip).where(Trip.user_id == user_id, Trip.state == TripState.ACTIVE).limit(1)
+        select(Trip)
+        .where(
+            Trip.user_id == user_id,
+            Trip.anime_id == anime_id,
+            Trip.state == TripState.ACTIVE,
+        )
+        .limit(1)
     )
     return found
+
+
+async def active_trips(session: AsyncSession, user_id: int) -> list[Trip]:
+    """Every active trip of the user, oldest first (one per show at most)."""
+    return list(
+        (
+            await session.scalars(
+                select(Trip)
+                .where(Trip.user_id == user_id, Trip.state == TripState.ACTIVE)
+                .order_by(Trip.created_at, Trip.id)
+            )
+        ).all()
+    )
 
 
 async def _progress(session: AsyncSession, user_id: int, anime_id: int) -> int:
@@ -221,7 +242,9 @@ async def queue_trip_copy(
 
     A ready copy whose file is on disk is stamped available on the spot; one
     that can be made — the source is on disk — is queued (``why="trip"``,
-    priority 600 + 10 × position). Returns whether there is, or will be, a
+    priority 600 + 10 × position — the place within its own trip, so two
+    trips' copies interleave rather than one trip waiting for the other).
+    Returns whether there is, or will be, a
     copy. Episodes whose file has not arrived yet are the linker's: it queues
     the copy when the file is matched (:mod:`arc.services.library.link`).
     ``copy`` and ``source`` are the caller's batched lookups.
@@ -269,7 +292,7 @@ async def create_trip(
     anime = await session.get(Anime, anime_id)
     if anime is None:
         raise TripNotFound("anime not found")
-    if await active_trip(session, user.id) is not None:
+    if await active_trip(session, user.id, anime_id) is not None:
         raise TripConflict(TRIP_ACTIVE)
     if await is_storage_held(session, settings):
         raise TripConflict(STORAGE_HELD)
@@ -308,8 +331,8 @@ async def create_trip(
         deadline_at=now + timedelta(days=await trip_copy_days(session)),
     )
     try:
-        # A savepoint, so a request racing this one onto the one-active-trip
-        # index is a 409 rather than a poisoned session.
+        # A savepoint, so a request racing this one onto the one-active-trip-
+        # per-show index is a 409 rather than a poisoned session.
         async with session.begin_nested():
             session.add(trip)
             await session.flush()
@@ -396,6 +419,7 @@ __all__ = [
     "TripInvalid",
     "TripNotFound",
     "active_trip",
+    "active_trips",
     "create_trip",
     "pick_episodes",
     "queue_trip_copy",
