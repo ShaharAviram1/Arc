@@ -27,9 +27,11 @@ class OfflineOut(BaseModel):
     * ``size`` — bytes, once ``available``.
     * ``url`` — ``/media/{id}/offline.mp4``, once ``available``; built beside
       the route that answers it, so the client never assembles a media path.
-    * ``codecs`` — the RFC 6381 video codec string (``avc1.640028`` or
-      ``hvc1.1.6.L93.B0``) for ``canPlayType``: the copy's own once it exists,
-      what the server would make otherwise; null when there is nothing to make.
+    * ``codecs`` — the RFC 6381 video codec string (``avc1.640028``,
+      ``hvc1.1.6.L120.B0``, … — by codec and height,
+      :func:`~arc.services.media.copies.codec_string`) for ``canPlayType``:
+      the copy's own once it exists, what the server would make otherwise;
+      null when there is nothing to make.
     """
 
     state: OfflineState
@@ -47,11 +49,14 @@ class OfflineOut(BaseModel):
         job: Job | None,
         has_source: bool,
         codec: str | None,
+        height: int | None = None,
     ) -> OfflineOut:
         """The answer for a **ready** episode (callers check that).
 
         ``job`` must be the episode's live (pending or running) ``offline_encode``
         or ``None`` (:func:`~arc.services.media.names.latest_offline_jobs`).
+        ``codec`` and ``height`` are the host's ``OFFLINE_CODEC`` and
+        ``OFFLINE_HEIGHT``, for a copy not made yet.
         """
         # ``job`` is the *live* encode, if there is one; a queued or preparing
         # row without one is a dead encode and reads ``failed``.
@@ -60,13 +65,15 @@ class OfflineOut(BaseModel):
             has_source=has_source,
             job_alive=job is not None,
         )
-        made_with = copy.codec if copy is not None and copy.codec else codec
+        made = copy is not None and bool(copy.codec)
+        made_with = copy.codec if copy is not None and made else codec
+        made_at = copy.height if copy is not None and made else height
         if state == "available" and copy is not None:
             return cls(
                 state=state,
                 size=copy.size,
                 url=offline_url(episode_id),
-                codecs=codec_string(copy.codec),
+                codecs=codec_string(copy.codec, copy.height),
             )
         if state == "unavailable":
             return cls(state=state)
@@ -75,7 +82,7 @@ class OfflineOut(BaseModel):
             progress = job_progress(job)
         elif state == "queued":
             progress = 0.0
-        return cls(state=state, progress=progress, codecs=codec_string(made_with))
+        return cls(state=state, progress=progress, codecs=codec_string(made_with, made_at))
 
 
 __all__ = ["OfflineOut"]

@@ -232,7 +232,11 @@ async def play(
 
     siblings = await episodes_for(session, episode.anime_id)
     extras = await episode_extras(
-        session, [episode.id], offline_codec=settings.offline_codec, offline_demo=user.is_demo
+        session,
+        [episode.id],
+        offline_codec=settings.offline_codec,
+        offline_height=settings.offline_height,
+        offline_demo=user.is_demo,
     )
     rendition = extras.renditions.get(episode.id)
     progress = await session.get(WatchProgress, (user.id, episode.id))

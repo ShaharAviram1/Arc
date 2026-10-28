@@ -50,6 +50,10 @@ class TripEpisodeFacts:
     #: Whether the copy is ``ready`` and there for the device to fetch: phase
     #: ``available``, or ``delivered`` while the copy still stands.
     fetchable: bool = False
+    #: The copy's ETag while it is :attr:`fetchable`, else ``None``: what a
+    #: device compares with the copy it holds, to tell a copy re-made since
+    #: (:mod:`arc.services.trips.remake`).
+    etag: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +146,11 @@ async def trip_facts(session: AsyncSession, settings: Settings, trip: Trip) -> T
                 held=held,
             )
         )
+        fetchable = (
+            phase in ("available", "delivered")
+            and copy is not None
+            and copy.state is OfflineCopyState.READY
+        )
         episodes.append(
             TripEpisodeFacts(
                 episode_id=episode.id,
@@ -152,11 +161,8 @@ async def trip_facts(session: AsyncSession, settings: Settings, trip: Trip) -> T
                 ),
                 size=copy.size if copy is not None and phase == "available" else None,
                 delivered=row.delivered_at is not None,
-                fetchable=(
-                    phase in ("available", "delivered")
-                    and copy is not None
-                    and copy.state is OfflineCopyState.READY
-                ),
+                fetchable=fetchable,
+                etag=copy.etag if fetchable and copy is not None else None,
             )
         )
     return TripFacts(trip=trip, anime=anime, episodes=episodes)

@@ -542,8 +542,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   a slot) are untouched by a trip starting or ending; episodes another user still wants are untouched, and an
   episode already delivered to the device stays the device's. **Delivery**
   (M19 T4): when the device has the whole copy it confirms it, and Arc
-  records the episode as delivered — repeats change nothing, and a copy
-  re-made meanwhile is still accepted; a confirmation arriving after the
+  records the episode as delivered — repeats change nothing; a confirmation
+  naming a different copy than the one the server now offers (the device
+  finished a copy that has since been re-made) leaves the episode waiting
+  for the new copy, which the device then fetches and confirms (owner,
+  2026-10-28); a confirmation arriving after the
   episode expired on an ended trip, or after a cancel, is recorded but
   gives no right to fetch the copy again. **The device's copy does change
   what the user's window wants** (FR-A1's device skip, M20, owner
@@ -554,7 +557,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   brings the episode back into the window. The device may ask for a
   delivered or expired episode **again** while the trip is active, which puts
   it back in the trip and fetches or re-makes the copy by the ordinary paths.
-  A trip-only episode's copy can be fetched only by a user whose trip holds
+  **A copy re-made with new encode settings replaces the one the device
+  holds** (owner, 2026-10-28): an admin's `remake-copies` puts every episode
+  of an active trip whose copy was made with other settings (FR-P6: codec,
+  height, quality or audio bitrate) back in the trip — fetched again or
+  re-made from the source still here — and with it the same episode in any
+  other user's active trip; each such episode gets a fresh `trip_copy_days`
+  from that moment. The device, seeing a different copy offered for an
+  episode it holds, **drops its copy first** and then downloads the new one
+  (about 250 MB at 1080p), so a swap interrupted by going offline leaves no
+  copy until the device is back online — swaps are meant to run while
+  online, with the new file ready on the server; any change of copy does
+  this, a re-make with the same settings included. Left alone: an episode
+  the device already let go of (released, e.g. deleted once watched), one
+  its user has watched, one cancelled or expired, and — until the command is
+  run again — a copy a device is downloading at that moment. A trip-only episode's copy can be fetched only by a user whose trip holds
   it (waiting or delivered; anybody else is told it does not exist), and
   opening it in the player is answered "offline only" for that user. Copies
   the device does not collect **expire** `trip_copy_days` (default 14) after
@@ -812,14 +829,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   reading it.
 - FR-P6 **A small offline copy** (M19, owner 2026-10-05). On request, the
   server makes a second, smaller file of a `ready` episode for a device to
-  keep (FR-S9): one MP4, at most 720 lines tall (a smaller source is never
-  scaled up), H.264 by default (HEVC selectable by the operator,
-  `OFFLINE_CODEC`), CRF 26, AAC stereo at 96 kbit/s, arranged so a player can
-  start it before the last byte arrives, and with **the same subtitle and audio
-  tracks as the rendition** (FR-P2), the subtitles burned in — drawn after the picture is
-  scaled, so the text is as sharp at 720p as it was meant to be. About a
-  quarter the size of the full-size file (≈100 MB for a 24-minute episode
-  measured on the owner's sources). It is made from the source the server
+  keep (FR-S9): one MP4, at most `OFFLINE_HEIGHT` lines tall (a smaller
+  source is never scaled up), in `OFFLINE_CODEC` (H.264 or HEVC) at
+  `OFFLINE_CRF`, AAC stereo at 96 kbit/s, arranged so a player can start it
+  before the last byte arrives, and with **the same subtitle and audio tracks
+  as the rendition** (FR-P2), the subtitles burned in — drawn after the
+  picture is scaled, so the text is as sharp at the copy's size as it was
+  meant to be. The operator sets the three: 720p H.264 CRF 26 until
+  2026-10-28 (the shipped defaults), **1080p HEVC CRF 28** on production
+  since (owner: the 720p copies were too soft on the iPad). Measured on
+  SubsPlease 1080p sources (8 Mbit/s), a 24-minute episode is 227 MB the
+  first way and about 254 MB the second, for 3.8× the encode time. The codec
+  string a device checks before downloading (`canPlayType`) names the level
+  that fits the copy's height. It is made from the source the server
   still holds; once that source is gone no copy can be made and the device
   takes FR-S7's full-size file instead. A request for an episode whose copy
   already exists, or is being made, starts nothing new. The copy is checked
@@ -3011,3 +3033,5 @@ through the same edge, without the grace period.
   downloading want above the user's progress is not cancelled merely because
   the window shrank (its row goes once the download ends; a searching want
   is), and N = 0 still stops everything. FR-D2: the three keys.
+- 2026-10-28 (owner) — **Offline copies 1080p HEVC CRF 28** (FR-P6): the 720p H.264 CRF 26 copies were too soft on the iPad; measured 227 MB vs ≈254 MB per 24-minute SubsPlease episode, encode 3.8× longer; set on production by `OFFLINE_*`, defaults unchanged. **Copies of a trip can be re-made with the current settings and replace what the device holds** (FR-A12): an admin's `remake-copies` puts the trip's episodes whose copy was made otherwise back in the trip, and the device swaps its copy when the new one is offered — except an episode it already let go of, or one cancelled or expired.
+- 2026-10-28 (owner, after review) — **Re-made trip copies, refined** (FR-A12): a confirmation of the copy from before a re-make leaves the episode waiting for the new one; the re-make covers the same episode in other users' active trips, restarts `trip_copy_days`, skips episodes the user has watched and copies a device is downloading at that moment (run again later), and judges a copy by its codec, height, quality and audio bitrate only. The device drops its old copy before fetching the new one (swaps run while online).

@@ -11,7 +11,13 @@ TripNotFound`, so a trip id is never confirmed to exist):
   second device of the same user to fetch the same copy. A ``cancelled`` row,
   or an ``expired`` one of an ended trip, only gets ``delivered_at``: no right
   to fetch the copy comes back. A repeat changes nothing. The ETag the device
-  sends is compared with the copy's and a mismatch is only logged. When the
+  sends is compared with the copy's: on a ``pending`` row, a mismatch — or no
+  ``ready`` copy at all — means the device holds a copy made *before* the
+  current one was re-made (``remake-copies``, owner 2026-10-28), so the row
+  stays ``pending`` and nothing else happens (logged, answered as a success
+  so the device stops asking); the device replaces its copy when the new one
+  is offered and confirms that. Without an ETag, or on any other row, a
+  mismatch is only logged, as before. When the
   confirmation leaves nothing of the trip pending, the trip ends
   ``finished`` there and then (:data:`FINISH_ON_LAST_CONFIRM`) so the next
   one can start at once.
@@ -125,6 +131,18 @@ async def confirm_delivered(
     """The device holds the copy. Flushed, not committed. Idempotent."""
     trip, row = await _row(session, user, trip_id, episode_id)
     copy = await session.get(OfflineCopy, episode_id)
+    if (
+        row.state is TripEpisodeState.PENDING
+        and etag is not None
+        and (copy is None or copy.state is not OfflineCopyState.READY or copy.etag != etag)
+    ):
+        # A copy from before a re-make: the row waits for the new one.
+        log.info(
+            "trip copy confirmed with an older ETag; the row stays pending",
+            extra={"trip_id": trip.id, "episode_id": episode_id, "user_id": user.id},
+        )
+        await session.flush()
+        return row
     if etag is not None and (copy is None or copy.etag != etag):
         log.info(
             "trip copy confirmed with a different ETag; accepted",
@@ -199,6 +217,21 @@ async def release_delivered(
     return row
 
 
+def repend(row: TripEpisode, *, available_at: datetime | None) -> None:
+    """Put a row back to ``pending`` for a copy the device is about to get.
+
+    ``delivered_at`` and ``released_at`` are cleared — the row describes the
+    copy to come, not the one the device had (the confirmation is in the
+    log) — and ``available_at`` is what the caller says: now for a copy still
+    on disk, ``None`` for the copy hook to stamp when one is made. Shared by
+    "again" and the remake (:mod:`arc.services.trips.remake`).
+    """
+    row.state = TripEpisodeState.PENDING
+    row.delivered_at = None
+    row.released_at = None
+    row.available_at = available_at
+
+
 async def ask_again(
     session: AsyncSession,
     settings: Settings,
@@ -224,10 +257,7 @@ async def ask_again(
             and copy.state is OfflineCopyState.READY
             and file_matches(offline_path_for(settings, episode_id), copy)
         )
-        row.state = TripEpisodeState.PENDING
-        row.delivered_at = None
-        row.released_at = None
-        row.available_at = now if on_disk else None
+        repend(row, available_at=now if on_disk else None)
         await enqueue_compute_wants(session)
         log.info(
             "trip episode asked for again",
@@ -249,4 +279,5 @@ __all__ = [
     "confirm_delivered",
     "confirmed_state",
     "release_delivered",
+    "repend",
 ]

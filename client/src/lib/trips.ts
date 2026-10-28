@@ -51,6 +51,13 @@ export interface TripEpisode {
    * not downloadable yet. Optional on the wire for an older payload.
    */
   url?: string | null
+  /**
+   * The copy's ETag whenever `url` is set, else null: a device holding the
+   * episode's small copy under another ETag holds one made before the server
+   * re-made it (`remake-copies`, owner 2026-10-28) and replaces it. Optional
+   * on the wire for an older payload.
+   */
+  etag?: string | null
 }
 
 /** `TripOut`: `POST /api/anime/{id}/trip`, `GET /api/trips/current`, the show's `trip`. */

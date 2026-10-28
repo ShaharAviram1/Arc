@@ -5,11 +5,13 @@ question here — *may this user fetch this copy?*, *what does the show page say
 about it?*, *queue one* — and must not import ffmpeg's runner or the job
 registry to ask. The encode itself is :mod:`arc.services.media.offline`.
 
-**What a copy is.** One MP4 per episode at ``DATA_DIR/offline/<id>.mp4``,
-720p at most, H.264 by default, the rendition's own subtitle and audio choice
-burned in, ``moov`` first. A device that keeps an episode offline downloads it
-instead of the full-size ``episode.mp4`` (FR-S7), which stays as the fallback
-for when the source a copy would be made from has already gone.
+**What a copy is.** One MP4 per episode at ``DATA_DIR/offline/<id>.mp4``, at
+most ``OFFLINE_HEIGHT`` lines tall, in ``OFFLINE_CODEC`` at ``OFFLINE_CRF``
+(1080p HEVC CRF 28 on production since 2026-10-28), the rendition's own
+subtitle and audio choice burned in, ``moov`` first. A device that keeps an
+episode offline downloads it instead of the full-size ``episode.mp4`` (FR-S7),
+which stays as the fallback for when the source a copy would be made from has
+already gone.
 
 **The six states a client sees** (:data:`OfflineState`), and only on a
 ``ready`` episode — anything else has no copy to offer (M19 T3/T4 widen that
@@ -74,14 +76,17 @@ log = logging.getLogger(__name__)
 type OfflineState = Literal["none", "queued", "preparing", "available", "failed", "unavailable"]
 
 #: RFC 6381 codec strings, so a client can ask ``canPlayType`` *before* it
-#: downloads a hundred megabytes it cannot play. H.264 High at level 4.0
-#: (``-profile:v high -level 4.0``) is ``avc1.640028``; HEVC Main at level 3.1,
-#: which is what x265 picks for 720p at anime frame rates, is
-#: ``hvc1.1.6.L93.B0``. The video codec only: the audio is AAC-LC either way,
-#: which every client Arc serves already plays.
-CODEC_STRINGS: Final[dict[str, str]] = {
-    "h264": "avc1.640028",
-    "hevc": "hvc1.1.6.L93.B0",
+#: downloads a few hundred megabytes it cannot play: per codec, ``(tallest
+#: picture, string)`` tiers in order, a ceiling of 0 meaning "anything
+#: taller" (:func:`codec_string`). H.264 High carries its level in the last
+#: byte: 4.0 (``avc1.640028``) up to 1080p, 5.1 (``avc1.640033``) above. HEVC
+#: Main carries it as ``L<level × 30>``: 3.1 (``L93``) up to 720p, 4.0
+#: (``L120``) up to 1080p, 5.1 (``L153``) above — what x265 picks at anime
+#: frame rates. The video codec only: the audio is AAC-LC either way, which
+#: every client Arc serves already plays.
+CODEC_STRINGS: Final[dict[str, tuple[tuple[int, str], ...]]] = {
+    "h264": ((1080, "avc1.640028"), (0, "avc1.640033")),
+    "hevc": ((720, "hvc1.1.6.L93.B0"), (1080, "hvc1.1.6.L120.B0"), (0, "hvc1.1.6.L153.B0")),
 }
 
 #: The detail a ready episode whose source is gone answers ``POST`` with: the
@@ -137,8 +142,11 @@ def settings_key(options: OfflineOptions, *, sub_lang: str, audio_lang: str) -> 
     """A short hash over everything that changes a copy's bytes.
 
     Stored on the row so that "was this copy made the way the host makes them
-    now?" is a comparison rather than a guess. Recorded only: nothing re-makes
-    a ready copy because the settings changed. The languages are in it because
+    now?" is a comparison rather than a guess. Nothing re-makes a ready copy
+    by itself because the settings changed; an admin's ``remake-copies``
+    re-makes a trip's (:mod:`arc.services.trips.remake`, owner 2026-10-28)
+    by the recorded codec, height, CRF and bitrate (:func:`made_otherwise`),
+    not by this key, whose languages can drift. The languages are in it because
     they choose the tracks; the preset is, because it changes the picture.
     """
     raw = "|".join(
@@ -155,9 +163,55 @@ def settings_key(options: OfflineOptions, *, sub_lang: str, audio_lang: str) -> 
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def codec_string(codec: str | None) -> str | None:
-    """:data:`CODEC_STRINGS` for ``codec``, or ``None`` for one Arc never writes."""
-    return CODEC_STRINGS.get(codec or "")
+def made_otherwise(
+    copy: OfflineCopy, options: OfflineOptions, *, source_height: int | None = None
+) -> bool:
+    """Whether ``copy`` was made with other encode settings than ``options``. Pure.
+
+    Compares what the row recorded — codec, CRF, audio bitrate and the
+    picture's own height (the *output*: ``min(cap, source)``) — with what an
+    encode now would produce. Not :func:`settings_key`: that hash carries the
+    languages, and an episode without a rendition reads them from the rules
+    of the day, so it could differ on every run and re-fetch for ever.
+
+    The height is like with like: a copy taller than ``options.height`` is
+    stale; one shorter is stale only when the source is known
+    (``source_height``, the rendition's) to be taller than the copy and the
+    cap allows more. A row that recorded nothing yet (queued, never started)
+    is not stale: whatever makes it will use the current settings.
+    """
+    if copy.codec is None or copy.crf is None or copy.audio_bitrate is None:
+        return False
+    if (copy.codec, copy.crf, copy.audio_bitrate) != (
+        options.codec,
+        options.crf,
+        options.audio_bitrate,
+    ):
+        return True
+    if copy.height is None:
+        return False
+    if copy.height > options.height:
+        return True
+    if source_height is None:
+        return False
+    return copy.height < min(options.height, source_height)
+
+
+def codec_string(codec: str | None, height: int | None) -> str | None:
+    """The RFC 6381 string for a copy in ``codec`` at most ``height`` lines tall. Pure.
+
+    The first :data:`CODEC_STRINGS` tier ``height`` fits under; ``None`` for a
+    codec Arc never writes. An unknown height (``None``) reads as the smallest
+    tier: the lowest level is the one any decoder of the codec accepts.
+    """
+    tiers = CODEC_STRINGS.get(codec or "")
+    if tiers is None:
+        return None
+    lines = height or 0
+    for ceiling, string in tiers:
+        if ceiling == 0 or lines <= ceiling:
+            return string
+    return tiers[-1][1]  # pragma: no cover - every table ends with a 0 ceiling
 
 
 def offline_state(
@@ -516,6 +570,7 @@ __all__ = [
     "episodes_with_sources",
     "file_matches",
     "job_progress",
+    "made_otherwise",
     "may_fetch_copy",
     "newest_source",
     "offline_options",

@@ -91,9 +91,11 @@ async def test_a_trip_is_created_and_read_back(
         "size",
         "delivered",
         "url",
+        "etag",
     }
     assert body["episodes"][0]["delivered"] is False
     assert body["episodes"][0]["url"] is None, "no copy yet"
+    assert body["episodes"][0]["etag"] is None
 
     current = await user_client.get("/api/trips/current")
     assert current.status_code == 200

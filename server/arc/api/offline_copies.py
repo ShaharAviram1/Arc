@@ -75,6 +75,7 @@ async def _answer(
         job=jobs.get(episode_id),
         has_source=has_source,
         codec=settings.offline_codec,
+        height=settings.offline_height,
     )
 
 
@@ -137,6 +138,7 @@ async def request_offline_copy(
         job=asked.job,
         has_source=asked.has_source,
         codec=settings.offline_codec,
+        height=settings.offline_height,
     )
 
 

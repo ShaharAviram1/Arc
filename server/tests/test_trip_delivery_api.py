@@ -167,8 +167,18 @@ async def test_a_confirmation_is_204_and_idempotent(
     owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
 ) -> None:
     trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986001)
+    async with api_factory() as session:
+        copy = await session.get(OfflineCopy, ids[1])
+        assert copy is not None
+        etag = copy.etag
 
-    first = await owner_client.post(delivered_url(trip_id, ids[1]), json={"etag": "anything"})
+    # An ETag that is not the ready copy's is a copy from before a re-make:
+    # answered, and the row waits (owner, 2026-10-28).
+    older = await owner_client.post(delivered_url(trip_id, ids[1]), json={"etag": "anything"})
+    assert older.status_code == 204, older.text
+    assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.PENDING
+
+    first = await owner_client.post(delivered_url(trip_id, ids[1]), json={"etag": etag})
     assert first.status_code == 204, first.text
     row = await row_state(api_factory, trip_id, ids[1])
     assert row.state is TripEpisodeState.DELIVERED and row.delivered_at is not None
@@ -396,3 +406,8 @@ async def test_the_url_is_null_without_a_ready_copy(
     by_id = {row["episode_id"]: row for row in current["episodes"]}
     assert by_id[ids[1]]["url"] is None
     assert by_id[ids[2]]["url"] == f"/media/{ids[2]}/offline.mp4"
+    # The ETag rides with the URL: what the media route answers with, so a
+    # device can tell a copy re-made since from the one it holds.
+    assert by_id[ids[1]]["etag"] is None
+    served = await owner_client.head(f"/media/{ids[2]}/offline.mp4")
+    assert by_id[ids[2]]["etag"] == served.headers["etag"]

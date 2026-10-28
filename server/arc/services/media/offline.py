@@ -1,13 +1,18 @@
 """The ``offline_encode`` handler: the small offline copy (FR-P6, §5.3b).
 
-One MP4 per episode, ``DATA_DIR/offline/<episode id>.mp4``: 720p at most, H.264
-(or HEVC, ``OFFLINE_CODEC``), CRF 26, AAC stereo 96k, ``moov`` first, and the
-rendition's own subtitle and audio choice burned in — the same
-:func:`~arc.services.media.plan.build_plan`, the same extracted fonts and
-subtitle file, a different output (:func:`~arc.services.media.plan.
-offline_encode_args`). It exists because a device that keeps an episode offline
-should not have to hold the 1080p rendition to do it: a 24-minute episode is
-about 100 MB here against 300–600 MB there.
+One MP4 per episode, ``DATA_DIR/offline/<episode id>.mp4``: at most
+``OFFLINE_HEIGHT`` lines tall, in ``OFFLINE_CODEC`` at ``OFFLINE_CRF``, AAC
+stereo 96k, ``moov`` first, and the rendition's own subtitle and audio choice
+burned in — the same :func:`~arc.services.media.plan.build_plan`, the same
+extracted fonts and subtitle file, a different output
+(:func:`~arc.services.media.plan.offline_encode_args`). The picture is scaled
+first and the subtitles burned onto the scaled frame, so they are drawn at the
+copy's own resolution. It exists because a device that keeps an episode
+offline should not have to hold the full rendition to do it. The defaults
+were 720p H.264 CRF 26 until 2026-10-28; production has made 1080p HEVC CRF 28
+since (owner: the 720p copies were too soft on the iPad). On SubsPlease 1080p
+sources (8 Mbit/s) a 24-minute episode measured 227 MB at the first and about
+254 MB at the second, for 3.8× the encode time.
 
 It follows the transcode handler (:mod:`arc.services.media.jobs`) point for
 point, and borrows its machinery rather than copying it:
