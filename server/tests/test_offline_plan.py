@@ -9,6 +9,7 @@ are fed captured shapes of what ffprobe says about a good and a bad copy.
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from arc.models import OfflineCopy, OfflineCopyState
 from arc.services.media.copies import (
     CODEC_STRINGS,
     codec_string,
+    made_otherwise,
     offline_options,
     offline_state,
     settings_key,
@@ -106,13 +108,20 @@ def test_h264_is_high_profile_level_4_with_animation_tuning() -> None:
 
 
 def test_h264_level_follows_the_height_as_the_codec_string_does() -> None:
-    at_1080 = offline_encode_args(_plan(), OfflineOptions(codec="h264", height=1080))
-    taller = offline_encode_args(_plan(), OfflineOptions(codec="h264", height=1440))
+    """Both count the picture the copy has: ``min(cap, source height)``."""
+    source = _plan()
+    assert source.height == 1080
+    at_1080 = offline_encode_args(source, OfflineOptions(codec="h264", height=1080))
+    # A 1440 cap over a 1080p source still makes a 1080p copy: level 4.0.
+    capped = offline_encode_args(source, OfflineOptions(codec="h264", height=1440))
+    tall_source = replace(source, video=replace(source.video, height=2160))
+    taller = offline_encode_args(tall_source, OfflineOptions(codec="h264", height=1440))
 
     assert _after(at_1080, "-level") == "4.0"
-    assert codec_string("h264", 1080) == "avc1.640028"  # level 4.0 = 0x28
+    assert _after(capped, "-level") == "4.0"
+    assert codec_string("h264", min(1440, 1080)) == "avc1.640028"  # level 4.0 = 0x28
     assert _after(taller, "-level") == "5.1"
-    assert codec_string("h264", 1440) == "avc1.640033"  # level 5.1 = 0x33
+    assert codec_string("h264", min(1440, 2160)) == "avc1.640033"  # level 5.1 = 0x33
 
 
 def test_hevc_is_tagged_hvc1_for_safari() -> None:
@@ -243,6 +252,38 @@ def test_the_codec_table_covers_both_codecs() -> None:
     assert set(CODEC_STRINGS) == {"h264", "hevc"}
     for tiers in CODEC_STRINGS.values():
         assert tiers[-1][0] == 0
+
+
+def _made(
+    codec: str | None = "h264", height: int | None = 720, crf: int | None = 26
+) -> OfflineCopy:
+    return OfflineCopy(
+        episode_id=1, codec=codec, height=height, crf=crf, audio_bitrate="96k" if codec else None
+    )
+
+
+def test_a_copy_made_otherwise_is_told_by_its_recorded_settings() -> None:
+    old = OfflineOptions(codec="h264", height=720, crf=26)
+    new = OfflineOptions(codec="hevc", height=1080, crf=28)
+
+    assert not made_otherwise(_made(), old)
+    assert made_otherwise(_made(), new), "the trip-4 case: codec and CRF differ"
+    assert made_otherwise(_made(crf=27), old)
+    assert made_otherwise(_made(), replace(old, audio_bitrate="128k"))
+    # Never started: nothing recorded, not stale.
+    assert not made_otherwise(_made(codec=None, height=None, crf=None), new)
+
+
+def test_the_height_is_compared_like_with_like() -> None:
+    cap_1080 = OfflineOptions(codec="h264", height=1080, crf=26)
+
+    # Taller than the cap allows: stale.
+    assert made_otherwise(_made(height=1080), OfflineOptions(codec="h264", height=720, crf=26))
+    # A 720p copy under a 1080 cap: stale only if the source is known taller.
+    assert made_otherwise(_made(height=720), cap_1080, source_height=1080)
+    assert not made_otherwise(_made(height=720), cap_1080, source_height=720)
+    assert not made_otherwise(_made(height=720), cap_1080, source_height=None)
+    assert not made_otherwise(_made(height=1080), cap_1080, source_height=2160)
 
 
 def test_offline_out_names_the_copys_own_level_once_it_exists() -> None:

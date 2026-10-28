@@ -135,7 +135,8 @@ class OfflineCopy(Base):
     #: CRF and the audio bitrate, and a short hash over every setting that
     #: changes the bytes (languages included). A settings change does not
     #: re-make a ready copy by itself (owner, 2026-10-06); ``remake-copies``
-    #: re-makes a trip's by this key (owner, 2026-10-28).
+    #: re-makes a trip's by the codec, height, CRF and bitrate columns, not
+    #: this key (owner, 2026-10-28).
     codec: Mapped[str | None] = mapped_column(String(16))
     height: Mapped[int | None] = mapped_column(Integer)
     crf: Mapped[int | None] = mapped_column(Integer)

@@ -145,7 +145,8 @@ def settings_key(options: OfflineOptions, *, sub_lang: str, audio_lang: str) -> 
     now?" is a comparison rather than a guess. Nothing re-makes a ready copy
     by itself because the settings changed; an admin's ``remake-copies``
     re-makes a trip's (:mod:`arc.services.trips.remake`, owner 2026-10-28)
-    by comparing this key. The languages are in it because
+    by the recorded codec, height, CRF and bitrate (:func:`made_otherwise`),
+    not by this key, whose languages can drift. The languages are in it because
     they choose the tracks; the preset is, because it changes the picture.
     """
     raw = "|".join(
@@ -160,6 +161,40 @@ def settings_key(options: OfflineOptions, *, sub_lang: str, audio_lang: str) -> 
         )
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def made_otherwise(
+    copy: OfflineCopy, options: OfflineOptions, *, source_height: int | None = None
+) -> bool:
+    """Whether ``copy`` was made with other encode settings than ``options``. Pure.
+
+    Compares what the row recorded — codec, CRF, audio bitrate and the
+    picture's own height (the *output*: ``min(cap, source)``) — with what an
+    encode now would produce. Not :func:`settings_key`: that hash carries the
+    languages, and an episode without a rendition reads them from the rules
+    of the day, so it could differ on every run and re-fetch for ever.
+
+    The height is like with like: a copy taller than ``options.height`` is
+    stale; one shorter is stale only when the source is known
+    (``source_height``, the rendition's) to be taller than the copy and the
+    cap allows more. A row that recorded nothing yet (queued, never started)
+    is not stale: whatever makes it will use the current settings.
+    """
+    if copy.codec is None or copy.crf is None or copy.audio_bitrate is None:
+        return False
+    if (copy.codec, copy.crf, copy.audio_bitrate) != (
+        options.codec,
+        options.crf,
+        options.audio_bitrate,
+    ):
+        return True
+    if copy.height is None:
+        return False
+    if copy.height > options.height:
+        return True
+    if source_height is None:
+        return False
+    return copy.height < min(options.height, source_height)
 
 
 def codec_string(codec: str | None, height: int | None) -> str | None:
@@ -535,6 +570,7 @@ __all__ = [
     "episodes_with_sources",
     "file_matches",
     "job_progress",
+    "made_otherwise",
     "may_fetch_copy",
     "newest_source",
     "offline_options",

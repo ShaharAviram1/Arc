@@ -27,8 +27,10 @@ and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
 type, ``import-catalogue`` replaces what it imported last time (and skips the
 work entirely when the files have not changed), ``status`` writes nothing,
 ``prune-unfinished-media`` finds nothing the second time, and
-``remake-copies`` finds no stale copy left (the copies it removed have no row
-until they are made again, with the current settings).
+``remake-copies`` removes nothing the second time (the copies it removed have
+no row until they are made again, with the current settings; a second run
+still reports the stale copies it skipped or found held, and re-makes the
+held ones once the device has stopped fetching them).
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -567,9 +569,12 @@ async def cmd_remake_copies(
     """Re-make the stale small copies of one active trip, or of every one.
 
     The same :func:`~arc.services.trips.remake.remake_stale` for each trip, one
-    commit per trip, one line per trip with its counts. ``--trip`` names a trip
-    that does not exist or is not active: exit 1 and nothing written. ``--all``
-    with no active trip prints that and exits 0.
+    commit per trip, one line per trip with its counts (another user's active
+    trip holding the same episode is re-made with it and logged, not
+    printed). ``--trip`` names a trip that does not exist or is not active:
+    exit 1 and nothing written. ``--all`` with no active trip prints that and
+    exits 0. Copies a device is fetching right now are counted ``held`` and
+    left for a later run.
     """
     now = datetime.now(UTC)
     if args.all:
@@ -601,7 +606,7 @@ async def cmd_remake_copies(
         await session.commit()
         print(
             f"trip {report.trip_id}: {report.stale} stale, {report.repended} re-pended, "
-            f"{report.cleared} cleared, {report.skipped} skipped"
+            f"{report.cleared} cleared, {report.held} held, {report.skipped} skipped"
         )
     return 0
 
