@@ -2042,7 +2042,7 @@ owner's word.
         measured: episode 15, 262 MB, 51.5 min on the 2-core host (3090 s;
         4.0× the 720p encodes' 10–13 min), `hvc1`, level 4.0, 1.32 Mbit/s
         video — the 254 MB / 3.8× estimate held.
-  - [ ] **A — codec string by height; stale copies re-made** (FR-P6,
+  - [x] **A — codec string by height; stale copies re-made** (FR-P6,
         FR-A12): `codec_string(codec, height)` (HEVC L93/L120/L153, H.264
         4.0/5.1); `trips/remake.remake_stale` + CLI `remake-copies --trip
         ID | --all` removes a trip's copies whose `settings_key` is not the
@@ -2050,8 +2050,18 @@ owner's word.
         cancelled and expired rows untouched) and queues a reconciliation;
         `TripEpisodeOut.etag`; the device replaces a held small copy whose
         ETag changed (`adoptTrip`). Docs: FR-P6/§5.3b no longer say 720p /
-        100 MB.
-  - [ ] **B — any number of active trips per user, one per show**
+        100 MB. Shipped as f4d924b (Writer; Validator PASS on all seven
+        criteria, building the production shape on a real DB and running the
+        CLI as a subprocess; Reviewer: no blockers, six should-fixes landed —
+        a late confirmation of the old copy leaves the row pending instead
+        of silently cancelling the swap, the fetch hold is respected, the
+        copy-days clock restarts, other users' trips on the episode are
+        covered, staleness compares the recorded codec/CRF/bitrate/height
+        rather than the language-bearing key, watched episodes are skipped).
+        Verified by the orchestrator 2026-10-28: diffs read, targeted 197,
+        full server 5111 passed on merged main, client 1385, `make lint`
+        clean.
+  - [x] **B — any number of active trips per user, one per show**
         (FR-A12): partial unique index on `(user_id, anime_id)` where
         active (new revision), `GET /api/trips` list replaces `/current`,
         auto-keep over every active trip, show page refusal only for the
@@ -2059,7 +2069,17 @@ owner's word.
         server (median of the last 20 ready copies with the current
         `settings_key`, fallback 260 MB) and the fit check subtracts the
         other trips' undelivered episodes. CLAUDE.md non-negotiable
-        reworded.
+        reworded. Shipped as 8bd7180 (Writer; revision 5d3e9a7c1b20 whose
+        downgrade refuses while a user has several active trips; Validator
+        PASS on all six criteria with five extra multi-trip edge cases;
+        Reviewer: no blockers — the fit check now skips declined episodes,
+        reserves only the missing bytes of a partial download, applies the
+        margin on both sides, the estimate rides on `trip_limits` only and
+        is skipped for the demo account). The Reviewer's open point — no
+        server-side ceiling on how much one user's trips fetch — is the
+        owner's explicit choice. Verified by the orchestrator 2026-10-28 as
+        for A (one merge fix: two ETag tests passed a single trip to
+        `autoKeep`).
   - [ ] **C — production**: deploy; `remake-copies --trip 4` so episodes
         12–14 are re-made at 1080p HEVC and the iPad swaps them; first
         HEVC copy measured (size, encode time on the 2-core host).
