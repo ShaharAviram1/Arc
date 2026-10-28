@@ -25,11 +25,13 @@ from arc.db import Base
 from arc.models._columns import TZDateTime, bigint_pk, created_at
 from arc.models.enums import TripEpisodeState, TripState, enum_column
 
-#: The one-active-trip-per-user invariant (owner, 2026-10-05). A partial
-#: unique index rather than a check in code because the create path's own
-#: check and a second request racing it can both pass; the database is the
-#: only place both agree.
-ONE_ACTIVE_TRIP_INDEX = "ux_trips_one_active_per_user"
+#: At most one active trip per show per user (owner, 2026-10-28; it was one
+#: per user from 2026-10-05). Any number of shows may each have one at once:
+#: the device's free space is the only other limit, and that is the user's
+#: call. A partial unique index rather than a check in code because the
+#: create path's own check and a second request racing it can both pass; the
+#: database is the only place both agree.
+ONE_ACTIVE_TRIP_INDEX = "ux_trips_one_active_per_show"
 ONE_ACTIVE_TRIP_PREDICATE = "state = 'active'"
 
 #: "Which trips hold this episode?" — asked by the reconciler, the copy hook
@@ -45,6 +47,7 @@ class Trip(Base):
         Index(
             ONE_ACTIVE_TRIP_INDEX,
             "user_id",
+            "anime_id",
             unique=True,
             postgresql_where=text(ONE_ACTIVE_TRIP_PREDICATE),
         ),

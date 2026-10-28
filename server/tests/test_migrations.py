@@ -584,21 +584,93 @@ def test_the_offline_copies_table_is_keyed_on_the_episode(
     assert primary == "PRIMARY KEY (episode_id)"
 
 
-def test_one_active_trip_per_user_is_a_partial_unique_index(
+def test_one_active_trip_per_show_is_a_partial_unique_index(
     pg_engine: AsyncEngine, test_database_url: str
 ) -> None:
-    """``ux_trips_one_active_per_user`` (FR-A12, owner 2026-10-05).
+    """``ux_trips_one_active_per_show`` (FR-A12, owner 2026-10-28).
 
     Partial on ``state = 'active'`` so a user's finished and cancelled trips
-    do not count against the one active trip; unique so a second request
-    racing the create path's own check cannot make two.
+    do not count; unique on ``(user_id, anime_id)`` so a second request racing
+    the create path's own check cannot make two on one show, while any number
+    of shows may each have one.
     """
     definition = _index_definition(test_database_url, "trips", ONE_ACTIVE_TRIP_INDEX)
 
+    assert ONE_ACTIVE_TRIP_INDEX == "ux_trips_one_active_per_show"
     assert definition is not None, f"{ONE_ACTIVE_TRIP_INDEX} is not on the trips table"
     assert "UNIQUE INDEX" in definition
-    assert "(user_id)" in definition
+    assert "(user_id, anime_id)" in definition
     assert "WHERE" in definition and "'active'" in definition
+    assert _index_definition(test_database_url, "trips", OLD_TRIP_INDEX) is None
+
+
+#: ``trips_one_active_per_show`` (2026-10-28) and the revision it sits on.
+PER_SHOW_TRIPS = "5d3e9a7c1b20"
+BEFORE_PER_SHOW_TRIPS = "c4b8e1f2a9d6"
+OLD_TRIP_INDEX = "ux_trips_one_active_per_user"
+_TRIPS_USER = "migration-trips@arc.test"
+
+
+def _two_active_trips(url: str) -> None:
+    """One user with active trips on two shows: what the per-user index forbade."""
+    _execute(
+        url,
+        "WITH u AS (INSERT INTO users (email, password_hash) VALUES (:email, 'x') "
+        "RETURNING id), "
+        "a AS (INSERT INTO anime (anilist_id, title_romaji) "
+        "VALUES (989901, 'Migration A'), (989902, 'Migration B') "
+        "RETURNING id) "
+        "INSERT INTO trips (user_id, anime_id, first_number, last_number, count, state, "
+        "created_at, deadline_at) "
+        "SELECT u.id, a.id, 1, 2, 2, 'active', now(), now() FROM u, a",
+        {"email": _TRIPS_USER},
+    )
+
+
+def _drop_trips_user(url: str) -> None:
+    _execute(
+        url,
+        "DELETE FROM anime WHERE id IN (SELECT anime_id FROM trips t JOIN users u "
+        "ON u.id = t.user_id WHERE u.email = :email)",
+        {"email": _TRIPS_USER},
+    )
+    _execute(url, "DELETE FROM users WHERE email = :email", {"email": _TRIPS_USER})
+
+
+def test_the_per_show_trip_index_goes_up_and_down(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """The per-user index comes back on the way down and goes on the way up."""
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, BEFORE_PER_SHOW_TRIPS)
+        old = _index_definition(test_database_url, "trips", OLD_TRIP_INDEX)
+        assert old is not None and "(user_id)" in old and "'active'" in old
+        assert _index_definition(test_database_url, "trips", ONE_ACTIVE_TRIP_INDEX) is None
+
+        command.upgrade(config, PER_SHOW_TRIPS)
+
+        assert _index_definition(test_database_url, "trips", OLD_TRIP_INDEX) is None
+        new = _index_definition(test_database_url, "trips", ONE_ACTIVE_TRIP_INDEX)
+        assert new is not None and "(user_id, anime_id)" in new
+    finally:
+        command.upgrade(config, "head")
+
+
+def test_the_per_show_downgrade_refuses_a_user_with_several_active_trips(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """It names the users and changes nothing, rather than picking trips to end."""
+    config = alembic_config(test_database_url)
+    _two_active_trips(test_database_url)
+    try:
+        with pytest.raises(RuntimeError, match="more than one active trip"):
+            command.downgrade(config, BEFORE_PER_SHOW_TRIPS)
+        assert _index_definition(test_database_url, "trips", ONE_ACTIVE_TRIP_INDEX) is not None
+        assert _index_definition(test_database_url, "trips", OLD_TRIP_INDEX) is None
+    finally:
+        _drop_trips_user(test_database_url)
+        command.upgrade(config, "head")
 
 
 def test_trip_episodes_are_indexed_by_episode(
