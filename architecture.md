@@ -1892,8 +1892,12 @@ time. Modules: `media/plan.py`
 (`OfflineOptions`, `offline_encode_args`, pure), `media/copies.py` (handler-free:
 the state rule, `request_copy`, `may_fetch_copy`, `encoding_episode_ids`, the
 codec strings — what the API and retention import), `media/offline.py` (the
-`offline_encode` handler; `copy_languages` / `current_settings_key`, what
-`trips/remake.py` compares a copy's `settings_key` against, §5.4).
+`offline_encode` handler). `copies.made_otherwise(copy, options,
+source_height=)` is what `trips/remake.py` asks (§5.4e): the row's recorded
+codec, CRF and audio bitrate against `OFFLINE_*`, and its height like with
+like — taller than the cap, or shorter than `min(cap, rendition height)`
+when the source's height is known; never `settings_key`, whose languages
+drift for an episode with no rendition.
 - **Codec strings.** `copies.codec_string(codec, height)` gives the RFC 6381
   string a device passes to `canPlayType` (`OfflineOut.codecs`): H.264 High
   `avc1.640028` (level 4.0) up to 1080 lines, `avc1.640033` (5.1) above — the
@@ -1909,7 +1913,7 @@ codec strings — what the API and retention import), `media/offline.py` (the
   then burn**, so libass draws the glyphs at the copy's own height rather than
   having the source's text scaled down; `min(…,ih)` never upscales. H.264:
   `libx264 -preset $OFFLINE_PRESET -crf $OFFLINE_CRF -tune animation
-  -profile:v high -level 4.0 -pix_fmt yuv420p` (`-level 5.1` above 1080); HEVC: `libx265 … -tag:v hvc1 -profile:v main -pix_fmt
+  -profile:v high -level 4.0 -pix_fmt yuv420p` (`-level 5.1` when `min(cap, source height)` is above 1080); HEVC: `libx265 … -tag:v hvc1 -profile:v main -pix_fmt
   yuv420p` (Safari refuses `hev1`). Common: `-c:a aac -b:a
   $OFFLINE_AUDIO_BITRATE -ac 2 -sn -dn -map_chapters -1 -map_metadata -1
   -movflags +faststart -progress pipe:1`, output `offline.mp4` (relative; the
@@ -3021,15 +3025,26 @@ pure stepper, refusal and row-status rules), `components/Trip.tsx`
   `downloaded` **small** record with a non-null `etag` that differs from a
   non-null server `etag`, with a `url`, is replaced: the blob URL memo
   dropped, the record patched to `preparing` (`url`/`etag` null, `bytes`/
-  `total` 0, `confirm` unset, `replacedFor` = the server ETag), its file
-  deleted (`dropFile`, the removal `remove()` uses — a file the worker
-  still holds is doomed until it lets go; one another account's record
-  holds is kept), then `place(key, 'small', url)` — the usual queue, a fresh
-  download, confirmed with the new ETag on `done`. Not while the episode is
-  open in the player (`enterPlayer`; the next pass does it), not twice at
-  once (`replacing`), and once per server ETag (`replacedFor`), so a server
-  naming one ETag and serving another cannot loop the device. A full-size
-  record, or a null ETag either side, is confirmed as before.
+  `total` 0, `confirm` unset, `reasked` false, `replacedFor` = the server
+  ETag), its file deleted (`dropFile`, the removal `remove()` uses — a file
+  the worker still holds is doomed until it lets go; one another account's
+  record holds is kept), then `place(key, 'small', url)` — the usual queue,
+  a fresh download, confirmed with the new ETag on `done`. **The old copy
+  goes first**: a swap interrupted by going offline leaves the episode with
+  no copy until the device is back online (owner's call — swaps run while
+  online, with the file ready on the server). **Any** ETag change on a held
+  small copy re-downloads it (≈250 MB at 1080p HEVC), a re-make with the
+  same settings included. Not while the episode is open in the player
+  (`enterPlayer`; the next pass does it), not twice at once (`replacing`),
+  and once per server ETag (`replacedFor`), so a server naming one ETag and
+  serving another cannot loop the device. A replacement that throws (the
+  old file cannot be removed) fails the record `gone` rather than leaving an
+  unhandled rejection. `keepTripCopy` carries the ETag too
+  (`TripCopyInput.etag`), so its fallback to `adoptTrip` replaces as well.
+  A confirmation in flight for the old copy when the new one lands does not
+  mark the new one confirmed: `confirm` re-checks the record's ETag when it
+  settles and sends the new one. A full-size record, or a null ETag either
+  side, is confirmed as before.
 - **No `/offline` request for a trip copy.** That route answers a `ready`
   episode only (404 otherwise), and a trip-only episode never is; so
   `keepTripCopy` writes the record (`variant: 'small'`, `tripId`,
@@ -3489,7 +3504,10 @@ above), so what is settled here is the **copy** — file and row — and the
   restores no right to fetch the copy. `delivered_at` is stamped the first
   time, and again (with `released_at` cleared) on a confirmation after a
   release, which restarts the settle hour; an ETag that differs from the
-  copy's is logged, not refused (the device checked size == total). On a
+  copy's is logged, not refused (the device checked size == total) —
+  except on a `pending` row, where an ETag that is not the `ready` copy's
+  (or no ready copy at all) is a copy from before a re-make: the row stays
+  `pending` and nothing else happens (2026-10-28, Remake below). On a
   change it queues `offline_settle(episode)` at `now + TRIP_SETTLE_DELAY`
   (1 h; dedupe per episode, priority 180) and `compute_wants` (the trip want
   ends), ends the trip `finished` when nothing of it is pending any more
@@ -3550,29 +3568,51 @@ above), so what is settled here is the **copy** — file and row — and the
 - **Remake** (owner, 2026-10-28: copies went 720p H.264 CRF 26 → 1080p HEVC
   CRF 28, §5.3b, and the trip under way was to follow). `trips.remake.
   remake_stale(session, settings, *, trip, now) → RemakeReport{stale,
-  repended, cleared, skipped}`, run by `python -m arc.cli remake-copies
-  --trip ID | --all` (one commit and one line per trip; `--trip` on an
-  unknown or ended trip exits 1). Refused with `TripConflict
-  (trip_not_active)` unless the trip is active. Locks the trip `FOR UPDATE`,
-  its rows, then the episodes (delivery's order). A copy is **stale** when
-  its `settings_key` is set and differs from `media.offline.
-  current_settings_key` (the encode's own `copy_languages` + `OFFLINE_*`);
-  a row with no key yet is not. Per stale row: `cancelled`/`expired`, or
-  `delivered` with `released_at` (the device let it go — deleted once
-  watched) → **skipped**, untouched. Otherwise a pending `offline_encode` is
-  dropped (`cancel.drop_queued_copies`) and the copy removed by
-  `retention.delete.delete_copy` (file + row); a **running** encode makes it
-  refuse, and the row is **skipped** unchanged. Then `delivered` →
-  `deliver.repend(row, available_at=None)` ("again"'s shape: pending,
-  `delivered_at`/`released_at`/`available_at` cleared) — **repended**; a
-  `pending` row → `available_at` cleared — **cleared**. One `compute_wants`
-  when anything changed: with no copy row left, `_requeue_trip_copies`
-  re-makes a copy from a source still on disk, and a trip-only episode
-  (source gone with the first copy) is searched and fetched again — the pack
-  the owner holds supplies it — after which the linker queues the copy. The
-  device replaces the copy it holds when the new one's ETag arrives on
-  `TripEpisodeOut.etag` (§5.4d). Flushed, not committed. No want, list
-  entry or MAL write.
+  repended, cleared, held, skipped}`, run by `python -m arc.cli
+  remake-copies --trip ID | --all` (one commit and one line per trip —
+  `trip 4: N stale, N re-pended, N cleared, N held, N skipped`; `--trip` on
+  an unknown or ended trip exits 1). Refused with `TripConflict
+  (trip_not_active)` unless the named trip is active. A copy is **stale**
+  when `copies.made_otherwise` says so (§5.3b: recorded codec/CRF/audio
+  bitrate vs `OFFLINE_*`, height like with like; a row that recorded nothing
+  is not; never `settings_key`).
+  **Other trips.** The named trip's stale episodes are found first, unlocked;
+  then every **active** trip holding one of them — another user's included —
+  is locked: trips `FOR UPDATE` in id order, then all their rows, then the
+  episodes, before anything is deleted; staleness is decided again under the
+  locks. Every live row of a stale episode in any of those trips follows the
+  rules below; the report counts the named trip's rows, and each trip
+  touched gets a log line with its own counts.
+  **Per row.** `cancelled`/`expired`; `delivered` with `released_at` (the
+  device let it go — deleted once watched); `delivered`, unreleased, and
+  completed by that trip's user (`playback.progress.completed_episode_ids`)
+  → **skipped**, untouched. **Fetch hold**: when
+  `settle.fetch_hold(copy.last_served_at, None, now=now)` holds (a device
+  fetched it within the settle's quiet window), the copy and its live rows
+  are left alone and counted **held** — the operator runs the command again
+  later. Otherwise a pending `offline_encode` is dropped
+  (`cancel.drop_queued_copies`) and the copy removed by
+  `retention.delete.delete_copy` — the file is unlinked at once, before the
+  CLI commits, as the settle's is; a **running** encode makes it refuse, and
+  the rows are **skipped** unchanged. Then `delivered` → `deliver.repend(row,
+  available_at=now)` ("again"'s shape: pending, `delivered_at`/
+  `released_at` cleared) — **repended**; `pending` → `available_at = now` —
+  **cleared**. Both restart the `trip_copy_days` clock, as "again" does for
+  a copy on disk, so a trip near its deadline is not expired by the next
+  sweep before the new copy exists (`trip_phase` and `fetchable` never read
+  `available_at`; `stamp_available` only stamps null rows, so the clock runs
+  from the remake). One `compute_wants` when a copy was removed: with no
+  copy row left, `_requeue_trip_copies` re-makes a copy from a source still
+  on disk, and a trip-only episode (source gone with the first copy) is
+  wanted again (`not_wanted` → `wanted`), searched and fetched — the pack
+  the owner holds supplies it — after which the linker queues the copy.
+  **Late confirmation.** A device that finished the old copy and confirms
+  it after the remake sends the old ETag: `confirm_delivered` leaves a
+  `pending` row pending when the ETag is not the `ready` copy's (or there
+  is no ready copy) — nothing queued, nothing dropped, the trip not ended,
+  answered 204 — and the device replaces its copy when the new one's ETag
+  arrives on `TripEpisodeOut.etag` (§5.4d), confirming that. Flushed, not
+  committed. No want, list entry or MAL write.
 - **Authorisation** (`media.copies.may_fetch_copy`, asked by
   `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
   account; a `ready` episode's copy → any account; a non-`ready` episode's →
@@ -7236,4 +7276,5 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-18 — **Next season** at a finished season's end (§5b `/play`; spec FR-S5 item 3, FR-A9, §5 Player; owner after the real-iPad check). `PlayInfo.next_season` (`NextSeasonRef`); new `services/catalog/sequels.py` (pure `season_ends_here`, `pick_sequel`, `first_regular_episode`, one-query `find_sequel`), `services/playback/next_season.py`, `wants.coverable_once_active`. Client: `useNextSeasonPress` in the player (end overlay and Next glyph) does the list write then the demand — two existing calls, no new endpoint; the demand's `coverable` reads the committed entry. No schema change, no new dependency, no new MAL-writing code (the absent case's add goes through `set_list_entry` like the show page's).
 - 2026-10-18 — Next season after review (§5b `/play`): `season_ends_here` requires the stated count on a FINISHED show too; `pick_sequel` ranks only `SEASON_FORMATS` (`TV`, `TV_SHORT`, `ONA`); `list_state` is `dormant` only within `WANTING_STATUSES`; `fetchable` also accepts the current `coverable` set for a dormant/absent entry; `NextSeasonRef.aired`; `NextSeasonRef.list_state` reuses `next_season.ListState`; one `useNextSeasonPress` per player. Still no schema change, no new dependency.
 - 2026-10-20 — **M20.2 Slow swarms** (§5.1a batches, `compute_wants`; spec FR-A1, FR-A4, FR-A6, FR-A11, FR-A14, FR-D2; owner). Settings `batch_prefer_ratio`, `slow_swarm_seeders`, `look_ahead_slow` seeded by data-only revision `c4b8e1f2a9d6`, read by `rules.batch_prefer_ratio` and the one-query `rules.window_rules`. `nyaa.search_for_episode(with_batches=True)` asks the pack forms beside the singles on a finished show; `jobs._prefer_batch` runs after `_pick` and before `_record_torrent`, filters packs (resolution_rank ≤ 1, no dub over a subbed single, trip floor, `nyaa.batch_beats_single`), takes the first through the unchanged `_take_batch` (`over_single=True`: a range-less miss is not tombstoned), attaches via `batch.claim_existing` when a sibling took it, else falls through to the single; the no-single fallback is gated on `not ranked`; `_retry_stalled_pack_episodes` (was `_retry_trip_episodes`) retries every pending episode of a stalled pack unless the pack is manual. `wants._thin_shows` (one UNION ALL + DISTINCT ON statement, singles via `torrents.episode_id`, packs via `torrent_files`, null seeders skipped) and `show_look_ahead` give a thin show `max(n, slow_n)`; `_reconcile(keep_in_flight=plan.look_ahead > 0)` keeps a downloading want above progress when the window shrinks. No schema change, no new dependency, no new MAL-writing code.
-- 2026-10-28 — **Offline copies 1080p HEVC CRF 28; trips' copies can be re-made** (§5.3b, §5.4d, §5.4e Remake, §9 CLI; spec FR-P6, FR-A12; owner: the 720p copies were too soft on the iPad). Production `.env` sets `OFFLINE_CODEC=hevc OFFLINE_HEIGHT=1080 OFFLINE_CRF=28` (227 MB → ≈254 MB per 24 min on SubsPlease 1080p, 3.8× the encode time); the shipped defaults stay 720p H.264 CRF 26. `copies.codec_string(codec, height)` names the level by height (HEVC L93/L120/L153 at ≤720/≤1080/above; H.264 `640028`/`640033` at ≤1080/above, and `offline_encode_args` writes `-level 5.1` above 1080 to match); `OfflineOut.build`, `OfflineFacts` and `episode_extras` take `OFFLINE_HEIGHT`. New `trips/remake.py` (`remake_stale`, `RemakeReport`) and `arc.cli remake-copies --trip ID | --all`; `deliver.repend` extracted from `ask_again`; `media.offline.copy_languages` (was `_languages`) and `current_settings_key`. `TripEpisodeOut.etag`; client `adoptTrip(…, etag)` replaces a small copy whose ETag differs (`DownloadRecord.replacedFor`, `dropFile` shared with `remove`). No schema change, no new dependency, no MAL-writing code.
+- 2026-10-28 — **Offline copies 1080p HEVC CRF 28; trips' copies can be re-made** (§5.3b, §5.4d, §5.4e Remake, §9 CLI; spec FR-P6, FR-A12; owner: the 720p copies were too soft on the iPad). Production `.env` sets `OFFLINE_CODEC=hevc OFFLINE_HEIGHT=1080 OFFLINE_CRF=28` (227 MB → ≈254 MB per 24 min on SubsPlease 1080p, 3.8× the encode time); the shipped defaults stay 720p H.264 CRF 26. `copies.codec_string(codec, height)` names the level by height (HEVC L93/L120/L153 at ≤720/≤1080/above; H.264 `640028`/`640033` at ≤1080/above, and `offline_encode_args` writes `-level 5.1` when `min(cap, source)` is above 1080 to match); `OfflineOut.build`, `OfflineFacts` and `episode_extras` take `OFFLINE_HEIGHT`. New `trips/remake.py` (`remake_stale`, `RemakeReport`) and `arc.cli remake-copies --trip ID | --all`; `deliver.repend` extracted from `ask_again`; `copies.made_otherwise` decides staleness. `TripEpisodeOut.etag`; client `adoptTrip(…, etag)` replaces a small copy whose ETag differs (`DownloadRecord.replacedFor`, `dropFile` shared with `remove`). No schema change, no new dependency, no MAL-writing code.
+- 2026-10-28 — Remake after validation and review (§5.4d, §5.4e Delivery and Remake; spec FR-A12). `confirm_delivered` leaves a `pending` row pending when the device's ETag is not the ready copy's (the late-confirmation race). Staleness is `copies.made_otherwise` over the recorded codec/height/CRF/bitrate, not `settings_key` (its languages drift without a rendition). `remake_stale` locks every active trip holding a stale episode (id order, rows, episodes) and applies the rules to all of them; skips a delivered episode its user completed; leaves a copy under `settle.fetch_hold` alone (`RemakeReport.held`, printed); sets `available_at = now` on repended and cleared rows. Client: `replaceCopy` failure fails the record `gone`; `reasked` reset; `confirm` re-checks the ETag when it settles; `TripCopyInput.etag`. The H.264 `-level` counts `min(cap, source height)`. No schema change, no new dependency, no MAL-writing code.
