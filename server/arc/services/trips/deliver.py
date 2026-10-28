@@ -199,6 +199,21 @@ async def release_delivered(
     return row
 
 
+def repend(row: TripEpisode, *, available_at: datetime | None) -> None:
+    """Put a row back to ``pending`` for a copy the device is about to get.
+
+    ``delivered_at`` and ``released_at`` are cleared — the row describes the
+    copy to come, not the one the device had (the confirmation is in the
+    log) — and ``available_at`` is what the caller says: now for a copy still
+    on disk, ``None`` for the copy hook to stamp when one is made. Shared by
+    "again" and the remake (:mod:`arc.services.trips.remake`).
+    """
+    row.state = TripEpisodeState.PENDING
+    row.delivered_at = None
+    row.released_at = None
+    row.available_at = available_at
+
+
 async def ask_again(
     session: AsyncSession,
     settings: Settings,
@@ -224,10 +239,7 @@ async def ask_again(
             and copy.state is OfflineCopyState.READY
             and file_matches(offline_path_for(settings, episode_id), copy)
         )
-        row.state = TripEpisodeState.PENDING
-        row.delivered_at = None
-        row.released_at = None
-        row.available_at = now if on_disk else None
+        repend(row, available_at=now if on_disk else None)
         await enqueue_compute_wants(session)
         log.info(
             "trip episode asked for again",
@@ -249,4 +261,5 @@ __all__ = [
     "confirm_delivered",
     "confirmed_state",
     "release_delivered",
+    "repend",
 ]

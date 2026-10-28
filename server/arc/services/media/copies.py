@@ -142,8 +142,10 @@ def settings_key(options: OfflineOptions, *, sub_lang: str, audio_lang: str) -> 
     """A short hash over everything that changes a copy's bytes.
 
     Stored on the row so that "was this copy made the way the host makes them
-    now?" is a comparison rather than a guess. Recorded only: nothing re-makes
-    a ready copy because the settings changed. The languages are in it because
+    now?" is a comparison rather than a guess. Nothing re-makes a ready copy
+    by itself because the settings changed; an admin's ``remake-copies``
+    re-makes a trip's (:mod:`arc.services.trips.remake`, owner 2026-10-28)
+    by comparing this key. The languages are in it because
     they choose the tracks; the preset is, because it changes the picture.
     """
     raw = "|".join(

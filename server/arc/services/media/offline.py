@@ -461,7 +461,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
         await _fail(ctx, episode, copy, reporter, SOURCE_GONE_MESSAGE)
         return
 
-    sub_lang, audio_lang = await _languages(ctx.session, episode_id)
+    sub_lang, audio_lang = await copy_languages(ctx.session, episode_id)
     options = offline_options(settings)
     copy.state = OfflineCopyState.PREPARING
     copy.media_file_id = media_file.id
@@ -559,7 +559,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     await on_copy_ready(ctx, episode, copy, why=why)
 
 
-async def _languages(session: AsyncSession, episode_id: int) -> tuple[str, str]:
+async def copy_languages(session: AsyncSession, episode_id: int) -> tuple[str, str]:
     """``(sub_lang, audio_lang)`` to plan the copy with.
 
     The rendition's own recorded choice when the episode has one, so the copy
@@ -572,6 +572,17 @@ async def _languages(session: AsyncSession, episode_id: int) -> tuple[str, str]:
     if rendition is None:
         return rules_sub, rules_audio
     return rendition.subtitle_lang or rules_sub, rendition.audio_lang or rules_audio
+
+
+async def current_settings_key(session: AsyncSession, settings: Settings, episode_id: int) -> str:
+    """The ``settings_key`` a copy of ``episode_id`` made now would record.
+
+    Exactly what :func:`_make` writes — :func:`copy_languages` and the
+    ``OFFLINE_*`` settings — so a copy whose row says otherwise was made some
+    other way (:mod:`arc.services.trips.remake`).
+    """
+    sub_lang, audio_lang = await copy_languages(session, episode_id)
+    return settings_key(offline_options(settings), sub_lang=sub_lang, audio_lang=audio_lang)
 
 
 async def _still_ready(session: AsyncSession, episode: Episode) -> bool:
@@ -675,6 +686,8 @@ __all__ = [
     "CopyRefused",
     "CopyResult",
     "check_probe",
+    "copy_languages",
+    "current_settings_key",
     "encode_copy",
     "moov_before_mdat",
     "offline_encode",

@@ -1,7 +1,7 @@
 """Operator commands: ``python -m arc.cli <command>`` (roadmap M11, M16).
 
 Five things an operator has to do on a host with no browser session yet, one
-thing they always want to know, and one repair:
+thing they always want to know, and two repairs:
 
 * ``invite``            — issue an invite link and print it.
 * ``warm-catalogue``    — queue the work that gives a fresh deployment a
@@ -17,12 +17,18 @@ thing they always want to know, and one repair:
 * ``prune-unfinished-media`` — delete the review-queue rows an earlier scan
                           wrote for files a torrent is still downloading
                           (owner incident 2026-10-06). ``--dry-run`` lists them.
+* ``remake-copies``     — re-make the small copies of an active trip (``--trip
+                          ID``) or of every one (``--all``) that were made with
+                          other encode settings than the current ``OFFLINE_*``
+                          (owner, 2026-10-28; :mod:`arc.services.trips.remake`).
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
 and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
 type, ``import-catalogue`` replaces what it imported last time (and skips the
-work entirely when the files have not changed), ``status`` writes nothing, and
-``prune-unfinished-media`` finds nothing the second time.
+work entirely when the files have not changed), ``status`` writes nothing,
+``prune-unfinished-media`` finds nothing the second time, and
+``remake-copies`` finds no stale copy left (the copies it removed have no row
+until they are made again, with the current settings).
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -45,6 +51,7 @@ Run it from ``server/``::
     uv run python -m arc.cli warm-catalogue
     uv run python -m arc.cli import-catalogue
     uv run python -m arc.cli prune-unfinished-media --dry-run
+    uv run python -m arc.cli remake-copies --trip 4
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -78,6 +85,8 @@ from arc.models import (
     ListEntry,
     ListStatus,
     MalLink,
+    Trip,
+    TripState,
     User,
     UserRole,
 )
@@ -107,6 +116,8 @@ from arc.services.recs import (
     run_recommendations,
 )
 from arc.services.retention.sweep import retained_bytes
+from arc.services.trips.create import TripConflict
+from arc.services.trips.remake import remake_stale
 
 #: Exit code for "the command could not do what was asked" — no such user, no
 #: search hit. Distinct from 2, which argparse uses for a bad command line.
@@ -547,6 +558,54 @@ async def cmd_prune_unfinished_media(
     return 0
 
 
+# --- remake-copies ----------------------------------------------------------
+
+
+async def cmd_remake_copies(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Re-make the stale small copies of one active trip, or of every one.
+
+    The same :func:`~arc.services.trips.remake.remake_stale` for each trip, one
+    commit per trip, one line per trip with its counts. ``--trip`` names a trip
+    that does not exist or is not active: exit 1 and nothing written. ``--all``
+    with no active trip prints that and exits 0.
+    """
+    now = datetime.now(UTC)
+    if args.all:
+        ids = list(
+            (
+                await session.scalars(
+                    select(Trip.id).where(Trip.state == TripState.ACTIVE).order_by(Trip.id)
+                )
+            ).all()
+        )
+        if not ids:
+            print("no active trip", file=sys.stderr)
+            return 0
+    else:
+        ids = [args.trip]
+    for trip_id in ids:
+        trip = await session.get(Trip, trip_id)
+        if trip is None:
+            print(f"no trip with id {trip_id}", file=sys.stderr)
+            return EXIT_FAILED
+        try:
+            report = await remake_stale(session, settings, trip=trip, now=now)
+        except TripConflict:
+            await session.rollback()
+            print(f"trip {trip_id} is not active", file=sys.stderr)
+            if not args.all:
+                return EXIT_FAILED
+            continue
+        await session.commit()
+        print(
+            f"trip {report.trip_id}: {report.stale} stale, {report.repended} re-pended, "
+            f"{report.cleared} cleared, {report.skipped} skipped"
+        )
+    return 0
+
+
 # --- wiring -----------------------------------------------------------------
 
 type Command = Callable[[AsyncSession, Settings, argparse.Namespace], Awaitable[int]]
@@ -635,6 +694,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="list the rows that would go and write nothing"
     )
     prune.set_defaults(handler=cmd_prune_unfinished_media)
+
+    remake = sub.add_parser(
+        "remake-copies",
+        help="re-make a trip's small copies made with other encode settings than now",
+    )
+    which = remake.add_mutually_exclusive_group(required=True)
+    which.add_argument("--trip", type=int, metavar="ID", help="the one active trip to remake")
+    which.add_argument("--all", action="store_true", help="every active trip")
+    remake.set_defaults(handler=cmd_remake_copies)
 
     return parser
 
