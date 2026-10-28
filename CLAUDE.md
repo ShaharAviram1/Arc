@@ -72,8 +72,8 @@ directly. Anything with logic goes through a Writer.
   explicitly pressed play on (FR-A14), a single first episode a user
   explicitly asked to sample (FR-A8), and the next X aired unwatched episodes
   of one show a user explicitly asked for as a trip (FR-A12: at most
-  `trip_max_episodes`, one trip per user at a time). Never fetch whole
-  seasons otherwise; imported list entries stay dormant until touched in Arc
+  `trip_max_episodes` per trip, one active trip per show per user). Never
+  fetch whole seasons otherwise; imported list entries stay dormant until touched in Arc
   (FR-A9), and never more than K shows per user at once (FR-A10; a trip, the
   halfway prefetch and a demanded episode do not count).
 - **Media routes** require a session. Paths are derived from ids, never from
