@@ -251,7 +251,7 @@ describe('the episode row', () => {
   }
 
   function renderShow(routes: MockRoutes) {
-    const fetchMock = mockApi({ 'GET /api/trips/current': { body: null }, ...routes })
+    const fetchMock = mockApi({ 'GET /api/trips': { body: [] }, ...routes })
     const router = createMemoryRouter([{ path: '/anime/:id', element: <Show /> }], {
       initialEntries: [`/anime/${String(FRIEREN.id)}`],
     })

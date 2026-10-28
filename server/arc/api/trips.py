@@ -4,11 +4,13 @@ Three routes, thin over :mod:`arc.services.trips`:
 
 * ``POST /api/anime/{id}/trip`` ``{count}`` → **201** :class:`~arc.api.
   trip_schemas.TripOut`. Refusals carry a short code as ``detail``: **403**
-  ``demo_account``; **409** ``trip_active`` (one active trip per user) or
+  ``demo_account``; **409** ``trip_active`` (this show already has the
+  caller's active trip: one per show, any number of shows) or
   ``storage_held`` (FR-T6); **422** ``count_out_of_range`` (1..
   ``trip_max_episodes``) or ``nothing_aired`` (no aired episode after the
   caller's progress); **404** for an unknown show.
-* ``GET /api/trips/current`` → the caller's active trip, or ``null``.
+* ``GET /api/trips`` → the caller's active trips, oldest first (``[]`` for
+  none).
 * ``DELETE /api/trips/{id}`` → **204**. The caller's own trip only; anybody
   else's is a 404, as is an unknown id. A trip that already finished or
   expired is a 409 ``trip_not_active``; cancelling a cancelled one is a 204.
@@ -53,7 +55,7 @@ from arc.services.trips.create import (
     TripForbidden,
     TripInvalid,
     TripNotFound,
-    active_trip,
+    active_trips,
     create_trip,
 )
 from arc.services.trips.deliver import ask_again, confirm_delivered, release_delivered
@@ -114,15 +116,15 @@ async def start_trip(
 
 
 @router.get(
-    "/api/trips/current",
-    response_model=TripOut | None,
-    summary="The caller's active trip, or null (FR-A12)",
+    "/api/trips",
+    response_model=list[TripOut],
+    summary="The caller's active trips, oldest first (FR-A12)",
 )
-async def current(user: CurrentUser, session: SessionDep, settings: SettingsDep) -> TripOut | None:
-    trip = await active_trip(session, user.id)
-    if trip is None:
-        return None
-    return TripOut.build(await trip_facts(session, settings, trip))
+async def active(user: CurrentUser, session: SessionDep, settings: SettingsDep) -> list[TripOut]:
+    return [
+        TripOut.build(await trip_facts(session, settings, trip))
+        for trip in await active_trips(session, user.id)
+    ]
 
 
 @router.delete(

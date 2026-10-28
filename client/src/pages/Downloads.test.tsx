@@ -271,7 +271,7 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     pretendOpfs()
     mockApi({
       'GET /api/auth/me': { body: TEST_USER },
-      'GET /api/trips/current': { body: null },
+      'GET /api/trips': { body: [] },
     })
     // The server has not answered the confirmation yet.
     install(tripRecords(), { confirmDelivered: () => new Promise(() => undefined) })
@@ -291,7 +291,7 @@ describe('a trip on the Downloads page (M19 T6)', () => {
 
   it('keeps episodes outside a trip in their own list', async () => {
     pretendOpfs()
-    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips/current': { body: null } })
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips': { body: [] } })
     const [first] = tripRecords()
     install([first as DownloadRecord, downloadedRecord(TEST_USER.id, PLAY_INFO_EPISODE_2, 700)])
 
@@ -306,7 +306,7 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     pretendOpfs()
     const fetchMock = mockApi({
       'GET /api/auth/me': { body: TEST_USER },
-      'GET /api/trips/current': { body: CURRENT },
+      'GET /api/trips': { body: [CURRENT] },
       [`DELETE /api/trips/${String(TRIP_ID)}`]: { status: 204 },
     })
     install(tripRecords())
@@ -326,9 +326,39 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     expect(screen.getByRole('button', { name: `Delete ${TITLE} episode 1` })).toBeInTheDocument()
   })
 
+  it('lists every active trip, one the device has nothing of yet too (owner, 2026-10-28)', async () => {
+    pretendOpfs()
+    const second = {
+      ...CURRENT,
+      id: TRIP_ID + 1,
+      anime_id: 4242,
+      anime_title: 'Kusuriya no Hitorigoto',
+      count: 3,
+    }
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/trips': { body: [CURRENT, second] },
+    })
+    install(tripRecords())
+
+    renderApp()
+
+    const first = await screen.findByRole('region', { name: `Trip · ${TITLE}` })
+    const other = await screen.findByRole('region', { name: 'Trip · Kusuriya no Hitorigoto' })
+    expect(
+      within(other).getByRole('heading', { name: 'Trip · Kusuriya no Hitorigoto · 3 episodes' }),
+    ).toBeInTheDocument()
+    expect(within(other).getByText('Nothing on this device yet')).toBeInTheDocument()
+    expect(await within(first).findByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+    expect(within(other).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+    // The newest trip first.
+    const regions = screen.getAllByRole('region', { name: /^Trip · / })
+    expect(regions[0]).toBe(other)
+  })
+
   it('tells the server when a trip episode is deleted from the device', async () => {
     pretendOpfs()
-    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips/current': { body: null } })
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips': { body: [] } })
     const releaseDelivered = vi.fn(() => Promise.resolve(null))
     const [first] = tripRecords()
     install([{ ...(first as DownloadRecord), confirm: 'done' }], { releaseDelivered })

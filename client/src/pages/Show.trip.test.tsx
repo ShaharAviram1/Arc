@@ -92,8 +92,14 @@ function installManager() {
 /** The routes every test needs, added to `routes` itself so a test may change them later. */
 function api(routes: MockRoutes) {
   routes['GET /api/auth/me'] ??= ME
-  routes['GET /api/trips/current'] ??= { body: null }
+  routes['GET /api/trips'] ??= { body: [] }
   return mockApi(routes)
+}
+
+/** The show with the server's copy estimate at 100 MB, the figure these sums were written for. */
+const ESTIMATED: AnimeDetail = {
+  ...FRIEREN_DETAIL,
+  trip_limits: { max_episodes: 50, copy_estimate_bytes: 100_000_000 },
 }
 
 beforeEach(() => {
@@ -135,7 +141,8 @@ describe('Prepare for a trip', () => {
     expect(count).toHaveAttribute('max', '5')
     expect(within(card).getByRole('button', { name: 'More episodes' })).toBeDisabled()
     expect(within(card).getByTestId('trip-range')).toHaveTextContent('Episodes 2–7')
-    expect(within(card).getByText(/About 500 MB \(estimate\)/)).toBeInTheDocument()
+    // No estimate from the server (an older payload): its 260 MB fallback.
+    expect(within(card).getByText(/About 1\.3 GB \(estimate\)/)).toBeInTheDocument()
 
     const fewer = within(card).getByRole('button', { name: 'Fewer episodes' })
     for (let i = 0; i < 6; i += 1) await user.click(fewer)
@@ -160,7 +167,7 @@ describe('Prepare for a trip', () => {
     installManager()
     // 340 MB free: about 3 episodes at 110 MB each.
     browserReports(4_700_000_000, 5_040_000_000)
-    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    api({ [DETAIL]: { body: ESTIMATED } })
     const user = userEvent.setup()
 
     renderShow()
@@ -180,7 +187,7 @@ describe('Prepare for a trip', () => {
   it('offers no trip when the browser reports no room for one episode', async () => {
     installManager()
     browserReports(5_000_000_000, 5_050_000_000)
-    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    api({ [DETAIL]: { body: ESTIMATED } })
     const user = userEvent.setup()
 
     renderShow()
@@ -193,10 +200,34 @@ describe('Prepare for a trip', () => {
     expect(within(card).getByRole('button', { name: 'Prepare 1 episode' })).toBeDisabled()
   })
 
+  it('counts what the other trips still have to bring (owner, 2026-10-28)', async () => {
+    installManager()
+    // 340 MB free, one episode of another show's trip still to come: room for 2.
+    browserReports(4_700_000_000, 5_040_000_000)
+    const other = trip(
+      [tripEpisode(5, 1, 'searching'), tripEpisode(6, 2, 'delivered', { delivered: true })],
+      { id: 91, anime_id: 4242, anime_title: 'Kusuriya no Hitorigoto' },
+    )
+    api({ [DETAIL]: { body: ESTIMATED }, 'GET /api/trips': { body: [other] } })
+    const user = userEvent.setup()
+
+    renderShow()
+    await user.click(await screen.findByRole('button', { name: 'Prepare for a trip' }))
+
+    const card = screen.getByRole('form', { name: 'Prepare for a trip' })
+    expect(await within(card).findByTestId('trip-room')).toHaveTextContent(
+      /room for about 2 episodes on this device \(324 MB free of 4\.7 GB, about 105 MB of it kept for your other trips\)/,
+    )
+    expect(within(card).getByRole('spinbutton', { name: 'Episodes' })).toHaveAttribute('max', '2')
+    // Another show's trip no longer blocks this one, and is not linked.
+    expect(within(card).getByRole('button', { name: 'Prepare 2 episodes' })).toBeEnabled()
+    expect(within(card).queryByRole('link')).not.toBeInTheDocument()
+  })
+
   it('leaves the stepper alone when the browser reports room enough', async () => {
     installManager()
     browserReports(4_700_000_000, 32_400_000_000)
-    api({ [DETAIL]: { body: FRIEREN_DETAIL } })
+    api({ [DETAIL]: { body: ESTIMATED } })
     const user = userEvent.setup()
 
     renderShow()
@@ -233,6 +264,7 @@ describe('Prepare for a trip', () => {
   })
 
   it.each([
+    [409, 'trip_active', /^This show already has a trip being prepared\.$/],
     [409, 'storage_held', /short of disk space/],
     [422, 'nothing_aired', /Nothing has aired after where you are/],
     [422, 'count_out_of_range', /more episodes than this server allows/],
@@ -251,24 +283,32 @@ describe('Prepare for a trip', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(sentence)
   })
 
-  it('links to the show that already holds the one trip', async () => {
+  it('starts a trip beside one on another show (owner, 2026-10-28)', async () => {
     installManager()
     const elsewhere = trip([tripEpisode(5, 1, 'searching')], {
+      id: 91,
       anime_id: 4242,
       anime_title: 'Kusuriya no Hitorigoto',
     })
-    api({
-      [DETAIL]: { body: FRIEREN_DETAIL },
-      'GET /api/trips/current': { body: elsewhere },
-    })
+    const made = trip([tripEpisode(9002, 2, 'preparing')])
+    const routes: MockRoutes = {
+      [DETAIL]: { body: ESTIMATED },
+      'GET /api/trips': { body: [elsewhere] },
+      [`POST ${TRIP_PATH}`]: { status: 201, body: made },
+    }
+    const fetchMock = api(routes)
     const user = userEvent.setup()
 
     renderShow()
     await user.click(await screen.findByRole('button', { name: 'Prepare for a trip' }))
 
-    const link = await screen.findByRole('link', { name: 'Kusuriya no Hitorigoto' })
-    expect(link).toHaveAttribute('href', '/anime/4242')
-    expect(screen.getByRole('button', { name: /^Prepare \d+ episodes$/ })).toBeDisabled()
+    expect(screen.queryByRole('link', { name: 'Kusuriya no Hitorigoto' })).not.toBeInTheDocument()
+    const start = screen.getByRole('button', { name: /^Prepare \d+ episodes$/ })
+    expect(start).toBeEnabled()
+    routes[DETAIL] = { body: { ...ESTIMATED, trip: made } }
+    await user.click(start)
+    expect(callTo(fetchMock, TRIP_PATH)).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Trip · Episode 2' })).toBeInTheDocument()
   })
 
   it('is not offered to the demo account', async () => {

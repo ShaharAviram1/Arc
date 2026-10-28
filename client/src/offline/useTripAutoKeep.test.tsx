@@ -12,8 +12,9 @@ import { mockApi, requestsMade, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock
 import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
 
 /**
- * The auto-keep hook (M19 T6, FR-A12): what one pass over the current trip
- * does, and when the hook runs at all.
+ * The auto-keep hook (M19 T6, FR-A12): what one pass over the active trips
+ * does (any number of them, one per show — owner, 2026-10-28), and when the
+ * hook runs at all.
  */
 
 const USER = TEST_USER.id
@@ -31,10 +32,15 @@ function tripEpisode(id: number, number: number, phase: TripEpisode['phase']): T
   }
 }
 
-function trip(episodes: TripEpisode[], state: Trip['state'] = 'active'): Trip {
+function trip(
+  episodes: TripEpisode[],
+  state: Trip['state'] = 'active',
+  id: number = TRIP,
+  animeId: number = PLAY_INFO.anime.id,
+): Trip {
   return {
-    id: TRIP,
-    anime_id: PLAY_INFO.anime.id,
+    id,
+    anime_id: animeId,
     anime_title: PLAY_INFO.anime.title.preferred,
     first_number: 1,
     last_number: 2,
@@ -73,7 +79,7 @@ describe('autoKeep', () => {
     const { manager, worker } = await managerWith()
 
     await autoKeep(
-      trip([tripEpisode(9001, 1, 'available'), tripEpisode(9002, 2, 'preparing')]),
+      [trip([tripEpisode(9001, 1, 'available'), tripEpisode(9002, 2, 'preparing')])],
       manager,
     )
 
@@ -85,7 +91,7 @@ describe('autoKeep', () => {
 
   it('downloads nothing the server has given no URL for yet', async () => {
     const { manager, worker } = await managerWith()
-    await autoKeep(trip([{ ...tripEpisode(9001, 1, 'available'), url: null }]), manager)
+    await autoKeep([trip([{ ...tripEpisode(9001, 1, 'available'), url: null }])], manager)
     expect(manager.record(9001)).toBeUndefined()
     expect(worker.commands).toEqual([])
   })
@@ -101,7 +107,7 @@ describe('autoKeep', () => {
     }
     const { manager, worker } = await managerWith([paused])
 
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
 
     expect(manager.record(9001)).toMatchObject({ state: 'paused', reason: 'by-hand' })
     expect(worker.commands).toEqual([])
@@ -111,7 +117,7 @@ describe('autoKeep', () => {
     const confirmDelivered = vi.fn(() => Promise.resolve(null))
     const { manager, worker } = await managerWith([downloadedRecord(USER)], { confirmDelivered })
 
-    await autoKeep(trip([tripEpisode(9001, 1, 'preparing')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'preparing')])], manager)
 
     expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"')
     expect(worker.commands).toEqual([])
@@ -154,12 +160,12 @@ describe('autoKeep', () => {
     await manager.remove(9001)
     const before = worker.commands.length
 
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
     expect(manager.record(9001)).toBeUndefined()
     expect(worker.commands).toHaveLength(before)
 
     manager.forgetDecline(TRIP, 9001)
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
     expect(manager.record(9001)?.tripId).toBe(TRIP)
   })
 
@@ -180,7 +186,7 @@ describe('autoKeep', () => {
     })
     await Promise.resolve()
 
-    await autoKeep(null, manager)
+    await autoKeep([], manager)
 
     expect(confirmDelivered).toHaveBeenCalledTimes(2)
     await vi.waitFor(() => {
@@ -192,21 +198,62 @@ describe('autoKeep', () => {
     const { manager, removed } = await managerWith([downloadedRecord(USER)])
     const leave = manager.enterPlayer(9001)
     await manager.noteWatched(USER, 9001, true)
-    await autoKeep(null, manager)
+    await autoKeep([], manager)
     expect(removed).toEqual([])
 
     leave()
-    await autoKeep(null, manager)
+    await autoKeep([], manager)
     expect(removed).toEqual(['episode-9001.mp4'])
+  })
+
+  it('keeps the available episodes of every active trip, each under its own trip', async () => {
+    const { manager, worker } = await managerWith()
+
+    await autoKeep(
+      [
+        trip([tripEpisode(9001, 1, 'available')]),
+        trip(
+          [tripEpisode(9002, 1, 'available'), tripEpisode(9003, 2, 'searching')],
+          'active',
+          78,
+          501,
+        ),
+      ],
+      manager,
+    )
+
+    expect(manager.record(9001)).toMatchObject({ tripId: TRIP, variant: 'small' })
+    expect(manager.record(9002)).toMatchObject({ tripId: 78, variant: 'small' })
+    expect(manager.record(9003)).toBeUndefined()
+    expect(worker.commands.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('respects a decline on one trip without touching the other', async () => {
+    const { manager } = await managerWith()
+    await manager.keepTripCopy({ episodeId: 9001, tripId: TRIP, url: '/media/9001/offline.mp4' })
+    await manager.remove(9001)
+
+    await autoKeep(
+      [
+        trip([tripEpisode(9001, 1, 'available')]),
+        trip([tripEpisode(9002, 1, 'available')], 'active', 78, 501),
+      ],
+      manager,
+    )
+
+    expect(manager.record(9001)).toBeUndefined()
+    expect(manager.record(9002)?.tripId).toBe(78)
+    expect(manager.isDeclined(TRIP, 9001)).toBe(true)
+    expect(manager.isDeclined(78, 9002)).toBe(false)
   })
 
   it('does nothing for a trip that has ended, or with nobody signed in', async () => {
     const { manager, worker } = await managerWith()
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')], 'cancelled'), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')], 'cancelled')], manager)
     expect(worker.commands).toEqual([])
 
     manager.setOwner(null)
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
     expect(worker.commands).toEqual([])
   })
 })
@@ -225,13 +272,18 @@ describe('useTripAutoKeep', () => {
     expect(keepsTrips(undefined)).toBe(false)
   })
 
-  it('asks for the current trip and keeps what is available', async () => {
+  it('asks for the active trips and keeps what is available in each', async () => {
     pretendOpfs()
     const harness = managerHarness()
     harness.manager.setOwner(USER)
     setDownloads(harness.manager)
     const fetchMock = mockApi({
-      'GET /api/trips/current': { body: trip([tripEpisode(9001, 1, 'available')]) },
+      'GET /api/trips': {
+        body: [
+          trip([tripEpisode(9001, 1, 'available')]),
+          trip([tripEpisode(9002, 1, 'available')], 'active', 78, 501),
+        ],
+      },
     })
 
     renderHook(
@@ -243,13 +295,14 @@ describe('useTripAutoKeep', () => {
 
     await vi.waitFor(() => {
       expect(harness.manager.record(9001)?.tripId).toBe(TRIP)
+      expect(harness.manager.record(9002)?.tripId).toBe(78)
     })
-    expect(requestsMade(fetchMock)).toContain('GET /api/trips/current')
+    expect(requestsMade(fetchMock)).toContain('GET /api/trips')
   })
 
   it('asks nothing for the demo account or once signed out', async () => {
     pretendOpfs()
-    const fetchMock = mockApi({ 'GET /api/trips/current': { body: null } })
+    const fetchMock = mockApi({ 'GET /api/trips': { body: [] } })
 
     const initialProps: { me: User | null } = { me: TEST_DEMO_USER }
     const { rerender } = renderHook(

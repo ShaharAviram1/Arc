@@ -13,20 +13,21 @@ import type { AnimeDetail } from '@/lib/anime'
 import { formatSize } from '@/lib/review'
 import {
   askAgainErrorMessage,
+  copyEstimateOf,
   onDeviceCount,
+  otherTripsReserve,
   tripCandidates,
   tripCopyUrl,
   tripCountMax,
   tripErrorMessage,
   tripEstimateLabel,
   tripRangeLabel,
-  tripRefusal,
   tripRoomFor,
   tripRowStatus,
   useAskAgain,
   useCancelTrip,
+  useActiveTrips,
   useCreateTrip,
-  useCurrentTrip,
   useStorageRoom,
   type StorageRoom,
   type Trip,
@@ -47,8 +48,11 @@ import { useDownloads } from '@/offline/useDownloads'
  * action. When the browser reports room for fewer episodes than the cap, the
  * card says so — as the browser's estimate, since on iPadOS it can report
  * room the iPad does not have (owner, 2026-10-07) — and the stepper stops
- * there; with no room at all the action is off. A refusal is said in a sentence;
- * "another trip is active" links to that show.
+ * there; with no room at all the action is off. The room is shared by every
+ * active trip of the account (any number, one per show — owner, 2026-10-28),
+ * so what the other trips still have to bring is counted first, each episode
+ * at the server's own estimate of a copy (`trip_limits.copy_estimate_bytes`).
+ * A refusal is said in a sentence.
  *
  * `TripPanel` replaces it while the viewer's trip on this show is active: per
  * episode where it stands (the device's own record first, else the server's
@@ -133,19 +137,21 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
   const max = tripCountMax(anime)
   const [count, setCount] = useState(() => Math.max(1, Math.min(max, DEFAULT_COUNT)))
   const create = useCreateTrip(anime.id)
-  // The shell's auto-keep hook keeps this answer fresh; it says whether
-  // another show already holds the one trip a viewer may have.
-  const { data: current } = useCurrentTrip(true)
+  // The shell's auto-keep hook keeps this answer fresh: the account's other
+  // trips share this device's room, so what they still bring is set aside.
+  const { data: trips } = useActiveTrips(true)
+  const records = useDownloads()
   const { data: room } = useStorageRoom(open)
 
   if (max === 0) return null
-  const roomFor = tripRoomFor(room ?? null)
+  const perEpisode = copyEstimateOf(anime.trip_limits)
+  const reserved = otherTripsReserve(trips, anime.id, perEpisode, records, (tripId, episodeId) =>
+    downloads().isDeclined(tripId, episodeId),
+  )
+  const roomFor = tripRoomFor(room ?? null, perEpisode, reserved)
   const cap = roomFor === null ? max : Math.max(1, Math.min(max, roomFor))
   const chosen = Math.max(1, Math.min(cap, count))
   const noRoom = roomFor === 0
-  const elsewhere =
-    current !== undefined && current !== null && current.anime_id !== anime.id ? current : null
-  const refusal = tripRefusal(create.error)
 
   return (
     <>
@@ -195,7 +201,7 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
               <span data-testid="trip-range">{tripRangeLabel(candidates, chosen)}</span>
               <br />
               <span className="text-[13px] text-[var(--arc-text-muted)]">
-                {`About ${tripEstimateLabel(chosen)} (estimate)`}
+                {`About ${tripEstimateLabel(chosen, perEpisode)} (estimate)`}
                 {room === undefined || room === null || roomFor === null
                   ? null
                   : ` · the browser reports ${formatSize(Math.max(0, room.quota - room.usage))} free`}
@@ -205,27 +211,14 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
 
           {room !== undefined && room !== null && roomFor !== null && roomFor < max ? (
             <p data-testid="trip-room" className="text-[13px] leading-[1.5] text-[var(--arc-text)]">
-              {roomSentence(roomFor, room)}
+              {roomSentence(roomFor, room, reserved)}
             </p>
           ) : null}
-
-          {elsewhere === null ? null : (
-            <p className="text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">
-              {'You have a trip for '}
-              <Link
-                to={`/anime/${String(elsewhere.anime_id)}`}
-                className={cx('text-[var(--arc-text)] underline underline-offset-2', FOCUS_RING)}
-              >
-                {elsewhere.anime_title}
-              </Link>
-              {' already. One trip at a time — cancel it there to start this one.'}
-            </p>
-          )}
 
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="submit"
-              disabled={create.isPending || elsewhere !== null || noRoom}
+              disabled={create.isPending || noRoom}
               className={buttonClass('primary', 'px-5 text-[14px]')}
             >
               {create.isPending
@@ -246,20 +239,6 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
           {create.isError ? (
             <p role="alert" className={FIELD_ERROR_CLASS}>
               {tripErrorMessage(create.error)}
-              {refusal === 'trip_active' &&
-              elsewhere === null &&
-              current !== undefined &&
-              current !== null ? (
-                <>
-                  {' '}
-                  <Link
-                    to={`/anime/${String(current.anime_id)}`}
-                    className={cx('underline underline-offset-2', FOCUS_RING)}
-                  >
-                    {`Go to ${current.anime_title}`}
-                  </Link>
-                </>
-              ) : null}
             </p>
           ) : null}
         </form>
@@ -268,14 +247,19 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
   )
 }
 
-/** What the browser reports, said as its estimate (owner, 2026-10-07). */
-function roomSentence(roomFor: number, room: StorageRoom): string {
+/**
+ * What the browser reports, said as its estimate (owner, 2026-10-07), and
+ * what the account's other trips still have to bring to it (2026-10-28).
+ */
+function roomSentence(roomFor: number, room: StorageRoom, reserved: number): string {
   const device = deviceName()
   const figures = `${formatSize(Math.max(0, room.quota - room.usage))} free of ${formatSize(room.quota)}`
+  const others =
+    reserved > 0 ? `, about ${formatSize(reserved)} of it kept for your other trips` : ''
   if (roomFor === 0) {
-    return `The browser reports no room for another episode on this ${device} (${figures}). Remove something from Downloads first.`
+    return `The browser reports no room for another episode on this ${device} (${figures}${others}). Remove something from Downloads first.`
   }
-  return `The browser reports room for about ${String(roomFor)} episode${roomFor === 1 ? '' : 's'} on this ${device} (${figures}). It is an estimate: the ${device}'s own storage can fill up first.`
+  return `The browser reports room for about ${String(roomFor)} episode${roomFor === 1 ? '' : 's'} on this ${device} (${figures}${others}). It is an estimate: the ${device}'s own storage can fill up first.`
 }
 
 function SuitcaseGlyph() {

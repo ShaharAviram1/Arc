@@ -196,7 +196,7 @@ describe('a write the device stopped', () => {
 
     manager.nudge()
     manager.resumeSuspended()
-    await autoKeep(null, manager)
+    await autoKeep([], manager)
 
     expect(manager.record(9001)).toMatchObject({ state: 'paused', reason: 'by-hand' })
   })
@@ -215,7 +215,7 @@ describe('a write the device stopped', () => {
     expect(manager.record(9001)?.state).toBe('paused')
 
     visible = true
-    await autoKeep(null, manager)
+    await autoKeep([], manager)
 
     expect(manager.record(9001)?.state).toMatch(/queued|downloading/)
   })

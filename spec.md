@@ -509,10 +509,16 @@ that the course professor can log in at any time, and the owner uses it daily.
   the next X **aired** episodes after the user's progress (FR-W5's boundary),
   made into small offline copies (FR-P6) for a device to keep. X is chosen by
   the user, 1..`trip_max_episodes` (default and most 50); fewer are taken
-  when fewer have aired, and the trip says how many it took. **One active
-  trip per user.** Refused for the demo account (FR-D5), while another trip
-  is active, while acquisition is held for disk space (FR-T6), for a count
-  outside the range, and when nothing has aired after the user's progress.
+  when fewer have aired, and the trip says how many it took. **Any number of
+  active trips per user, at most one per show** (owner, 2026-10-28; one per
+  user before): the device's free space is the only other limit, and it is
+  the user's call. That room is shared by every trip, so the show page's fit
+  check counts what the user's other active trips still have to bring, each
+  episode at the server's own estimate of a copy (the median size of its
+  recent copies made with the current settings). Refused for the demo account
+  (FR-D5), while this show already has an active trip of the user's, while
+  acquisition is held for disk space (FR-T6), for a count outside the range,
+  and when nothing has aired after the user's progress.
   The trip's episodes are wanted like any other episode (FR-A2 merges them
   with everybody's wants) and their searches start at once, just behind the
   window's own; a torrent taken only for a trip goes to the bottom of the
@@ -580,7 +586,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   trip's deadline (14 days after the trip was made); a trip with nothing left
   waiting **ends** — finished at the confirmation of its last episode, or at
   the hourly check (expired if nothing reached the device) — and the user may
-  then start another at once. **An episode wanted both by a trip and by the
+  then start another on that show at once. **An episode wanted both by a trip and by the
   user's window (or anybody's) is not trip-only**: it keeps its source and
   gets its full HLS rendition for normal viewing as well as the small copy;
   only an episode wanted by trips alone loses its source when the copy is
@@ -589,8 +595,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   after the last confirmation. Nothing in delivery or expiry touches
   a list entry or MyAnimeList.
 - FR-A13 **Manual release choice** (owner, 2026-10-06). Every account except
-  the demo may choose or change the release an episode — or their active
-  trip — downloads from. The show page's episode row offers **Change
+  the demo may choose or change the release an episode — or one of their
+  active trips — downloads from. The show page's episode row offers **Change
   release…** for an episode the user already wants (their window, a sample or
   their trip) that has not arrived yet; the trip panel offers **Choose
   pack…**. Both open a sheet: what is downloading now, Arc's own candidates
@@ -1258,15 +1264,20 @@ that the course professor can log in at any time, and the owner uses it daily.
      format, a one-line sentence says so instead): how many episodes, from 1
      to whichever is fewer of the server's cap (`trip_max_episodes`, sent on
      the show page) and the episodes aired after the viewer's progress, the range it takes ("Episodes 4–15"), a size labelled as an
-     estimate (about 100 MB an episode) beside what the browser reports free,
-     and one action. When the browser reports room for fewer episodes than
-     the cap (at 110 MB each), the card says "The browser reports room for
-     about N episodes on this iPad (X free of Y). It is an estimate: the
+     estimate (the server's estimate of one copy, the median of its recent
+     copies — about 254 MB at 1080p HEVC; 2026-10-28) beside what the browser
+     reports free, and one action. When the browser reports room for fewer
+     episodes than the cap (at the estimate plus a tenth each, after setting
+     aside — at the same rate — what the user's other active trips still have
+     to bring: less what this device already holds of them, and nothing for
+     an episode the viewer took off this device by hand), the card
+     says "The browser reports room for about N episodes on this iPad (X free
+     of Y, about Z of it kept for your other trips). It is an estimate: the
      iPad's own storage can fill up first." and the stepper stops at N; with
      no room for one, the action is off (owner, 2026-10-07). The panel of an
      active trip says prominently when one of its downloads is paused because
      the device is full, with a link to Downloads. A refusal is a
-     sentence: another trip is active (with a link to its show), the server
+     sentence: this show already has a trip being prepared, the server
      is short of disk, nothing has aired after the viewer's progress, more
      episodes than the server allows. While the trip is active its panel on
      the show page lists every episode where it stands — this device's copy
@@ -1790,8 +1801,8 @@ through the same edge, without the grace period.
 - Downloading whole seasons or a general "download anything" UI. (FR-S9 is
   not that: it is a per-episode copy of a file Arc has already prepared for
   streaming. A trip, FR-A12, is not that either: it is the next X aired
-  episodes of one show after the user's progress, at most 50, one trip at a
-  time, asked for explicitly. Nor is FR-A13's manual release choice: it only
+  episodes of one show after the user's progress, at most 50 per trip, one
+  active trip per show, asked for explicitly. Nor is FR-A13's manual release choice: it only
   redirects an episode or a trip the user has already asked for to another
   release, and a pack is still taken only for the user's wanted files. Nor is
   FR-A14's play on demand: it fetches only an episode the user's window
@@ -3035,3 +3046,11 @@ through the same edge, without the grace period.
   is), and N = 0 still stops everything. FR-D2: the three keys.
 - 2026-10-28 (owner) — **Offline copies 1080p HEVC CRF 28** (FR-P6): the 720p H.264 CRF 26 copies were too soft on the iPad; measured 227 MB vs ≈254 MB per 24-minute SubsPlease episode, encode 3.8× longer; set on production by `OFFLINE_*`, defaults unchanged. **Copies of a trip can be re-made with the current settings and replace what the device holds** (FR-A12): an admin's `remake-copies` puts the trip's episodes whose copy was made otherwise back in the trip, and the device swaps its copy when the new one is offered — except an episode it already let go of, or one cancelled or expired.
 - 2026-10-28 (owner, after review) — **Re-made trip copies, refined** (FR-A12): a confirmation of the copy from before a re-make leaves the episode waiting for the new one; the re-make covers the same episode in other users' active trips, restarts `trip_copy_days`, skips episodes the user has watched and copies a device is downloading at that moment (run again later), and judges a copy by its codec, height, quality and audio bitrate only. The device drops its old copy before fetching the new one (swaps run while online).
+- 2026-10-28 (owner) — **Any number of active trips per user, one per show**
+  (FR-A12, FR-S9 item 8 amended; "Let me start as many trips as I want,
+  granted I have enough place in my iPad to store them"). The device's room is
+  the limit, and it is shared by every trip: the show page's fit check sets
+  aside what the other active trips still have to bring. The copy size
+  estimate comes from the server (the median of its recent current-settings
+  copies, 260 MB before there are any) rather than a constant in the client.
+  A second trip on the same show is still refused (`trip_active`).

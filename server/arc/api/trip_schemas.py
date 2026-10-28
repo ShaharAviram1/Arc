@@ -1,7 +1,7 @@
 """What a client is told about a trip (FR-A12).
 
 :class:`TripOut` is sent by ``POST /api/anime/{id}/trip`` (201), by ``GET
-/api/trips/current`` and as the show page's ``trip`` block. Its own module
+/api/trips`` (a list, one per show) and as the show page's ``trip`` block. Its own module
 because both :mod:`arc.api.trips` and :mod:`arc.api.anime_schemas` need it.
 """
 
@@ -52,6 +52,11 @@ class TripLimits(BaseModel):
     """
 
     max_episodes: int
+    #: What one trip copy is likely to weigh, in bytes (owner, 2026-10-28):
+    #: the median of the host's newest copies made with the current settings
+    #: (:func:`arc.services.trips.estimate.copy_estimate_bytes`). The show page
+    #: needs it before a trip exists, to check what fits the device.
+    copy_estimate_bytes: int
 
 
 class TripEpisodeOut(BaseModel):

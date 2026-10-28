@@ -22,6 +22,7 @@ from arc.services.trips.create import (
     TRIP_ACTIVE,
     TRIP_NOT_FOUND,
 )
+from arc.services.trips.names import FALLBACK_COPY_BYTES
 from tests.acquisition_helpers import make_anime, make_entry, make_episodes
 from tests.conftest import add_user, api_transport, login
 
@@ -63,7 +64,7 @@ async def user_id(factory: SessionFactory, email: str = EMAIL) -> int:
 
 async def test_anonymous_callers_get_401(api_client: AsyncClient) -> None:
     assert (await api_client.post("/api/anime/1/trip", json={"count": 2})).status_code == 401
-    assert (await api_client.get("/api/trips/current")).status_code == 401
+    assert (await api_client.get("/api/trips")).status_code == 401
     assert (await api_client.delete("/api/trips/1")).status_code == 401
 
 
@@ -96,16 +97,66 @@ async def test_a_trip_is_created_and_read_back(
     assert body["episodes"][0]["delivered"] is False
     assert body["episodes"][0]["url"] is None, "no copy yet"
     assert body["episodes"][0]["etag"] is None
+    assert "copy_estimate_bytes" not in body, "the estimate rides on trip_limits only"
 
-    current = await user_client.get("/api/trips/current")
-    assert current.status_code == 200
-    assert current.json() == body
+    listed = await user_client.get("/api/trips")
+    assert listed.status_code == 200
+    assert listed.json() == [body]
 
 
-async def test_no_trip_reads_null(user_client: AsyncClient) -> None:
-    response = await user_client.get("/api/trips/current")
+async def test_no_trip_reads_an_empty_list(user_client: AsyncClient) -> None:
+    response = await user_client.get("/api/trips")
     assert response.status_code == 200
-    assert response.json() is None
+    assert response.json() == []
+
+
+async def test_trips_on_several_shows_are_listed_oldest_first(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """Any number of active trips, one per show (owner, 2026-10-28)."""
+    first = await a_show(api_factory, anilist_id=981010)
+    second = await a_show(api_factory, anilist_id=981011)
+    third = await a_show(api_factory, anilist_id=981012)
+
+    made = []
+    for anime_id in (first, second, third):
+        response = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})
+        assert response.status_code == 201, response.text
+        made.append(response.json()["id"])
+    same = await user_client.post(f"/api/anime/{second}/trip", json={"count": 2})
+    assert (same.status_code, same.json()["detail"]) == (409, TRIP_ACTIVE)
+
+    listed = (await user_client.get("/api/trips")).json()
+    assert [trip["id"] for trip in listed] == made
+    assert [trip["anime_id"] for trip in listed] == [first, second, third]
+
+    assert (await user_client.delete(f"/api/trips/{made[1]}")).status_code == 204
+    listed = (await user_client.get("/api/trips")).json()
+    assert [trip["id"] for trip in listed] == [made[0], made[2]]
+    again = await user_client.post(f"/api/anime/{second}/trip", json={"count": 2})
+    assert again.status_code == 201, "the show's trip ended, so it may have another"
+
+
+async def test_the_show_page_carries_its_own_trip_and_the_estimate(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    first = await a_show(api_factory, anilist_id=981013)
+    second = await a_show(api_factory, anilist_id=981014)
+    third = await a_show(api_factory, anilist_id=981015)
+    one = (await user_client.post(f"/api/anime/{first}/trip", json={"count": 2})).json()
+    two = (await user_client.post(f"/api/anime/{second}/trip", json={"count": 3})).json()
+
+    page_one = (await user_client.get(f"/api/anime/{first}")).json()
+    page_two = (await user_client.get(f"/api/anime/{second}")).json()
+    page_three = (await user_client.get(f"/api/anime/{third}")).json()
+
+    assert page_one["trip"]["id"] == one["id"]
+    assert page_two["trip"]["id"] == two["id"]
+    assert page_three["trip"] is None, "another show's trip is not this show's"
+    assert page_three["trip_limits"] == {
+        "max_episodes": 50,
+        "copy_estimate_bytes": FALLBACK_COPY_BYTES,
+    }
 
 
 async def test_the_refusals(user_client: AsyncClient, api_factory: SessionFactory) -> None:
@@ -134,6 +185,7 @@ async def test_the_refusals(user_client: AsyncClient, api_factory: SessionFactor
     assert (
         await user_client.post(f"/api/anime/{other}/trip", json={"count": 2})
     ).status_code == 201
+    # The same show again is refused; another show is not (owner, 2026-10-28).
     again = await user_client.post(f"/api/anime/{other}/trip", json={"count": 2})
     assert (again.status_code, again.json()["detail"]) == (409, TRIP_ACTIVE)
 
@@ -164,10 +216,10 @@ async def test_only_the_owner_can_cancel_and_others_see_404(
         await login(other, OTHER_EMAIL, OTHER_PASSWORD)
         refused = await other.delete(f"/api/trips/{trip['id']}")
         assert (refused.status_code, refused.json()["detail"]) == (404, TRIP_NOT_FOUND)
-        assert (await other.get("/api/trips/current")).json() is None
+        assert (await other.get("/api/trips")).json() == []
 
     assert (await user_client.delete(f"/api/trips/{trip['id']}")).status_code == 204
-    assert (await user_client.get("/api/trips/current")).json() is None
+    assert (await user_client.get("/api/trips")).json() == []
     assert (await user_client.delete(f"/api/trips/{trip['id']}")).status_code == 204
     assert (await user_client.delete("/api/trips/999999")).status_code == 404
     async with api_factory() as session:
@@ -218,10 +270,48 @@ async def test_the_show_page_carries_the_trip_cap(
     anime_id = await a_show(api_factory, anilist_id=981090)
 
     body = (await user_client.get(f"/api/anime/{anime_id}")).json()
-    assert body["trip_limits"] == {"max_episodes": 50}
+    assert body["trip_limits"] == {
+        "max_episodes": 50,
+        "copy_estimate_bytes": FALLBACK_COPY_BYTES,
+    }
 
     async with api_factory() as session:
         await session.merge(Setting(key="trip_max_episodes", value=7))
         await session.commit()
     body = (await user_client.get(f"/api/anime/{anime_id}")).json()
-    assert body["trip_limits"] == {"max_episodes": 7}
+    assert body["trip_limits"]["max_episodes"] == 7
+
+
+async def test_the_show_page_reads_the_estimate_for_everyone_but_the_demo(
+    api_app: FastAPI,
+    api_factory: SessionFactory,
+    user_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The demo account can never make a trip: it is sent the fallback, unread."""
+    from arc.api import anime as anime_api
+
+    calls: list[int] = []
+
+    async def measured(session: object, settings: object) -> int:
+        calls.append(1)
+        return 254_000_000
+
+    monkeypatch.setattr(anime_api, "copy_estimate_bytes", measured)
+    anime_id = await a_show(api_factory, anilist_id=981091)
+
+    body = (await user_client.get(f"/api/anime/{anime_id}")).json()
+    assert body["trip_limits"]["copy_estimate_bytes"] == 254_000_000
+    assert calls == [1]
+
+    await add_user(api_factory, "demo-estimate@arc.test", "demopassword123")
+    async with api_factory() as session:
+        demo = await session.scalar(select(User).where(User.email == "demo-estimate@arc.test"))
+        assert demo is not None
+        demo.is_demo = True
+        await session.commit()
+    async with api_transport(api_app) as client:
+        await login(client, "demo-estimate@arc.test", "demopassword123")
+        demo_body = (await client.get(f"/api/anime/{anime_id}")).json()
+    assert demo_body["trip_limits"]["copy_estimate_bytes"] == FALLBACK_COPY_BYTES
+    assert calls == [1], "no estimate query for the demo account"

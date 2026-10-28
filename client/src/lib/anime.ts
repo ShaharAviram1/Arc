@@ -540,9 +540,11 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   trip?: Trip | null
   /**
    * The server's trip rules the client needs (M19): `max_episodes` is the
-   * admin's `trip_max_episodes`. Optional on the wire for an older payload.
+   * admin's `trip_max_episodes`; `copy_estimate_bytes` the server's estimate
+   * of one copy (owner, 2026-10-28), for the trip card's room check. Optional
+   * on the wire for an older payload.
    */
-  trip_limits?: { max_episodes: number } | null
+  trip_limits?: { max_episodes: number; copy_estimate_bytes?: number } | null
   /**
    * Whether the viewer has pinned this show: "Keep files" (FR-T8, M20). The
    * sweep keeps a show's files after watching if *anyone* has pinned it.

@@ -3,6 +3,9 @@ import type { AnimeDetail, EpisodeOut } from '@/lib/anime'
 import { ApiError } from '@/lib/api'
 import {
   askAgainErrorMessage,
+  copyEstimateOf,
+  otherTripsReserve,
+  TRIP_COPY_ESTIMATE_FALLBACK,
   tripCandidates,
   tripCodecsPlayable,
   tripCountMax,
@@ -11,6 +14,8 @@ import {
   tripRoomFor,
   tripRangeLabel,
   tripRowStatus,
+  withTrip,
+  type Trip,
   type TripEpisode,
 } from '@/lib/trips'
 import type { DownloadRecord } from '@/offline/downloads'
@@ -74,21 +79,106 @@ describe('the stepper’s bounds', () => {
 
 describe('the size estimate', () => {
   it('rounds to decimal units, as a guess should', () => {
-    expect(tripEstimateLabel(1)).toBe('100 MB')
-    expect(tripEstimateLabel(9)).toBe('900 MB')
-    expect(tripEstimateLabel(10)).toBe('1 GB')
-    expect(tripEstimateLabel(12)).toBe('1.2 GB')
-    expect(tripEstimateLabel(50)).toBe('5 GB')
+    expect(tripEstimateLabel(1, 100_000_000)).toBe('100 MB')
+    expect(tripEstimateLabel(9, 100_000_000)).toBe('900 MB')
+    expect(tripEstimateLabel(10, 100_000_000)).toBe('1 GB')
+    expect(tripEstimateLabel(12, 100_000_000)).toBe('1.2 GB')
+    expect(tripEstimateLabel(10, 254_000_000)).toBe('2.5 GB')
+  })
+
+  it("takes the server's estimate, else its fallback (owner, 2026-10-28)", () => {
+    expect(copyEstimateOf({ copy_estimate_bytes: 254_000_000 })).toBe(254_000_000)
+    expect(copyEstimateOf({ copy_estimate_bytes: 0 })).toBe(TRIP_COPY_ESTIMATE_FALLBACK)
+    expect(copyEstimateOf({})).toBe(TRIP_COPY_ESTIMATE_FALLBACK)
+    expect(copyEstimateOf(null)).toBe(TRIP_COPY_ESTIMATE_FALLBACK)
+    expect(TRIP_COPY_ESTIMATE_FALLBACK).toBe(260_000_000)
   })
 })
 
 describe('the room the browser reports (owner, 2026-10-07)', () => {
-  it('counts whole episodes at 110 MB each, and says nothing without figures', () => {
-    expect(tripRoomFor({ usage: 4_700_000_000, quota: 32_400_000_000 })).toBe(251)
-    expect(tripRoomFor({ usage: 0, quota: 219_999_999 })).toBe(1)
-    expect(tripRoomFor({ usage: 6, quota: 5 })).toBe(0)
-    expect(tripRoomFor({ usage: 0, quota: 0 })).toBeNull()
-    expect(tripRoomFor(null)).toBeNull()
+  it('counts whole episodes at the estimate plus a tenth, and says nothing without figures', () => {
+    expect(tripRoomFor({ usage: 4_700_000_000, quota: 32_400_000_000 }, 100_000_000)).toBe(251)
+    expect(tripRoomFor({ usage: 0, quota: 219_999_999 }, 100_000_000)).toBe(1)
+    expect(tripRoomFor({ usage: 0, quota: 2_794_000_000 }, 254_000_000)).toBe(10)
+    expect(tripRoomFor({ usage: 6, quota: 5 }, 100_000_000)).toBe(0)
+    expect(tripRoomFor({ usage: 0, quota: 0 }, 100_000_000)).toBeNull()
+    expect(tripRoomFor(null, 100_000_000)).toBeNull()
+  })
+
+  it('sets aside what the other trips still have to bring (owner, 2026-10-28)', () => {
+    const room = { usage: 0, quota: 2_794_000_000 }
+    expect(tripRoomFor(room, 254_000_000, 4 * 254_000_000)).toBe(6)
+    expect(tripRoomFor(room, 254_000_000, 20 * 254_000_000)).toBe(0)
+  })
+})
+
+function tripOf(id: number, animeId: number, phases: TripEpisode['phase'][]): Trip {
+  return {
+    id,
+    anime_id: animeId,
+    anime_title: `Show ${String(animeId)}`,
+    first_number: 1,
+    last_number: phases.length,
+    count: phases.length,
+    state: 'active',
+    created_at: '2026-10-28T08:00:00Z',
+    deadline_at: '2026-11-11T08:00:00Z',
+    episodes: phases.map((phase, index) => ({
+      episode_id: id * 100 + index,
+      number: index + 1,
+      phase,
+      progress: null,
+      size: null,
+      delivered: phase === 'delivered',
+    })),
+  }
+}
+
+describe('the other trips on the device (owner, 2026-10-28)', () => {
+  it("counts each other trip's episodes still to come, never this show's, with the margin", () => {
+    const trips = [
+      tripOf(1, 10, ['available', 'searching', 'delivered', 'expired', 'unavailable']),
+      tripOf(2, 20, ['downloading', 'preparing', 'waiting_space']),
+      tripOf(3, 30, ['searching', 'searching']),
+    ]
+    // 100 bytes an episode, 110 with the margin — the same margin the new trip gets.
+    expect(otherTripsReserve(trips, 30, 100)).toBe(550)
+    expect(otherTripsReserve(trips, 99, 100)).toBe(770)
+    expect(otherTripsReserve([], 30, 100)).toBe(0)
+    expect(otherTripsReserve(undefined, 30, 100)).toBe(0)
+  })
+
+  it('leaves out a copy this device already holds', () => {
+    const trips = [tripOf(1, 10, ['available', 'available'])]
+    const records = { 100: { ...downloadedRecord(1, PLAY_INFO), episodeId: 100 } }
+    expect(otherTripsReserve(trips, 30, 100, records)).toBe(110)
+  })
+
+  it('counts only what is still to come of a download under way or paused', () => {
+    const trips = [tripOf(1, 10, ['available', 'available', 'available'])]
+    const base = downloadedRecord(1, PLAY_INFO)
+    const records = {
+      100: { ...base, episodeId: 100, state: 'downloading' as const, bytes: 40 },
+      101: { ...base, episodeId: 101, state: 'paused' as const, bytes: 500 },
+    }
+    // 110 − 40, nothing for the one already past the estimate, 110 for the third.
+    expect(otherTripsReserve(trips, 30, 100, records)).toBe(70 + 0 + 110)
+  })
+
+  it('leaves out an episode taken off this device by hand', () => {
+    const trips = [tripOf(1, 10, ['available', 'available']), tripOf(2, 20, ['available'])]
+    const declined = (tripId: number, episodeId: number) => tripId === 1 && episodeId === 100
+    expect(otherTripsReserve(trips, 30, 100, {}, declined)).toBe(220)
+  })
+
+  it('keeps the cached list in step: added at the end, replaced in place, ended removed', () => {
+    const one = tripOf(1, 10, ['searching'])
+    const two = tripOf(2, 20, ['searching'])
+    expect(withTrip(undefined, one)).toEqual([one])
+    expect(withTrip([one], two)).toEqual([one, two])
+    const moved = tripOf(1, 10, ['available'])
+    expect(withTrip([one, two], moved)).toEqual([moved, two])
+    expect(withTrip([one, two], { ...one, state: 'finished' })).toEqual([two])
   })
 })
 
@@ -120,7 +210,7 @@ describe('the codec check', () => {
 
 describe('refusals, in sentences', () => {
   it.each([
-    ['trip_active', 'You already have a trip being prepared. Cancel it, or wait for it to finish.'],
+    ['trip_active', 'This show already has a trip being prepared.'],
     [
       'storage_held',
       'Arc’s server is short of disk space right now, so it cannot start a trip. Try again later.',
