@@ -135,14 +135,15 @@ function tripOf(id: number, animeId: number, phases: TripEpisode['phase'][]): Tr
 }
 
 describe('the other trips on the device (owner, 2026-10-28)', () => {
-  it("counts each other trip's episodes still to come, never this show's", () => {
+  it("counts each other trip's episodes still to come, never this show's, with the margin", () => {
     const trips = [
       tripOf(1, 10, ['available', 'searching', 'delivered', 'expired', 'unavailable']),
       tripOf(2, 20, ['downloading', 'preparing', 'waiting_space']),
       tripOf(3, 30, ['searching', 'searching']),
     ]
-    expect(otherTripsReserve(trips, 30, 100)).toBe(500)
-    expect(otherTripsReserve(trips, 99, 100)).toBe(700)
+    // 100 bytes an episode, 110 with the margin — the same margin the new trip gets.
+    expect(otherTripsReserve(trips, 30, 100)).toBe(550)
+    expect(otherTripsReserve(trips, 99, 100)).toBe(770)
     expect(otherTripsReserve([], 30, 100)).toBe(0)
     expect(otherTripsReserve(undefined, 30, 100)).toBe(0)
   })
@@ -150,7 +151,24 @@ describe('the other trips on the device (owner, 2026-10-28)', () => {
   it('leaves out a copy this device already holds', () => {
     const trips = [tripOf(1, 10, ['available', 'available'])]
     const records = { 100: { ...downloadedRecord(1, PLAY_INFO), episodeId: 100 } }
-    expect(otherTripsReserve(trips, 30, 100, records)).toBe(100)
+    expect(otherTripsReserve(trips, 30, 100, records)).toBe(110)
+  })
+
+  it('counts only what is still to come of a download under way or paused', () => {
+    const trips = [tripOf(1, 10, ['available', 'available', 'available'])]
+    const base = downloadedRecord(1, PLAY_INFO)
+    const records = {
+      100: { ...base, episodeId: 100, state: 'downloading' as const, bytes: 40 },
+      101: { ...base, episodeId: 101, state: 'paused' as const, bytes: 500 },
+    }
+    // 110 − 40, nothing for the one already past the estimate, 110 for the third.
+    expect(otherTripsReserve(trips, 30, 100, records)).toBe(70 + 0 + 110)
+  })
+
+  it('leaves out an episode taken off this device by hand', () => {
+    const trips = [tripOf(1, 10, ['available', 'available']), tripOf(2, 20, ['available'])]
+    const declined = (tripId: number, episodeId: number) => tripId === 1 && episodeId === 100
+    expect(otherTripsReserve(trips, 30, 100, {}, declined)).toBe(220)
   })
 
   it('keeps the cached list in step: added at the end, replaced in place, ended removed', () => {

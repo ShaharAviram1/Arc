@@ -216,7 +216,7 @@ describe('Prepare for a trip', () => {
 
     const card = screen.getByRole('form', { name: 'Prepare for a trip' })
     expect(await within(card).findByTestId('trip-room')).toHaveTextContent(
-      /room for about 2 episodes on this device \(324 MB free of 4\.7 GB, about 95\.4 MB of it kept for your other trips\)/,
+      /room for about 2 episodes on this device \(324 MB free of 4\.7 GB, about 105 MB of it kept for your other trips\)/,
     )
     expect(within(card).getByRole('spinbutton', { name: 'Episodes' })).toHaveAttribute('max', '2')
     // Another show's trip no longer blocks this one, and is not linked.

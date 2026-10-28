@@ -145,7 +145,9 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
 
   if (max === 0) return null
   const perEpisode = copyEstimateOf(anime.trip_limits)
-  const reserved = otherTripsReserve(trips, anime.id, perEpisode, records)
+  const reserved = otherTripsReserve(trips, anime.id, perEpisode, records, (tripId, episodeId) =>
+    downloads().isDeclined(tripId, episodeId),
+  )
   const roomFor = tripRoomFor(room ?? null, perEpisode, reserved)
   const cap = roomFor === null ? max : Math.max(1, Math.min(max, roomFor))
   const chosen = Math.max(1, Math.min(cap, count))

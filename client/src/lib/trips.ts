@@ -66,11 +66,6 @@ export interface Trip {
   created_at: string
   deadline_at: string
   episodes: TripEpisode[]
-  /**
-   * What one copy is likely to weigh, from the server's own recent copies
-   * (owner, 2026-10-28). Optional on the wire for an older payload.
-   */
-  copy_estimate_bytes?: number
 }
 
 /**
@@ -98,7 +93,7 @@ export const TRIP_MAX_EPISODES = 50
  */
 export const TRIP_COPY_ESTIMATE_FALLBACK = 260_000_000
 
-/** The server's estimate of one copy, from a trip or the show's `trip_limits`. */
+/** The server's estimate of one copy, from the show's `trip_limits`. */
 export function copyEstimateOf(
   source: { copy_estimate_bytes?: number } | null | undefined,
 ): number {
@@ -118,9 +113,16 @@ export function tripEstimateLabel(count: number, perEpisode: number): string {
 
 /**
  * The room check's margin over the estimate, since the browser's figures are
- * themselves an estimate (owner, 2026-10-07: 110 MB for a 100 MB guess).
+ * themselves an estimate (owner, 2026-10-07: 110 MB for a 100 MB guess). It
+ * applies to **both** sides of the check: each episode of the new trip, and
+ * each episode the other trips still have to bring ({@link fitBytes}).
  */
 export const TRIP_FIT_MARGIN = 1.1
+
+/** What the room check counts for one episode: the estimate with the margin. */
+export function fitBytes(perEpisode: number): number {
+  return Math.round(perEpisode * TRIP_FIT_MARGIN)
+}
 
 /** The phases whose copy has yet to reach a device: what a trip still needs room for. */
 const STILL_TO_COME: ReadonlySet<TripPhase> = new Set<TripPhase>([
@@ -134,26 +136,36 @@ const STILL_TO_COME: ReadonlySet<TripPhase> = new Set<TripPhase>([
 /**
  * The bytes the account's **other** active trips still have to bring to the
  * device (owner, 2026-10-28: the device's room is shared by every trip). Each
- * episode not yet delivered, expired or given up on counts one estimate,
- * unless this device already holds its copy (`records`), which the browser's
- * own figures already count.
+ * episode not yet delivered, expired or given up on counts one estimate with
+ * the margin ({@link fitBytes}), less what this device already holds of it:
+ * a downloaded copy counts nothing, a download under way or paused counts
+ * only what is still to come (its bytes are in the browser's usage already).
+ * An episode the viewer took off this device by hand (`isDeclined`) will not
+ * come back by itself, so it counts nothing either.
  */
 export function otherTripsReserve(
   trips: readonly Trip[] | null | undefined,
   animeId: number,
   perEpisode: number,
   records: Downloads = {},
+  isDeclined: (tripId: number, episodeId: number) => boolean = () => false,
 ): number {
-  let episodes = 0
+  const each = fitBytes(perEpisode)
+  let reserved = 0
   for (const trip of trips ?? []) {
     if (trip.anime_id === animeId || trip.state !== 'active') continue
     for (const episode of trip.episodes) {
       if (!STILL_TO_COME.has(episode.phase)) continue
-      if (records[episode.episode_id]?.state === 'downloaded') continue
-      episodes += 1
+      const record = records[episode.episode_id]
+      if (record === undefined) {
+        if (!isDeclined(trip.id, episode.episode_id)) reserved += each
+        continue
+      }
+      if (record.state === 'downloaded') continue
+      reserved += Math.max(0, each - record.bytes)
     }
   }
-  return episodes * perEpisode
+  return reserved
 }
 
 /** What the browser reports about Arc's storage (`navigator.storage.estimate()`). */
@@ -166,7 +178,8 @@ export interface StorageRoom {
  * How many trip episodes the browser says there is room for, or `null` when
  * it says nothing useful. `perEpisode` is the server's estimate of one copy
  * (with {@link TRIP_FIT_MARGIN} on top) and `reserved` what the account's
- * other trips still have to bring ({@link otherTripsReserve}). Only ever a
+ * other trips still have to bring ({@link otherTripsReserve}, margin
+ * included). Only ever a
  * cap on the stepper with a sentence: on iPadOS the figure is the browser's
  * allowance, and a full iPad can still report gigabytes free, so this never
  * stands in for the write itself.
@@ -178,7 +191,7 @@ export function tripRoomFor(
 ): number | null {
   if (room === null || !(room.quota > 0)) return null
   const free = Math.max(0, room.quota - room.usage - reserved)
-  return Math.floor(free / Math.ceil(perEpisode * TRIP_FIT_MARGIN))
+  return Math.floor(free / fitBytes(perEpisode))
 }
 
 /** `navigator.storage.estimate()` for the trip card, read when it opens. */
