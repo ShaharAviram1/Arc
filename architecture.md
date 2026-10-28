@@ -3633,6 +3633,18 @@ above), so what is settled here is the **copy** — file and row — and the
   answered 204 — and the device replaces its copy when the new one's ETag
   arrives on `TripEpisodeOut.etag` (§5.4d), confirming that. Flushed, not
   committed. No want, list entry or MAL write.
+  **Settled copies (`--delivered-before ISO8601`, `remake_stale(…,
+  delivered_before=)`).** The settle deletes a delivered trip-only copy an
+  hour after the confirmation, row and file, so nothing records how the copy
+  on the device was made. Given the time the settings changed (a timestamp
+  with no offset is read as UTC), a `delivered`, unreleased, unwatched row
+  with `delivered_at` before it whose episode has **no** copy row is
+  re-pended the same way (`repend`, `available_at = now`, **repended**, the
+  one `compute_wants`); the other-trips rule and the skips apply. A row whose
+  episode has a current copy row is left alone whenever it was delivered —
+  the device may hold that copy, and the ETag rule decides. Without the
+  flag nothing copyless is touched (production 2026-10-28: trip 4's
+  episodes 13 and 14 had been settled; only 12 still had its stale row).
 - **Authorisation** (`media.copies.may_fetch_copy`, asked by
   `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
   account; a `ready` episode's copy → any account; a non-`ready` episode's →
@@ -7300,3 +7312,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-28 — Remake after validation and review (§5.4d, §5.4e Delivery and Remake; spec FR-A12). `confirm_delivered` leaves a `pending` row pending when the device's ETag is not the ready copy's (the late-confirmation race). Staleness is `copies.made_otherwise` over the recorded codec/height/CRF/bitrate, not `settings_key` (its languages drift without a rendition). `remake_stale` locks every active trip holding a stale episode (id order, rows, episodes) and applies the rules to all of them; skips a delivered episode its user completed; leaves a copy under `settle.fetch_hold` alone (`RemakeReport.held`, printed); sets `available_at = now` on repended and cleared rows. Client: `replaceCopy` failure fails the record `gone`; `reasked` reset; `confirm` re-checks the ETag when it settles; `TripCopyInput.etag`. The H.264 `-level` counts `min(cap, source height)`. No schema change, no new dependency, no MAL-writing code.
 - 2026-10-28 (owner) — **Any number of active trips per user, one per show; the device's room is the limit; the copy size estimate comes from the server** (§4 `trips`, §5.4d, §5.4e, §5b; spec FR-A12, FR-S9 item 8). Revision `5d3e9a7c1b20` (on `c4b8e1f2a9d6`) swaps `ux_trips_one_active_per_user` for `ux_trips_one_active_per_show` on `(user_id, anime_id) WHERE state = 'active'`; its downgrade raises while a user has more than one active trip. `trips.create.active_trip(session, user_id, anime_id)` and `active_trips(session, user_id)`; 409 `trip_active` now means "this show already has a trip". `GET /api/trips` (list, oldest first) replaces `GET /api/trips/current`. New `trips/estimate.py` (`copy_estimate_bytes`, median of the newest 20 current-key ready copies; `names.FALLBACK_COPY_BYTES` 260 MB, the 1080p HEVC CRF 28 copies measuring ~254 MB) on `TripLimits`. Everything else already reasoned per episode across all trips (delivered accounting, the device skip, `drop_queued_copies`/`_drop_unneeded_encode`, the storage hold, the sweep, `_trip_wants`, keyed per (user, episode) — safe because two active trips of one user never share an episode) and is unchanged; the copy priority stays `600 + 10 × position` within its own trip. Client: `useActiveTrips` (`['trips','active']`), `autoKeep(trips, manager)`, the show card's room check sets aside the other trips' remaining episodes at the server's estimate (`otherTripsReserve`, `TRIP_FIT_MARGIN` 1.1), the Downloads page lists every active trip. No new dependency, no new MAL-writing code.
 - 2026-10-28 — Many-trips review fixes (§5.4d, §5b). The estimate is on `TripLimits` only (no client read it on `TripOut`) and is not queried for the demo account. `otherTripsReserve` applies `TRIP_FIT_MARGIN` to the reserved episodes as well as the new trip's (`fitBytes`), counts only what is still to come of a downloading or paused record, and skips an episode the viewer declined on this device.
+- 2026-10-28 — `remake-copies --delivered-before ISO8601` (§5.4e Remake; spec FR-A12): `remake_stale(…, delivered_before=)` also re-pends a delivered, unreleased, unwatched row delivered before the time whose copy the settle already deleted (no copy row); a current copy row still wins; naive timestamps read as UTC. No schema change, no new dependency, no MAL-writing code.

@@ -577,7 +577,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   this, a re-make with the same settings included. Left alone: an episode
   the device already let go of (released, e.g. deleted once watched), one
   its user has watched, one cancelled or expired, and — until the command is
-  run again — a copy a device is downloading at that moment. A trip-only episode's copy can be fetched only by a user whose trip holds
+  run again — a copy a device is downloading at that moment. Because a
+  copy the device has confirmed is deleted from the server an hour later and
+  leaves no record of how it was made, the operator may name the time the
+  settings changed, and episodes delivered before it are fetched again too.
+  A trip-only episode's copy can be fetched only by a user whose trip holds
   it (waiting or delivered; anybody else is told it does not exist), and
   opening it in the player is answered "offline only" for that user. Copies
   the device does not collect **expire** `trip_copy_days` (default 14) after

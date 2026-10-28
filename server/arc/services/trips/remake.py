@@ -36,7 +36,18 @@ episode in any of them follows the same rules:
   before the new copy exists (the phase never reads ``available_at``; the
   copy hook stamps only rows that have none).
 
-One ``compute_wants`` is queued when anything was removed. With no copy row
+**Copies the settle already took** (``delivered_before``, owner 2026-10-28).
+An hour after a confirmation the settle deletes a trip-only episode's copy,
+row and file, so nothing on the server records how the copy on the device
+was made. Given the time the settings changed, a ``delivered``, unreleased,
+unwatched row delivered before it whose episode has **no** copy row is
+re-pended the same way (``repend``, ``available_at = now``, **repended**);
+the same skips and the other-trips rule apply. A row whose episode has a
+current copy row is left alone whenever it was delivered: the device may
+hold that copy, and the ETag rule decides. Without the time, nothing
+copyless is touched.
+
+One ``compute_wants`` is queued when anything was removed or re-pended. With no copy row
 left, the reconciler queues the copy again from a source still on disk
 (:func:`~arc.services.acquisition.wants._requeue_trip_copies`), or wants and
 fetches a trip-only episode again — its source went when the first copy was
@@ -159,10 +170,51 @@ async def _stale_episodes(
     }
 
 
+async def _copyless(session: AsyncSession, episode_ids: list[int]) -> set[int]:
+    """Which of ``episode_ids`` have no ``offline_copies`` row at all."""
+    if not episode_ids:
+        return set()
+    having = set(
+        (
+            await session.scalars(
+                select(OfflineCopy.episode_id).where(OfflineCopy.episode_id.in_(episode_ids))
+            )
+        ).all()
+    )
+    return set(episode_ids) - having
+
+
+def delivered_before_cutoff(row: TripEpisode, cutoff: datetime) -> bool:
+    """Whether a copyless row was delivered before ``cutoff`` (still held). Pure.
+
+    The settle deletes a delivered copy an hour after the confirmation, row
+    and file, so nothing records how the copy on the device was made; the
+    operator names the time the settings changed instead.
+    """
+    return (
+        row.state is TripEpisodeState.DELIVERED
+        and row.delivered_at is not None
+        and row.delivered_at < cutoff
+    )
+
+
 async def remake_stale(
-    session: AsyncSession, settings: Settings, *, trip: Trip, now: datetime
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    trip: Trip,
+    now: datetime,
+    delivered_before: datetime | None = None,
 ) -> RemakeReport:
     """Re-make ``trip``'s stale copies (module docstring). Flushed, not committed.
+
+    ``delivered_before``, when given, also re-pends a ``delivered`` row
+    delivered before that time whose episode has **no** copy row any more
+    (the settle took it): the device holds a copy made the old way, and
+    nothing on the server can say so. The same skips apply (released,
+    watched); a row whose episode has a *current* copy row is left alone
+    whenever it was delivered — the ETag rule on the device decides. Without
+    it, a copyless row is never touched.
 
     :class:`~arc.services.trips.create.TripConflict` (``trip_not_active``)
     unless the trip is active. The report counts the named trip's rows; every
@@ -176,7 +228,9 @@ async def remake_stale(
             )
         ).all()
     )
-    first_pass = await _stale_episodes(session, settings, own)
+    first_pass = set(await _stale_episodes(session, settings, own))
+    if delivered_before is not None:
+        first_pass |= await _copyless(session, own)
     trip_ids = {trip.id}
     if first_pass:
         trip_ids |= set(
@@ -231,16 +285,17 @@ async def remake_stale(
 
     # Decided again under the locks: only the named trip's episodes count.
     stale = await _stale_episodes(session, settings, sorted(set(own)))
+    copyless = await _copyless(session, sorted(set(own))) if delivered_before is not None else set()
     by_episode: dict[int, list[TripEpisode]] = defaultdict(list)
     for row in rows:
-        if row.episode_id in stale:
+        if row.episode_id in stale or row.episode_id in copyless:
             by_episode[row.episode_id].append(row)
     watched: dict[int, frozenset[int]] = {}
     for trip_id in active:
         user_id = trips[trip_id].user_id
         if user_id not in watched:
             watched[user_id] = await completed_episode_ids(
-                session, user_id=user_id, episode_ids=list(stale)
+                session, user_id=user_id, episode_ids=sorted(set(stale) | copyless)
             )
 
     counts: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -278,6 +333,20 @@ async def remake_stale(
                 row.available_at = now
                 counts[row.trip_id]["cleared"] += 1
 
+    # The settle took these copies; the operator's time says they were old.
+    if delivered_before is not None:
+        for episode_id in sorted(copyless):
+            for row in by_episode.get(episode_id, []):
+                if not delivered_before_cutoff(row, delivered_before):
+                    continue
+                counts[row.trip_id]["stale"] += 1
+                if leaves_alone(row, watched=episode_id in watched[trips[row.trip_id].user_id]):
+                    counts[row.trip_id]["skipped"] += 1
+                    continue
+                repend(row, available_at=now)
+                counts[row.trip_id]["repended"] += 1
+                removed = True
+
     if removed:
         await enqueue_compute_wants(session)
     await session.flush()
@@ -302,4 +371,10 @@ async def remake_stale(
     )
 
 
-__all__ = ["REASON_REMAKE", "RemakeReport", "leaves_alone", "remake_stale"]
+__all__ = [
+    "REASON_REMAKE",
+    "RemakeReport",
+    "delivered_before_cutoff",
+    "leaves_alone",
+    "remake_stale",
+]
