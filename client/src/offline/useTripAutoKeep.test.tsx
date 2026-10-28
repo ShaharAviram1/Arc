@@ -136,7 +136,7 @@ describe('autoKeep', () => {
     const { manager, worker } = await managerWith([held])
     const adopt = vi.spyOn(manager, 'adoptTrip')
 
-    await autoKeep(trip([{ ...tripEpisode(9001, 1, 'available'), etag: '"n"' }]), manager)
+    await autoKeep([trip([{ ...tripEpisode(9001, 1, 'available'), etag: '"n"' }])], manager)
 
     expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', '"n"')
     await vi.waitFor(() => {
@@ -148,7 +148,7 @@ describe('autoKeep', () => {
     const { manager, worker } = await managerWith([downloadedRecord(USER)])
     const adopt = vi.spyOn(manager, 'adoptTrip')
 
-    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+    await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
 
     expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', null)
     expect(worker.commands).toEqual([])
