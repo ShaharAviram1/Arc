@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Artwork, buttonClass, Chip, cx, EmptyState, FOCUS_RING, RowGroup } from '@/components/ui'
 import { useMe } from '@/lib/auth'
 import { formatSize } from '@/lib/review'
-import { useCancelTrip, useCurrentTrip } from '@/lib/trips'
+import { useActiveTrips, useCancelTrip, type Trip } from '@/lib/trips'
 import { coverUrl } from '@/offline/cache'
 import {
   COPY_NOTE,
@@ -371,22 +371,32 @@ function tripCounts(records: readonly DownloadRecord[]): string {
 function TripGroup({
   tripId,
   records,
-  active,
+  trip,
   renderRow,
 }: {
   tripId: number
   records: DownloadRecord[]
-  /** This is the account's active trip, and the server answered: it can be cancelled. */
-  active: boolean
+  /**
+   * The server's answer for this trip when it is one of the account's active
+   * trips (it can be cancelled); undefined for an ended trip, or offline.
+   */
+  trip: Trip | undefined
   renderRow: (record: DownloadRecord) => ReactNode
 }) {
   const cancel = useCancelTrip()
   const [confirming, setConfirming] = useState(false)
   const first = records[0]
-  if (first === undefined) return null
-  const show = first.snapshot.anime.title.preferred
+  const active = trip !== undefined
+  const show = first?.snapshot.anime.title.preferred ?? trip?.anime_title
+  const animeId = first?.animeId ?? trip?.anime_id
+  if (show === undefined || animeId === undefined) return null
   const total = records.reduce((sum, record) => sum + sizeOf(record), 0)
-  const n = records.length
+  // A trip with nothing on this device yet says how many episodes it took.
+  const n = first === undefined ? (trip?.count ?? 0) : records.length
+  const heading =
+    first === undefined
+      ? `Trip · ${show} · ${String(n)} episode${n === 1 ? '' : 's'}`
+      : `Trip · ${show} · ${String(n)} episode${n === 1 ? '' : 's'} · ${formatSize(total)}`
 
   return (
     <section
@@ -395,11 +405,9 @@ function TripGroup({
     >
       <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 pt-2.5 pb-1">
         <div className="min-w-0">
-          <h2 className="text-[16px] font-medium text-[var(--arc-text)]">
-            {`Trip · ${show} · ${String(n)} episode${n === 1 ? '' : 's'} · ${formatSize(total)}`}
-          </h2>
+          <h2 className="text-[16px] font-medium text-[var(--arc-text)]">{heading}</h2>
           <p className="text-[13px] text-[var(--arc-text-muted)] tabular-nums">
-            {tripCounts(records)}
+            {first === undefined ? 'Nothing on this device yet' : tripCounts(records)}
           </p>
         </div>
         {active ? (
@@ -433,7 +441,7 @@ function TripGroup({
               className={buttonClass('danger')}
               onClick={() => {
                 cancel.mutate(
-                  { tripId, animeId: first.animeId },
+                  { tripId, animeId },
                   {
                     onSuccess: () => {
                       setConfirming(false)
@@ -469,7 +477,7 @@ function TripGroup({
 export function Downloads() {
   const records = useDownloads()
   const { data: me } = useMe()
-  const { data: current } = useCurrentTrip(me !== undefined && me !== null && !me.is_demo)
+  const { data: active } = useActiveTrips(me !== undefined && me !== null && !me.is_demo)
   const [confirming, setConfirming] = useState<number | null>(null)
   const items = Object.values(records).sort((a, b) => {
     const show = a.snapshot.anime.title.preferred.localeCompare(b.snapshot.anime.title.preferred)
@@ -482,6 +490,10 @@ export function Downloads() {
     if (record.tripId === undefined) continue
     trips.set(record.tripId, [...(trips.get(record.tripId) ?? []), record])
   }
+  // Every active trip is listed, one per show (owner, 2026-10-28) — one the
+  // device has nothing of yet too, so it can be seen and cancelled here.
+  for (const trip of active ?? []) if (!trips.has(trip.id)) trips.set(trip.id, [])
+  const activeById = new Map((active ?? []).map((trip) => [trip.id, trip]))
   // The newest trip first: a larger id is a later trip.
   const groups = [...trips.entries()].sort(([a], [b]) => b - a)
 
@@ -511,7 +523,16 @@ export function Downloads() {
 
       <div className="mt-7 flex max-w-[1080px] flex-col gap-6">
         {items.length === 0 ? null : <RemoveWatchedSwitch />}
-        {items.length === 0 ? (
+        {groups.map(([tripId, group]) => (
+          <TripGroup
+            key={tripId}
+            tripId={tripId}
+            records={group}
+            trip={activeById.get(tripId)}
+            renderRow={renderRow}
+          />
+        ))}
+        {items.length === 0 && groups.length === 0 ? (
           <EmptyState
             message={canDownloadInApp() ? EMPTY_MESSAGE : UNSUPPORTED}
             action={
@@ -520,19 +541,8 @@ export function Downloads() {
               </Link>
             }
           />
-        ) : (
-          <>
-            {groups.map(([tripId, group]) => (
-              <TripGroup
-                key={tripId}
-                tripId={tripId}
-                records={group}
-                active={current !== undefined && current !== null && current.id === tripId}
-                renderRow={renderRow}
-              />
-            ))}
-            {loose.length === 0 ? null : <RowGroup>{loose.map(renderRow)}</RowGroup>}
-          </>
+        ) : loose.length === 0 ? null : (
+          <RowGroup>{loose.map(renderRow)}</RowGroup>
         )}
 
         <StorageCard used={used} />

@@ -53,7 +53,7 @@ export interface TripEpisode {
   url?: string | null
 }
 
-/** `TripOut`: `POST /api/anime/{id}/trip`, `GET /api/trips/current`, the show's `trip`. */
+/** `TripOut`: `POST /api/anime/{id}/trip`, each of `GET /api/trips`, the show's `trip`. */
 export interface Trip {
   id: number
   anime_id: number
@@ -66,11 +66,20 @@ export interface Trip {
   created_at: string
   deadline_at: string
   episodes: TripEpisode[]
+  /**
+   * What one copy is likely to weigh, from the server's own recent copies
+   * (owner, 2026-10-28). Optional on the wire for an older payload.
+   */
+  copy_estimate_bytes?: number
 }
 
-export const TRIP_QUERY_KEY = ['trip', 'current'] as const
+/**
+ * `GET /api/trips`: every active trip of the signed-in account, oldest first.
+ * A user may have one per show and any number of shows (owner, 2026-10-28).
+ */
+export const TRIP_QUERY_KEY = ['trips', 'active'] as const
 
-/** How often the auto-keep hook asks about the current trip while Arc is open. */
+/** How often the auto-keep hook asks about the active trips while Arc is open. */
 export const TRIP_POLL_MS = 60_000
 
 /**
@@ -81,24 +90,71 @@ export const TRIP_POLL_MS = 60_000
  */
 export const TRIP_MAX_EPISODES = 50
 
-/** What one small copy roughly weighs (720p H.264, CRF 26): the estimate, not a promise. */
-export const TRIP_EPISODE_ESTIMATE_BYTES = 100_000_000
+/**
+ * What one copy weighs when the server does not say (an older payload): the
+ * server's own fallback, a little above the ~254 MB 1080p HEVC copies measured
+ * on 2026-10-28. The server's figure (`copy_estimate_bytes`, the median of its
+ * recent copies) is used whenever it is there.
+ */
+export const TRIP_COPY_ESTIMATE_FALLBACK = 260_000_000
+
+/** The server's estimate of one copy, from a trip or the show's `trip_limits`. */
+export function copyEstimateOf(
+  source: { copy_estimate_bytes?: number } | null | undefined,
+): number {
+  const bytes = source?.copy_estimate_bytes
+  return bytes !== undefined && bytes > 0 ? bytes : TRIP_COPY_ESTIMATE_FALLBACK
+}
 
 /**
  * "500 MB", "1.2 GB": the stepper's size estimate, in round decimal units
- * because it is a guess ({@link TRIP_EPISODE_ESTIMATE_BYTES} per episode).
+ * because it is a guess (`perEpisode` is the server's estimate of one copy).
  */
-export function tripEstimateLabel(count: number): string {
-  const bytes = count * TRIP_EPISODE_ESTIMATE_BYTES
+export function tripEstimateLabel(count: number, perEpisode: number): string {
+  const bytes = count * perEpisode
   if (bytes < 1_000_000_000) return `${String(Math.round(bytes / 1_000_000))} MB`
   return `${(bytes / 1_000_000_000).toFixed(1).replace(/\.0$/, '')} GB`
 }
 
 /**
- * What the room check reckons one episode needs: the estimate with a margin,
- * since the browser's figures are themselves an estimate (owner, 2026-10-07).
+ * The room check's margin over the estimate, since the browser's figures are
+ * themselves an estimate (owner, 2026-10-07: 110 MB for a 100 MB guess).
  */
-export const TRIP_FIT_BYTES_PER_EPISODE = 110_000_000
+export const TRIP_FIT_MARGIN = 1.1
+
+/** The phases whose copy has yet to reach a device: what a trip still needs room for. */
+const STILL_TO_COME: ReadonlySet<TripPhase> = new Set<TripPhase>([
+  'searching',
+  'downloading',
+  'preparing',
+  'available',
+  'waiting_space',
+])
+
+/**
+ * The bytes the account's **other** active trips still have to bring to the
+ * device (owner, 2026-10-28: the device's room is shared by every trip). Each
+ * episode not yet delivered, expired or given up on counts one estimate,
+ * unless this device already holds its copy (`records`), which the browser's
+ * own figures already count.
+ */
+export function otherTripsReserve(
+  trips: readonly Trip[] | null | undefined,
+  animeId: number,
+  perEpisode: number,
+  records: Downloads = {},
+): number {
+  let episodes = 0
+  for (const trip of trips ?? []) {
+    if (trip.anime_id === animeId || trip.state !== 'active') continue
+    for (const episode of trip.episodes) {
+      if (!STILL_TO_COME.has(episode.phase)) continue
+      if (records[episode.episode_id]?.state === 'downloaded') continue
+      episodes += 1
+    }
+  }
+  return episodes * perEpisode
+}
 
 /** What the browser reports about Arc's storage (`navigator.storage.estimate()`). */
 export interface StorageRoom {
@@ -108,14 +164,21 @@ export interface StorageRoom {
 
 /**
  * How many trip episodes the browser says there is room for, or `null` when
- * it says nothing useful. Only ever a cap on the stepper with a sentence:
- * on iPadOS the figure is the browser's allowance, and a full iPad can still
- * report gigabytes free, so this never stands in for the write itself.
+ * it says nothing useful. `perEpisode` is the server's estimate of one copy
+ * (with {@link TRIP_FIT_MARGIN} on top) and `reserved` what the account's
+ * other trips still have to bring ({@link otherTripsReserve}). Only ever a
+ * cap on the stepper with a sentence: on iPadOS the figure is the browser's
+ * allowance, and a full iPad can still report gigabytes free, so this never
+ * stands in for the write itself.
  */
-export function tripRoomFor(room: StorageRoom | null): number | null {
+export function tripRoomFor(
+  room: StorageRoom | null,
+  perEpisode: number,
+  reserved = 0,
+): number | null {
   if (room === null || !(room.quota > 0)) return null
-  const free = Math.max(0, room.quota - room.usage)
-  return Math.floor(free / TRIP_FIT_BYTES_PER_EPISODE)
+  const free = Math.max(0, room.quota - room.usage - reserved)
+  return Math.floor(free / Math.ceil(perEpisode * TRIP_FIT_MARGIN))
 }
 
 /** `navigator.storage.estimate()` for the trip card, read when it opens. */
@@ -228,7 +291,7 @@ export type TripRefusal =
 
 const REFUSALS: Record<TripRefusal, string> = {
   demo_account: 'The demo account cannot prepare trips.',
-  trip_active: 'You already have a trip being prepared. Cancel it, or wait for it to finish.',
+  trip_active: 'This show already has a trip being prepared.',
   storage_held:
     'Arc’s server is short of disk space right now, so it cannot start a trip. Try again later.',
   count_out_of_range: 'That is more episodes than this server allows for one trip.',
@@ -258,19 +321,19 @@ export function askAgainErrorMessage(error: unknown): string {
 
 /* --- Queries ------------------------------------------------------------- */
 
-function fetchCurrentTrip(): Promise<Trip | null> {
-  return apiFetch<Trip | null>('/api/trips/current').then((trip) => trip ?? null)
+function fetchActiveTrips(): Promise<Trip[]> {
+  return apiFetch<Trip[] | null>('/api/trips').then((trips) => trips ?? [])
 }
 
 /**
- * `GET /api/trips/current`: the signed-in account's active trip, or null.
- * Asked every {@link TRIP_POLL_MS}, when Arc comes back on screen or back
- * online, and whenever the live stream says a copy or an episode moved.
+ * `GET /api/trips`: the signed-in account's active trips, oldest first (`[]`
+ * for none). Asked every {@link TRIP_POLL_MS}, when Arc comes back on screen
+ * or back online, and whenever the live stream says a copy or an episode moved.
  */
-export function useCurrentTrip(enabled: boolean): UseQueryResult<Trip | null, Error> {
-  return useQuery<Trip | null, Error>({
+export function useActiveTrips(enabled: boolean): UseQueryResult<Trip[], Error> {
+  return useQuery<Trip[], Error>({
     queryKey: TRIP_QUERY_KEY,
-    queryFn: fetchCurrentTrip,
+    queryFn: fetchActiveTrips,
     enabled,
     retry: false,
     staleTime: 0,
@@ -278,6 +341,15 @@ export function useCurrentTrip(enabled: boolean): UseQueryResult<Trip | null, Er
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
   })
+}
+
+/** The cached list with `trip` in its place (at the end when new), or without it once ended. */
+export function withTrip(trips: readonly Trip[] | undefined, trip: Trip): Trip[] {
+  const list = trips ?? []
+  if (trip.state !== 'active') return list.filter((other) => other.id !== trip.id)
+  const at = list.findIndex((other) => other.id === trip.id)
+  if (at < 0) return [...list, trip]
+  return list.map((other) => (other.id === trip.id ? trip : other))
 }
 
 function refreshAfterTrip(client: QueryClient, animeIds: readonly number[]): void {
@@ -299,7 +371,7 @@ export function useCreateTrip(animeId: number): UseMutationResult<Trip, Error, n
       client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
         current === undefined ? current : { ...current, trip },
       )
-      client.setQueryData<Trip | null>(TRIP_QUERY_KEY, trip)
+      client.setQueryData<Trip[]>(TRIP_QUERY_KEY, (trips) => withTrip(trips, trip))
       refreshAfterTrip(client, [animeId])
     },
   })
@@ -316,11 +388,13 @@ export function useCancelTrip(): UseMutationResult<null, Error, CancelTripInput>
   return useMutation<null, Error, CancelTripInput>({
     mutationFn: ({ tripId }) =>
       apiFetch<null>(`/api/trips/${String(tripId)}`, { method: 'DELETE' }),
-    onSuccess: (_result, { animeId }) => {
+    onSuccess: (_result, { tripId, animeId }) => {
       client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
         current === undefined ? current : { ...current, trip: null },
       )
-      client.setQueryData<Trip | null>(TRIP_QUERY_KEY, null)
+      client.setQueryData<Trip[]>(TRIP_QUERY_KEY, (trips) =>
+        trips === undefined ? trips : trips.filter((trip) => trip.id !== tripId),
+      )
       refreshAfterTrip(client, [animeId])
     },
   })
@@ -344,7 +418,7 @@ export function useAskAgain(): UseMutationResult<Trip, Error, AskAgainInput> {
       client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
         current === undefined ? current : { ...current, trip },
       )
-      client.setQueryData<Trip | null>(TRIP_QUERY_KEY, trip)
+      client.setQueryData<Trip[]>(TRIP_QUERY_KEY, (trips) => withTrip(trips, trip))
       refreshAfterTrip(client, [animeId])
     },
   })
