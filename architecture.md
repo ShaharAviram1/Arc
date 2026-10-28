@@ -1883,19 +1883,33 @@ and gradients.
 ### 5.3b The small offline copy (M19 T1, FR-P6)
 One MP4 per episode at `DATA_DIR/offline/<episode_id>.mp4`, made on request
 from a `ready` episode's source, for a device to keep instead of the full-size
-`episode.mp4` (≈100 MB against 300–600 MB). Modules: `media/plan.py`
+`episode.mp4`. Height, codec and CRF are `OFFLINE_HEIGHT` / `OFFLINE_CODEC` /
+`OFFLINE_CRF` (§9): 720p H.264 CRF 26 until 2026-10-28 (the shipped
+defaults), **1080p HEVC CRF 28** on production since (owner: 720p was too soft
+on the iPad). Measured on SubsPlease 1080p sources (8 Mbit/s): 227 MB per
+24-minute episode the first way, ≈254 MB the second, for 3.8× the encode
+time. Modules: `media/plan.py`
 (`OfflineOptions`, `offline_encode_args`, pure), `media/copies.py` (handler-free:
 the state rule, `request_copy`, `may_fetch_copy`, `encoding_episode_ids`, the
 codec strings — what the API and retention import), `media/offline.py` (the
-`offline_encode` handler).
+`offline_encode` handler; `copy_languages` / `current_settings_key`, what
+`trips/remake.py` compares a copy's `settings_key` against, §5.4).
+- **Codec strings.** `copies.codec_string(codec, height)` gives the RFC 6381
+  string a device passes to `canPlayType` (`OfflineOut.codecs`): H.264 High
+  `avc1.640028` (level 4.0) up to 1080 lines, `avc1.640033` (5.1) above — the
+  level `offline_encode_args` writes with `-level`; HEVC Main
+  `hvc1.1.6.L93.B0` (3.1) up to 720, `L120` (4.0) up to 1080, `L153` (5.1)
+  above. A made copy is described by its own row's codec and height, one not
+  made yet by the host's `OFFLINE_CODEC` / `OFFLINE_HEIGHT`; no height reads
+  as the lowest tier.
 - **Args.** The rendition's own `build_plan` (same video, audio and subtitle
   tracks, FR-P2), the same `extract_fonts`/`extract_subtitle` into the staging
   directory's `_work/`, then one pass: `-vf "scale=-2:'min(OFFLINE_HEIGHT,ih)'
   :flags=bicubic,ass=_work/sub.ass:fontsdir=_work/fonts"` — **scale first,
-  then burn**, so libass draws the glyphs at 720p rather than having 1080p text
-  scaled down; `min(…,ih)` never upscales. H.264: `libx264 -preset
-  $OFFLINE_PRESET -crf $OFFLINE_CRF -tune animation -profile:v high -level 4.0
-  -pix_fmt yuv420p`; HEVC: `libx265 … -tag:v hvc1 -profile:v main -pix_fmt
+  then burn**, so libass draws the glyphs at the copy's own height rather than
+  having the source's text scaled down; `min(…,ih)` never upscales. H.264:
+  `libx264 -preset $OFFLINE_PRESET -crf $OFFLINE_CRF -tune animation
+  -profile:v high -level 4.0 -pix_fmt yuv420p` (`-level 5.1` above 1080); HEVC: `libx265 … -tag:v hvc1 -profile:v main -pix_fmt
   yuv420p` (Safari refuses `hev1`). Common: `-c:a aac -b:a
   $OFFLINE_AUDIO_BITRATE -ac 2 -sn -dn -map_chapters -1 -map_metadata -1
   -movflags +faststart -progress pipe:1`, output `offline.mp4` (relative; the
@@ -1935,7 +1949,9 @@ codec strings — what the API and retention import), `media/offline.py` (the
   job ends without a retry, since another full encode would fail the same way.
   A `queued`/`preparing` row with no live job behind it (attempts used up,
   row gone) reads `failed` to clients and is re-queued by the next request.
-  `settings_key` is recorded only: a settings change re-makes nothing. The episode's own
+  `settings_key` is recorded only: a settings change re-makes nothing by
+  itself; an admin's `remake-copies` re-makes a trip's stale copies (§5.4,
+  2026-10-28). The episode's own
   state never changes. `on_copy_ready(ctx, episode, copy, why=…)` is the single
   hook a successful copy calls (after its commit) — where M19 T3 hangs a
   trip-only episode's source deletion.
@@ -2995,10 +3011,25 @@ pure stepper, refusal and row-status rules), `components/Trip.tsx`
   marks the show and the trip stale). Each answer runs `autoKeep(trip,
   manager)`: an `available` episode with no record and not declined →
   `keepTripCopy({episodeId, tripId, url})`; an episode with a record →
-  `adoptTrip` (sets `tripId`; a downloaded copy of either size is confirmed
-  at once; a record waiting on the server, or a small copy that failed
+  `adoptTrip(episodeId, tripId, url, etag)` (sets `tripId`; a downloaded
+  copy of either size is confirmed at once — except a **re-made** one, below;
+  a record waiting on the server, or a small copy that failed
   `gone`/`unprepared`, takes the trip's URL; anything else — paused by
   hand included — is left alone); then `confirmPending()`.
+- **A copy re-made on the server** (owner, 2026-10-28; §5.4e "Remake").
+  `TripEpisodeOut.etag` is the copy's ETag whenever `url` is set. A
+  `downloaded` **small** record with a non-null `etag` that differs from a
+  non-null server `etag`, with a `url`, is replaced: the blob URL memo
+  dropped, the record patched to `preparing` (`url`/`etag` null, `bytes`/
+  `total` 0, `confirm` unset, `replacedFor` = the server ETag), its file
+  deleted (`dropFile`, the removal `remove()` uses — a file the worker
+  still holds is doomed until it lets go; one another account's record
+  holds is kept), then `place(key, 'small', url)` — the usual queue, a fresh
+  download, confirmed with the new ETag on `done`. Not while the episode is
+  open in the player (`enterPlayer`; the next pass does it), not twice at
+  once (`replacing`), and once per server ETag (`replacedFor`), so a server
+  naming one ETag and serving another cannot loop the device. A full-size
+  record, or a null ETag either side, is confirmed as before.
 - **No `/offline` request for a trip copy.** That route answers a `ready`
   episode only (404 otherwise), and a trip-only episode never is; so
   `keepTripCopy` writes the record (`variant: 'small'`, `tripId`,
@@ -3418,7 +3449,9 @@ worker).
   retention. `compute_wants` queued.
 - **Read side.** `TripOut` (`api/trip_schemas.py`): id, anime_id,
   anime_title, first/last_number, count, state, created_at, deadline_at,
-  `episodes[] = {episode_id, number, phase, progress, size, delivered}`.
+  `episodes[] = {episode_id, number, phase, progress, size, delivered, url,
+  etag}` — `url` and `etag` (the copy's, 2026-10-28) only while the copy is
+  `ready` and the phase `available` or `delivered`, else null.
   `phase` is `trips.phase.trip_phase(PhaseFacts)` — pure, in this order: the
   row's own `delivered`/`expired` (T4 writes them), `cancelled` →
   `unavailable`; copy `ready` → `available`; any other copy row → `preparing`
@@ -3514,6 +3547,32 @@ above), so what is settled here is the **copy** — file and row — and the
   rows went with the user by CASCADE). `compute_wants` is queued when (1) or (2)
   changed anything. The idle rule for `ready` episodes' copies stays
   retention's.
+- **Remake** (owner, 2026-10-28: copies went 720p H.264 CRF 26 → 1080p HEVC
+  CRF 28, §5.3b, and the trip under way was to follow). `trips.remake.
+  remake_stale(session, settings, *, trip, now) → RemakeReport{stale,
+  repended, cleared, skipped}`, run by `python -m arc.cli remake-copies
+  --trip ID | --all` (one commit and one line per trip; `--trip` on an
+  unknown or ended trip exits 1). Refused with `TripConflict
+  (trip_not_active)` unless the trip is active. Locks the trip `FOR UPDATE`,
+  its rows, then the episodes (delivery's order). A copy is **stale** when
+  its `settings_key` is set and differs from `media.offline.
+  current_settings_key` (the encode's own `copy_languages` + `OFFLINE_*`);
+  a row with no key yet is not. Per stale row: `cancelled`/`expired`, or
+  `delivered` with `released_at` (the device let it go — deleted once
+  watched) → **skipped**, untouched. Otherwise a pending `offline_encode` is
+  dropped (`cancel.drop_queued_copies`) and the copy removed by
+  `retention.delete.delete_copy` (file + row); a **running** encode makes it
+  refuse, and the row is **skipped** unchanged. Then `delivered` →
+  `deliver.repend(row, available_at=None)` ("again"'s shape: pending,
+  `delivered_at`/`released_at`/`available_at` cleared) — **repended**; a
+  `pending` row → `available_at` cleared — **cleared**. One `compute_wants`
+  when anything changed: with no copy row left, `_requeue_trip_copies`
+  re-makes a copy from a source still on disk, and a trip-only episode
+  (source gone with the first copy) is searched and fetched again — the pack
+  the owner holds supplies it — after which the linker queues the copy. The
+  device replaces the copy it holds when the new one's ETag arrives on
+  `TripEpisodeOut.etag` (§5.4d). Flushed, not committed. No want, list
+  entry or MAL write.
 - **Authorisation** (`media.copies.may_fetch_copy`, asked by
   `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
   account; a `ready` episode's copy → any account; a non-`ready` episode's →
@@ -4636,7 +4695,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s\|video.m3u8\|subs.m3u8\|sub_NNNNN.vtt}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex (a name with `/` is a 422 too), path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native). For a remux (M20): `index.m3u8` is a generated master (video + default WebVTT subtitle rendition), `subs.m3u8` and `sub_NNNNN.vtt` (`text/vtt`, `no-cache` + ETag/304) are generated from `subs.vtt`; 404 for a rendition without a text track (§5.4a) |
 | `GET`/`HEAD /media/{id}/episode.mp4` | any but the demo account (403) | The whole ready episode as one MP4 (FR-S7): `init.mp4` + segments in playlist order, concatenated on the fly; parts checked like segments; 404 unless `ready` and every part is present and plain; `private, no-cache` + strong ETag over all parts/304; single Range → 206, multi-range → 200, JSON 400/416; `If-Range` honoured; `Content-Disposition: attachment` named from the database (§5.4a). Parts come from `video.m3u8` for a remux; a remux with a text track is **404 with a reason** (M20, Q7) |
 | `GET`/`HEAD /media/{id}/offline.mp4` | any but the demo account (403, before any lookup) | The small offline copy (FR-P6, M19 T1) from `DATA_DIR/offline/<id>.mp4`: 404 unless its `offline_copies` row is `ready`, `copies.may_fetch_copy` agrees (a `ready` episode: anyone; a non-ready trip episode: only a user holding a `pending`/`delivered` trip row on it — M19 T4), and the file is a plain file inside `offline/` (a symlink is refused); `video/mp4`, `private, no-cache`, strong ETag `"<size hex>-<mtime_ns hex>"` (the row's `etag`)/304, Range → 206, JSON 400/416, `If-Range` (a mismatch answers 200 with the whole file), `Content-Disposition: attachment` named like `episode.mp4`'s. Touches `last_served_at` at most hourly (§5.4a) |
-| `POST /api/episodes/{id}/offline` | any but the demo account (403) | "Keep offline" asks for the small copy (FR-P6): **202 `OfflineOut`** = `{state: none\|queued\|preparing\|available\|failed\|unavailable, progress: 0..1 \| null (while queued/preparing), size: bytes \| null (once available), url: "/media/{id}/offline.mp4" \| null (once available), codecs: "avc1.640028" \| "hvc1.1.6.L93.B0" \| null}`. Queues `offline_encode` (deduped per episode, priority 520) and writes the `offline_copies` row as `queued` unless a matching ready copy exists (then `available`, nothing queued) or one is already queued/preparing. **409** when no usable copy can be made now — `{"detail": "source_gone"}` (the episode is ready but its source is not on disk and no copy is made or on its way) or `{"detail": "storage_held"}` (the data volume is under its FR-T6 floor) — and **429 `{"detail": "copy_queue_full"}`** when the caller has 10 copies queued or being made or the host has 30 (trip copies not counted); on all three the device takes `download_url`. `request_copy` locks the episode row `FOR UPDATE` against retention's deletion. 404 `episode not found or not ready` for an unknown or not-`ready` episode |
+| `POST /api/episodes/{id}/offline` | any but the demo account (403) | "Keep offline" asks for the small copy (FR-P6): **202 `OfflineOut`** = `{state: none\|queued\|preparing\|available\|failed\|unavailable, progress: 0..1 \| null (while queued/preparing), size: bytes \| null (once available), url: "/media/{id}/offline.mp4" \| null (once available), codecs: "avc1.640028" \| "hvc1.1.6.L120.B0" \| … \| null}` (the RFC 6381 string by codec and height, `copies.codec_string`, §5.3b). Queues `offline_encode` (deduped per episode, priority 520) and writes the `offline_copies` row as `queued` unless a matching ready copy exists (then `available`, nothing queued) or one is already queued/preparing. **409** when no usable copy can be made now — `{"detail": "source_gone"}` (the episode is ready but its source is not on disk and no copy is made or on its way) or `{"detail": "storage_held"}` (the data volume is under its FR-T6 floor) — and **429 `{"detail": "copy_queue_full"}`** when the caller has 10 copies queued or being made or the host has 30 (trip copies not counted); on all three the device takes `download_url`. `request_copy` locks the episode row `FOR UPDATE` against retention's deletion. 404 `episode not found or not ready` for an unknown or not-`ready` episode |
 | `POST /api/anime/{id}/trip` | any but the demo account (403 `demo_account`) | FR-A12, M19 T3: body `{count}` (strict int) → **201 `TripOut`** = `{id, anime_id, anime_title, first_number, last_number, count, state, created_at, deadline_at, episodes: [{episode_id, number, phase: searching\|downloading\|preparing\|available\|delivered\|expired\|unavailable\|waiting_space, progress, size, delivered, url: "/media/{eid}/offline.mp4" \| null (the copy is `ready` and phase is `available`/`delivered`)}]}`. 409 `trip_active` / `storage_held`; 422 `count_out_of_range` (1..`trip_max_episodes`) / `nothing_aired`; 404 unknown anime. Writes trip, rows, wants; starts searches (160) and queues copies at once; never writes a list entry or MAL (§5.4e) |
 | `GET /api/episodes/{id}/releases`, `GET /api/trips/{id}/releases` | any but the demo account (403 `demo_account`); an episode the caller has a live want on (else 404 `not_wanted`) / the caller's own active trip (404 `trip_not_found`, 409 `trip_not_active`) | FR-A13 (§5.1a "Manual release choice"): **200 `ReleasesOut`** = `{scope, scope_id, number, candidates[{id, title, group, resolution, size, seeders, leechers, kind: single\|batch, trusted, covers: int[]\|null, acceptable, reason, current}], current: {title, kind, state, progress, manual}\|null, cached, searched_seconds_ago}`. Searches Nyaa in the request, at most once a minute per caller and scope (the remembered list otherwise); 502 `nyaa_unavailable`. Errors here and below are `{"detail": {"code", "message"}}` |
 | `POST /api/episodes/{id}/release`, `POST /api/trips/{id}/release` | as above | FR-A13: body exactly one of `{candidate_id}` (from the caller's last list; else 422 `unknown_candidate`) or `{link}` (magnet, or an `https` nyaa.si / `NYAA_URL`-host `/view/<id>` or `/download/<id>.torrent`; else 422 `host_not_allowed`/`bad_link`; a magnet not in the pool 422 `magnet_unknown`) → **202 `ReleaseChosenOut`** = `{title, kind, info_hash, episodes[{episode_id, number, state}]}`. Replaces the running download (single cancelled via `qbit_cancel`, pack claim released via `qbit_reselect`) and takes the release through the existing add paths (a pack: `_take_batch`, only the caller's wanted files). 409 `storage_held`, `acquisition_paused`, `packs_off`, `busy`, `already_arrived`, `nothing_to_fetch`; 422 `pack_selects_nothing` (the pack is deleted while stopped), `already_tried`, `already_downloading`, `wrong_episode`; 503 `qbit_unavailable`. A refusal rolls everything back. `EpisodeOut.wanted_by_me` and `ReleaseOut.manual` feed the show page |
@@ -4781,7 +4840,7 @@ Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
 heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
 `caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
 `api` container → up. Ops runbook: `deploy/README.md`; CLI:
-`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media}`.
+`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media,remake-copies}`.
 `demo-list` takes `--user-email`, one or more `--add TITLE`, `--status`
 (any `ListStatus` value, default `watching`), `--progress N` and `--demo`
 (sets `users.is_demo`): **one status group and one progress per invocation**,
@@ -7177,3 +7236,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-18 — **Next season** at a finished season's end (§5b `/play`; spec FR-S5 item 3, FR-A9, §5 Player; owner after the real-iPad check). `PlayInfo.next_season` (`NextSeasonRef`); new `services/catalog/sequels.py` (pure `season_ends_here`, `pick_sequel`, `first_regular_episode`, one-query `find_sequel`), `services/playback/next_season.py`, `wants.coverable_once_active`. Client: `useNextSeasonPress` in the player (end overlay and Next glyph) does the list write then the demand — two existing calls, no new endpoint; the demand's `coverable` reads the committed entry. No schema change, no new dependency, no new MAL-writing code (the absent case's add goes through `set_list_entry` like the show page's).
 - 2026-10-18 — Next season after review (§5b `/play`): `season_ends_here` requires the stated count on a FINISHED show too; `pick_sequel` ranks only `SEASON_FORMATS` (`TV`, `TV_SHORT`, `ONA`); `list_state` is `dormant` only within `WANTING_STATUSES`; `fetchable` also accepts the current `coverable` set for a dormant/absent entry; `NextSeasonRef.aired`; `NextSeasonRef.list_state` reuses `next_season.ListState`; one `useNextSeasonPress` per player. Still no schema change, no new dependency.
 - 2026-10-20 — **M20.2 Slow swarms** (§5.1a batches, `compute_wants`; spec FR-A1, FR-A4, FR-A6, FR-A11, FR-A14, FR-D2; owner). Settings `batch_prefer_ratio`, `slow_swarm_seeders`, `look_ahead_slow` seeded by data-only revision `c4b8e1f2a9d6`, read by `rules.batch_prefer_ratio` and the one-query `rules.window_rules`. `nyaa.search_for_episode(with_batches=True)` asks the pack forms beside the singles on a finished show; `jobs._prefer_batch` runs after `_pick` and before `_record_torrent`, filters packs (resolution_rank ≤ 1, no dub over a subbed single, trip floor, `nyaa.batch_beats_single`), takes the first through the unchanged `_take_batch` (`over_single=True`: a range-less miss is not tombstoned), attaches via `batch.claim_existing` when a sibling took it, else falls through to the single; the no-single fallback is gated on `not ranked`; `_retry_stalled_pack_episodes` (was `_retry_trip_episodes`) retries every pending episode of a stalled pack unless the pack is manual. `wants._thin_shows` (one UNION ALL + DISTINCT ON statement, singles via `torrents.episode_id`, packs via `torrent_files`, null seeders skipped) and `show_look_ahead` give a thin show `max(n, slow_n)`; `_reconcile(keep_in_flight=plan.look_ahead > 0)` keeps a downloading want above progress when the window shrinks. No schema change, no new dependency, no new MAL-writing code.
+- 2026-10-28 — **Offline copies 1080p HEVC CRF 28; trips' copies can be re-made** (§5.3b, §5.4d, §5.4e Remake, §9 CLI; spec FR-P6, FR-A12; owner: the 720p copies were too soft on the iPad). Production `.env` sets `OFFLINE_CODEC=hevc OFFLINE_HEIGHT=1080 OFFLINE_CRF=28` (227 MB → ≈254 MB per 24 min on SubsPlease 1080p, 3.8× the encode time); the shipped defaults stay 720p H.264 CRF 26. `copies.codec_string(codec, height)` names the level by height (HEVC L93/L120/L153 at ≤720/≤1080/above; H.264 `640028`/`640033` at ≤1080/above, and `offline_encode_args` writes `-level 5.1` above 1080 to match); `OfflineOut.build`, `OfflineFacts` and `episode_extras` take `OFFLINE_HEIGHT`. New `trips/remake.py` (`remake_stale`, `RemakeReport`) and `arc.cli remake-copies --trip ID | --all`; `deliver.repend` extracted from `ask_again`; `media.offline.copy_languages` (was `_languages`) and `current_settings_key`. `TripEpisodeOut.etag`; client `adoptTrip(…, etag)` replaces a small copy whose ETag differs (`DownloadRecord.replacedFor`, `dropFile` shared with `remove`). No schema change, no new dependency, no MAL-writing code.
