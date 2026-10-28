@@ -2084,9 +2084,17 @@ owner's word.
         owner's explicit choice. Verified by the orchestrator 2026-10-28 as
         for A (one merge fix: two ETag tests passed a single trip to
         `autoKeep`).
-  - [ ] **C — production**: deploy; `remake-copies --trip 4` so episodes
-        12–14 are re-made at 1080p HEVC and the iPad swaps them; first
-        HEVC copy measured (size, encode time on the 2-core host).
+  - [x] **C — production**: deployed 2026-10-28 19:35 UTC between two
+        encodes (backup arc-20261028T185827Z, `git pull --ff-only` to
+        0473e82, `make up`, `alembic current` = 5d3e9a7c1b20, health 200,
+        no errors). `remake-copies --trip 4 --delivered-before
+        2026-10-28T17:10:00Z` re-pended episodes 12 and 13 (2 stale, 2
+        re-pended); episode 14 had been confirmed at 17:13 with a 720p copy
+        made just before the restart, so a second run with `17:15:00Z`
+        re-pended it too. Twenty seconds later the reconciler had episode 12
+        (still `ready` in the window) queued for a new copy, 13 `matched`
+        from the held pack and 14 `downloading` from it. The first HEVC copy
+        is in the T0 line above.
   - DoD: Writer → Validator → Reviewer (A and B both touch
     acquisition/retention paths) → orchestrator verification; full suites
     green; lint clean; single Alembic head; deployed; trip 4's early
