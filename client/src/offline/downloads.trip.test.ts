@@ -208,6 +208,123 @@ describe('adoptTrip', () => {
   })
 })
 
+describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
+  /** Alice holds the small copy `"o"`, already confirmed to the server. */
+  async function holding(
+    patch: Partial<DownloadRecord> = {},
+    options: Parameters<typeof managerHarness>[0] = {},
+  ) {
+    const confirmDelivered = vi.fn(() => Promise.resolve(null))
+    const record = tripRecord({ confirm: 'done', ...patch })
+    const harness = managerHarness({
+      confirmDelivered,
+      ...options,
+      initial: [recordEntry(record)],
+    })
+    harness.files.set(record.name, record.bytes)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+    return { ...harness, confirmDelivered }
+  }
+
+  it('drops the old file and downloads the new copy afresh when the ETag differs', async () => {
+    const { manager, worker, removed, confirmDelivered } = await holding()
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    await vi.waitFor(() => {
+      expect(worker.lastCommand()).toMatchObject({
+        cmd: 'download',
+        name: SMALL,
+        url: COPY_URL,
+        etag: null,
+        fresh: true,
+      })
+    })
+    expect(removed).toEqual([SMALL])
+    expect(manager.record(9001)).toMatchObject({
+      tripId: TRIP,
+      variant: 'small',
+      state: 'downloading',
+      replacedFor: '"n"',
+    })
+
+    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"n"', run: 1 })
+
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"')
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"n"' })
+  })
+
+  it('fetches the new copy once per server ETag, even if it lands under another', async () => {
+    const { manager, worker } = await holding()
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    await vi.waitFor(() => {
+      expect(worker.commands).toHaveLength(1)
+    })
+    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"x"', run: 1 })
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    expect(worker.commands).toHaveLength(1)
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"x"' })
+  })
+
+  it('keeps a copy whose ETag is the server’s', async () => {
+    const { manager, worker, removed } = await holding()
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"o"')
+
+    expect(worker.commands).toEqual([])
+    expect(removed).toEqual([])
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"o"' })
+  })
+
+  it('keeps it when either ETag is unknown, or there is no URL', async () => {
+    const { manager, worker, removed } = await holding({ etag: null })
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    expect(worker.commands).toEqual([])
+
+    const second = await holding()
+    second.manager.adoptTrip(9001, TRIP, COPY_URL, null)
+    second.manager.adoptTrip(9001, TRIP, COPY_URL)
+    second.manager.adoptTrip(9001, TRIP, null, '"n"')
+
+    expect(second.worker.commands).toEqual([])
+    expect([...removed, ...second.removed]).toEqual([])
+    expect(second.manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"o"' })
+  })
+
+  it('confirms a full-size copy at once, whatever the ETag', async () => {
+    const confirmDelivered = vi.fn(() => Promise.resolve(null))
+    const full = downloadedRecord(ALICE)
+    const harness = managerHarness({ confirmDelivered, initial: [recordEntry(full)] })
+    harness.files.set(full.name, full.bytes)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+
+    harness.manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"')
+    expect(harness.worker.commands).toEqual([])
+    expect(harness.removed).toEqual([])
+  })
+
+  it('waits while the episode is open in the player', async () => {
+    const { manager, worker } = await holding()
+    const leave = manager.enterPlayer(9001)
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    expect(worker.commands).toEqual([])
+
+    leave()
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    await vi.waitFor(() => {
+      expect(worker.lastCommand()).toMatchObject({ url: COPY_URL, fresh: true })
+    })
+  })
+})
+
 describe('taking a trip copy off the device', () => {
   it('tells the server, and keeps the hook from fetching it again until asked', async () => {
     const releaseDelivered = vi.fn(() => Promise.resolve(null))

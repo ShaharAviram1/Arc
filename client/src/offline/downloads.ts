@@ -190,6 +190,13 @@ export interface DownloadRecord {
    * finishes, so a copy that keeps vanishing ends at "gone" instead of looping.
    */
   reasked?: boolean
+  /**
+   * The server's ETag this trip copy was last replaced for ({@link
+   * DownloadManager.adoptTrip}, owner 2026-10-28): a copy re-made on the
+   * server is fetched again once per ETag, so a server that names one ETag
+   * and serves another cannot make the device download for ever.
+   */
+  replacedFor?: string
   state: DownloadState
   /** Bytes on the device. */
   bytes: number
@@ -705,6 +712,8 @@ export class DownloadManager {
   private ticker: ReturnType<typeof setInterval> | null = null
   /** Trip confirmations in flight, by key, so a tick does not send a second. */
   private confirming = new Set<string>()
+  /** Trip copies being replaced by a re-made one ({@link adoptTrip}), by key. */
+  private replacing = new Set<string>()
   /** Trip episodes taken off the device by hand: `trip-skip:<user>:<trip>:<episode>`. */
   private declined = new Set<string>()
 
@@ -1146,15 +1155,9 @@ export class DownloadManager {
     await this.store.delete(key)
     this.emit()
     if (this.active === key) this.halt(record)
-    if (this.sharedRecord(record.name) === undefined) {
-      if (this.releasing.has(record.name)) {
-        // The worker still holds the file; it goes when the worker says it
-        // has closed it.
-        this.doomed.add(record.name)
-      } else {
-        await this.removeFrom(record.name)
-      }
-    }
+    // The worker may still hold the file; then it goes when the worker says
+    // it has closed it.
+    await this.dropFile(record.name)
     const stillShown = [...this.all.values()].some(
       (other) => other.userId === record.userId && other.animeId === record.animeId,
     )
@@ -1579,8 +1582,22 @@ export class DownloadManager {
    * vanished, takes the trip's copy (`url`, when it is available). Anything
    * else — queued, downloading, paused (by hand or not) — is left exactly as
    * it is, and confirms when it finishes.
+   *
+   * One exception to "confirmed at once" (owner, 2026-10-28): a small copy
+   * on the device whose ETag differs from the one the server now offers
+   * (`etag`, with a `url`) was re-made on the server with new encode settings
+   * (`remake-copies`). Its file is dropped and the new copy downloaded in its
+   * place through the usual queue, confirming with the new ETag when it
+   * lands — not while the episode is open in the player (the next pass does
+   * it), and once per server ETag ({@link DownloadRecord.replacedFor}). A
+   * full-size copy, or either side's ETag unknown, is confirmed as before.
    */
-  adoptTrip(episodeId: number, tripId: number, url: string | null): void {
+  adoptTrip(
+    episodeId: number,
+    tripId: number,
+    url: string | null,
+    etag: string | null = null,
+  ): void {
     const record = this.snapshot[episodeId]
     if (record === undefined) return
     const key = keyOfRecord(record)
@@ -1591,7 +1608,12 @@ export class DownloadManager {
       })
     }
     const current = this.all.get(key)
-    if (current === undefined) return
+    // A replacement under way places the new copy itself.
+    if (current === undefined || this.replacing.has(key)) return
+    if (url !== null && etag !== null && this.remadeOnServer(current, etag)) {
+      void this.replaceCopy(key, url, etag)
+      return
+    }
     const copyGone =
       current.state === 'failed' &&
       current.variant === 'small' &&
@@ -1606,6 +1628,62 @@ export class DownloadManager {
       return
     }
     this.confirm(key)
+  }
+
+  /** Whether `record` is a small copy the server has since re-made (see {@link adoptTrip}). */
+  private remadeOnServer(record: DownloadRecord, etag: string): boolean {
+    return (
+      record.state === 'downloaded' &&
+      record.variant === 'small' &&
+      record.etag !== null &&
+      record.etag !== etag &&
+      record.replacedFor !== etag &&
+      this.active !== keyOfRecord(record) &&
+      !this.playing.has(record.episodeId)
+    )
+  }
+
+  /**
+   * Drop the small copy on the device and fetch the server's new one in its
+   * place: the record (and its trip) stays, back to `preparing` with no ETag,
+   * and goes through {@link place} as any small copy does.
+   */
+  private async replaceCopy(key: string, url: string, etag: string): Promise<void> {
+    const record = this.all.get(key)
+    if (record === undefined) return
+    this.replacing.add(key)
+    try {
+      this.urls.delete(key)
+      this.patch(key, {
+        state: 'preparing',
+        url: null,
+        etag: null,
+        bytes: 0,
+        total: 0,
+        confirm: undefined,
+        replacedFor: etag,
+        serverProgress: null,
+        reason: null,
+        message: null,
+      })
+      await this.dropFile(record.name, key)
+      await this.place(key, 'small', url)
+    } finally {
+      this.replacing.delete(key)
+    }
+  }
+
+  /**
+   * Delete the file `name` unless another record (other than `except`)
+   * still holds it; one the worker still has open goes when it lets go.
+   */
+  private async dropFile(name: string, except?: string): Promise<void> {
+    if (this.sharedRecord(name, except) !== undefined) return
+    if (this.releasing.has(name)) {
+      this.doomed.add(name)
+      return
+    }
+    await this.removeFrom(name)
   }
 
   /** Every trip copy of the signed-in account the server has not heard about yet: tell it. */

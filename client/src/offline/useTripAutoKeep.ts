@@ -14,6 +14,8 @@
  * - an episode the device already has a record of joins the trip
  *   (`adoptTrip`): a copy already on the device — small or full size — is
  *   confirmed to the server at once; a record paused by hand stays paused;
+ *   a small copy whose ETag differs from the server's (`episode.etag`) was
+ *   re-made there, and is replaced (owner, 2026-10-28);
  * - a download the device stopped (a write it would not take: Arc left the
  *   screen, or the iPad is full) is resumed — or, for a full iPad, probed —
  *   by `resumeSuspended`, never one paused by hand;
@@ -44,7 +46,7 @@ export async function autoKeep(trip: Trip | null, manager: DownloadManager): Pro
       const url = tripCopyUrl(episode)
       const record = manager.record(episode.episode_id)
       if (record !== undefined) {
-        manager.adoptTrip(episode.episode_id, trip.id, url)
+        manager.adoptTrip(episode.episode_id, trip.id, url, episode.etag ?? null)
         continue
       }
       if (url === null || manager.isDeclined(trip.id, episode.episode_id)) continue

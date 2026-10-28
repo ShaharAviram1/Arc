@@ -117,6 +117,37 @@ describe('autoKeep', () => {
     expect(worker.commands).toEqual([])
   })
 
+  it('hands the server’s ETag to the manager, so a re-made copy replaces the old one', async () => {
+    const held: DownloadRecord = {
+      ...downloadedRecord(USER, PLAY_INFO, 210),
+      name: 'episode-9001-o.mp4',
+      url: '/media/9001/offline.mp4',
+      variant: 'small',
+      tripId: TRIP,
+      confirm: 'done',
+      etag: '"o"',
+    }
+    const { manager, worker } = await managerWith([held])
+    const adopt = vi.spyOn(manager, 'adoptTrip')
+
+    await autoKeep(trip([{ ...tripEpisode(9001, 1, 'available'), etag: '"n"' }]), manager)
+
+    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', '"n"')
+    await vi.waitFor(() => {
+      expect(worker.lastCommand()).toMatchObject({ name: 'episode-9001-o.mp4', fresh: true })
+    })
+  })
+
+  it('passes no ETag for an older payload without one, and keeps the copy', async () => {
+    const { manager, worker } = await managerWith([downloadedRecord(USER)])
+    const adopt = vi.spyOn(manager, 'adoptTrip')
+
+    await autoKeep(trip([tripEpisode(9001, 1, 'available')]), manager)
+
+    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', null)
+    expect(worker.commands).toEqual([])
+  })
+
   it('leaves an episode taken off this device by hand until "Ask again"', async () => {
     const { manager, worker } = await managerWith()
     await manager.keepTripCopy({ episodeId: 9001, tripId: TRIP, url: '/media/9001/offline.mp4' })
