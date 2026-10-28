@@ -346,6 +346,7 @@ async def detail(
         session,
         episode_ids,
         offline_codec=settings.offline_codec,
+        offline_height=settings.offline_height,
         offline_demo=user.is_demo,
         live_settings=settings,
     )

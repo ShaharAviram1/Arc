@@ -412,8 +412,10 @@ class Settings(BaseSettings):
     #: The tallest the copy may be. A source shorter than this is never
     #: upscaled; a taller one is scaled down, keeping its aspect ratio.
     offline_height: int = Field(default=720, ge=144, le=2160)
-    #: Quality target, and the encoder speed preset. CRF 26 at 720p is about
-    #: 100 MB for a 24-minute episode on the owner's own sources.
+    #: Quality target, and the encoder speed preset. On SubsPlease 1080p
+    #: sources a 24-minute episode measured 227 MB at 720p H.264 CRF 26 (these
+    #: defaults) and about 254 MB at 1080p HEVC CRF 28 (production since
+    #: 2026-10-28), the second for 3.8× the encode time.
     offline_crf: int = Field(default=26, ge=0, le=51)
     offline_preset: str = "fast"
     #: AAC stereo bitrate, as ffmpeg writes it (``96k``).

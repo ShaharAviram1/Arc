@@ -105,7 +105,11 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # every shelf at once.
     progress = await list_progress_for(session, user_id=user.id, anime_ids=anime_ids)
     extras = await episode_extras(
-        session, episode_ids, offline_codec=settings.offline_codec, offline_demo=user.is_demo
+        session,
+        episode_ids,
+        offline_codec=settings.offline_codec,
+        offline_height=settings.offline_height,
+        offline_demo=user.is_demo,
     )
     # Only "new this week" needs this: a continue-watching row carries its own
     # ``completed`` out of the query that found it (a rewatch left half-way is

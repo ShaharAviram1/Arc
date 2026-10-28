@@ -14,8 +14,9 @@ from typing import Any
 
 import pytest
 
+from arc.api.offline_schemas import OfflineOut
 from arc.config import Settings
-from arc.models import OfflineCopyState
+from arc.models import OfflineCopy, OfflineCopyState
 from arc.services.media.copies import (
     CODEC_STRINGS,
     codec_string,
@@ -102,6 +103,16 @@ def test_h264_is_high_profile_level_4_with_animation_tuning() -> None:
     assert _after(args, "-level") == "4.0"
     assert _after(args, "-pix_fmt") == "yuv420p"
     assert "-tag:v" not in args
+
+
+def test_h264_level_follows_the_height_as_the_codec_string_does() -> None:
+    at_1080 = offline_encode_args(_plan(), OfflineOptions(codec="h264", height=1080))
+    taller = offline_encode_args(_plan(), OfflineOptions(codec="h264", height=1440))
+
+    assert _after(at_1080, "-level") == "4.0"
+    assert codec_string("h264", 1080) == "avc1.640028"  # level 4.0 = 0x28
+    assert _after(taller, "-level") == "5.1"
+    assert codec_string("h264", 1440) == "avc1.640033"  # level 5.1 = 0x33
 
 
 def test_hevc_is_tagged_hvc1_for_safari() -> None:
@@ -201,11 +212,58 @@ def test_the_settings_key_moves_with_anything_that_changes_the_bytes() -> None:
     assert len(base) == 16
 
 
-def test_the_codec_strings_are_rfc_6381() -> None:
-    assert codec_string("h264") == "avc1.640028"
-    assert codec_string("hevc") == "hvc1.1.6.L93.B0"
-    assert codec_string(None) is None
+@pytest.mark.parametrize(
+    ("codec", "height", "expected"),
+    [
+        ("h264", 480, "avc1.640028"),
+        ("h264", 720, "avc1.640028"),
+        ("h264", 1080, "avc1.640028"),
+        ("h264", 1440, "avc1.640033"),
+        ("h264", 2160, "avc1.640033"),
+        ("hevc", 540, "hvc1.1.6.L93.B0"),
+        ("hevc", 720, "hvc1.1.6.L93.B0"),
+        ("hevc", 721, "hvc1.1.6.L120.B0"),
+        ("hevc", 1080, "hvc1.1.6.L120.B0"),
+        ("hevc", 1081, "hvc1.1.6.L153.B0"),
+        ("hevc", 2160, "hvc1.1.6.L153.B0"),
+        # An unknown height reads as the smallest tier.
+        ("h264", None, "avc1.640028"),
+        ("hevc", None, "hvc1.1.6.L93.B0"),
+        (None, 1080, None),
+        ("vp9", 1080, None),
+    ],
+)
+def test_the_codec_strings_are_rfc_6381_by_height(
+    codec: str | None, height: int | None, expected: str | None
+) -> None:
+    assert codec_string(codec, height) == expected
+
+
+def test_the_codec_table_covers_both_codecs() -> None:
     assert set(CODEC_STRINGS) == {"h264", "hevc"}
+    for tiers in CODEC_STRINGS.values():
+        assert tiers[-1][0] == 0
+
+
+def test_offline_out_names_the_copys_own_level_once_it_exists() -> None:
+    """The copy row's codec and height decide, not the host's current settings."""
+    tall = OfflineCopy(
+        episode_id=1, state=OfflineCopyState.READY, codec="hevc", height=1080, size=9
+    )
+    short = OfflineCopy(episode_id=2, state=OfflineCopyState.READY, codec="h264", height=720)
+
+    made = OfflineOut.build(1, copy=tall, job=None, has_source=True, codec="h264", height=720)
+    older = OfflineOut.build(2, copy=short, job=None, has_source=True, codec="hevc", height=1080)
+
+    assert made.codecs == "hvc1.1.6.L120.B0"
+    assert older.codecs == "avc1.640028"
+
+
+def test_offline_out_names_the_hosts_level_for_a_copy_not_made_yet() -> None:
+    out = OfflineOut.build(1, copy=None, job=None, has_source=True, codec="hevc", height=1080)
+
+    assert out.state == "none"
+    assert out.codecs == "hvc1.1.6.L120.B0"
 
 
 # --- Validating a finished copy -------------------------------------------------
