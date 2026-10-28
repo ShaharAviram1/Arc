@@ -310,6 +310,55 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     expect(harness.removed).toEqual([])
   })
 
+  it('fails the record, not the page, when the old file cannot be removed', async () => {
+    const { manager, worker } = await holding(
+      { reasked: true },
+      { removeFrom: () => Promise.reject(new Error('no access')) },
+    )
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    await vi.waitFor(() => {
+      expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'gone' })
+    })
+    expect(manager.record(9001)?.reasked).toBe(false)
+    expect(worker.commands).toEqual([])
+  })
+
+  it('replaces through keepTripCopy too, when the record is already there', async () => {
+    const { manager, worker } = await holding()
+
+    await manager.keepTripCopy({ episodeId: 9001, tripId: TRIP, url: COPY_URL, etag: '"n"' })
+
+    await vi.waitFor(() => {
+      expect(worker.lastCommand()).toMatchObject({ url: COPY_URL, fresh: true })
+    })
+  })
+
+  it('confirms the new copy even if the old one’s confirmation was still in flight', async () => {
+    const first = deferred()
+    const confirmDelivered = vi
+      .fn<(tripId: number, episodeId: number, etag: string | null) => Promise<unknown>>()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValue(null)
+    const { manager, worker } = await holding({ confirm: 'pending' }, { confirmDelivered })
+    expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"o"')
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    await vi.waitFor(() => {
+      expect(worker.commands).toHaveLength(1)
+    })
+    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"n"', run: 1 })
+    first.resolve()
+
+    await vi.waitFor(() => {
+      expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"n"')
+    })
+    await vi.waitFor(() => {
+      expect(manager.record(9001)).toMatchObject({ etag: '"n"', confirm: 'done' })
+    })
+  })
+
   it('waits while the episode is open in the player', async () => {
     const { manager, worker } = await holding()
     const leave = manager.enterPlayer(9001)

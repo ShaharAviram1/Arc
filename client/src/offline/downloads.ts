@@ -247,6 +247,8 @@ export interface TripCopyInput {
   url: string
   /** The full-size `download_url`, when the episode is also ready; else none. */
   fullUrl?: string | null
+  /** The copy's ETag (`TripEpisodeOut.etag`), so a re-made copy can replace the one held. */
+  etag?: string | null
 }
 
 /** What the manager needs of a worker, so a test can hand it a fake. */
@@ -1537,7 +1539,7 @@ export class DownloadManager {
     if (owner === null) return
     const key = keyOf(owner, input.episodeId)
     if (this.all.has(key)) {
-      this.adoptTrip(input.episodeId, input.tripId, input.url)
+      this.adoptTrip(input.episodeId, input.tripId, input.url, input.etag ?? null)
       return
     }
     if (this.starting.has(key)) return
@@ -1611,7 +1613,9 @@ export class DownloadManager {
     // A replacement under way places the new copy itself.
     if (current === undefined || this.replacing.has(key)) return
     if (url !== null && etag !== null && this.remadeOnServer(current, etag)) {
-      void this.replaceCopy(key, url, etag)
+      this.replaceCopy(key, url, etag).catch(() => {
+        this.fail(key, 'gone')
+      })
       return
     }
     const copyGone =
@@ -1662,6 +1666,7 @@ export class DownloadManager {
         total: 0,
         confirm: undefined,
         replacedFor: etag,
+        reasked: false,
         serverProgress: null,
         reason: null,
         message: null,
@@ -1725,12 +1730,19 @@ export class DownloadManager {
       return
     }
     const tripId = record.tripId
+    const sent = record.etag
     this.confirming.add(key)
     if (record.confirm !== 'pending') this.patch(key, { confirm: 'pending' })
     const settled = (final: boolean) => {
       this.confirming.delete(key)
       const current = this.all.get(key)
       if (!final || current === undefined || current.tripId !== tripId) return
+      if (current.etag !== sent) {
+        // The copy was replaced while this was in flight: the answer was
+        // about the old one, so the new one is confirmed now.
+        this.confirm(key)
+        return
+      }
       if (current.confirm !== 'done') this.patch(key, { confirm: 'done' })
     }
     void this.confirmDelivered(tripId, record.episodeId, record.etag).then(

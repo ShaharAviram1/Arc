@@ -51,7 +51,12 @@ export async function autoKeep(trip: Trip | null, manager: DownloadManager): Pro
       }
       if (url === null || manager.isDeclined(trip.id, episode.episode_id)) continue
       try {
-        await manager.keepTripCopy({ episodeId: episode.episode_id, tripId: trip.id, url })
+        await manager.keepTripCopy({
+          episodeId: episode.episode_id,
+          tripId: trip.id,
+          url,
+          etag: episode.etag ?? null,
+        })
       } catch {
         // No payload for it right now (no network): the next pass tries again.
       }
