@@ -2058,6 +2058,10 @@ owner's word.
         copy-days clock restarts, other users' trips on the episode are
         covered, staleness compares the recorded codec/CRF/bitrate/height
         rather than the language-bearing key, watched episodes are skipped).
+        Addendum 2659080: `--delivered-before ISO8601` also re-pends
+        delivered, unreleased, unwatched rows whose copy the settle already
+        took (production had settled episodes 13–14 an hour after delivery,
+        leaving no record of how the iPad's files were made).
         Verified by the orchestrator 2026-10-28: diffs read, targeted 197,
         full server 5111 passed on merged main, client 1385, `make lint`
         clean.
