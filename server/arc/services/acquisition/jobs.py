@@ -871,7 +871,10 @@ async def _lock_targets(
         await session.scalars(
             select(Episode)
             .where(Episode.id.in_(ids))
-            .with_for_update(skip_locked=True)
+            # ``NO KEY UPDATE`` like the search's own lock (2026-10-29): it
+            # still skips a row another search holds, and it does not block a
+            # ``torrent_files`` insert that only references the episode.
+            .with_for_update(skip_locked=True, key_share=True)
             .execution_options(populate_existing=True)
         )
     ).all()
@@ -1703,11 +1706,50 @@ async def search_release(ctx: JobContext) -> None:
         await _requeue_paused(ctx, episode_id, now=now, message=HELD_LOG)
         return
 
+    # **The show's pack lock before any row lock** (owner incident 2026-10-29).
+    # A trip queues its searches all at once (FR-A12), and two of them choosing,
+    # adding and claiming one pack together is a race: a trip-only search of a
+    # finished show holds ``('trip_pack', anime)`` until it commits, so the next
+    # sibling's attach below sees the pack. It is taken *here*, before this
+    # episode's row is locked, because the holder's ``torrent_files`` insert
+    # takes ``FOR KEY SHARE`` on every sibling episode the pack holds: a
+    # sibling that had locked its own row and then queued on this lock was a
+    # cycle Postgres broke with ``DeadlockDetectedError`` — four minutes of
+    # retries in production, each one re-adding and re-selecting the pack while
+    # nothing about it was committed. Everything read to decide whether to take
+    # it is a read.
+    anime_id = await ctx.session.scalar(select(Episode.anime_id).where(Episode.id == episode_id))
+    if anime_id is None:
+        ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
+        return
+    anime = await ctx.session.get(Anime, anime_id)
+    if anime is None:  # pragma: no cover - the foreign key forbids it
+        raise RuntimeError(f"episode {episode_id} has no anime row")
+    # The kill switch, read once and used twice (FR-D2, FR-A11). It gates the
+    # attach as well as the pick: enabling a file in a pack Arc already holds
+    # is still fetching more, and "fetch no more of this" is what an admin who
+    # turns it off means. What it does not stop is the episodes a pack already
+    # has claims for — those bytes are in flight and stranding them is not what
+    # a kill switch is for.
+    fallback = await batch_fallback(ctx.session)
+    trip_only = episode_id in await trip_only_episode_ids(ctx.session, [episode_id])
+    if (
+        fallback
+        and nyaa_module.deep_search(anime)
+        and not nyaa_module.is_single(anime)
+        and trip_only
+    ):
+        await ctx.session.execute(select(func.pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime.id)))
+
     # Locked and re-read (FR-A13): a manual choice may have committed this row
     # to ``downloading`` after an earlier read left it stale in the identity
-    # map, and a search must never overwrite that.
+    # map, and a search must never overwrite that. ``FOR NO KEY UPDATE``, not
+    # ``FOR UPDATE``: it excludes every other locker of the row exactly as
+    # before, but not another search's ``torrent_files`` insert that merely
+    # *references* this episode (``FOR KEY SHARE``) — the other half of the
+    # 2026-10-29 deadlock, for a search that takes no pack lock.
     episode = await ctx.session.get(
-        Episode, episode_id, with_for_update=True, populate_existing=True
+        Episode, episode_id, with_for_update={"key_share": True}, populate_existing=True
     )
     if episode is None:
         ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
@@ -1728,39 +1770,17 @@ async def search_release(ctx: JobContext) -> None:
         ctx.log.info("nobody wants this episode any more", extra={"episode_id": episode_id})
         return
 
-    anime = await ctx.session.get(Anime, episode.anime_id)
-    if anime is None:  # pragma: no cover - the foreign key forbids it
-        raise RuntimeError(f"episode {episode_id} has no anime row")
-
     transition(episode, EpisodeState.SEARCHING, reason="looking for a release")
     await ctx.session.flush()
 
-    # The kill switch, read once and used twice (FR-D2, FR-A11). It gates the
-    # attach as well as the pick: enabling a file in a pack Arc already holds
-    # is still fetching more, and "fetch no more of this" is what an admin who
-    # turns it off means. What it does not stop is the episodes a pack already
-    # has claims for — those bytes are in flight and stranding them is not what
-    # a kill switch is for.
-    fallback = await batch_fallback(ctx.session)
     # How much better seeded a season pack must be before a finished show takes
     # it instead of its single (FR-A4, owner 2026-10-20); 0 means never. Under
     # the same kill switch as every other pack.
     ratio = await batch_prefer_ratio(ctx.session)
     prefer_packs = fallback and ratio > 0
-    trip_only = episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
     # A trip-only search takes no thinly seeded pack, by any route (owner
     # incident 2026-10-06): not preferred, not attached to, not as fallback.
     min_seeders = await trip_pack_min_seeders(ctx.session) if trip_only else None
-    if (
-        fallback
-        and nyaa_module.deep_search(anime)
-        and not nyaa_module.is_single(anime)
-        and trip_only
-    ):
-        # A trip queues its searches all at once (FR-A12), and two of them
-        # choosing, adding and claiming one pack together is a race: held until
-        # this job commits, so the next sibling's attach below sees the pack.
-        await ctx.session.execute(select(func.pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime.id)))
     if fallback:
         # Before Nyaa is asked anything at all (FR-A11): a batch Arc already
         # has may hold this episode's file, and turning that file on is the
