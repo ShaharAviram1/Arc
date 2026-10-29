@@ -129,6 +129,14 @@ class PlanError(ValueError):
     """The source cannot be transcoded at all — no video stream."""
 
 
+class SourceUnreadable(PlanError):
+    """ffprobe returned nothing for the source: a truncated or empty file.
+
+    A :class:`PlanError` like any other to every caller, told apart only by
+    the small copy, which fetches such a source again once (FR-P6).
+    """
+
+
 def normalise_language(tag: str | None) -> str | None:
     """A language tag reduced to something comparable, or ``None``.
 
@@ -550,7 +558,7 @@ def build_plan(
     is not an episode.
     """
     if not payload:
-        raise PlanError(f"ffprobe returned nothing for {source}")
+        raise SourceUnreadable(f"ffprobe returned nothing for {source}")
 
     grouped = _by_type(payload)
     videos = [
@@ -1146,6 +1154,7 @@ __all__ = [
     "EncodeOptions",
     "OfflineOptions",
     "PlanError",
+    "SourceUnreadable",
     "Stream",
     "TranscodePlan",
     "Copyability",

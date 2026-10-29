@@ -1,7 +1,7 @@
 """Operator commands: ``python -m arc.cli <command>`` (roadmap M11, M16).
 
 Five things an operator has to do on a host with no browser session yet, one
-thing they always want to know, and two repairs:
+thing they always want to know, and three repairs:
 
 * ``invite``            — issue an invite link and print it.
 * ``warm-catalogue``    — queue the work that gives a fresh deployment a
@@ -21,6 +21,11 @@ thing they always want to know, and two repairs:
                           ID``) or of every one (``--all``) that were made with
                           other encode settings than the current ``OFFLINE_*``
                           (owner, 2026-10-28; :mod:`arc.services.trips.remake`).
+* ``redo-copies``       — redo an active trip's copies from a freshly fetched
+                          source: the episodes named by number
+                          (``--episodes 1,3``) or every one whose copy failed
+                          (``--failed``) (owner, 2026-10-29;
+                          :mod:`arc.services.trips.redo`).
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
 and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
@@ -30,7 +35,9 @@ work entirely when the files have not changed), ``status`` writes nothing,
 ``remake-copies`` removes nothing the second time (the copies it removed have
 no row until they are made again, with the current settings; a second run
 still reports the stale copies it skipped or found held, and re-makes the
-held ones once the device has stopped fetching them).
+held ones once the device has stopped fetching them). ``redo-copies`` run
+twice redoes twice — it is a repair the operator asks for — but each run only
+resets rows and queues the same deduplicated work.
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -55,6 +62,8 @@ Run it from ``server/``::
     uv run python -m arc.cli prune-unfinished-media --dry-run
     uv run python -m arc.cli remake-copies --trip 4
     uv run python -m arc.cli remake-copies --trip 4 --delivered-before 2026-10-28T12:00:00Z
+    uv run python -m arc.cli redo-copies --trip 5 --failed
+    uv run python -m arc.cli redo-copies --trip 5 --episodes 1,3,4
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -89,6 +98,7 @@ from arc.models import (
     ListStatus,
     MalLink,
     Trip,
+    TripEpisode,
     TripState,
     User,
     UserRole,
@@ -120,6 +130,7 @@ from arc.services.recs import (
 )
 from arc.services.retention.sweep import retained_bytes
 from arc.services.trips.create import TripConflict
+from arc.services.trips.redo import redo_copies
 from arc.services.trips.remake import remake_stale
 
 #: Exit code for "the command could not do what was asked" — no such user, no
@@ -629,6 +640,77 @@ async def cmd_remake_copies(
     return 0
 
 
+# --- redo-copies ------------------------------------------------------------
+
+
+def episode_numbers(raw: str) -> list[int]:
+    """``1,3,4`` for argparse: positive episode numbers, comma-separated."""
+    try:
+        numbers = [int(part) for part in raw.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a list of episode numbers: {raw!r}") from exc
+    if not numbers or any(number < 1 for number in numbers):
+        raise argparse.ArgumentTypeError(f"not a list of episode numbers: {raw!r}")
+    return numbers
+
+
+async def cmd_redo_copies(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Redo one active trip's copies from a freshly fetched source (FR-A12).
+
+    :func:`~arc.services.trips.redo.redo_copies` with the episodes the trip
+    holds under the numbers given (``--episodes``; a number the trip does not
+    hold is reported and skipped) or every one whose copy failed
+    (``--failed``). One commit, then one line of counts and one line per
+    episode skipped. An unknown or ended trip exits 1 with nothing written.
+    """
+    trip = await session.get(Trip, args.trip)
+    if trip is None:
+        print(f"no trip with id {args.trip}", file=sys.stderr)
+        return EXIT_FAILED
+    numbers: list[int] = list(args.episodes or [])
+    by_number = dict(
+        (
+            await session.execute(
+                select(Episode.number, Episode.id)
+                .join(TripEpisode, TripEpisode.episode_id == Episode.id)
+                .where(TripEpisode.trip_id == trip.id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    unknown = [number for number in numbers if number not in by_number]
+    numbers_of = {episode_id: number for number, episode_id in by_number.items()}
+    try:
+        report = await redo_copies(
+            session,
+            settings,
+            trip=trip,
+            now=datetime.now(UTC),
+            episode_ids=[by_number[number] for number in numbers if number in by_number],
+            failed=bool(args.failed),
+        )
+    except TripConflict:
+        await session.rollback()
+        print(f"trip {args.trip} is not active", file=sys.stderr)
+        return EXIT_FAILED
+    await session.commit()
+    redone = ", ".join(str(numbers_of.get(episode_id, episode_id)) for episode_id in report.redone)
+    print(
+        f"trip {report.trip_id}: {len(report.redone)} redone"
+        + (f" (episodes {redone})" if redone else "")
+        + f", {report.sources_removed} sources removed, {report.repended} re-pended, "
+        f"{len(report.skipped) + len(unknown)} skipped"
+    )
+    for number in unknown:
+        print(f"  episode {number}: not in this trip")
+    for episode_id, why in report.skipped:
+        print(f"  episode {numbers_of.get(episode_id, episode_id)}: {why}")
+    return 0
+
+
 # --- wiring -----------------------------------------------------------------
 
 type Command = Callable[[AsyncSession, Settings, argparse.Namespace], Awaitable[int]]
@@ -736,6 +818,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     remake.set_defaults(handler=cmd_remake_copies)
+
+    redo = sub.add_parser(
+        "redo-copies",
+        help="redo a trip's copies from a freshly fetched source (a broken source's repair)",
+    )
+    redo.add_argument("--trip", type=int, required=True, metavar="ID", help="the active trip")
+    chosen = redo.add_mutually_exclusive_group(required=True)
+    chosen.add_argument(
+        "--episodes",
+        type=episode_numbers,
+        metavar="N,N",
+        help="episode numbers of the trip's show, comma-separated",
+    )
+    chosen.add_argument(
+        "--failed", action="store_true", help="every episode of the trip whose copy failed"
+    )
+    redo.set_defaults(handler=cmd_redo_copies)
 
     return parser
 

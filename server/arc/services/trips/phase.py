@@ -62,6 +62,9 @@ class PhaseFacts:
     encoding: bool = False
     #: Whether acquisition is holding itself for want of disk space (FR-T6).
     held: bool = False
+    #: Whether the copy row was redone (``offline_copies.redone_at``): a
+    #: ``queued`` row with no job is then waiting for its new source, not dead.
+    redone: bool = False
 
 
 def trip_phase(facts: PhaseFacts) -> TripPhase:
@@ -74,7 +77,10 @@ def trip_phase(facts: PhaseFacts) -> TripPhase:
     is not retried, FR-P6; a queued row with no job is a dead encode). Then
     the episode's own state. A ``ready`` episode with no
     copy and no source is ``unavailable`` here — the device's fallback to the
-    full-size file is M19 T6's to decide.
+    full-size file is M19 T6's to decide. A ``queued`` copy that was **redone**
+    (``redone``, owner 2026-10-29) and has no encode yet is waiting for its
+    source to be fetched again: it falls through to the episode's state, so
+    the device sees searching, downloading or preparing rather than a failure.
 
     The row's own ending answers before anything else: ``delivered`` and
     ``expired`` as themselves, and a ``cancelled``
@@ -88,7 +94,8 @@ def trip_phase(facts: PhaseFacts) -> TripPhase:
         return "unavailable"
     if facts.copy_state is OfflineCopyState.READY:
         return "available"
-    if facts.copy_state is not None:
+    redoing = facts.copy_state is OfflineCopyState.QUEUED and facts.redone and not facts.encoding
+    if facts.copy_state is not None and not redoing:
         # Queued, preparing or failed: only an encode actually on its way
         # makes it "preparing". A failed copy is not retried automatically
         # (FR-P6), and a queued/preparing row with no live job is an encode

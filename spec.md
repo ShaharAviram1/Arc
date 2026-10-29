@@ -586,7 +586,14 @@ that the course professor can log in at any time, and the owner uses it daily.
   copy the device has confirmed is deleted from the server an hour later and
   leaves no record of how it was made, the operator may name the time the
   settings changed, and episodes delivered before it are fetched again too.
-  A trip-only episode's copy can be fetched only by a user whose trip holds
+  **A trip's copies can be redone from a freshly fetched source** (owner,
+  2026-10-29): an admin's `redo-copies` names the trip and either episode
+  numbers or "every failed copy"; each such episode loses its copy and its
+  source (a pack's file given back), goes back in the trip if it had been
+  delivered, and is fetched and copied again — left alone are episodes the
+  device let go of, watched, cancelled or expired ones, and one being
+  encoded at that moment. FR-P6's single automatic retry after a broken
+  source is the same redo. A trip-only episode's copy can be fetched only by a user whose trip holds
   it (waiting or delivered; anybody else is told it does not exist), and
   opening it in the player is answered "offline only" for that user. Copies
   the device does not collect **expire** `trip_copy_days` (default 14) after
@@ -864,9 +871,17 @@ that the course professor can log in at any time, and the owner uses it daily.
   takes FR-S7's full-size file instead. A request for an episode whose copy
   already exists, or is being made, starts nothing new. The copy is checked
   before it is offered (the expected codec, no taller than the cap, no shorter
-  than the tracks it was made from, playable while downloading); a copy that
+  than the tracks it was made from, playable while downloading; a source that
+  reports no length at all is refused too — a real one always has one); a copy that
   fails the check is never served, the request reads "failed", and it is not
-  retried automatically — the same encode would fail the same way. An encode
+  retried automatically — the same encode would fail the same way. **Except
+  when the source itself is broken** (owner, 2026-10-29: copies were made from
+  half-downloaded files): a source that is missing, unreadable or without a
+  length, or a copy that comes out shorter than its source, while a trip is
+  still waiting on the episode, is retried **once** — the copy and the source
+  are removed and the episode fetched again for the trip, then the copy made
+  from the new file; a second failure stays "failed". An encoder failure is
+  never retried this way. An encode
   that died without saying so (its worker killed, its attempts used up) also
   reads "failed" rather than "preparing" for ever; asking again starts it
   afresh. **A new copy is refused** (owner, 2026-10-06), and the device takes
@@ -3073,3 +3088,22 @@ through the same edge, without the grace period.
   (also for a pack already in `error`/`missingFiles`); a trip's sibling
   searches queue behind one another on the show's pack lock instead of
   deadlocking.
+- 2026-10-29 (owner) — **Broken sources: redo a trip's copies** (FR-P6,
+  FR-A12; trip 5's copies were encoded from half-downloaded pack files — one
+  9.9 MB copy delivered, five failed, nothing able to start them again). An
+  admin's `redo-copies --trip ID (--episodes N,N | --failed)` removes the
+  chosen episodes' copies and sources, puts delivered ones back in the trip,
+  and lets the trip fetch and copy them again. A copy whose **source** turned
+  out broken (missing, unreadable, no length, or the copy shorter than it) is
+  redone **automatically once** while a trip waits on it; a second failure
+  stays failed, and encoder failures are never redone. The copy check refuses
+  a source that reports no length instead of skipping the length check — a
+  "Keep offline" request copy included, which is refused the same way and is
+  never redone (no trip waits on it; the device takes the full-size file).
+  Small calls made with it (orchestrator, after review): a redo leaves an
+  episode whose download or preparation is still under way, or whose copy a
+  device is fetching at that moment, for a later run; a single release that
+  delivered a broken file is not fetched again — the next search picks
+  another release — while a season pack's file is fetched again from the
+  same pack; and a trip episode waiting for its re-fetched source shows
+  searching or downloading on the device rather than a failure.

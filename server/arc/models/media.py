@@ -154,3 +154,7 @@ class OfflineCopy(Base):
     last_served_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     #: The head and tail of the last failure, for the person who asked.
     error: Mapped[str | None] = mapped_column(Text)
+    #: When the copy was last re-made from a freshly fetched source — by the
+    #: operator's ``redo-copies`` or by the one automatic retry after a broken
+    #: source (FR-P6, owner 2026-10-29). Set, it means that retry is spent.
+    redone_at: Mapped[datetime | None] = mapped_column(TZDateTime)

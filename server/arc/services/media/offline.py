@@ -36,6 +36,14 @@ point, and borrows its machinery rather than copying it:
   retries, and the person who asked sees the reason in the meantime. The one
   exception is a source that has gone: no retry can bring it back, so the copy
   is marked ``failed`` and the job ends there.
+* **A broken source is fetched again, once** (owner, 2026-10-29). A source
+  that is missing, that ffprobe cannot read, that reports no duration, or
+  whose finished copy falls short of it is a source problem, not an encoder
+  one (:attr:`CopyProblem.source`). When some active trip is still waiting on the
+  episode and its copy has not been redone yet, the failure is recorded and
+  then :func:`~arc.services.trips.redo.redo_after_broken_source` removes the
+  copy and the source and lets the trip want fetch the episode again. A
+  second failure stays ``failed``; an encoder failure never redoes anything.
 * **The encoder cap is shared.** ``transcode`` and ``offline_encode`` take the
   same semaphore and count against one ``MAX_TRANSCODES`` in the claim loop
   (:func:`arc.services.jobs.loop.process_caps`); a pending transcode always
@@ -103,6 +111,7 @@ from arc.services.media.plan import (
     OFFLINE_OUTPUT,
     OfflineOptions,
     PlanError,
+    SourceUnreadable,
     TranscodePlan,
     offline_encode_args,
 )
@@ -123,6 +132,7 @@ from arc.services.media.transcode import (
     transcode_semaphore,
 )
 from arc.services.trips.hooks import trip_copy_ready
+from arc.services.trips.redo import redo_after_broken_source
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +160,21 @@ SOURCE_GONE_MESSAGE: Final[str] = (
     "the source file is gone, so no small copy can be made; download the full-size file instead"
 )
 
+#: What the validator says of a source with no length at all (FR-P6, owner
+#: 2026-10-29). A real source always states one — its container's, at the
+#: least — so ``None`` is a truncated or broken file, never a length to skip.
+NO_SOURCE_DURATION: Final[str] = "the source reports no duration"
+
+#: What the validator says of a copy shorter than its source: the encode ran
+#: out of picture, which on a finished ffmpeg means the source ended early.
+SHORTFALL: Final[str] = "it is {actual:.1f}s long; the source is {duration:.1f}s"
+
+#: How every failure blamed on the source begins, in the copy's ``error``: the
+#: one record a later run of the job reads to tell such a failure from an
+#: encoder's (:func:`failed_on_broken_source`). A gone source keeps its own
+#: sentence, :data:`SOURCE_GONE_MESSAGE`.
+BROKEN_SOURCE_PREFIX: Final[str] = "the source file is broken: "
+
 #: Why a request copy was abandoned without a failure: the episode stopped
 #: being ``ready`` (retention took it) before or while its copy was made.
 NOT_READY_MESSAGE: Final[str] = "the episode is no longer ready; the copy was not kept"
@@ -163,6 +188,38 @@ class CopyRefused(TranscodeError):
     again produces the same refusal, and each retry would cost a whole encode.
     Like a source that is gone, these end the job ``failed`` and say why.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class CopyProblem:
+    """Why a finished copy is not usable, and whose fault that is.
+
+    ``source`` is true when the source is to blame: it reported no duration,
+    or the copy came out short of it — a file that ends early (a
+    half-downloaded pack member, 2026-10-29). Every other refusal — codec,
+    height, audio, faststart — is about what ffmpeg wrote, and fetching the
+    source again would not change it. ``message`` is the sentence logged and
+    shown.
+    """
+
+    message: str
+    source: bool = False
+
+
+class BrokenSource(CopyRefused):
+    """A :class:`CopyRefused` whose cause is the source (:attr:`CopyProblem.source`)."""
+
+
+def failed_on_broken_source(error: str | None) -> bool:
+    """Whether a failed copy's recorded ``error`` blames its source. Pure.
+
+    What :class:`BrokenSource`, an unreadable source and a gone one write
+    (:data:`BROKEN_SOURCE_PREFIX`, :data:`SOURCE_GONE_MESSAGE`); an encoder's
+    failure never starts either way.
+    """
+    if not error:
+        return False
+    return error.startswith(BROKEN_SOURCE_PREFIX) or error.startswith(SOURCE_GONE_MESSAGE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,17 +278,17 @@ def moov_before_mdat(path: Path) -> bool:
     return False
 
 
-def check_probe(
+def probe_problem(
     payload: dict[str, Any] | None,
     *,
     codec: str,
     max_height: int,
     duration: float | None,
     has_audio: bool,
-) -> str | None:
+) -> CopyProblem | None:
     """Why an ffprobe of a finished copy is not acceptable, or ``None``. Pure."""
     if not payload:
-        return "ffprobe could not read it"
+        return CopyProblem("ffprobe could not read it")
     streams = [s for s in payload.get("streams") or [] if isinstance(s, dict)]
     videos = [
         s
@@ -240,34 +297,56 @@ def check_probe(
         and not (isinstance(s.get("disposition"), dict) and s["disposition"].get("attached_pic"))
     ]
     if len(videos) != 1:
-        return f"expected one video stream, found {len(videos)}"
+        return CopyProblem(f"expected one video stream, found {len(videos)}")
     video = videos[0]
     expected = PROBE_CODEC.get(codec, codec)
     if video.get("codec_name") != expected:
-        return f"the video is {video.get('codec_name')!r}, not {expected!r}"
+        return CopyProblem(f"the video is {video.get('codec_name')!r}, not {expected!r}")
     if codec == "hevc" and video.get("codec_tag_string") != "hvc1":
-        return f"the HEVC track is tagged {video.get('codec_tag_string')!r}, not 'hvc1'"
+        return CopyProblem(
+            f"the HEVC track is tagged {video.get('codec_tag_string')!r}, not 'hvc1'"
+        )
     try:
         height = int(video.get("height") or 0)
     except TypeError, ValueError:
         height = 0
     if height <= 0 or height > max_height:
-        return f"the picture is {height} lines tall; the most a copy may be is {max_height}"
+        return CopyProblem(
+            f"the picture is {height} lines tall; the most a copy may be is {max_height}"
+        )
     audios = [s for s in streams if s.get("codec_type") == "audio"]
     if has_audio and len(audios) != 1:
-        return f"expected one audio stream, found {len(audios)}"
-    if duration is not None:
-        container = payload.get("format")
-        raw: Any = container.get("duration") if isinstance(container, dict) else None
-        try:
-            actual = float(raw)
-        except TypeError, ValueError:
-            return "it has no duration"
-        # A shortfall only: ``duration`` is the chosen tracks' length, and a
-        # copy a frame or two longer is a rounding, not a broken encode.
-        if actual < duration - DURATION_TOLERANCE:
-            return f"it is {actual:.1f}s long; the source is {duration:.1f}s"
+        return CopyProblem(f"expected one audio stream, found {len(audios)}")
+    if duration is None:
+        # Nothing to check the copy against, and a real source always says:
+        # this one is truncated or broken (owner, 2026-10-29).
+        return CopyProblem(NO_SOURCE_DURATION, source=True)
+    container = payload.get("format")
+    raw: Any = container.get("duration") if isinstance(container, dict) else None
+    try:
+        actual = float(raw)
+    except TypeError, ValueError:
+        return CopyProblem("it has no duration")
+    # A shortfall only: ``duration`` is the chosen tracks' length, and a
+    # copy a frame or two longer is a rounding, not a broken encode.
+    if actual < duration - DURATION_TOLERANCE:
+        return CopyProblem(SHORTFALL.format(actual=actual, duration=duration), source=True)
     return None
+
+
+def check_probe(
+    payload: dict[str, Any] | None,
+    *,
+    codec: str,
+    max_height: int,
+    duration: float | None,
+    has_audio: bool,
+) -> str | None:
+    """:func:`probe_problem`'s sentence alone, or ``None``. Pure."""
+    problem = probe_problem(
+        payload, codec=codec, max_height=max_height, duration=duration, has_audio=has_audio
+    )
+    return problem.message if problem is not None else None
 
 
 async def validate_copy(
@@ -278,14 +357,14 @@ async def validate_copy(
     duration: float | None,
     has_audio: bool,
     ffprobe: str,
-) -> str | None:
+) -> CopyProblem | None:
     """Why the file at ``path`` is not a usable copy, or ``None`` when it is."""
     if not path.is_file() or path.stat().st_size == 0:
-        return "ffmpeg wrote nothing"
+        return CopyProblem("ffmpeg wrote nothing")
     if not moov_before_mdat(path):
-        return "the moov box is not before the media data (no faststart)"
+        return CopyProblem("the moov box is not before the media data (no faststart)")
     payload = await ffprobe_json(path, binary=ffprobe)
-    return check_probe(
+    return probe_problem(
         payload, codec=codec, max_height=max_height, duration=duration, has_audio=has_audio
     )
 
@@ -309,6 +388,10 @@ async def encode_copy(
     same relative name, rendered with the same fonts.
     """
     started = perf_counter()
+    if plan.chosen_duration is None:
+        # Refused before a whole encode is spent on it: the validator would
+        # refuse the result for the same reason.
+        raise BrokenSource(f"{BROKEN_SOURCE_PREFIX}{NO_SOURCE_DURATION}")
     prepare_directories(plan)
     if on_progress is not None:
         await on_progress(STAGE_FONTS, 0.0)
@@ -355,8 +438,12 @@ async def encode_copy(
         has_audio=plan.audio is not None,
         ffprobe=ffprobe,
     )
+    if problem is not None and problem.source:
+        raise BrokenSource(
+            f"{BROKEN_SOURCE_PREFIX}the finished copy failed its check: {problem.message}"
+        )
     if problem is not None:
-        raise CopyRefused(f"ffmpeg finished but the offline copy is not usable: {problem}")
+        raise CopyRefused(f"ffmpeg finished but the offline copy is not usable: {problem.message}")
     height = plan.height if plan.height is not None else None
     return CopyResult(
         path=output,
@@ -454,11 +541,22 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
         return
     if copy is None:
         copy = await ensure_copy_row(ctx.session, episode_id)
+    if (
+        copy.state is OfflineCopyState.FAILED
+        and copy.redone_at is None
+        and failed_on_broken_source(copy.error)
+        and await _redo_once(ctx, episode_id, copy.error or "")
+    ):
+        # A retry of a job whose source was found broken (its redo failed
+        # last time): the redo, not another encode of the same broken file.
+        await reporter.write(stage=STAGE_DONE, extra={KEY_ERROR: None})
+        return
 
     media_file = await source_on_disk(ctx.session, episode_id)
     if media_file is None:
         # No retry can bring a deleted source back: record why and stop.
         await _fail(ctx, episode, copy, reporter, SOURCE_GONE_MESSAGE)
+        await _redo_once(ctx, episode_id, SOURCE_GONE_MESSAGE)
         return
 
     sub_lang, audio_lang = await _languages(ctx.session, episode_id)
@@ -488,13 +586,20 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
         )
     except PlanError as exc:
         # A source with no video stream stays one: no retry.
-        await _fail(ctx, episode, copy, reporter, str(exc))
+        if isinstance(exc, SourceUnreadable):
+            unreadable = f"{BROKEN_SOURCE_PREFIX}{exc}"
+            await _fail(ctx, episode, copy, reporter, unreadable)
+            await _redo_once(ctx, episode_id, unreadable)
+        else:
+            await _fail(ctx, episode, copy, reporter, str(exc))
         return
 
     semaphore = transcode_semaphore(settings.max_transcodes)
     await reporter.write(stage=STAGE_ENCODE, progress=0.0, heartbeat=True)
     warm = asyncio.create_task(_keep_lock_warm(reporter))
     info: os.stat_result | None = None
+    refused = False
+    broken: str | None = None
     try:
         async with semaphore:
             await _stop(warm)
@@ -515,7 +620,8 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
             info = _publish(result, target)
     except CopyRefused as exc:
         await _fail(ctx, episode, copy, reporter, str(exc), tail=exc.error_tail)
-        return
+        refused = True
+        broken = str(exc) if isinstance(exc, BrokenSource) else None
     except TranscodeError as exc:
         await _fail(ctx, episode, copy, reporter, str(exc), tail=exc.error_tail)
         raise
@@ -528,6 +634,10 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
         # more: the copy has been moved out of it, or it is not a copy.
         _discard(staging)
 
+    if refused:
+        if broken is not None:
+            await _redo_once(ctx, episode_id, broken)
+        return
     if info is None:
         await _abandon(ctx, episode_id, reporter)
         return
@@ -557,6 +667,39 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
         },
     )
     await on_copy_ready(ctx, episode, copy, why=why)
+
+
+async def _redo_once(ctx: JobContext, episode_id: int, problem: str) -> bool:
+    """After a broken source's failure is committed: fetch it again, once.
+
+    :func:`~arc.services.trips.redo.redo_after_broken_source` decides whether
+    (an active trip waiting, the copy not redone yet, the episode not
+    ``ready``) and does it in a fresh transaction, committed here. A redo that
+    itself fails (the torrent client unreachable) is rolled back and
+    re-raised, so the runner retries the job — whose next run sees the
+    ``failed`` row's broken-source error (:func:`failed_on_broken_source`) and
+    comes straight back here without encoding the broken file again. True
+    when the episode was redone.
+    """
+    try:
+        report = await redo_after_broken_source(
+            ctx.session,
+            ctx.settings,
+            episode_id=episode_id,
+            now=datetime.now(UTC),
+            exclude_job_id=ctx.job.id,
+        )
+        await ctx.session.commit()
+    except Exception:
+        await ctx.session.rollback()
+        raise
+    if report is None or episode_id not in report.redone:
+        return False
+    ctx.log.warning(
+        "offline copy redone after a broken source",
+        extra={"episode_id": episode_id, "trip_id": report.trip_id, "problem": problem},
+    )
+    return True
 
 
 async def _languages(session: AsyncSession, episode_id: int) -> tuple[str, str]:
@@ -668,17 +811,24 @@ async def _fail(
 __all__ = [
     "DURATION_TOLERANCE",
     "NOT_READY_MESSAGE",
+    "NO_SOURCE_DURATION",
+    "SHORTFALL",
     "OFFLINE_LOCK_KEY",
     "SOURCE_GONE_MESSAGE",
     "STAGING_GLOB",
     "STAGING_SUFFIX",
+    "BROKEN_SOURCE_PREFIX",
+    "BrokenSource",
+    "CopyProblem",
     "CopyRefused",
     "CopyResult",
     "check_probe",
     "encode_copy",
+    "failed_on_broken_source",
     "moov_before_mdat",
     "offline_encode",
     "on_copy_ready",
+    "probe_problem",
     "sweep_offline_leftovers",
     "validate_copy",
 ]

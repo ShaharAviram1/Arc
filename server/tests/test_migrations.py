@@ -808,3 +808,43 @@ def test_torrents_evicted_at_goes_up_and_down(
         assert _torrents_column(test_database_url, "evicted_at") == column
     finally:
         command.upgrade(config, "head")
+
+
+REDONE_AT = "8b6f2d4e1a73"
+BEFORE_REDONE_AT = "5d3e9a7c1b20"
+
+
+def _column(url: str, table: str, column: str) -> tuple[str, str] | None:
+    async def run() -> tuple[str, str] | None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                found = await connection.execute(
+                    text(
+                        "SELECT data_type, is_nullable FROM information_schema.columns "
+                        "WHERE table_name = :table AND column_name = :column"
+                    ),
+                    {"table": table, "column": column},
+                )
+                row = found.first()
+                return None if row is None else (str(row[0]), str(row[1]))
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_offline_copies_redone_at_goes_up_and_down(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``offline_copies.redone_at`` (M20.4): a nullable timestamptz, and reversible."""
+    config = alembic_config(test_database_url)
+    column = ("timestamp with time zone", "YES")
+    assert _column(test_database_url, "offline_copies", "redone_at") == column
+    try:
+        command.downgrade(config, BEFORE_REDONE_AT)
+        assert _column(test_database_url, "offline_copies", "redone_at") is None
+        command.upgrade(config, REDONE_AT)
+        assert _column(test_database_url, "offline_copies", "redone_at") == column
+    finally:
+        command.upgrade(config, "head")

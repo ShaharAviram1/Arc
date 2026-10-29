@@ -323,6 +323,7 @@ async def encoding_episode_ids(
     episode_ids: list[int] | None = None,
     *,
     types: frozenset[str] = SOURCE_READER_TYPES,
+    exclude_job_id: int | None = None,
 ) -> set[int]:
     """Episodes with a pending or running job of ``types``.
 
@@ -332,10 +333,13 @@ async def encoding_episode_ids(
     than the source. A ``preparing`` row with **no** live job behind it is an
     encode whose worker died, and it does not hold the source — otherwise a
     crash could pin a file to the disk for ever. ``None`` asks about every
-    episode.
+    episode. ``exclude_job_id`` leaves one job out: the encode asking on its
+    own behalf (the automatic redo after a broken source, FR-P6).
     """
     key = _offline_job_key()
     statement = select(key).where(Job.type.in_(types), Job.status.in_(ACTIVE_STATUSES))
+    if exclude_job_id is not None:
+        statement = statement.where(Job.id != exclude_job_id)
     if episode_ids is not None:
         if not episode_ids:
             return set()

@@ -26,7 +26,14 @@ from arc.services.media.copies import (
     offline_state,
     settings_key,
 )
-from arc.services.media.offline import check_probe, moov_before_mdat
+from arc.services.media.offline import (
+    NO_SOURCE_DURATION,
+    SHORTFALL,
+    CopyProblem,
+    check_probe,
+    moov_before_mdat,
+    probe_problem,
+)
 from arc.services.media.plan import (
     OFFLINE_OUTPUT,
     OfflineOptions,
@@ -374,10 +381,47 @@ def test_a_wrong_copy_is_refused(payload: dict[str, Any] | None, codec: str, say
     assert problem is not None and says in problem
 
 
-def test_a_duration_within_two_seconds_is_fine_and_unknown_is_not_checked() -> None:
+def test_a_duration_within_two_seconds_is_fine() -> None:
     near = {**OFFLINE_PROBE, "format": {"duration": "13.5"}}
     assert check_probe(near, codec="h264", max_height=720, duration=12.0, has_audio=True) is None
-    assert check_probe(near, codec="h264", max_height=720, duration=None, has_audio=True) is None
+
+
+def test_a_source_with_no_duration_is_refused() -> None:
+    """A real source always states a length; ``None`` is a broken file (owner, 2026-10-29)."""
+    near = {**OFFLINE_PROBE, "format": {"duration": "13.5"}}
+
+    problem = probe_problem(near, codec="h264", max_height=720, duration=None, has_audio=True)
+
+    assert problem == CopyProblem(NO_SOURCE_DURATION, source=True)
+    assert check_probe(near, codec="h264", max_height=720, duration=None, has_audio=True) == (
+        NO_SOURCE_DURATION
+    )
+
+
+def test_a_short_copy_is_the_sources_fault() -> None:
+    short = {**OFFLINE_PROBE, "format": {"duration": "1454.8"}}
+
+    problem = probe_problem(short, codec="h264", max_height=720, duration=1500.1, has_audio=True)
+
+    assert problem == CopyProblem(SHORTFALL.format(actual=1454.8, duration=1500.1), source=True)
+    assert problem.message == "it is 1454.8s long; the source is 1500.1s"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _probe(codec_name="hevc"),
+        _probe(height=1080),
+        {**OFFLINE_PROBE, "format": {}},
+        {**OFFLINE_PROBE, "streams": [OFFLINE_PROBE["streams"][0]]},
+        None,
+    ],
+    ids=["codec", "height", "copy-without-duration", "no-audio", "unreadable-copy"],
+)
+def test_every_other_refusal_is_the_encoders(payload: dict[str, Any] | None) -> None:
+    problem = probe_problem(payload, codec="h264", max_height=720, duration=12.0, has_audio=True)
+
+    assert problem is not None and problem.source is False
 
 
 def test_hevc_tagged_hvc1_passes() -> None:
