@@ -739,6 +739,20 @@ async def test_stopping_nothing_makes_no_request() -> None:
     assert stub.calls == []
 
 
+async def test_recheck_sends_the_hashes_folded_and_deduplicated() -> None:
+    """M20.4: ``torrents/recheck``, for a pack whose file the disk does not have."""
+    stub = QbitStub()
+
+    async with client(stub) as qbit:
+        await qbit.recheck(["BBB", "aaa", "bbb"])
+        await qbit.recheck([])
+
+    assert stub.rechecked == ["aaa", "bbb"]
+    assert [call for call in stub.calls if call.endswith("/torrents/recheck")] == [
+        f"{API}/torrents/recheck"
+    ], "and nothing for an empty list"
+
+
 async def test_an_unreachable_client_is_not_mistaken_for_an_old_one() -> None:
     """``down`` must raise, not be retried as if ``stop`` were unsupported."""
     stub = QbitStub()

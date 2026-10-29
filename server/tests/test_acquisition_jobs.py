@@ -4640,6 +4640,157 @@ async def test_a_selection_arc_dropped_while_a_reselect_was_running_is_repaired(
     ], "every file off: nobody wants anything in this pack any more"
 
 
+# --- Files the client has and the disk does not (owner incident 2026-10-29) ---
+#
+# Trip 4: retention deleted a held pack's files, a remake re-selected them, and
+# qBittorrent — still believing it had those pieces — reported them complete at
+# once. Arc stamped ``completed_at``, one episode sat ``downloaded`` with "not
+# readable yet" for fourteen hours, and the pack sat in ``error``.
+
+
+@pytest.fixture
+def _no_recheck_memo() -> Any:
+    acquisition_jobs._RECHECKED.clear()
+    yield
+    acquisition_jobs._RECHECKED.clear()
+
+
+def _recheck_calls(wired: Wired) -> int:
+    return sum(1 for call in wired.qbit.calls if call.endswith("/torrents/recheck"))
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_a_complete_the_disk_does_not_have_is_not_stamped_and_is_rechecked(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962260, email="phantom1@arc.test"
+    )
+    _arrived(wired, 6)  # the client says so; nothing is on the disk
+
+    await _poll(db_session, wired)
+
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    assert row.completed_at is None
+    assert row.progress == 0.0
+    assert episode.state is EpisodeState.DOWNLOADING
+    assert wired.qbit.rechecked == [BATCH_HASH]
+    assert [job.payload["torrent_id"] for job in await queued(db_session, QBIT_RESELECT)] == [
+        torrent.id
+    ], "back through qbit_reselect, whose KEEP starts it"
+    assert await queued(db_session, MATCH_FILE) == []
+    assert wired.qbit.stopped == [] and wired.qbit.deleted == []
+
+    # The client is checking now (the stub says ``checkingDL``) and still lists
+    # the file at 100 %: a wait, not a second recheck and not a stamp.
+    await _poll(db_session, wired)
+    assert _recheck_calls(wired) == 1
+    assert row.completed_at is None
+
+    # The check is done and the file is fetched again, for real this time.
+    wired.qbit.torrents[0]["state"] = "downloading"
+    _member(tmp_path, 7)
+    await _poll(db_session, wired)
+
+    assert row.completed_at is not None
+    assert episode.state is EpisodeState.MATCHING
+    assert _recheck_calls(wired) == 1
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_an_empty_file_is_as_absent_as_a_missing_one(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """libtorrent recreated ``13v2`` at zero bytes on restart."""
+    wired, _episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962261, email="phantom2@arc.test"
+    )
+    _member(tmp_path, 7, size=0)
+    _arrived(wired, 6)
+
+    await _poll(db_session, wired)
+
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    assert row.completed_at is None
+    assert wired.qbit.rechecked == [BATCH_HASH]
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_an_errored_pack_missing_a_stamped_file_is_rechecked_and_recovers(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Torrent 112 as production holds it: ``error`` already, rows stamped.
+
+    The rule fires on the **current** state, not on a transition into it; the
+    rows go back to pending so ``qbit_reselect`` starts the pack, nothing is a
+    stall while the client checks, and the episode left ``downloaded`` by "not
+    readable yet" is handed off once the file is really there.
+    """
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962262, email="phantom3@arc.test"
+    )
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    row.completed_at = datetime.now(UTC) - timedelta(hours=14)
+    row.progress = 1.0
+    episode.state = EpisodeState.DOWNLOADED
+    torrent.qbit_state = "error"
+    await db_session.flush()
+    _arrived(wired, 6)
+    wired.qbit.torrents[0] |= {"state": "error", "progress": 1.0}
+
+    await _poll(db_session, wired)
+
+    assert row.completed_at is None and row.progress == 0.0
+    assert wired.qbit.rechecked == [BATCH_HASH]
+    assert episode.state is EpisodeState.DOWNLOADED, "not given up on"
+    assert torrent.qbit_state == "error", "not stalled"
+    assert wired.qbit.stopped == [] and wired.qbit.deleted == []
+    reselects = await queued(db_session, QBIT_RESELECT)
+    assert [job.payload["torrent_id"] for job in reselects] == [torrent.id]
+
+    # qbit_reselect: the pack has a pending wanted file, so KEEP starts it.
+    await _reselect(db_session, wired, torrent.id)
+    assert wired.qbit.started == [BATCH_HASH]
+
+    # Still checking: a wait.
+    wired.qbit.torrents[0]["state"] = "checkingDL"
+    await _poll(db_session, wired)
+    # Back in ``error`` inside the cool-down: still a wait, not a stall and
+    # not a recheck a minute.
+    wired.qbit.torrents[0]["state"] = "error"
+    await _poll(db_session, wired)
+    assert _recheck_calls(wired) == 1
+    assert episode.state is EpisodeState.DOWNLOADED
+    assert torrent.qbit_state == "error"
+
+    # The file is fetched again.
+    wired.qbit.torrents[0]["state"] = "downloading"
+    _member(tmp_path, 7)
+    await _poll(db_session, wired)
+
+    assert row.completed_at is not None
+    assert episode.state is EpisodeState.MATCHING
+    assert len(await queued(db_session, MATCH_FILE)) == 1
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_an_errored_pack_whose_files_are_all_there_still_stalls(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The recheck is for absent files only; a client error otherwise is FR-A6's."""
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962263, email="phantom4@arc.test"
+    )
+    _member(tmp_path, 7)
+    wired.qbit.torrents[0] |= {"state": "error", "progress": 0.2}
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.rechecked == []
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is not EpisodeState.DOWNLOADING
+
+
 # --- qbit_reselect ----------------------------------------------------------
 
 

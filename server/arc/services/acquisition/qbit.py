@@ -2,7 +2,8 @@
 
 A handful of calls — ``auth/login``, ``torrents/add``, ``torrents/info``,
 ``torrents/files``, ``torrents/filePrio``, ``torrents/delete``,
-``torrents/start``, ``torrents/stop`` and ``app/setPreferences``
+``torrents/start``, ``torrents/stop``, ``torrents/recheck`` and
+``app/setPreferences``
 (architecture.md §6) — and one piece of arithmetic that is easy to get wrong
 and expensive to get wrong: **the path mapping**.
 
@@ -1040,6 +1041,22 @@ class QbitClient:
             log.info("this qbittorrent has no torrents/stop; using torrents/pause")
             await self.request("POST", "/torrents/pause", data=data)
         log.info("torrents stopped", extra={"count": len(wanted)})
+
+    async def recheck(self, hashes: list[str]) -> None:
+        """Ask the client to re-verify torrents against the disk (M20.4, FR-A11).
+
+        ``torrents/recheck`` — the same name in 4.x and 5.x. For a pack whose
+        file the client still believes it has but that is absent or empty on
+        disk (retention unlinked it, or libtorrent recreated it at zero bytes):
+        until the client re-reads the pieces it reports the file complete and
+        never fetches it again. Like :meth:`stop`, only for hashes Arc recorded
+        itself.
+        """
+        wanted = sorted({value.lower() for value in hashes if value})
+        if not wanted:
+            return
+        await self.request("POST", "/torrents/recheck", data={"hashes": "|".join(wanted)})
+        log.info("torrents rechecked", extra={"count": len(wanted), "hashes": wanted})
 
     async def bottom_prio(self, info_hash: str) -> bool:
         """Move one torrent to the bottom of the client's queue (FR-A12).

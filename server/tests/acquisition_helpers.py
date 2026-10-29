@@ -322,6 +322,9 @@ class QbitStub:
         self.bottomed: list[str] = []
         #: And to ``torrents/topPrio`` (a trip torrent somebody now streams).
         self.topped: list[str] = []
+        #: And to ``torrents/recheck`` (M20.4); the torrent then reports
+        #: ``checkingDL`` until a test says otherwise.
+        self.rechecked: list[str] = []
         self.queueing = True
         #: Make ``torrents/bottomPrio`` alone unreachable.
         self.bottom_down = False
@@ -496,6 +499,14 @@ class QbitStub:
                 return httpx.Response(409, text="Torrent queueing must be enabled")
             hashes = self._form(request).get("hashes", "")
             self.bottomed.extend(value for value in hashes.split("|") if value)
+            return httpx.Response(200, text="")
+        if path.endswith("/torrents/recheck"):
+            hashes = self._form(request).get("hashes", "")
+            wanted = [value.lower() for value in hashes.split("|") if value]
+            self.rechecked.extend(wanted)
+            for torrent in self.torrents:
+                if torrent["hash"].lower() in wanted:
+                    torrent["state"] = "checkingDL"
             return httpx.Response(200, text="")
         if path.endswith("/torrents/topPrio"):
             if not self.queueing:

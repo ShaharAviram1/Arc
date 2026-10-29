@@ -258,6 +258,25 @@ METADATA_STATES: frozenset[str] = frozenset({"metaDL", "forcedMetaDL"})
 #: against a client that had stopped.
 ERROR_STATES: frozenset[str] = frozenset({"error", "missingFiles"})
 
+#: The states a torrent is in while the client re-reads its pieces from disk
+#: (M20.4): a recheck Arc asked for, or the client's own resume check. A file's
+#: progress is not to be believed while one runs, so a pack in one of these is
+#: left to finish — no complete is stamped, no recheck is asked for again, and
+#: nothing is a stall.
+CHECKING_STATES: frozenset[str] = frozenset(
+    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData"}
+)
+
+#: How long after asking for a pack's recheck Arc waits before asking again
+#: (M20.4). The client moves into :data:`CHECKING_STATES` within seconds, so
+#: this only matters for a client that answers the recheck and then reports the
+#: same fault again: once a minute for ever would be a loop, not a repair.
+RECHECK_COOLDOWN: float = 10 * 60.0
+
+#: ``info hash → when its recheck was last asked for`` (monotonic). Process-local
+#: and lossy by design, like the pack memo: forgetting costs one more recheck.
+_RECHECKED: dict[str, float] = {}
+
 #: And the states that mean "the client is trying to download this **now**".
 #: An allow-list, deliberately: most of the other states are ones where making
 #: no progress is correct. ``queuedDL`` is a torrent waiting its turn behind
@@ -2366,6 +2385,9 @@ class BatchPoll:
     #: client's answer disagreed with the rows, and **the rows are the
     #: instruction** (:func:`_sync_batch_files`).
     reselect: int | None = None
+    #: The hash to recheck, or ``None`` (M20.4): a wanted file the client
+    #: calls complete is absent or empty on disk (:func:`_absent_on_disk`).
+    recheck: str | None = None
 
 
 async def _batch_files(
@@ -2411,6 +2433,61 @@ async def _claimed_episodes(
     return {episode.id: episode for episode in rows.all()}
 
 
+def _pack_file_path(
+    settings: Settings, torrent: Torrent, row: TorrentFile, info: TorrentInfo
+) -> Path:
+    """Where one of a pack's files is, as the worker sees it (FR-A11).
+
+    The torrent's own save path plus the file's own name, through ``host_path``
+    — which refuses anything not under the configured downloads root. The one
+    place the path is built, for :func:`_complete_file` and for
+    :func:`_absent_on_disk`.
+    """
+    reported = torrent.save_path or info.save_path
+    if not reported:
+        raise QbitError(f"qbittorrent reported no path for {info.hash}")
+    return host_path(
+        str(PurePosixPath(reported) / row.path),
+        downloads_path=settings.qbit_downloads_path,
+        host_downloads=settings.downloads_dir,
+    )
+
+
+def _absent_on_disk(
+    settings: Settings, torrent: Torrent, row: TorrentFile, info: TorrentInfo
+) -> bool:
+    """Whether a pack's file is missing or empty on disk (M20.4, FR-A11).
+
+    Owner incident 2026-10-29: retention deleted a held pack's files, a later
+    want re-selected them, and the client — which still believed it had those
+    pieces — reported them complete at once; libtorrent then recreated one at
+    zero bytes and never created the other. A zero-byte file is never a video,
+    so "empty" counts as "absent". A path that cannot be built is not
+    answered here (``False``): that is :func:`_complete_file`'s error to raise.
+    """
+    try:
+        path = _pack_file_path(settings, torrent, row, info)
+    except QbitError:
+        return False
+    try:
+        return not path.is_file() or path.stat().st_size == 0
+    except OSError:
+        return True
+
+
+def _may_recheck(info_hash: str) -> bool:
+    """Whether a recheck of ``info_hash`` may be asked for now (:data:`RECHECK_COOLDOWN`)."""
+    asked = _RECHECKED.get(info_hash.lower())
+    return asked is None or time.monotonic() - asked >= RECHECK_COOLDOWN
+
+
+def _asked_recheck(info_hash: str) -> None:
+    now = time.monotonic()
+    for key in [key for key, asked in _RECHECKED.items() if now - asked >= RECHECK_COOLDOWN]:
+        del _RECHECKED[key]
+    _RECHECKED[info_hash.lower()] = now
+
+
 async def _complete_file(
     ctx: JobContext,
     torrent: Torrent,
@@ -2436,14 +2513,7 @@ async def _complete_file(
     ``downloaded`` and the next poll tries again, which is why this is retried
     from the row's ``completed_at`` rather than from the client's progress.
     """
-    reported = torrent.save_path or info.save_path
-    if not reported:
-        raise QbitError(f"qbittorrent reported no path for {info.hash}")
-    path = host_path(
-        str(PurePosixPath(reported) / row.path),
-        downloads_path=ctx.settings.qbit_downloads_path,
-        host_downloads=ctx.settings.downloads_dir,
-    )
+    path = _pack_file_path(ctx.settings, torrent, row, info)
     name = PurePosixPath(row.path).name
     transition(episode, EpisodeState.DOWNLOADED, reason=f"{name} finished downloading")
     if not path.is_file():
@@ -2583,14 +2653,27 @@ async def _retry_stalled_pack_episodes(
     return retried
 
 
+@dataclass(frozen=True, slots=True)
+class _Synced:
+    """What :func:`_sync_batch_files` found."""
+
+    synced: int = 0
+    drifted: bool = False
+    #: Wanted rows the client called complete that are absent or empty on disk
+    #: (M20.4), by ``file_index``: not stamped, progress reset, and the pack
+    #: wants a recheck.
+    phantom: tuple[int, ...] = ()
+
+
 def _sync_batch_files(
     ctx: JobContext,
     torrent: Torrent,
     rows: Sequence[TorrentFile],
     listed: Mapping[int, FileInfo],
     *,
+    info: TorrentInfo,
     now: datetime,
-) -> tuple[int, bool]:
+) -> _Synced:
     """Write every file's own progress, and say whether the selection drifted.
 
     Matched by ``file_index``, which is the client's own numbering and the only
@@ -2611,12 +2694,22 @@ def _sync_batch_files(
     of mind: Arc says what it is fetching, says so in the log when it has to
     say it twice, and an operator who wants a file left alone has Arc's own
     controls for it.
+
+    **A complete is believed only when the file is on disk** (owner incident
+    2026-10-29). A wanted file the client calls complete is stamped
+    ``completed_at`` only once :func:`_absent_on_disk` says it is there with
+    bytes in it; otherwise its progress is reset to 0 and it is counted in
+    ``phantom``, for the caller to ask the client for a recheck. While the
+    client is checking (:data:`CHECKING_STATES`) nothing is stamped at all:
+    a file's progress is not an answer until the check is done.
     """
     synced = 0
     drifted = False
+    phantom: list[int] = []
+    checking = info.state in CHECKING_STATES
     for row in rows:
-        info = listed.get(row.file_index)
-        if info is None:
+        file_info = listed.get(row.file_index)
+        if file_info is None:
             ctx.log.warning(
                 "the client does not list a file arc recorded for this batch",
                 extra={
@@ -2627,9 +2720,9 @@ def _sync_batch_files(
                 },
             )
             continue
-        row.progress = info.progress
+        row.progress = file_info.progress
         synced += 1
-        if row.wanted != info.wanted:
+        if row.wanted != file_info.wanted:
             drifted = True
             ctx.log.warning(
                 "a batch's selection in the client disagrees with arc's rows",
@@ -2639,14 +2732,18 @@ def _sync_batch_files(
                     "file_index": row.file_index,
                     "episode_id": row.episode_id,
                     "wanted": row.wanted,
-                    "priority": info.priority,
+                    "priority": file_info.priority,
                 },
             )
         if not row.wanted:
             continue
-        if row.completed_at is None and info.complete:
+        if row.completed_at is None and file_info.complete and not checking:
+            if _absent_on_disk(ctx.settings, torrent, row, info):
+                row.progress = 0.0
+                phantom.append(row.file_index)
+                continue
             row.completed_at = now
-    return synced, drifted
+    return _Synced(synced=synced, drifted=drifted, phantom=tuple(phantom))
 
 
 async def _poll_batch(
@@ -2760,12 +2857,49 @@ async def _poll_batch(
     # The one request this loop can make, and the condition under which it does
     # not: a pack with every wanted file in, sitting stopped where the last poll
     # left it, has nothing to tell Arc that Arc does not already know.
+    # **Files the client has and the disk does not** (owner incident
+    # 2026-10-29). A pack in :data:`ERROR_STATES` — ``missingFiles`` is the
+    # client saying so outright — whose wanted file is absent or empty on disk
+    # is asked to recheck, on its *current* state and not only on a transition:
+    # the row may have said ``error`` for hours. The rows go back to pending
+    # first, so the pack counts as unfinished and ``qbit_reselect``'s
+    # disposition (KEEP) starts it rather than stopping it, and an episode left
+    # ``downloaded`` by "not readable yet" is handed off by the ordinary retry
+    # once the file is really there.
+    absent: list[TorrentFile] = []
+    if info.state in ERROR_STATES:
+        absent = [row for row in wanted if _absent_on_disk(ctx.settings, torrent, row, info)]
+        for row in absent:
+            row.completed_at = None
+            row.progress = 0.0
+
     synced = 0
     drifted = False
+    phantom: tuple[int, ...] = ()
     if any(row.completed_at is None for row in wanted) or info.state not in SETTLED_STATES:
         listed = {info_row.index: info_row for info_row in await qbit.files(torrent.info_hash)}
-        synced, drifted = _sync_batch_files(ctx, torrent, rows, listed, now=now)
+        found = _sync_batch_files(ctx, torrent, rows, listed, info=info, now=now)
+        synced, drifted, phantom = found.synced, found.drifted, found.phantom
     reselect = torrent.id if drifted else None
+    # One recheck per pack per poll, and none while the client is checking or
+    # within :data:`RECHECK_COOLDOWN` of the last one Arc asked for: those are
+    # waits, and so is the stall rule below.
+    waiting = bool(absent or phantom) or info.state in CHECKING_STATES
+    recheck: str | None = None
+    if (absent or phantom) and info.state not in CHECKING_STATES and _may_recheck(info.hash):
+        recheck = info.hash
+        _asked_recheck(info.hash)
+        # Back through ``qbit_reselect``: KEEP starts a pack with a pending file.
+        reselect = torrent.id
+        ctx.log.warning(
+            "pack file reported complete but absent on disk; rechecking",
+            extra={
+                "torrent_id": torrent.id,
+                "hash": torrent.info_hash,
+                "state": info.state,
+                "file_indexes": sorted({row.file_index for row in absent} | set(phantom))[:20],
+            },
+        )
 
     # The hand-off is driven by the **row**, not by this listing: an episode
     # whose file was complete last poll but not yet readable is still sitting in
@@ -2806,9 +2940,13 @@ async def _poll_batch(
             reselect=reselect,
         )
 
-    reason = stall_reason(info, metadata_after=metadata_after, no_bytes_after=no_bytes_after)
+    reason = (
+        None
+        if waiting
+        else stall_reason(info, metadata_after=metadata_after, no_bytes_after=no_bytes_after)
+    )
     if reason is None:
-        return BatchPoll(synced=synced, finished=finished, reselect=reselect)
+        return BatchPoll(synced=synced, finished=finished, reselect=reselect, recheck=recheck)
 
     torrent.qbit_state = QBIT_STALLED
     given_up = _give_up_on(ctx, pending, episodes, reason=manual_stall(torrent, reason))
@@ -2921,6 +3059,8 @@ async def poll_qbit(ctx: JobContext) -> None:
     seeding: list[str] = []
     stalled: list[str] = []
     stopping: list[str] = []
+    #: Packs whose absent files the client still calls complete (M20.4).
+    rechecking: list[str] = []
     #: Packs whose selection in the client has drifted from Arc's rows. Queued
     #: rather than written here: ``qbit_reselect`` is the only writer of a
     #: pack's selection, and this loop is holding a transaction.
@@ -3080,6 +3220,8 @@ async def poll_qbit(ctx: JobContext) -> None:
                 stopping.append(outcome.stop)
             if outcome.reselect is not None:
                 repair.append(outcome.reselect)
+            if outcome.recheck is not None:
+                rechecking.append(outcome.recheck)
 
         # **The rows first, then the client.** The flush is what makes the
         # deletion safe to fail: the episode is already ``unavailable`` and the
@@ -3105,6 +3247,11 @@ async def poll_qbit(ctx: JobContext) -> None:
             await ctx.session.flush()
         if stalled:
             await qbit.delete(stalled, delete_files=True)
+        # After the flush too: the rows already say the file is pending, so a
+        # client that stops answering here leaves a pack the next poll asks
+        # again (M20.4).
+        if rechecking:
+            await qbit.recheck(rechecking)
 
         # Packs to stop, **and keep** (FR-A11), for either of two reasons: every
         # file Arc asked for is in, or the pack was given up on while holding a
