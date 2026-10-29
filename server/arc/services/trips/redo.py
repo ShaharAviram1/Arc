@@ -113,6 +113,7 @@ SKIP_ENCODING = "encoding"
 SKIP_BUSY = "busy"
 SKIP_CLIENT = "client"
 SKIP_HELD = "held"
+SKIP_READY = "ready"
 
 _ENDED: frozenset[TripEpisodeState] = frozenset(
     {TripEpisodeState.CANCELLED, TripEpisodeState.EXPIRED}
@@ -325,6 +326,10 @@ async def redo_copies(
             watched=episode_id in watched[named.user_id],
             encoding=episode_id in encoding,
         )
+        if reason is None and automatic and episode.state is EpisodeState.READY:
+            # Became ready since the unlocked check: it streams from that
+            # source, and nothing is queued onto the encode calling us.
+            reason = SKIP_READY
         if reason is not None:
             skipped.append((episode_id, reason))
             continue
@@ -452,7 +457,8 @@ async def redo_after_broken_source(
     the copy has not been redone before (``redone_at`` is null), and the
     episode is not ``ready`` (it streams from that source); ``None``
     otherwise, with nothing written. The redo is :func:`redo_copies` for that
-    one episode under the first such trip.
+    one episode under the first such trip whose user has not watched it; an
+    episode that became ``ready`` before the locks were taken is skipped.
     """
     copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
     if copy is None or copy.redone_at is not None:
@@ -461,17 +467,27 @@ async def redo_after_broken_source(
     if episode is None or episode.state is EpisodeState.READY:
         # A ready episode streams from that source; it is not refetched for a copy.
         return None
-    trip = await session.scalar(
-        select(Trip)
-        .join(TripEpisode, TripEpisode.trip_id == Trip.id)
-        .where(
-            TripEpisode.episode_id == episode_id,
-            TripEpisode.state == TripEpisodeState.PENDING,
-            Trip.state == TripState.ACTIVE,
+    waiting = (
+        await session.scalars(
+            select(Trip)
+            .join(TripEpisode, TripEpisode.trip_id == Trip.id)
+            .where(
+                TripEpisode.episode_id == episode_id,
+                TripEpisode.state == TripEpisodeState.PENDING,
+                Trip.state == TripState.ACTIVE,
+            )
+            .order_by(Trip.id)
         )
-        .order_by(Trip.id)
-        .limit(1)
-    )
+    ).all()
+    trip = None
+    for candidate in waiting:
+        # A pending row passes the skip rules unless its user watched it.
+        done = await completed_episode_ids(
+            session, user_id=candidate.user_id, episode_ids=[episode_id]
+        )
+        if episode_id not in done:
+            trip = candidate
+            break
     if trip is None:
         return None
     return await redo_copies(
@@ -493,6 +509,7 @@ __all__ = [
     "SKIP_ENDED",
     "SKIP_HELD",
     "SKIP_NOT_IN_TRIP",
+    "SKIP_READY",
     "SKIP_RELEASED",
     "SKIP_WATCHED",
     "RedoReport",

@@ -65,6 +65,7 @@ from arc.services.trips.redo import (
     SKIP_ENDED,
     SKIP_HELD,
     SKIP_NOT_IN_TRIP,
+    SKIP_READY,
     SKIP_RELEASED,
     SKIP_WATCHED,
     redo_after_broken_source,
@@ -983,3 +984,54 @@ async def test_a_copy_a_device_is_fetching_is_held(
         db_session, settings, trip=trip, now=later, episode_ids=[episodes[0].id]
     )
     assert again.redone == (episodes[0].id,)
+
+
+async def test_the_automatic_redo_picks_a_trip_whose_user_has_not_watched_it(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    first_user, first, episodes = await a_trip(db_session, 991250, "redo-pick1@arc.test", settings)
+    second_user = await make_user(db_session, "redo-pick2@arc.test")
+    second = (
+        await create_trip(
+            db_session,
+            settings,
+            user=second_user,
+            anime_id=episodes[0].anime_id,
+            count=1,
+            now=now(),
+        )
+    ).trip
+    db_session.add(
+        WatchProgress(
+            user_id=first_user.id, episode_id=episodes[0].id, position_s=1400.0, completed=True
+        )
+    )
+    await failed_copy(db_session, settings, episodes[0])
+    assert first.id < second.id
+
+    report = await redo_after_broken_source(
+        db_session, settings, episode_id=episodes[0].id, now=now()
+    )
+
+    assert report is not None and report.trip_id == second.id
+    assert report.redone == (episodes[0].id,)
+
+
+async def test_the_automatic_redo_skips_an_episode_that_turned_ready(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    _, trip, episodes = await a_trip(db_session, 991251, "redo-ready@arc.test", settings)
+    episodes[0].state = EpisodeState.READY
+    await failed_copy(db_session, settings, episodes[0])
+
+    report = await redo_copies(
+        db_session,
+        settings,
+        trip=trip,
+        now=now(),
+        episode_ids=[episodes[0].id],
+        automatic=True,
+    )
+
+    assert report.skipped == ((episodes[0].id, SKIP_READY),)
+    assert await pending_jobs(db_session, OFFLINE_ENCODE) == []
