@@ -2122,7 +2122,8 @@ owner's word.
         `retention.delete.delete_episode_files` (pack files given back, the
         episode reset), keep the copy row as `queued` with `redone_at`
         stamped (new column, one Alembic revision), re-pend a `delivered`
-        row (`available_at` None), queue `compute_wants` so the pending trip
+        row (`available_at` now, as the remake does, so a trip near its
+        deadline does not expire mid-refetch), queue `compute_wants` so the pending trip
         row re-fetches the source; the link path then re-queues the encode.
         CLI `redo-copies --trip ID (--episodes N,N | --failed)`. Automatic:
         an `offline_encode` that fails on a *source* problem (probe returned
@@ -2144,7 +2145,8 @@ owner's word.
         of the episode or pack is written, so sibling searches wait instead
         of deadlocking (production logged ten `DeadlockDetectedError`
         retries at 03:05–03:07).
-  - [ ] **C — production**: deploy; `redo-copies --trip 5 --failed` plus
+  - [ ] **C — production**: deploy A and B together (A's pack re-claim
+        relies on B's recheck); `redo-copies --trip 5 --failed` plus
         `--episodes 1`; after the S4 copies, `redo-copies --trip 4
         --episodes 13` (14 heals through the recheck); verify the iPad
         picks them up.
