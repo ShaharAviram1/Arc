@@ -387,6 +387,7 @@ async def delete_episode_files(
     reason: str = RETENTION_REASON,
     dry_run: bool = False,
     keep_copy: bool = False,
+    exclude_job_id: int | None = None,
 ) -> Removed:
     """Remove everything ``targets`` names and reset the episode (FR-T3).
 
@@ -404,6 +405,10 @@ async def delete_episode_files(
     last step take the same lock, so a copy can neither be requested between
     the in-flight check below and the deletion, nor be put in place on an
     episode this has just reset (FR-P6).
+
+    ``exclude_job_id`` is the one job the in-flight check may ignore: an
+    ``offline_encode`` that found its source broken and redoes it itself
+    (:mod:`arc.services.trips.redo`) is not reading that source any more.
     """
     await session.flush()
     await session.refresh(episode, with_for_update=True)
@@ -418,7 +423,7 @@ async def delete_episode_files(
     # now (FR-P6). Asked here, immediately before anything irreversible, and
     # not only by the planner: an encode can be queued in the minutes between
     # the two.
-    if await encoding_episode_ids(session, [episode.id]):
+    if await encoding_episode_ids(session, [episode.id], exclude_job_id=exclude_job_id):
         log.info(
             "a job is reading this episode's source; leaving its files alone",
             extra={"episode_id": episode.id},

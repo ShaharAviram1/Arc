@@ -150,6 +150,7 @@ uv run python -m arc.cli demo-list --user-email prof@example.edu \
     --status watching --progress 3 --demo
 uv run python -m arc.cli recs --user-email prof@example.edu    # one picks run
 uv run python -m arc.cli remake-copies --trip 4                # re-make a trip's copies with the current OFFLINE_* settings
+uv run python -m arc.cli redo-copies --trip 5 --failed         # redo a trip's failed copies from a freshly fetched source
 ```
 
 In production the same commands run inside the api container, which already
