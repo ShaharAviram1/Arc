@@ -259,12 +259,13 @@ METADATA_STATES: frozenset[str] = frozenset({"metaDL", "forcedMetaDL"})
 ERROR_STATES: frozenset[str] = frozenset({"error", "missingFiles"})
 
 #: The states a torrent is in while the client re-reads its pieces from disk
-#: (M20.4): a recheck Arc asked for, or the client's own resume check. A file's
+#: (M20.4): a recheck Arc asked for, or the client's own resume check — and
+#: ``moving``/``allocating``, which are the same kind of busy. A file's
 #: progress is not to be believed while one runs, so a pack in one of these is
 #: left to finish — no complete is stamped, no recheck is asked for again, and
 #: nothing is a stall.
 CHECKING_STATES: frozenset[str] = frozenset(
-    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData"}
+    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData", "moving", "allocating"}
 )
 
 #: How long after asking for a pack's recheck Arc waits before asking again
@@ -273,9 +274,34 @@ CHECKING_STATES: frozenset[str] = frozenset(
 #: same fault again: once a minute for ever would be a loop, not a repair.
 RECHECK_COOLDOWN: float = 10 * 60.0
 
-#: ``info hash → when its recheck was last asked for`` (monotonic). Process-local
-#: and lossy by design, like the pack memo: forgetting costs one more recheck.
-_RECHECKED: dict[str, float] = {}
+#: How many rechecks one pack gets while its files stay absent (M20.4). After
+#: that the pack is no longer a wait: :func:`stall_reason` and its
+#: :data:`ERROR_STATES` rule decide, as they did before rechecks existed.
+RECHECK_ATTEMPTS: int = 2
+
+#: Below how many allocated bytes a file the client created is no file at all
+#: (M20.4): libtorrent pre-allocates a selected file at its full size, sparse,
+#: so neither the size nor the mtime says whether a byte is in it. A file over
+#: :data:`SPARSE_LARGE` needs 1 % of its size allocated; a smaller one all of
+#: its size or 64 KiB, whichever is less.
+SPARSE_LARGE: int = 8 * 1024 * 1024
+SPARSE_SMALL_FLOOR: int = 64 * 1024
+
+
+@dataclass(slots=True)
+class _Recheck:
+    """One pack's rechecks while its files stay absent (:data:`_RECHECKED`)."""
+
+    asked: float
+    count: int = 1
+    #: Whether "giving up" has been logged, so it is logged once.
+    gave_up: bool = False
+
+
+#: ``info hash → its rechecks``. Process-local and lossy by design, like the
+#: pack memo: forgetting costs one more recheck. Dropped when the pack's files
+#: are fine again (:func:`_rechecks_done`), and after a day regardless.
+_RECHECKED: dict[str, _Recheck] = {}
 
 #: And the states that mean "the client is trying to download this **now**".
 #: An allow-list, deliberately: most of the other states are ones where making
@@ -2484,22 +2510,58 @@ def _absent_on_disk(
     except QbitError:
         return False
     try:
-        return not path.is_file() or path.stat().st_size == 0
+        if not path.is_file():
+            return True
+        found = path.stat()
     except OSError:
         return True
+    return sparse_file(found.st_size, getattr(found, "st_blocks", None))
 
 
-def _may_recheck(info_hash: str) -> bool:
-    """Whether a recheck of ``info_hash`` may be asked for now (:data:`RECHECK_COOLDOWN`)."""
-    asked = _RECHECKED.get(info_hash.lower())
-    return asked is None or time.monotonic() - asked >= RECHECK_COOLDOWN
+def sparse_file(size: int, blocks: int | None) -> bool:
+    """Whether a file of ``size`` bytes with ``blocks`` 512-byte blocks holds nothing.
+
+    Empty is nothing; and a file whose allocation is under the floor
+    (:data:`SPARSE_LARGE`, :data:`SPARSE_SMALL_FLOOR`) is a pre-allocated shell
+    the client never wrote to. A filesystem that reports no block count is
+    believed about the size alone.
+    """
+    if size <= 0:
+        return True
+    if blocks is None:
+        return False
+    allocated = blocks * 512
+    floor = size // 100 if size > SPARSE_LARGE else min(SPARSE_SMALL_FLOOR, size)
+    return allocated < floor
 
 
-def _asked_recheck(info_hash: str) -> None:
+def _recheck_step(info_hash: str) -> str:
+    """What to do about a pack whose files are absent: ``recheck``, ``wait`` or ``give_up``.
+
+    A recheck at most every :data:`RECHECK_COOLDOWN`, and at most
+    :data:`RECHECK_ATTEMPTS` of them while the files stay absent; then
+    ``give_up`` — no longer a wait, so the stall rule decides.
+    """
+    key = info_hash.lower()
     now = time.monotonic()
-    for key in [key for key, asked in _RECHECKED.items() if now - asked >= RECHECK_COOLDOWN]:
-        del _RECHECKED[key]
-    _RECHECKED[info_hash.lower()] = now
+    for stale in [k for k, entry in _RECHECKED.items() if now - entry.asked >= 24 * 3600]:
+        del _RECHECKED[stale]
+    entry = _RECHECKED.get(key)
+    if entry is None:
+        _RECHECKED[key] = _Recheck(asked=now)
+        return "recheck"
+    if entry.count >= RECHECK_ATTEMPTS:
+        return "give_up"
+    if now - entry.asked < RECHECK_COOLDOWN:
+        return "wait"
+    entry.asked = now
+    entry.count += 1
+    return "recheck"
+
+
+def _rechecks_done(info_hash: str) -> None:
+    """The pack's files are fine again: its recheck count starts over."""
+    _RECHECKED.pop(info_hash.lower(), None)
 
 
 async def _complete_file(
@@ -2530,7 +2592,10 @@ async def _complete_file(
     path = _pack_file_path(ctx.settings, torrent, row, info)
     name = PurePosixPath(row.path).name
     transition(episode, EpisodeState.DOWNLOADED, reason=f"{name} finished downloading")
-    if not path.is_file():
+    if _absent_on_disk(ctx.settings, torrent, row, info):
+        # Missing, empty or a sparse shell (M20.4): never handed to the
+        # matcher. The next poll's rule for a stamped row whose episode is
+        # still ``downloaded`` clears the stamp and asks for a recheck.
         ctx.log.warning(
             "a finished batch file is not readable yet, will look again next poll",
             extra={"episode_id": episode.id, "path": str(path), "hash": info.hash},
@@ -2880,9 +2945,25 @@ async def _poll_batch(
     # disposition (KEEP) starts it rather than stopping it, and an episode left
     # ``downloaded`` by "not readable yet" is handed off by the ordinary retry
     # once the file is really there.
+    #
+    # Only a file Arc **stamped** complete is examined here — in an error
+    # state, or while its episode still sits ``downloaded`` (a stamp from
+    # before this rule, production's 0-byte ``13v2``). A file that never
+    # finished is not a phantom: a pack that errors mid-download stalls on the
+    # first poll exactly as before (FR-A6). A file the client lists complete
+    # but Arc never stamped is :func:`_sync_batch_files`' to catch.
+    checking = info.state in CHECKING_STATES
     absent: list[TorrentFile] = []
-    if info.state in ERROR_STATES:
-        absent = [row for row in wanted if _absent_on_disk(ctx.settings, torrent, row, info)]
+    if not checking:
+        for row in wanted:
+            if row.completed_at is None:
+                continue
+            holder = None if row.episode_id is None else episodes.get(row.episode_id)
+            suspect = info.state in ERROR_STATES or (
+                holder is not None and holder.state is EpisodeState.DOWNLOADED
+            )
+            if suspect and _absent_on_disk(ctx.settings, torrent, row, info):
+                absent.append(row)
         for row in absent:
             row.completed_at = None
             row.progress = 0.0
@@ -2895,25 +2976,47 @@ async def _poll_batch(
         found = _sync_batch_files(ctx, torrent, rows, listed, info=info, now=now)
         synced, drifted, phantom = found.synced, found.drifted, found.phantom
     reselect = torrent.id if drifted else None
-    # One recheck per pack per poll, and none while the client is checking or
-    # within :data:`RECHECK_COOLDOWN` of the last one Arc asked for: those are
-    # waits, and so is the stall rule below.
-    waiting = bool(absent or phantom) or info.state in CHECKING_STATES
+    # One recheck per pack per poll, none while the client is checking or
+    # within :data:`RECHECK_COOLDOWN` of the last one, and at most
+    # :data:`RECHECK_ATTEMPTS` while the files stay absent: until then a wait,
+    # and so is the stall rule below; after it, the stall rule decides.
+    trouble = sorted({row.file_index for row in absent} | set(phantom))
+    waiting = checking
     recheck: str | None = None
-    if (absent or phantom) and info.state not in CHECKING_STATES and _may_recheck(info.hash):
-        recheck = info.hash
-        _asked_recheck(info.hash)
-        # Back through ``qbit_reselect``: KEEP starts a pack with a pending file.
-        reselect = torrent.id
-        ctx.log.warning(
-            "pack file reported complete but absent on disk; rechecking",
-            extra={
-                "torrent_id": torrent.id,
-                "hash": torrent.info_hash,
-                "state": info.state,
-                "file_indexes": sorted({row.file_index for row in absent} | set(phantom))[:20],
-            },
-        )
+    if trouble and not checking:
+        step = _recheck_step(info.hash)
+        if step == "recheck":
+            recheck = info.hash
+            waiting = True
+            # Back through ``qbit_reselect``: KEEP starts a pack with a pending file.
+            reselect = torrent.id
+            ctx.log.warning(
+                "pack file reported complete but absent on disk; rechecking",
+                extra={
+                    "torrent_id": torrent.id,
+                    "hash": torrent.info_hash,
+                    "state": info.state,
+                    "file_indexes": trouble[:20],
+                },
+            )
+        elif step == "wait":
+            waiting = True
+        else:
+            entry = _RECHECKED.get(info.hash.lower())
+            if entry is not None and not entry.gave_up:
+                entry.gave_up = True
+                ctx.log.error(
+                    f"pack rechecked {RECHECK_ATTEMPTS} times and still has absent files;"
+                    " giving up",
+                    extra={
+                        "torrent_id": torrent.id,
+                        "hash": torrent.info_hash,
+                        "state": info.state,
+                        "file_indexes": trouble[:20],
+                    },
+                )
+    elif not checking and info.state not in ERROR_STATES:
+        _rechecks_done(info.hash)
 
     # The hand-off is driven by the **row**, not by this listing: an episode
     # whose file was complete last poll but not yet readable is still sitting in

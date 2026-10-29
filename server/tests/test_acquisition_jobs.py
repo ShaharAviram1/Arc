@@ -8,6 +8,7 @@ of a handler does to the database, to the client and to the queue.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -4789,6 +4790,175 @@ async def test_an_errored_pack_whose_files_are_all_there_still_stalls(
     assert wired.qbit.rechecked == []
     assert torrent.qbit_state == QBIT_STALLED
     assert episode.state is not EpisodeState.DOWNLOADING
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_a_pack_that_errors_mid_download_stalls_at_once_as_before(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file at 20 % and nothing on disk is not a phantom: FR-A6's stall, first poll."""
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962264, email="phantom5@arc.test"
+    )
+    for row in wired.qbit.file_lists[BATCH_HASH]:
+        if row["index"] == 6:
+            row["progress"] = 0.2
+    wired.qbit.torrents[0] |= {"state": "error", "progress": 0.2}
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.rechecked == []
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is not EpisodeState.DOWNLOADING
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_a_pack_whose_file_is_only_a_partial_name_stalls_at_once(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962265, email="phantom6@arc.test"
+    )
+    member = _member(tmp_path, 7)
+    member.rename(member.with_name(member.name + ".!qB"))
+    wired.qbit.torrents[0] |= {"state": "missingFiles", "progress": 0.4}
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.rechecked == []
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is not EpisodeState.DOWNLOADING
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_rechecks_are_capped_and_then_the_stall_rule_decides(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client that keeps calling an absent file complete gets two rechecks, not forever."""
+    monkeypatch.setattr(acquisition_jobs, "RECHECK_COOLDOWN", 0.0)
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962266, email="phantom7@arc.test"
+    )
+    _arrived(wired, 6)
+
+    for _ in range(acquisition_jobs.RECHECK_ATTEMPTS):
+        wired.qbit.torrents[0] |= {"state": "error", "progress": 0.5}
+        await _poll(db_session, wired)
+        assert torrent.qbit_state == "error", "a wait, not a stall"
+    assert _recheck_calls(wired) == acquisition_jobs.RECHECK_ATTEMPTS
+
+    wired.qbit.torrents[0] |= {"state": "error", "progress": 0.5}
+    with caplog.at_level(logging.ERROR):
+        await _poll(db_session, wired)
+
+    assert _recheck_calls(wired) == acquisition_jobs.RECHECK_ATTEMPTS
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is not EpisodeState.DOWNLOADING
+    gave_up = [r for r in caplog.records if "still has absent files" in r.getMessage()]
+    assert len(gave_up) == 1
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_the_recheck_count_starts_over_once_the_files_are_fine(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, _torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962267, email="phantom8@arc.test"
+    )
+    _arrived(wired, 6)
+    await _poll(db_session, wired)
+    assert BATCH_HASH in acquisition_jobs._RECHECKED
+
+    for row in wired.qbit.file_lists[BATCH_HASH]:
+        row["progress"] = 0.0
+    wired.qbit.torrents[0]["state"] = "downloading"
+    await _poll(db_session, wired)
+
+    assert BATCH_HASH not in acquisition_jobs._RECHECKED
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_a_row_stamped_before_the_rule_with_an_empty_file_is_not_handed_off(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Production's ``13v2``: stamped, 0 bytes, episode ``downloaded``, pack running."""
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962268, email="phantom9@arc.test"
+    )
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    row.completed_at = datetime.now(UTC) - timedelta(hours=1)
+    row.progress = 1.0
+    episode.state = EpisodeState.DOWNLOADED
+    await db_session.flush()
+    _member(tmp_path, 7, size=0)
+    _arrived(wired, 6)
+
+    await _poll(db_session, wired)
+
+    assert row.completed_at is None and row.progress == 0.0
+    assert episode.state is EpisodeState.DOWNLOADED
+    assert await queued(db_session, MATCH_FILE) == []
+    assert wired.qbit.rechecked == [BATCH_HASH]
+
+
+async def test_the_hand_off_refuses_an_empty_file(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962269, email="phantom10@arc.test"
+    )
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    _member(tmp_path, 7, size=0)
+    info = qbit_module.TorrentInfo.from_json(wired.qbit.torrents[0])
+    assert info is not None
+
+    handed = await acquisition_jobs._complete_file(
+        context(db_session, wired.settings, {}, job_type="poll_qbit"), torrent, row, episode, info
+    )
+
+    assert handed is False
+    assert episode.state is EpisodeState.DOWNLOADED
+    assert (await db_session.scalars(select(MediaFile))).all() == []
+
+
+@pytest.mark.parametrize(
+    ("size", "blocks", "empty"),
+    [
+        (0, 0, True),
+        (1_500_000_000, 0, True),
+        (1_500_000_000, 8, True),
+        (1_500_000_000, 1_500_000_000 // 512 // 50, False),
+        (4096, 8, False),
+        (4096, 0, True),
+        (4096, None, False),
+    ],
+)
+def test_a_sparse_shell_counts_as_absent(size: int, blocks: int | None, empty: bool) -> None:
+    assert acquisition_jobs.sparse_file(size, blocks) is empty
+
+
+@pytest.mark.usefixtures("_no_recheck_memo")
+async def test_a_full_size_sparse_file_is_a_phantom(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """libtorrent's pre-allocated 1.5 GB of nothing is not a finished file."""
+    wired, _episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962270, email="phantom11@arc.test"
+    )
+    member = _member(tmp_path, 7, size=0)
+    os.truncate(member, 1_500_000_000)
+    if member.stat().st_blocks * 512 >= 15_000_000:
+        pytest.skip("this filesystem does not report sparse files")
+    _arrived(wired, 6)
+
+    await _poll(db_session, wired)
+
+    row = next(r for r in await _torrent_files(db_session, torrent.id) if r.file_index == 6)
+    assert row.completed_at is None
+    assert wired.qbit.rechecked == [BATCH_HASH]
 
 
 # --- qbit_reselect ----------------------------------------------------------
