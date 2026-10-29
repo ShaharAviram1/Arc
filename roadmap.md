@@ -2099,6 +2099,58 @@ owner's word.
     acquisition/retention paths) → orchestrator verification; full suites
     green; lint clean; single Alembic head; deployed; trip 4's early
     episodes re-made and replaced on the iPad.
+- **M20.4 — Pack hygiene: broken sources, phantom files (owner 2026-10-29).**
+  Incident, trip 5 (Iruma-kun 4, episodes 1–10, started 03:03 UTC): the ten
+  trip searches all chose the SubsPlease season pack and deadlocked each
+  other for four minutes while qBittorrent was already downloading it; the
+  library scan found the pack's pre-allocated files before Arc had any
+  `torrents` row for the pack, linked seven of them, and the encoder ran on
+  half-downloaded sources. Episode 1's copy (9.9 MB) passed validation
+  because the truncated source reported no duration; 3, 6, 8 were refused as
+  too short and 4, 9 as empty — all five left `failed`, their episodes
+  `matched` to files that were partial and were then deleted when the owner
+  re-chose the pack from the iPad. Separately, trip 4's episodes 13–14 (the
+  M20.3 remake) attached to the held S3 pack whose files retention had
+  deleted after the 720p copies: qBittorrent still believed it had them,
+  reported the re-selected files complete, recreated one as 0 bytes, and
+  went to `error`. Owner: "Fix you suggested approved, make it happen";
+  the S4 trip must be ready to download at the connecting flight.
+  - [ ] **A — redo copies: repair command + automatic retry once** (FR-P6,
+        FR-A12, FR-T3). `trips/redo.redo_copies(session, settings, *,
+        trip, episode_ids | failed)`: for each episode drop the copy's file,
+        remove the linked source through
+        `retention.delete.delete_episode_files` (pack files given back, the
+        episode reset), keep the copy row as `queued` with `redone_at`
+        stamped (new column, one Alembic revision), re-pend a `delivered`
+        row (`available_at` None), queue `compute_wants` so the pending trip
+        row re-fetches the source; the link path then re-queues the encode.
+        CLI `redo-copies --trip ID (--episodes N,N | --failed)`. Automatic:
+        an `offline_encode` that fails on a *source* problem (probe returned
+        nothing, no duration, duration shortfall) for an episode some active
+        trip is waiting on, whose copy has no `redone_at`, takes the same
+        path by itself once; a second failure stays `failed`. Validator
+        refuses a source without a readable duration ("the source reports no
+        duration") instead of skipping the length check. Owner's call
+        2026-10-29: automatic retry once, re-fetching the source first.
+  - [ ] **B — packs: unknown directories, phantom completes, search
+        storm** (FR-A11, FR-L1, FR-T3). `library.ingest.in_flight` treats
+        every file under `downloads/batch/<hash>` with no `torrents` row for
+        `<hash>` as unfinished. `_sync_batch_files` does not stamp
+        `completed_at` for a file the client calls complete while the file on
+        disk is missing or empty — it asks the client to recheck the torrent
+        instead (`QbitClient.recheck`); `_poll_batch` rechecks a pack the
+        client reports in `ERROR_STATES`, once per entry into the state. The
+        trip-pack advisory lock in `search_release` is taken before any row
+        of the episode or pack is written, so sibling searches wait instead
+        of deadlocking (production logged ten `DeadlockDetectedError`
+        retries at 03:05–03:07).
+  - [ ] **C — production**: deploy; `redo-copies --trip 5 --failed` plus
+        `--episodes 1`; after the S4 copies, `redo-copies --trip 4
+        --episodes 13` (14 heals through the recheck); verify the iPad
+        picks them up.
+  - DoD: Writer → Validator → Reviewer (both touch acquisition/retention)
+    → orchestrator verification; full suites green; lint clean; single
+    Alembic head; deployed; S4 trip's six missing copies made.
 
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
