@@ -5522,20 +5522,25 @@ async def _neighbour(session: AsyncSession, episode: Episode, number: int) -> Ep
     return found
 
 
+_SETTLED = sorted(acquisition_jobs.SETTLED_STATES)
+
+
 @pytest.mark.usefixtures("_no_start_memo")
+@pytest.mark.parametrize("state", _SETTLED)
 async def test_a_stopped_pack_with_pending_files_is_started(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    state: str,
 ) -> None:
     """Torrent 112's shape: stoppedDL, 0.20, one wanted file in, two still to fetch."""
     wired, episode, torrent = await _in_flight(
         db_session,
         monkeypatch,
         tmp_path,
-        anilist_id=962280,
-        email="restart1@arc.test",
+        anilist_id=962310 + _SETTLED.index(state),
+        email=f"restart1-{state}@arc.test",
         also=(8, 9),
     )
     eighth = await _neighbour(db_session, episode, 8)
@@ -5544,7 +5549,7 @@ async def test_a_stopped_pack_with_pending_files_is_started(
     _file_progress(wired, 6, 0.9998)
     _arrived(wired, 6)
     _file_progress(wired, 7, 0.0003)
-    wired.qbit.torrents[0] |= {"state": "stoppedDL", "progress": 0.2}
+    wired.qbit.torrents[0] |= {"state": state, "progress": 0.2}
 
     with caplog.at_level(logging.WARNING):
         await _poll(db_session, wired)
@@ -5552,7 +5557,7 @@ async def test_a_stopped_pack_with_pending_files_is_started(
     assert wired.qbit.started == [BATCH_HASH]
     assert wired.qbit.rechecked == []
     assert wired.qbit.stopped == [] and wired.qbit.deleted == []
-    assert torrent.qbit_state == "stoppedDL", "not a stall"
+    assert torrent.qbit_state == state, "not a stall"
     assert await queued(db_session, QBIT_RESELECT) == []
     assert episode.state is EpisodeState.MATCHING, "the file that is in is handed off"
     assert eighth.state is EpisodeState.DOWNLOADING
@@ -5684,3 +5689,167 @@ async def test_a_stopped_pack_under_the_recheck_cooldown_is_left_alone(
     assert _recheck_calls(wired) == 1
     assert torrent.qbit_state == "stoppedDL"
     assert episode.state is EpisodeState.DOWNLOADING
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+async def test_a_client_that_ignores_the_start_is_asked_a_bounded_number_of_times(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wired, episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962320, email="restart7@arc.test"
+    )
+    with caplog.at_level(logging.WARNING):
+        for _ in range(acquisition_jobs.START_ATTEMPTS + 3):
+            wired.qbit.torrents[0]["state"] = "stoppedDL"
+            await _poll(db_session, wired)
+
+    assert wired.qbit.started == [BATCH_HASH] * acquisition_jobs.START_ATTEMPTS
+    ignored = [r for r in caplog.records if "ignores the start" in r.getMessage()]
+    assert len(ignored) == 1 and ignored[0].levelno == logging.ERROR
+    assert torrent.qbit_state == "stoppedDL", "not a stall"
+    assert episode.state is EpisodeState.DOWNLOADING
+    entry = acquisition_jobs._STARTED[BATCH_HASH]
+    assert entry.count == acquisition_jobs.START_ATTEMPTS
+
+    # The expiry counts from the first ask, so it is not refreshed by each start.
+    first = entry.first
+    wired.qbit.torrents[0]["state"] = "stoppedDL"
+    await _poll(db_session, wired)
+    assert acquisition_jobs._STARTED[BATCH_HASH].first == first
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+async def test_a_phantom_only_pack_is_not_started_after_the_last_recheck(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Given up on rechecking, a pack whose only pending file the client calls
+    complete would only seed if started."""
+    monkeypatch.setattr(acquisition_jobs, "RECHECK_COOLDOWN", 0.0)
+    wired, episode, _torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962321, email="restart8@arc.test"
+    )
+    _arrived(wired, 6)  # the client says so; nothing is on the disk
+
+    for _ in range(acquisition_jobs.RECHECK_ATTEMPTS + 2):
+        wired.qbit.torrents[0]["state"] = "stoppedUP"
+        await _poll(db_session, wired)
+
+    assert _recheck_calls(wired) == acquisition_jobs.RECHECK_ATTEMPTS
+    assert wired.qbit.started == []
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+async def test_a_drifted_stopped_pack_is_left_to_the_reselect(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The client has a wanted file off: the reselect writes it, then starts."""
+    wired, _episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962322, email="restart9@arc.test"
+    )
+    for row in wired.qbit.file_lists[BATCH_HASH]:
+        if row["index"] == 6:
+            row["priority"] = 0
+    wired.qbit.torrents[0]["state"] = "stoppedDL"
+
+    await _poll(db_session, wired)
+
+    assert [job.payload["torrent_id"] for job in await queued(db_session, QBIT_RESELECT)] == [
+        torrent.id
+    ]
+    assert wired.qbit.started == []
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+@pytest.mark.parametrize("state", ["error", "missingFiles"])
+async def test_an_errored_pack_with_pending_files_still_stalls_and_is_not_started(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
+) -> None:
+    wired, episode, torrent = await _in_flight(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962323 + ["error", "missingFiles"].index(state),
+        email=f"restart10-{state}@arc.test",
+    )
+    wired.qbit.torrents[0] |= {"state": state, "progress": 0.2}
+
+    await _poll(db_session, wired)
+
+    assert torrent.qbit_state == QBIT_STALLED
+    assert episode.state is not EpisodeState.DOWNLOADING
+    assert wired.qbit.started == []
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+async def test_a_stalled_pack_that_is_stopped_is_not_started(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962325, email="restart11@arc.test"
+    )
+    torrent.qbit_state = QBIT_STALLED
+    await db_session.flush()
+    wired.qbit.torrents[0]["state"] = "stoppedDL"
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.started == []
+    assert torrent.qbit_state == QBIT_STALLED
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+@pytest.mark.parametrize("hold", ["paused", "storage"])
+async def test_a_stopped_pack_is_not_started_while_acquisition_is_held(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hold: str
+) -> None:
+    """Starting the rest of a pack is fetching more: a pause and the floor apply."""
+    wired, episode, _torrent = await _in_flight(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962326 + ["paused", "storage"].index(hold),
+        email=f"restart12-{hold}@arc.test",
+    )
+    if hold == "paused":
+        await set_setting(db_session, PAUSED_KEY, True)
+    holding = [True]
+
+    async def held(_session: AsyncSession, _settings: Any) -> bool:
+        return hold == "storage" and holding[0]
+
+    monkeypatch.setattr(acquisition_jobs, "is_storage_held", held)
+    wired.qbit.torrents[0]["state"] = "stoppedDL"
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.started == []
+    assert episode.state is EpisodeState.DOWNLOADING
+
+    # Lifted: started on the next poll.
+    if hold == "paused":
+        await set_setting(db_session, PAUSED_KEY, False)
+    holding[0] = False
+    await _poll(db_session, wired)
+    assert wired.qbit.started == [BATCH_HASH]
+
+
+@pytest.mark.usefixtures("_no_start_memo")
+async def test_a_running_pack_with_nothing_wanted_is_stopped(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The withdraw race: a pack started after its last want went away."""
+    wired, _episode, torrent = await _in_flight(
+        db_session, monkeypatch, tmp_path, anilist_id=962328, email="restart13@arc.test"
+    )
+    for row in await _torrent_files(db_session, torrent.id):
+        row.wanted = False
+    await db_session.flush()
+
+    await _poll(db_session, wired)
+
+    assert wired.qbit.stopped == [BATCH_HASH]
+    assert wired.qbit.started == [] and wired.qbit.deleted == []

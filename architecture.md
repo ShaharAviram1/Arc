@@ -588,12 +588,17 @@ stores — which rows a reader has dismissed — lives in that browser's
    stamp, no second recheck, no stall — for at most `RECHECK_ATTEMPTS` (2)
    rechecks while the files stay absent (process-local count, reset once they
    are fine); after that one error line ("giving up") and the stall rule
-   decides. A pack in `SETTLED_STATES` with a wanted file still pending, not
-   checking, not waiting on a recheck and with no re-selection queued, is
-   started by the poll itself (`BatchPoll.start`, after the flush; one log
-   line per entry into the stopped state, process-local `_STARTED`): a start
-   that lands while the client checks leaves the pack stopped, and a wanted
-   row is always KEEP (production torrent 112, 2026-10-29).
+   decides. A pack in `SETTLED_STATES` with a wanted file of an episode still
+   pending that is not a recheck's absent file, not checking, not waiting on
+   or given up on a recheck, with no re-selection queued, and with
+   acquisition neither paused nor under the storage hold, is started by the
+   poll itself (`BatchPoll.start`, after the flush and the stops; one log
+   line per entry into the stopped state, process-local `_STARTED`; after
+   `START_ATTEMPTS` (10) ignored starts one error line and no more starts for
+   a day): a start that lands while the client checks leaves the pack
+   stopped, and a wanted row is always KEEP (production torrent 112,
+   2026-10-29). A hand stop in the WebUI is not respected — Arc is the only
+   operator of packs. A pack running with nothing wanted is stopped.
    `search_release` reads the episode's state unlocked and stops if
    it is past searching, then takes the trip's `('trip_pack', anime)` advisory
    lock **before** it locks its own episode row (`FOR NO KEY UPDATE`, as
@@ -7430,3 +7435,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-29 (owner) — **Redo a trip's copies; a broken source is redone once** (§4 `offline_copies.redone_at`, §5.3b, §5.4e Redo, §9 CLI; spec FR-P6, FR-A12; production trip 5: copies encoded from half-downloaded pack files). New `trips/redo.py` (`redo_copies`, `redo_after_broken_source`, `RedoReport`) and `arc.cli redo-copies --trip ID (--episodes N,N | --failed)`; `offline_copies.redone_at` (revision `8b6f2d4e1a73`). `offline_encode` classifies source problems (`SOURCE_GONE_MESSAGE`, `plan.SourceUnreadable`, `NO_SOURCE_DURATION`, shortfall → `BrokenSource`) and redoes the episode once when an active trip waits on it; encoder failures never. `check_probe` refuses `duration=None` (`the source reports no duration`) and `encode_copy` refuses it before encoding. `delete_episode_files` and `encoding_episode_ids` take `exclude_job_id`. No new dependency, no MAL-writing code.
 - 2026-10-29 — Redo after validation and review (§5.3b, §5.4e Redo, §5.4e phase; spec FR-P6, FR-A12). `redo_copies` runs the source step first and touches the copy only when the deleter acted (or there was nothing to delete): a refusal is skipped `busy`, an unreachable client `client` (the automatic path re-raises), a copy a device is fetching `held`; every source reader (transcode, remux, live remux, copy) counts as `encoding`; the copy's file is unlinked after the deleter's client call and rows. A finished single's `torrents` row is kept as `rejected` rather than remembered (orchestrator's call), so the next search picks another release; a pack member is re-claimed as before. `trip_phase` lets a `queued`, redone copy with no job fall through to the episode's state (`PhaseFacts.redone`). `probe_problem` returns `CopyProblem(message, source)`; broken-source failures are written behind `BROKEN_SOURCE_PREFIX`, and a retried job whose row says so redoes instead of re-encoding. The automatic redo picks the first active trip whose user has not watched the episode and skips one that turned `ready` under the locks. No new schema beyond `redone_at`, no new dependency, no MAL-writing code.
 - 2026-10-29 — M20.4 Task C: **a stopped pack with a wanted file still to fetch is started** (§5.1 step 4; spec FR-A11; production torrent 112 sat `stoppedDL` at 20 % after `qbit_reselect` started it mid-check). `_poll_batch` returns `BatchPoll.start` for a pack in `SETTLED_STATES` with a pending wanted row when it is not checking, not waiting on a recheck and has no re-selection queued; `poll_qbit` starts it after the flush and logs once per entry into the state (`_STARTED`). Started directly rather than through `qbit_reselect`: a wanted row is KEEP by `batch.disposition`, so the job would only rewrite an unchanged selection. The every-file-in stop and the stall rule are unchanged and decide first. No schema change, no new dependency.
+- 2026-10-29 — M20.4 Task C after review (§5.1 step 4): the start waits out a pause and the storage hold (FR-T6), skips a pack whose only pending files are a recheck's absent ones or whose rechecks were given up on, counts only rows with an episode, and stops after `START_ATTEMPTS` (10) ignored starts with one error line until the memo expires a day after the first ask (not handed to the stall rule); starts go after the stops; a pack running with nothing wanted is stopped (withdraw race). Orchestrator's call: a stop made by hand in the qBittorrent WebUI is not respected — Arc is the only operator of packs on its host.

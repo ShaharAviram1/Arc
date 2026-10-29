@@ -303,22 +303,46 @@ class _Recheck:
 #: are fine again (:func:`_rechecks_done`), and after a day regardless.
 _RECHECKED: dict[str, _Recheck] = {}
 
-#: ``info hash → (the settled state it was started from, when)`` (M20.4): a
-#: pack :func:`_poll_batch` asked the client to start because it sat stopped
-#: with a wanted file still to fetch. Only what the *log* needs — the start
-#: itself is asked every poll until the client leaves the state, which is
-#: idempotent — so one line per entry into a stopped state rather than one a
-#: minute while qBittorrent is slow. Process-local and lossy like
-#: :data:`_RECHECKED`: dropped when the pack is seen in any unsettled state, and
-#: after a day regardless.
-_STARTED: dict[str, tuple[str, float]] = {}
+#: How many polls in a row a settled pack is asked to start before Arc
+#: concludes the client ignores it (M20.4). Starting is idempotent, so a client
+#: slow to leave the stopped state is asked again each minute; after this many
+#: one ``ERROR`` line is written and the start is no longer sent until the
+#: pack's :data:`_STARTED` entry expires (a day after the first ask) or the
+#: pack leaves the state.
+START_ATTEMPTS: int = 10
+
+
+@dataclass(slots=True)
+class _Start:
+    """One settled pack's starts while it stays in one state (:data:`_STARTED`)."""
+
+    state: str
+    #: When the first start in this state was asked; the 24 h expiry counts from it.
+    first: float
+    count: int = 1
+    #: Whether "the client ignores the start" has been logged.
+    ignored: bool = False
+
+
+#: ``info hash → its starts`` (M20.4): a pack :func:`_poll_batch` asked the
+#: client to start because it sat stopped with a wanted file still to fetch.
+#: One log line per entry into a stopped state rather than one a minute, and a
+#: cap (:data:`START_ATTEMPTS`) on a client that never leaves it.
+#: Process-local and lossy like :data:`_RECHECKED`: dropped when the pack is
+#: seen in any unsettled state, is gone, or Arc has decided about it, and a
+#: day after the first ask regardless.
+_STARTED: dict[str, _Start] = {}
 
 #: And the states that mean "the client is trying to download this **now**".
 #: An allow-list, deliberately: most of the other states are ones where making
 #: no progress is correct. ``queuedDL`` is a torrent waiting its turn behind
 #: :attr:`~arc.config.Settings.qbit_max_active_downloads` — with four hundred
 #: wants that is most of them, for hours — and ``stoppedDL``/``pausedDL`` is
-#: somebody's own decision (production has 297 torrents deliberately stopped).
+#: never a stall (production has 297 torrents deliberately stopped). For a
+#: **pack** with a wanted file still to fetch a stopped state is not respected
+#: either (M20.4): Arc is the only operator of packs on its host, so
+#: :func:`_poll_batch` starts it again, a stop made by hand in the WebUI
+#: included.
 #: Checking, moving and allocating are busy, and an errored torrent is a
 #: different problem. None of those is a stall, and a deny-list would have to
 #: be right about every state qBittorrent ever adds.
@@ -2578,15 +2602,29 @@ def _rechecks_done(info_hash: str) -> None:
     _RECHECKED.pop(info_hash.lower(), None)
 
 
-def _first_start(info_hash: str, state: str) -> bool:
-    """Record a start of a settled pack; whether it is the first since it entered ``state``."""
+def _start_step(info_hash: str, state: str) -> str:
+    """Whether to start a settled pack: ``first``, ``again``, ``ignored`` or ``given_up``.
+
+    ``first`` on entering ``state`` (log it and start), ``again`` while the
+    client is slow to leave it (start, quietly), then — after
+    :data:`START_ATTEMPTS` asks in the same state — ``ignored`` once (log an
+    error, do not start) and ``given_up`` until the entry expires.
+    """
     key = info_hash.lower()
     now = time.monotonic()
-    for stale in [k for k, (_, asked) in _STARTED.items() if now - asked >= 24 * 3600]:
+    for stale in [k for k, entry in _STARTED.items() if now - entry.first >= 24 * 3600]:
         del _STARTED[stale]
     entry = _STARTED.get(key)
-    _STARTED[key] = (state, now)
-    return entry is None or entry[0] != state
+    if entry is None or entry.state != state:
+        _STARTED[key] = _Start(state=state, first=now)
+        return "first"
+    if entry.count < START_ATTEMPTS:
+        entry.count += 1
+        return "again"
+    if not entry.ignored:
+        entry.ignored = True
+        return "ignored"
+    return "given_up"
 
 
 async def _complete_file(
@@ -2860,6 +2898,7 @@ async def _poll_batch(
     episodes: Mapping[int, Episode],
     metadata_after: timedelta,
     no_bytes_after: timedelta,
+    may_start: bool = True,
 ) -> BatchPoll:
     """One batch against what the client says about it (FR-A11).
 
@@ -2920,6 +2959,7 @@ async def _poll_batch(
         # through here re-decides it from what the client actually says now.
         was = torrent.qbit_state
         torrent.qbit_state = QBIT_MISSING
+        _STARTED.pop(torrent.info_hash.lower(), None)
         given_up = _give_up_on(
             ctx,
             [row for row in wanted if row.completed_at is None],
@@ -2947,6 +2987,7 @@ async def _poll_batch(
         # landed, and a pack still running is a pack still fetching. Which
         # request it was is the same question as above — a pack the library is
         # drawing on is stopped, never deleted, however often this is asked.
+        _STARTED.pop(info.hash.lower(), None)
         if torrent.qbit_state not in DELETE_ON_SIGHT:
             return BatchPoll()
         if handed_off:
@@ -3004,12 +3045,19 @@ async def _poll_batch(
         found = _sync_batch_files(ctx, torrent, rows, listed, info=info, now=now)
         synced, drifted, phantom = found.synced, found.drifted, found.phantom
     reselect = torrent.id if drifted else None
+    if not wanted and info.state not in SETTLED_STATES and not checking:
+        # Running with nothing wanted (a want withdrawn while the pack was
+        # being started): stopped, and kept until ``qbit_reselect``'s
+        # disposition decides — queued here too if the selection drifted. A
+        # safety net: nothing in it is owed to anybody.
+        return BatchPoll(synced=synced, stop=info.hash, reselect=reselect)
     # One recheck per pack per poll, none while the client is checking or
     # within :data:`RECHECK_COOLDOWN` of the last one, and at most
     # :data:`RECHECK_ATTEMPTS` while the files stay absent: until then a wait,
     # and so is the stall rule below; after it, the stall rule decides.
     trouble = sorted({row.file_index for row in absent} | set(phantom))
     waiting = checking
+    gave_up = False
     recheck: str | None = None
     if trouble and not checking:
         step = _recheck_step(info.hash)
@@ -3030,6 +3078,7 @@ async def _poll_batch(
         elif step == "wait":
             waiting = True
         else:
+            gave_up = True
             entry = _RECHECKED.get(info.hash.lower())
             if entry is not None and not entry.gave_up:
                 entry.gave_up = True
@@ -3104,18 +3153,41 @@ async def _poll_batch(
         # starts the pack itself, and starting it before would fetch to a
         # selection the rows disagree with.
         start: str | None = None
-        if pending and info.state in SETTLED_STATES and not waiting and reselect is None:
-            start = info.hash
-            if _first_start(info.hash, info.state):
-                ctx.log.warning(
-                    "a stopped pack still has files to fetch; starting it",
-                    extra={
-                        "torrent_id": torrent.id,
-                        "hash": torrent.info_hash,
-                        "state": info.state,
-                        "file_indexes": [row.file_index for row in pending][:20],
-                    },
+        # Only for a file that can still arrive: one the client calls complete
+        # and the disk does not have (``trouble``) is the recheck's, and after
+        # its last recheck starting the pack would only seed it. Only a row that
+        # belongs to an episode, too — bytes nobody will be handed are not worth
+        # restarting a pack for.
+        fetchable = [
+            row.file_index
+            for row in pending
+            if row.episode_id is not None and row.file_index not in trouble
+        ]
+        if (
+            may_start
+            and fetchable
+            and info.state in SETTLED_STATES
+            and not waiting
+            and not gave_up
+            and reselect is None
+        ):
+            step = _start_step(info.hash, info.state)
+            extra = {
+                "torrent_id": torrent.id,
+                "hash": torrent.info_hash,
+                "state": info.state,
+                "file_indexes": fetchable[:20],
+            }
+            if step == "first":
+                ctx.log.warning("a stopped pack still has files to fetch; starting it", extra=extra)
+            elif step == "ignored":
+                ctx.log.error(
+                    f"the client ignores the start: pack still {info.state} after"
+                    f" {START_ATTEMPTS} starts; not asking again for a day",
+                    extra=extra,
                 )
+            if step in ("first", "again"):
+                start = info.hash
         return BatchPoll(
             synced=synced, finished=finished, reselect=reselect, recheck=recheck, start=start
         )
@@ -3226,6 +3298,11 @@ async def poll_qbit(ctx: JobContext) -> None:
 
     files = await _batch_files(ctx.session, batches)
     claimed = await _claimed_episodes(ctx.session, files)
+    # Starting the rest of a stopped pack is fetching more (M20.4), so it waits
+    # out a pause and the storage hold (FR-T6) like any search does.
+    may_start = bool(batches) and not (
+        await is_paused(ctx.session) or await is_storage_held(ctx.session, ctx.settings)
+    )
 
     synced = finished = vanished = 0
     seeding: list[str] = []
@@ -3384,6 +3461,7 @@ async def poll_qbit(ctx: JobContext) -> None:
                 episodes=claimed,
                 metadata_after=metadata_after,
                 no_bytes_after=no_bytes_after,
+                may_start=may_start,
             )
             synced += outcome.synced
             finished += outcome.finished
@@ -3428,12 +3506,6 @@ async def poll_qbit(ctx: JobContext) -> None:
         # again (M20.4).
         if rechecking:
             await qbit.recheck(rechecking)
-        # And a pack sitting stopped with a wanted file still to fetch (M20.4).
-        # Never one this poll stops: a pack is started only on the path that
-        # returns no ``stop``.
-        if starting:
-            await qbit.start(starting)
-            ctx.log.info("stopped batches started", extra={"count": len(starting)})
 
         # Packs to stop, **and keep** (FR-A11), for either of two reasons: every
         # file Arc asked for is in, or the pack was given up on while holding a
@@ -3456,6 +3528,14 @@ async def poll_qbit(ctx: JobContext) -> None:
         if seeding:
             await qbit.stop(seeding)
             ctx.log.info("seeding torrents stopped", extra={"count": len(seeding)})
+
+        # And a pack sitting stopped with a wanted file still to fetch (M20.4).
+        # Last, so a start that fails cannot cost this poll its stops; and
+        # never one this poll stops — a pack is started only on the path that
+        # returns no ``stop``.
+        if starting:
+            await qbit.start(starting)
+            ctx.log.info("stopped batches started", extra={"count": len(starting)})
 
     await ctx.session.flush()
     ctx.log.info(
