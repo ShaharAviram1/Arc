@@ -572,6 +572,21 @@ stores — which rows a reader has dismissed — lives in that browser's
 4. `poll_qbit` (every 60 s): sync progress; on completion → state
    `downloaded`, ingest the largest video file (`library.ingest_file`, called
    inline) and enqueue `match_file` for the row it wrote.
+   For a pack (§5.1a) a file is complete only when the client says so **and**
+   it is on disk with bytes (`_absent_on_disk`, M20.4, owner incident
+   2026-10-29): otherwise its progress is reset, `torrents/recheck` is asked
+   for (`QbitClient.recheck`) and `qbit_reselect` is queued so KEEP starts the
+   pack. A pack in `error`/`missingFiles` with an absent wanted file gets the
+   same on its current state, its rows going back to pending; while the client
+   is in `CHECKING_STATES`, or within `RECHECK_COOLDOWN` (10 min, process-local)
+   of Arc's last recheck, the pack waits — no stamp, no second recheck, no
+   stall. A pack in an error state whose wanted files are all there still
+   stalls as before. `search_release` takes the trip's
+   `('trip_pack', anime)` advisory lock **before** it locks its own episode row
+   (`FOR NO KEY UPDATE`, as `_lock_targets` now is): the old order — row lock
+   `FOR UPDATE`, then queue on the advisory lock — met the holder's
+   `torrent_files` insert, whose foreign key takes `FOR KEY SHARE` on every
+   sibling episode, and Postgres broke the cycle with `DeadlockDetectedError`.
 
 Trips (FR-A12, M19 T3) enter this flow at step 1 and nowhere else: the
 reconciler adds every `pending` row of an `active` trip to `desired` (like a
@@ -1490,6 +1505,10 @@ owner 2026-10-13).**
 1. `ingest_file` (a function, called by `library_scan` and by the poll's
    hand-off — not a job type of its own): create `media_files`, ffprobe it,
    parse filename.
+   The scan's fence (`ingest.in_flight`, FR-L1) also holds every file under
+   `<downloads>/batch/<dir>/` whose `<dir>` is no `torrents` row's hash
+   (`InFlight.batch_root`, M20.4): a search adds and starts a pack before its
+   transaction commits, and such a directory is never the library's.
 2. `match_file`: candidates = expected episode (if Arc downloaded it, prior
    0.6) ∪ local anime cache fuzzy hits ∪ AniList search hits. Score =
    weighted title similarity (token-set ratio over romaji/english/synonyms),
@@ -7313,3 +7332,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-28 (owner) — **Any number of active trips per user, one per show; the device's room is the limit; the copy size estimate comes from the server** (§4 `trips`, §5.4d, §5.4e, §5b; spec FR-A12, FR-S9 item 8). Revision `5d3e9a7c1b20` (on `c4b8e1f2a9d6`) swaps `ux_trips_one_active_per_user` for `ux_trips_one_active_per_show` on `(user_id, anime_id) WHERE state = 'active'`; its downgrade raises while a user has more than one active trip. `trips.create.active_trip(session, user_id, anime_id)` and `active_trips(session, user_id)`; 409 `trip_active` now means "this show already has a trip". `GET /api/trips` (list, oldest first) replaces `GET /api/trips/current`. New `trips/estimate.py` (`copy_estimate_bytes`, median of the newest 20 current-key ready copies; `names.FALLBACK_COPY_BYTES` 260 MB, the 1080p HEVC CRF 28 copies measuring ~254 MB) on `TripLimits`. Everything else already reasoned per episode across all trips (delivered accounting, the device skip, `drop_queued_copies`/`_drop_unneeded_encode`, the storage hold, the sweep, `_trip_wants`, keyed per (user, episode) — safe because two active trips of one user never share an episode) and is unchanged; the copy priority stays `600 + 10 × position` within its own trip. Client: `useActiveTrips` (`['trips','active']`), `autoKeep(trips, manager)`, the show card's room check sets aside the other trips' remaining episodes at the server's estimate (`otherTripsReserve`, `TRIP_FIT_MARGIN` 1.1), the Downloads page lists every active trip. No new dependency, no new MAL-writing code.
 - 2026-10-28 — Many-trips review fixes (§5.4d, §5b). The estimate is on `TripLimits` only (no client read it on `TripOut`) and is not queried for the demo account. `otherTripsReserve` applies `TRIP_FIT_MARGIN` to the reserved episodes as well as the new trip's (`fitBytes`), counts only what is still to come of a downloading or paused record, and skips an episode the viewer declined on this device.
 - 2026-10-28 — `remake-copies --delivered-before ISO8601` (§5.4e Remake; spec FR-A12): `remake_stale(…, delivered_before=)` also re-pends a delivered, unreleased, unwatched row delivered before the time whose copy the settle already deleted (no copy row); a current copy row still wins; naive timestamps read as UTC. No schema change, no new dependency, no MAL-writing code.
+- 2026-10-29 — M20.4 Task B: **pack hygiene after the trip 5 incident** (§5.1 step 4, §5.2 step 1; spec FR-A11, FR-L1). `InFlight.batch_root`: an unknown `batch/<dir>` is unfinished whole. `QbitClient.recheck` (`torrents/recheck`); `_sync_batch_files` stamps `completed_at` only when `_absent_on_disk` is false and the client is not checking, else resets progress; `_poll_batch` resets and rechecks an `ERROR_STATES` pack's absent wanted files on its current state, queues `qbit_reselect`, and skips the stall rule while waiting (`CHECKING_STATES`, `RECHECK_COOLDOWN`). `search_release` takes the trip pack advisory lock before its row lock, and its row locks are `FOR NO KEY UPDATE` — the deadlock root cause. The duplicate "file priorities written" lines were the deadlock's retries re-running the whole take, so no separate dedupe. No schema change, no new dependency, no MAL-writing code.

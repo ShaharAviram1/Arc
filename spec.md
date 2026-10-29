@@ -505,6 +505,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   to remove per episode. Retention deletes a batch-backed episode's **file**, never the
   torrent; the bytes an episode is charged with are its own file's, and the
   size Arc reserves or reports for a batch is the sum of its **wanted** files.
+  **A file the client calls complete but that is absent or empty on disk is
+  not complete** (owner incident 2026-10-29): Arc asks the client to recheck
+  the pack and fetch it again, whether the client still reports it fine or
+  has put the pack in an error state, and sibling searches of one trip wait
+  for each other rather than adding the same pack at once.
 - FR-A12 **Trips** (M19, owner 2026-10-05). "Prepare for a trip" on a show:
   the next X **aired** episodes after the user's progress (FR-W5's boundary),
   made into small offline copies (FR-P6) for a device to keep. X is chosen by
@@ -717,7 +722,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   that download is live and incomplete, and anything under a pack's
   directory except the files Arc has recorded as complete. This is decided
   from Arc's own torrent records, not from the file — the client creates a
-  selected file at full size before a byte has arrived. Such files reach the
+  selected file at full size before a byte has arrived. **A directory under
+  the downloads' `batch/` that no pack record names is never indexed**
+  (owner incident 2026-10-29): it is a pack the client holds before Arc has
+  recorded it. Such files reach the
   library through the download's own hand-off when they finish; a review
   item an earlier scan made for one (pending, linked to nothing) is removed,
   with its model suggestion, when the scan meets it again. Playing while
@@ -3058,3 +3066,10 @@ through the same edge, without the grace period.
   estimate comes from the server (the median of its recent current-settings
   copies, 260 MB before there are any) rather than a constant in the client.
   A second trip on the same show is still refused (`trip_active`).
+- 2026-10-29 (owner incident, trips 4 and 5) — **Pack hygiene** (FR-A11,
+  FR-L1, M20.4): the library scan never indexes a file under a `batch/`
+  directory no pack record names; a pack file the client calls complete but
+  that is absent or empty on disk triggers a recheck and is fetched again
+  (also for a pack already in `error`/`missingFiles`); a trip's sibling
+  searches queue behind one another on the show's pack lock instead of
+  deadlocking.
