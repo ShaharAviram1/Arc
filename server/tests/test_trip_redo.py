@@ -55,6 +55,7 @@ from arc.services.media.offline import NO_SOURCE_DURATION, SOURCE_GONE_MESSAGE, 
 from arc.services.media.transcode import TranscodeError, reset_semaphore
 from arc.services.trips.create import TripConflict, create_trip
 from arc.services.trips.names import TRIP_RELEASE
+from arc.services.trips.phase import PhaseFacts, trip_phase
 from arc.services.trips.redo import (
     SKIP_BUSY,
     SKIP_ENCODING,
@@ -67,6 +68,7 @@ from arc.services.trips.redo import (
     reset_copy,
     skip_reason,
 )
+from arc.services.trips.view import trip_facts
 from tests.acquisition_helpers import (
     acquisition_settings,
     fake_free_space,
@@ -813,3 +815,57 @@ async def test_any_source_reader_counts_as_encoding(
     report = await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
 
     assert report.skipped == ((episodes[0].id, SKIP_ENCODING),)
+
+
+# --- Fix loop: the phase while the source is fetched again ------------------
+
+
+@pytest.mark.parametrize(
+    ("episode_state", "phase"),
+    [
+        (EpisodeState.NOT_WANTED, "searching"),
+        (EpisodeState.WANTED, "searching"),
+        (EpisodeState.SEARCHING, "searching"),
+        (EpisodeState.DOWNLOADING, "downloading"),
+        (EpisodeState.MATCHED, "preparing"),
+        (EpisodeState.UNAVAILABLE, "unavailable"),
+    ],
+)
+def test_a_redone_queued_copy_reads_the_episodes_progress(
+    episode_state: EpisodeState, phase: str
+) -> None:
+    facts = PhaseFacts(episode_state=episode_state, copy_state=OfflineCopyState.QUEUED, redone=True)
+
+    assert trip_phase(facts) == phase
+
+
+def test_a_queued_copy_that_was_not_redone_is_still_a_dead_encode() -> None:
+    queued = PhaseFacts(episode_state=EpisodeState.DOWNLOADING, copy_state=OfflineCopyState.QUEUED)
+    failed = PhaseFacts(
+        episode_state=EpisodeState.DOWNLOADING, copy_state=OfflineCopyState.FAILED, redone=True
+    )
+    running = PhaseFacts(
+        episode_state=EpisodeState.MATCHED,
+        copy_state=OfflineCopyState.QUEUED,
+        redone=True,
+        encoding=True,
+    )
+
+    assert trip_phase(queued) == "unavailable"
+    assert trip_phase(failed) == "unavailable", "a second failure is a failure"
+    assert trip_phase(running) == "preparing"
+
+
+async def test_the_trip_view_shows_the_refetch(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    _, trip, episodes = await a_trip(db_session, 991210, "redo-phase@arc.test", settings)
+    await failed_copy(db_session, settings, episodes[0])
+    await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
+    episodes[0].state = EpisodeState.DOWNLOADING
+    await db_session.flush()
+
+    facts = await trip_facts(db_session, settings, trip)
+
+    phases = {episode.episode_id: episode.phase for episode in facts.episodes}
+    assert phases[episodes[0].id] == "downloading"

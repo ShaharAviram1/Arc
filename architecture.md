@@ -3509,7 +3509,9 @@ worker).
   `unavailable`; copy `ready` → `available`; any other copy row → `preparing`
   while an `offline_encode` is pending or running for it (`PhaseFacts.encoding`),
   else `unavailable` (a failed copy is not retried, FR-P6; a queued row with no
-  live job is a dead encode);
+  live job is a dead encode) — **except** a `queued` row with `redone_at` set
+  and no live job (`PhaseFacts.redone`, 2026-10-29), which is waiting for its
+  source to be fetched again and falls through to the episode's state;
   then the episode: `ready` → `preparing`/`unavailable` by source; landed
   states → `preparing`; `downloading`; `wanted`/`searching` → `searching`;
   `unavailable`/`failed` → `unavailable`; `not_wanted` → `waiting_space` while

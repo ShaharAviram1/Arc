@@ -144,6 +144,7 @@ async def trip_facts(session: AsyncSession, settings: Settings, trip: Trip) -> T
                 has_source=episode.id in sources,
                 encoding=episode.id in jobs,
                 held=held,
+                redone=copy is not None and copy.redone_at is not None,
             )
         )
         fetchable = (
