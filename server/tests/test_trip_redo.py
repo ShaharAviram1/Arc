@@ -46,7 +46,7 @@ from arc.models import (
 )
 from arc.services.acquisition import rules as acquisition_rules
 from arc.services.acquisition.names import COMPUTE_WANTS, QBIT_RESELECT, SEARCH_RELEASE
-from arc.services.acquisition.qbit import QbitError
+from arc.services.acquisition.qbit import QBIT_REJECTED, QbitClient, QbitError
 from arc.services.acquisition.rules import BYTES_PER_GB
 from arc.services.acquisition.wants import REASON_TRIP_ENDED, compute_wants
 from arc.services.jobs.registry import JobContext
@@ -73,8 +73,10 @@ from arc.services.trips.redo import (
 )
 from arc.services.trips.view import trip_facts
 from tests.acquisition_helpers import (
+    QbitStub,
     acquisition_settings,
     fake_free_space,
+    force_transport,
     make_anime,
     make_episodes,
     make_user,
@@ -934,3 +936,25 @@ async def test_an_unreachable_client_skips_the_episode_and_the_run_goes_on(
             episode_ids=[episodes[0].id],
             automatic=True,
         )
+
+
+async def test_a_finished_single_is_rejected_not_remembered(
+    db_session: AsyncSession, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The release that delivered the broken file is not re-added by the next want."""
+    stub = QbitStub()
+    stub.add_torrent("9" * 40)
+    monkeypatch.setattr(QbitClient, "__init__", force_transport(QbitClient, stub.transport()))
+    _, trip, episodes = await a_trip(db_session, 991230, "redo-single@arc.test", settings)
+    torrent, source = await single_source(db_session, settings, episodes[0], info_hash="9" * 40)
+    await failed_copy(db_session, settings, episodes[0])
+
+    report = await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
+
+    assert report.redone == (episodes[0].id,) and report.sources_removed == 1
+    assert [entry["hashes"] for entry in stub.deleted] == ["9" * 40], "removed with its files"
+    assert not source.exists()
+    await db_session.refresh(torrent)
+    assert torrent.qbit_state == QBIT_REJECTED, "kept, so the search skips this hash"
+    assert torrent.evicted_at is None, "not the remembered release"
+    assert episodes[0].state is EpisodeState.NOT_WANTED

@@ -3686,9 +3686,13 @@ above), so what is settled here is the **copy** — file and row — and the
   `ready` episode keeps its source and gets `enqueue_offline_encode(why=trip)`;
   otherwise, when anything is linked or claimed, `retention.delete.
   delete_episode_files(…, keep_copy=True, exclude_job_id=)` with the copy out
-  of the targets — a single's torrent removed (remembered, FR-T3), a pack's
-  file given back (`release_files`, `qbit_reselect`), `media_files` rows gone,
-  episode → `not_wanted`; (c) in every active trip, a `delivered`, unreleased,
+  of the targets — a single's torrent removed from the client with its files
+  and, when it had finished, its row kept as `rejected` (out of the deleter's
+  `torrent_ids`, so not the remembered release of FR-T3: the hash keeps a row
+  and the next search picks another release; orchestrator's call
+  2026-10-29), a pack's file given back (`release_files`, `qbit_reselect`;
+  the pack is re-claimed as usual), `media_files` rows gone, episode →
+  `not_wanted`; (c) in every active trip, a `delivered`, unreleased,
   unwatched row → `repend(row, available_at=now)` and a `pending` row →
   `available_at = now` (Remake's clock rule). Then one `compute_wants`: the
   pending trip row revives the want (a `trip ended` drop included) and the

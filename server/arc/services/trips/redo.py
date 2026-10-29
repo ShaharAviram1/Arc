@@ -26,8 +26,11 @@ changes nothing:
 
 a. The **source** goes through retention's own deleter
    (:func:`~arc.services.retention.delete.delete_episode_files`, the copy
-   kept out of its targets): a single's torrent removed with its files, a
-   pack's file given back through its claim, the episode reset to
+   kept out of its targets): a single's torrent removed from the client with
+   its files — a **finished** single's row kept as ``rejected`` rather than
+   remembered (FR-T3), so the next search picks another release instead of
+   re-adding the one that delivered the broken file — a pack's file given
+   back through its claim (the pack is re-claimed as usual), the episode reset to
    ``not_wanted``. A ``ready`` episode keeps its source — it streams from it —
    and its copy is queued again from it at once. An episode with no source
    (nothing linked, no file claimed) has nothing to remove and keeps its
@@ -70,13 +73,15 @@ from arc.models import (
     EpisodeState,
     OfflineCopy,
     OfflineCopyState,
+    Torrent,
+    TorrentKind,
     Trip,
     TripEpisode,
     TripEpisodeState,
     TripState,
 )
 from arc.services.acquisition.names import enqueue_compute_wants
-from arc.services.acquisition.qbit import QbitError
+from arc.services.acquisition.qbit import QBIT_REJECTED, QbitError
 from arc.services.media.copies import encoding_episode_ids
 from arc.services.media.names import (
     OFFLINE_WHY_TRIP,
@@ -149,6 +154,24 @@ async def _failed_copies(session: AsyncSession, episode_ids: Iterable[int]) -> s
                 select(OfflineCopy.episode_id).where(
                     OfflineCopy.episode_id.in_(ids),
                     OfflineCopy.state == OfflineCopyState.FAILED,
+                )
+            )
+        ).all()
+    )
+
+
+async def _finished_singles(session: AsyncSession, torrent_ids: Iterable[int]) -> list[Torrent]:
+    """The finished singles among ``torrent_ids`` (the episode's own rows)."""
+    ids = list(torrent_ids)
+    if not ids:
+        return []
+    return list(
+        (
+            await session.scalars(
+                select(Torrent).where(
+                    Torrent.id.in_(ids),
+                    Torrent.kind == TorrentKind.SINGLE,
+                    Torrent.completed_at.is_not(None),
                 )
             )
         ).all()
@@ -305,8 +328,21 @@ async def redo_copies(
         source_removed = False
         if episode.state is not EpisodeState.READY:
             targets = await targets_for_episode(session, settings, episode_id)
-            targets = replace(targets, offline_file=None, offline_copy=False)
-            if not targets.empty or targets.torrent_file_ids:
+            # A finished single is the release that delivered the broken file:
+            # kept as ``rejected`` rather than remembered (FR-T3), so the next
+            # search picks another release instead of re-adding this one.
+            rejected = await _finished_singles(session, targets.torrent_ids)
+            targets = replace(
+                targets,
+                offline_file=None,
+                offline_copy=False,
+                torrent_ids=tuple(
+                    torrent_id
+                    for torrent_id in targets.torrent_ids
+                    if torrent_id not in {torrent.id for torrent in rejected}
+                ),
+            )
+            if not targets.empty or targets.torrent_file_ids or rejected:
                 try:
                     outcome = await delete_episode_files(
                         session,
@@ -337,6 +373,8 @@ async def redo_copies(
                     continue
                 source_removed = True
                 sources_removed += 1
+                for torrent in rejected:
+                    torrent.qbit_state = QBIT_REJECTED
 
         # b. The copy: file gone, row back to queued and stamped.
         removed_file = _remove_copy_file(settings, episode_id)
