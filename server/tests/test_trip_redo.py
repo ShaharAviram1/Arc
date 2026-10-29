@@ -52,7 +52,13 @@ from arc.services.acquisition.wants import REASON_TRIP_ENDED, compute_wants
 from arc.services.jobs.registry import JobContext
 from arc.services.library.link import link
 from arc.services.media.names import OFFLINE_ENCODE, REMUX, TRANSCODE, offline_path_for
-from arc.services.media.offline import NO_SOURCE_DURATION, SOURCE_GONE_MESSAGE, offline_encode
+from arc.services.media.offline import (
+    BROKEN_SOURCE_PREFIX,
+    NO_SOURCE_DURATION,
+    SOURCE_GONE_MESSAGE,
+    failed_on_broken_source,
+    offline_encode,
+)
 from arc.services.media.transcode import TranscodeError, reset_semaphore
 from arc.services.retention import delete as delete_module
 from arc.services.trips.create import TripConflict, create_trip
@@ -1035,3 +1041,44 @@ async def test_the_automatic_redo_skips_an_episode_that_turned_ready(
 
     assert report.skipped == ((episodes[0].id, SKIP_READY),)
     assert await pending_jobs(db_session, OFFLINE_ENCODE) == []
+
+
+# --- Fix loop: a retried job does not encode a known-broken source again ----------
+
+
+def test_a_broken_source_is_read_back_from_the_error() -> None:
+    assert failed_on_broken_source(f"{BROKEN_SOURCE_PREFIX}{NO_SOURCE_DURATION}")
+    assert failed_on_broken_source(f"{BROKEN_SOURCE_PREFIX}ffprobe returned nothing for x\n…tail")
+    assert failed_on_broken_source(SOURCE_GONE_MESSAGE)
+    assert not failed_on_broken_source("ffmpeg exited 1\n…stub complaint")
+    assert not failed_on_broken_source(
+        "ffmpeg finished but the offline copy is not usable: the video is 'hevc', not 'h264'"
+    )
+    assert not failed_on_broken_source(None)
+
+
+@pytest.mark.parametrize("broken", [True, False], ids=["broken-source", "encoder"])
+async def test_a_retried_job_redoes_rather_than_encoding_a_broken_source(
+    api_factory: SessionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bool
+) -> None:
+    settings = acquisition_settings(tmp_path)
+    marker = tmp_path / "calls.txt"
+    install_fake_ffmpeg(tmp_path / "bin", monkeypatch, marker=marker)
+    async with api_factory() as session:
+        _, episode, source = await a_trip_episode_with_a_source(
+            session, settings, 991300 + int(broken)
+        )
+        error = f"{BROKEN_SOURCE_PREFIX}{NO_SOURCE_DURATION}" if broken else "ffmpeg exited 1"
+        session.add(OfflineCopy(episode_id=episode.id, state=OfflineCopyState.FAILED, error=error))
+        await session.commit()
+
+        await offline_encode(context(session, settings, await running_job(session, episode.id)))
+
+        copy = await session.get(OfflineCopy, episode.id, populate_existing=True)
+        assert copy is not None
+        if broken:
+            assert not marker.exists(), "no encode of a source known to be broken"
+            await assert_redone(session, settings, episode.id, source)
+        else:
+            assert marker.exists()
+            assert copy.state is OfflineCopyState.READY and copy.redone_at is None
