@@ -8,6 +8,7 @@ the machine running the suite is not what these tests are about, and
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -586,6 +587,45 @@ class TestInFlight:
 
         assert result.pruned == 1
         assert await rows(db_session) == []
+
+    async def test_an_unknown_pack_directory_is_logged_once_and_not_every_pass(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        data_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An orphaned ``batch/<dir>`` must not make the scan line fire every two minutes."""
+        ingest._UNKNOWN_PACKS_LOGGED.clear()
+        sparse(data_dir / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(4))
+
+        with caplog.at_level(logging.INFO, logger=ingest.log.name):
+            first = await ingest.scan(db_session, library_settings, probe=False)
+            second = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert first.skipped_unfinished == second.skipped_unfinished == 1
+        said = [record.getMessage() for record in caplog.records]
+        assert said.count("files under a pack directory arc has no record of are not indexed") == 1
+        assert "library scan finished" not in said
+        ingest._UNKNOWN_PACKS_LOGGED.clear()
+
+    async def test_a_symlinked_downloads_directory_still_fences_unknown_packs(
+        self, db_session: AsyncSession, settings: Settings, tmp_path: Path
+    ) -> None:
+        real = tmp_path / "real"
+        (real / "downloads").mkdir(parents=True)
+        (real / "manual").mkdir()
+        linked = tmp_path / "linked"
+        linked.symlink_to(real)
+        sparse(real / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(5))
+        configured = settings.model_copy(
+            update={"data_dir": linked, "library_settle_seconds": SETTLE}
+        )
+
+        result = await ingest.scan(db_session, configured, probe=False)
+
+        assert result.added == 0
+        assert result.skipped_unfinished == 1
 
     async def test_a_singles_preallocated_file_is_not_indexed(
         self, db_session: AsyncSession, library_settings: Settings, data_dir: Path

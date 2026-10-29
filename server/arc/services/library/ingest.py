@@ -214,9 +214,32 @@ class InFlight:
                 return absolute not in complete
         # Under ``<downloads>/batch/<something>/`` and no row for it: a pack
         # Arc has not committed (yet), never the library's.
-        if self.batch_root is not None and absolute.startswith(self.batch_root + os.sep):
-            return os.sep in absolute[len(self.batch_root) + 1 :]
-        return False
+        return self.unknown_pack(absolute) is not None
+
+    def unknown_pack(self, absolute: str) -> str | None:
+        """The ``batch/<dir>`` holding ``absolute`` when no pack row names it, else ``None``."""
+        if self.batch_root is None or not absolute.startswith(self.batch_root + os.sep):
+            return None
+        name, separator, _ = absolute[len(self.batch_root) + 1 :].partition(os.sep)
+        if not separator:
+            return None
+        directory = self.batch_root + os.sep + name
+        return None if directory in self.packs else directory
+
+
+#: The ``batch/<dir>`` directories with no pack row this process has already
+#: logged (M20.4). Process-local: a restart says each one once more.
+_UNKNOWN_PACKS_LOGGED: set[str] = set()
+
+
+def _note_unknown_pack(directory: str) -> None:
+    if directory in _UNKNOWN_PACKS_LOGGED:
+        return
+    _UNKNOWN_PACKS_LOGGED.add(directory)
+    log.info(
+        "files under a pack directory arc has no record of are not indexed",
+        extra={"directory": directory},
+    )
 
 
 async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
@@ -227,7 +250,9 @@ async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
     worker's side of the mount, so no path reported by another process is
     trusted here.
     """
-    root = settings.downloads_dir
+    # Resolved, like every path the scan compares against (M20.4): a symlinked
+    # downloads directory must not silently switch the fence off.
+    root = settings.downloads_dir.resolve()
     singles = await session.scalars(
         select(Torrent.episode_id).where(
             Torrent.kind == TorrentKind.SINGLE,
@@ -291,7 +316,7 @@ async def prune_unfinished(
     fence = fence if fence is not None else await in_flight(session, settings)
     if fence.empty():
         return []
-    prefix = str(settings.downloads_dir) + os.sep
+    prefix = str(settings.downloads_dir.resolve()) + os.sep
     rows = await session.scalars(
         select(MediaFile).where(
             MediaFile.review_state == ReviewState.PENDING,
@@ -435,10 +460,15 @@ async def scan(
     pruned = await prune_unfinished(session, settings, fence)
     resolved: dict[Path, str] = {}
     unfinished = 0
+    orphaned = 0
     for path in candidates:
         absolute = str(path.resolve())
         if fence.holds(absolute):
             unfinished += 1
+            unknown = fence.unknown_pack(absolute)
+            if unknown is not None:
+                orphaned += 1
+                _note_unknown_pack(unknown)
             continue
         resolved[path] = absolute
 
@@ -470,11 +500,14 @@ async def scan(
         remaining=remaining,
         paths=tuple(added),
     )
+    # A ``batch/<dir>`` with no row is counted every pass but said once
+    # (:func:`_note_unknown_pack`): a directory a deleted pack left behind
+    # would otherwise make this line fire every two minutes for ever.
     if (
         result.added
         or result.skipped_recent
         or result.skipped_partial
-        or result.skipped_unfinished
+        or result.skipped_unfinished - orphaned
         or result.pruned
         or result.remaining
     ):
