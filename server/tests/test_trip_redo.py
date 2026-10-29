@@ -46,6 +46,7 @@ from arc.models import (
 )
 from arc.services.acquisition import rules as acquisition_rules
 from arc.services.acquisition.names import COMPUTE_WANTS, QBIT_RESELECT, SEARCH_RELEASE
+from arc.services.acquisition.qbit import QbitError
 from arc.services.acquisition.rules import BYTES_PER_GB
 from arc.services.acquisition.wants import REASON_TRIP_ENDED, compute_wants
 from arc.services.jobs.registry import JobContext
@@ -53,11 +54,13 @@ from arc.services.library.link import link
 from arc.services.media.names import OFFLINE_ENCODE, REMUX, TRANSCODE, offline_path_for
 from arc.services.media.offline import NO_SOURCE_DURATION, SOURCE_GONE_MESSAGE, offline_encode
 from arc.services.media.transcode import TranscodeError, reset_semaphore
+from arc.services.retention import delete as delete_module
 from arc.services.trips.create import TripConflict, create_trip
 from arc.services.trips.names import TRIP_RELEASE
 from arc.services.trips.phase import PhaseFacts, trip_phase
 from arc.services.trips.redo import (
     SKIP_BUSY,
+    SKIP_CLIENT,
     SKIP_ENCODING,
     SKIP_ENDED,
     SKIP_NOT_IN_TRIP,
@@ -869,3 +872,65 @@ async def test_the_trip_view_shows_the_refetch(
 
     phases = {episode.episode_id: episode.phase for episode in facts.episodes}
     assert phases[episodes[0].id] == "downloading"
+
+
+# --- Fix loop: the torrent client ---------------------------------------------
+
+
+class _DownClient:
+    """A ``QbitClient`` whose host is unreachable."""
+
+    async def __aenter__(self) -> _DownClient:
+        raise QbitError("qBittorrent is not answering")
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+async def single_source(
+    session: AsyncSession, settings: Settings, episode: Episode, *, info_hash: str
+) -> tuple[Torrent, Path]:
+    """A single's download for ``episode``, finished and linked: ``matched``."""
+    path = write_source_file(settings, episode.id)
+    torrent = Torrent(
+        kind=TorrentKind.SINGLE,
+        episode_id=episode.id,
+        info_hash=info_hash,
+        qbit_state="stalledUP",
+        completed_at=now() - timedelta(hours=5),
+        progress=1.0,
+    )
+    session.add(torrent)
+    session.add(MediaFile(episode_id=episode.id, path=str(path.resolve()), size=2048))
+    episode.state = EpisodeState.MATCHED
+    await session.flush()
+    return torrent, path
+
+
+async def test_an_unreachable_client_skips_the_episode_and_the_run_goes_on(
+    db_session: AsyncSession, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(delete_module.QbitClient, "from_settings", lambda _: _DownClient())
+    _, trip, episodes = await a_trip(db_session, 991220, "redo-client@arc.test", settings)
+    _, source = await single_source(db_session, settings, episodes[0], info_hash="f" * 40)
+    await failed_copy(db_session, settings, episodes[0], leftover=True)
+    await failed_copy(db_session, settings, episodes[1])
+
+    report = await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
+
+    assert report.skipped == ((episodes[0].id, SKIP_CLIENT),)
+    assert report.redone == (episodes[1].id,)
+    copy = await db_session.get(OfflineCopy, episodes[0].id, populate_existing=True)
+    assert copy is not None and copy.state is OfflineCopyState.FAILED and copy.redone_at is None
+    assert offline_path_for(settings, episodes[0].id).exists(), "nothing unlinked before the client"
+    assert source.exists()
+
+    with pytest.raises(QbitError):
+        await redo_copies(
+            db_session,
+            settings,
+            trip=trip,
+            now=now(),
+            episode_ids=[episodes[0].id],
+            automatic=True,
+        )

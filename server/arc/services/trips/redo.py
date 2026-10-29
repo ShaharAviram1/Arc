@@ -18,7 +18,8 @@ in the report: an episode the trip does not hold; a ``cancelled`` or
 episode a job is reading the source of right now — a copy, a transcode or a
 remux (``encoding``), except the one encode redoing its own episode; and one
 whose source the deleter refused to remove (``busy``: it is searching,
-downloading, matching or preparing) — its copy row is left untouched.
+downloading, matching or preparing) or could not reach the torrent client for
+(``client``) — its copy row is left untouched.
 
 **What each one gets**, in this order — the source first, so that a refusal
 changes nothing:
@@ -75,6 +76,7 @@ from arc.models import (
     TripState,
 )
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.acquisition.qbit import QbitError
 from arc.services.media.copies import encoding_episode_ids
 from arc.services.media.names import (
     OFFLINE_WHY_TRIP,
@@ -100,6 +102,7 @@ SKIP_RELEASED = "released"
 SKIP_WATCHED = "watched"
 SKIP_ENCODING = "encoding"
 SKIP_BUSY = "busy"
+SKIP_CLIENT = "client"
 
 _ENDED: frozenset[TripEpisodeState] = frozenset(
     {TripEpisodeState.CANCELLED, TripEpisodeState.EXPIRED}
@@ -184,12 +187,15 @@ async def redo_copies(
     episode_ids: list[int] | None = None,
     failed: bool = False,
     exclude_job_id: int | None = None,
+    automatic: bool = False,
 ) -> RedoReport:
     """Redo ``trip``'s chosen copies (module docstring). Flushed, not committed.
 
     ``exclude_job_id`` is the ``offline_encode`` calling on its own episode
     (the automatic redo after a broken source): it is not counted as an encode
-    in flight. :class:`~arc.services.trips.create.TripConflict`
+    in flight; ``automatic`` (that same caller) re-raises a torrent client
+    failure instead of skipping the episode (``client``) as the operator's run
+    does. :class:`~arc.services.trips.create.TripConflict`
     (``trip_not_active``) unless the trip is active.
     """
     own = {
@@ -301,15 +307,28 @@ async def redo_copies(
             targets = await targets_for_episode(session, settings, episode_id)
             targets = replace(targets, offline_file=None, offline_copy=False)
             if not targets.empty or targets.torrent_file_ids:
-                outcome = await delete_episode_files(
-                    session,
-                    settings,
-                    episode,
-                    targets,
-                    reason=REASON_REDO,
-                    keep_copy=True,
-                    exclude_job_id=exclude_job_id,
-                )
+                try:
+                    outcome = await delete_episode_files(
+                        session,
+                        settings,
+                        episode,
+                        targets,
+                        reason=REASON_REDO,
+                        keep_copy=True,
+                        exclude_job_id=exclude_job_id,
+                    )
+                except QbitError as exc:
+                    # The client is the first thing the deleter asks, so
+                    # nothing has changed yet. The encode's own redo re-raises
+                    # (its job is retried); the operator's run goes on.
+                    if automatic:
+                        raise
+                    log.warning(
+                        "torrent client unreachable; episode not redone",
+                        extra={"episode_id": episode_id, "error": str(exc)},
+                    )
+                    skipped.append((episode_id, SKIP_CLIENT))
+                    continue
                 if not outcome.acted:
                     # In flight (searching, downloading, matching, preparing)
                     # or a reader holds it: the copy row is left as it was, so
@@ -414,12 +433,14 @@ async def redo_after_broken_source(
         now=now,
         episode_ids=[episode_id],
         exclude_job_id=exclude_job_id,
+        automatic=True,
     )
 
 
 __all__ = [
     "REASON_REDO",
     "SKIP_BUSY",
+    "SKIP_CLIENT",
     "SKIP_ENCODING",
     "SKIP_ENDED",
     "SKIP_NOT_IN_TRIP",
