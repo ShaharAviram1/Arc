@@ -29,9 +29,10 @@ from arc.services.media.copies import (
 from arc.services.media.offline import (
     NO_SOURCE_DURATION,
     SHORTFALL,
+    CopyProblem,
     check_probe,
     moov_before_mdat,
-    source_problem,
+    probe_problem,
 )
 from arc.services.media.plan import (
     OFFLINE_OUTPUT,
@@ -389,40 +390,38 @@ def test_a_source_with_no_duration_is_refused() -> None:
     """A real source always states a length; ``None`` is a broken file (owner, 2026-10-29)."""
     near = {**OFFLINE_PROBE, "format": {"duration": "13.5"}}
 
-    problem = check_probe(near, codec="h264", max_height=720, duration=None, has_audio=True)
+    problem = probe_problem(near, codec="h264", max_height=720, duration=None, has_audio=True)
 
-    assert problem == NO_SOURCE_DURATION
-    assert source_problem(problem)
+    assert problem == CopyProblem(NO_SOURCE_DURATION, source=True)
+    assert check_probe(near, codec="h264", max_height=720, duration=None, has_audio=True) == (
+        NO_SOURCE_DURATION
+    )
+
+
+def test_a_short_copy_is_the_sources_fault() -> None:
+    short = {**OFFLINE_PROBE, "format": {"duration": "1454.8"}}
+
+    problem = probe_problem(short, codec="h264", max_height=720, duration=1500.1, has_audio=True)
+
+    assert problem == CopyProblem(SHORTFALL.format(actual=1454.8, duration=1500.1), source=True)
+    assert problem.message == "it is 1454.8s long; the source is 1500.1s"
 
 
 @pytest.mark.parametrize(
-    ("problem", "expected"),
+    "payload",
     [
-        ("the source reports no duration", True),
-        ("it is 1454.8s long; the source is 1500.1s", True),
-        ("it is 3.0s long; the source is 12.0s", True),
-        ("it has no duration", False),
-        ("the video is 'hevc', not 'h264'", False),
-        ("the picture is 1080 lines tall; the most a copy may be is 720", False),
-        ("expected one audio stream, found 0", False),
-        ("the moov box is not before the media data (no faststart)", False),
-        ("ffmpeg wrote nothing", False),
+        _probe(codec_name="hevc"),
+        _probe(height=1080),
+        {**OFFLINE_PROBE, "format": {}},
+        {**OFFLINE_PROBE, "streams": [OFFLINE_PROBE["streams"][0]]},
+        None,
     ],
+    ids=["codec", "height", "copy-without-duration", "no-audio", "unreadable-copy"],
 )
-def test_only_a_short_or_lengthless_source_is_the_sources_fault(
-    problem: str, expected: bool
-) -> None:
-    assert source_problem(problem) is expected
+def test_every_other_refusal_is_the_encoders(payload: dict[str, Any] | None) -> None:
+    problem = probe_problem(payload, codec="h264", max_height=720, duration=12.0, has_audio=True)
 
-
-def test_the_shortfall_sentence_is_what_the_classifier_reads() -> None:
-    short = {**OFFLINE_PROBE, "format": {"duration": "1454.8"}}
-
-    problem = check_probe(short, codec="h264", max_height=720, duration=1500.1, has_audio=True)
-
-    assert problem == SHORTFALL.format(actual=1454.8, duration=1500.1)
-    assert problem == "it is 1454.8s long; the source is 1500.1s"
-    assert source_problem(problem)
+    assert problem is not None and problem.source is False
 
 
 def test_hevc_tagged_hvc1_passes() -> None:

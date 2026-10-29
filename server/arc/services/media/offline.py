@@ -39,7 +39,7 @@ point, and borrows its machinery rather than copying it:
 * **A broken source is fetched again, once** (owner, 2026-10-29). A source
   that is missing, that ffprobe cannot read, that reports no duration, or
   whose finished copy falls short of it is a source problem, not an encoder
-  one (:func:`source_problem`). When some active trip is still waiting on the
+  one (:attr:`CopyProblem.source`). When some active trip is still waiting on the
   episode and its copy has not been redone yet, the failure is recorded and
   then :func:`~arc.services.trips.redo.redo_after_broken_source` removes the
   copy and the source and lets the trip want fetch the episode again. A
@@ -59,7 +59,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import struct
 from dataclasses import dataclass, replace
@@ -169,9 +168,6 @@ NO_SOURCE_DURATION: Final[str] = "the source reports no duration"
 #: What the validator says of a copy shorter than its source: the encode ran
 #: out of picture, which on a finished ffmpeg means the source ended early.
 SHORTFALL: Final[str] = "it is {actual:.1f}s long; the source is {duration:.1f}s"
-_SHORTFALL_RE: Final[re.Pattern[str]] = re.compile(
-    r"it is \d+(?:\.\d+)?s long; the source is \d+(?:\.\d+)?s"
-)
 
 #: Why a request copy was abandoned without a failure: the episode stopped
 #: being ``ready`` (retention took it) before or while its copy was made.
@@ -188,19 +184,24 @@ class CopyRefused(TranscodeError):
     """
 
 
-def source_problem(problem: str) -> bool:
-    """Whether a validation refusal is the source's fault rather than the encoder's. Pure.
+@dataclass(frozen=True, slots=True)
+class CopyProblem:
+    """Why a finished copy is not usable, and whose fault that is.
 
-    The source reported no duration, or the copy came out short of it: a
-    file that ends early (a half-downloaded pack member, 2026-10-29). Every
-    other refusal — codec, height, audio, faststart — is about what ffmpeg
-    wrote, and fetching the source again would not change it.
+    ``source`` is true when the source is to blame: it reported no duration,
+    or the copy came out short of it — a file that ends early (a
+    half-downloaded pack member, 2026-10-29). Every other refusal — codec,
+    height, audio, faststart — is about what ffmpeg wrote, and fetching the
+    source again would not change it. ``message`` is the sentence logged and
+    shown.
     """
-    return problem == NO_SOURCE_DURATION or _SHORTFALL_RE.fullmatch(problem) is not None
+
+    message: str
+    source: bool = False
 
 
 class BrokenSource(CopyRefused):
-    """A :class:`CopyRefused` whose cause is the source (:func:`source_problem`)."""
+    """A :class:`CopyRefused` whose cause is the source (:attr:`CopyProblem.source`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,17 +260,17 @@ def moov_before_mdat(path: Path) -> bool:
     return False
 
 
-def check_probe(
+def probe_problem(
     payload: dict[str, Any] | None,
     *,
     codec: str,
     max_height: int,
     duration: float | None,
     has_audio: bool,
-) -> str | None:
+) -> CopyProblem | None:
     """Why an ffprobe of a finished copy is not acceptable, or ``None``. Pure."""
     if not payload:
-        return "ffprobe could not read it"
+        return CopyProblem("ffprobe could not read it")
     streams = [s for s in payload.get("streams") or [] if isinstance(s, dict)]
     videos = [
         s
@@ -278,37 +279,56 @@ def check_probe(
         and not (isinstance(s.get("disposition"), dict) and s["disposition"].get("attached_pic"))
     ]
     if len(videos) != 1:
-        return f"expected one video stream, found {len(videos)}"
+        return CopyProblem(f"expected one video stream, found {len(videos)}")
     video = videos[0]
     expected = PROBE_CODEC.get(codec, codec)
     if video.get("codec_name") != expected:
-        return f"the video is {video.get('codec_name')!r}, not {expected!r}"
+        return CopyProblem(f"the video is {video.get('codec_name')!r}, not {expected!r}")
     if codec == "hevc" and video.get("codec_tag_string") != "hvc1":
-        return f"the HEVC track is tagged {video.get('codec_tag_string')!r}, not 'hvc1'"
+        return CopyProblem(
+            f"the HEVC track is tagged {video.get('codec_tag_string')!r}, not 'hvc1'"
+        )
     try:
         height = int(video.get("height") or 0)
     except TypeError, ValueError:
         height = 0
     if height <= 0 or height > max_height:
-        return f"the picture is {height} lines tall; the most a copy may be is {max_height}"
+        return CopyProblem(
+            f"the picture is {height} lines tall; the most a copy may be is {max_height}"
+        )
     audios = [s for s in streams if s.get("codec_type") == "audio"]
     if has_audio and len(audios) != 1:
-        return f"expected one audio stream, found {len(audios)}"
+        return CopyProblem(f"expected one audio stream, found {len(audios)}")
     if duration is None:
         # Nothing to check the copy against, and a real source always says:
         # this one is truncated or broken (owner, 2026-10-29).
-        return NO_SOURCE_DURATION
+        return CopyProblem(NO_SOURCE_DURATION, source=True)
     container = payload.get("format")
     raw: Any = container.get("duration") if isinstance(container, dict) else None
     try:
         actual = float(raw)
     except TypeError, ValueError:
-        return "it has no duration"
+        return CopyProblem("it has no duration")
     # A shortfall only: ``duration`` is the chosen tracks' length, and a
     # copy a frame or two longer is a rounding, not a broken encode.
     if actual < duration - DURATION_TOLERANCE:
-        return SHORTFALL.format(actual=actual, duration=duration)
+        return CopyProblem(SHORTFALL.format(actual=actual, duration=duration), source=True)
     return None
+
+
+def check_probe(
+    payload: dict[str, Any] | None,
+    *,
+    codec: str,
+    max_height: int,
+    duration: float | None,
+    has_audio: bool,
+) -> str | None:
+    """:func:`probe_problem`'s sentence alone, or ``None``. Pure."""
+    problem = probe_problem(
+        payload, codec=codec, max_height=max_height, duration=duration, has_audio=has_audio
+    )
+    return problem.message if problem is not None else None
 
 
 async def validate_copy(
@@ -319,14 +339,14 @@ async def validate_copy(
     duration: float | None,
     has_audio: bool,
     ffprobe: str,
-) -> str | None:
+) -> CopyProblem | None:
     """Why the file at ``path`` is not a usable copy, or ``None`` when it is."""
     if not path.is_file() or path.stat().st_size == 0:
-        return "ffmpeg wrote nothing"
+        return CopyProblem("ffmpeg wrote nothing")
     if not moov_before_mdat(path):
-        return "the moov box is not before the media data (no faststart)"
+        return CopyProblem("the moov box is not before the media data (no faststart)")
     payload = await ffprobe_json(path, binary=ffprobe)
-    return check_probe(
+    return probe_problem(
         payload, codec=codec, max_height=max_height, duration=duration, has_audio=has_audio
     )
 
@@ -401,8 +421,8 @@ async def encode_copy(
         ffprobe=ffprobe,
     )
     if problem is not None:
-        refusal = BrokenSource if source_problem(problem) else CopyRefused
-        raise refusal(f"ffmpeg finished but the offline copy is not usable: {problem}")
+        refusal = BrokenSource if problem.source else CopyRefused
+        raise refusal(f"ffmpeg finished but the offline copy is not usable: {problem.message}")
     height = plan.height if plan.height is not None else None
     return CopyResult(
         path=output,
@@ -760,6 +780,7 @@ __all__ = [
     "STAGING_GLOB",
     "STAGING_SUFFIX",
     "BrokenSource",
+    "CopyProblem",
     "CopyRefused",
     "CopyResult",
     "check_probe",
@@ -767,7 +788,7 @@ __all__ = [
     "moov_before_mdat",
     "offline_encode",
     "on_copy_ready",
-    "source_problem",
+    "probe_problem",
     "sweep_offline_leftovers",
     "validate_copy",
 ]
