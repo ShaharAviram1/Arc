@@ -508,7 +508,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   **A file the client calls complete but that is absent or empty on disk is
   not complete** (owner incident 2026-10-29): Arc asks the client to recheck
   the pack and fetch it again, whether the client still reports it fine or
-  has put the pack in an error state, and sibling searches of one trip wait
+  has put the pack in an error state, starts a pack left stopped while a
+  wanted file is still to fetch, and sibling searches of one trip wait
   for each other rather than adding the same pack at once.
 - FR-A12 **Trips** (M19, owner 2026-10-05). "Prepare for a trip" on a show:
   the next X **aired** episodes after the user's progress (FR-W5's boundary),
@@ -3107,3 +3108,6 @@ through the same edge, without the grace period.
   another release — while a season pack's file is fetched again from the
   same pack; and a trip episode waiting for its re-fetched source shows
   searching or downloading on the device rather than a failure.
+- 2026-10-29 — FR-A11: a pack the client holds stopped while a wanted file is
+  still to fetch is started again by the poll (production torrent 112 sat
+  stopped at 20 % after a start landed during the client's recheck).
