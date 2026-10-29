@@ -28,7 +28,14 @@ otherwise reach a user.
   (``acquisition.jobs._complete`` / ``_complete_file``), which indexes it with
   the matcher's prior once the client says it is complete; a row the scan
   wrote earlier for one is deleted when the scan meets it again
-  (:func:`prune_unfinished`).
+  (:func:`prune_unfinished`). **A pack directory with no ``torrents`` row at
+  all** is unfinished whole (owner incident 2026-10-29): a search adds and
+  starts a pack in the client *before* its transaction commits, and in
+  production ten sibling searches retried a deadlock for four minutes while
+  the pack downloaded with no committed row — the scan indexed seven sparse,
+  half-written files of it, the matcher linked them and the offline encoder ran
+  on them. Nothing under ``<downloads>/batch/`` is Arc's to index except what a
+  pack row records as complete.
 * **Not new.** ``media_files.path`` is unique, so a path Arc already has a row
   for is left alone. That is what makes a rescan free and what makes this safe
   to run beside a qBittorrent hand-off that inserts the same row (M6).
@@ -182,10 +189,20 @@ class InFlight:
     (their ``torrent_files`` row has ``completed_at``, or progress at
     :data:`~arc.services.acquisition.qbit.COMPLETE_PROGRESS`); anything else
     under that directory is unfinished, whatever state the pack is in.
+
+    ``batch_root`` is ``<downloads>/batch`` (owner incident 2026-10-29): a file
+    in a directory under it that is **not** one of ``packs`` belongs to a pack
+    with no ``torrents`` row — added to the client by a search whose
+    transaction has not committed (or never will) — and is unfinished too.
     """
 
     singles: frozenset[str] = frozenset()
     packs: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    batch_root: str | None = None
+
+    def empty(self) -> bool:
+        """Whether nothing at all can be held (no singles, packs or batch root)."""
+        return not self.singles and not self.packs and self.batch_root is None
 
     def holds(self, absolute: str) -> bool:
         """Whether ``absolute`` (a resolved path) is a file still being downloaded."""
@@ -195,6 +212,10 @@ class InFlight:
         for directory, complete in self.packs.items():
             if absolute.startswith(directory + os.sep):
                 return absolute not in complete
+        # Under ``<downloads>/batch/<something>/`` and no row for it: a pack
+        # Arc has not committed (yet), never the library's.
+        if self.batch_root is not None and absolute.startswith(self.batch_root + os.sep):
+            return os.sep in absolute[len(self.batch_root) + 1 :]
         return False
 
 
@@ -246,6 +267,7 @@ async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
     return InFlight(
         singles=single_dirs,
         packs={directory: frozenset(files) for directory, files in packs.items()},
+        batch_root=str(root / BATCH_DIR),
     )
 
 
@@ -267,7 +289,7 @@ async def prune_unfinished(
     their transactions. Returns the deleted rows, for the log and the report.
     """
     fence = fence if fence is not None else await in_flight(session, settings)
-    if not fence.singles and not fence.packs:
+    if fence.empty():
         return []
     prefix = str(settings.downloads_dir) + os.sep
     rows = await session.scalars(
