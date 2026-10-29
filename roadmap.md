@@ -2115,7 +2115,7 @@ owner's word.
   reported the re-selected files complete, recreated one as 0 bytes, and
   went to `error`. Owner: "Fix you suggested approved, make it happen";
   the S4 trip must be ready to download at the connecting flight.
-  - [ ] **A — redo copies: repair command + automatic retry once** (FR-P6,
+  - [x] **A — redo copies: repair command + automatic retry once** (FR-P6,
         FR-A12, FR-T3). `trips/redo.redo_copies(session, settings, *,
         trip, episode_ids | failed)`: for each episode drop the copy's file,
         remove the linked source through
@@ -2133,7 +2133,7 @@ owner's word.
         refuses a source without a readable duration ("the source reports no
         duration") instead of skipping the length check. Owner's call
         2026-10-29: automatic retry once, re-fetching the source first.
-  - [ ] **B — packs: unknown directories, phantom completes, search
+  - [x] **B — packs: unknown directories, phantom completes, search
         storm** (FR-A11, FR-L1, FR-T3). `library.ingest.in_flight` treats
         every file under `downloads/batch/<hash>` with no `torrents` row for
         `<hash>` as unfinished. `_sync_batch_files` does not stamp
@@ -2145,6 +2145,23 @@ owner's word.
         of the episode or pack is written, so sibling searches wait instead
         of deadlocking (production logged ten `DeadlockDetectedError`
         retries at 03:05–03:07).
+        Shipped (A) as abd231f…08894cd on top of 84fe855, merged 4c1cbf0:
+        Validator PASS on A–G building the three production shapes on a real
+        DB and running the CLI as a subprocess; Reviewer: no blockers, six
+        should-fixes landed (source step first with `busy`/`client`/`held`
+        skips, the re-fetch shows the episode's phase, copy file unlinked
+        last, a retried job redoes instead of re-encoding a known-broken
+        source, a finished single's release is rejected rather than
+        remembered, structured probe result). (B) as eec515e…75d41b5, merged
+        2972bb3: the deadlock reproduced on the old code and gone (sibling
+        held `FOR UPDATE` on its episode while queueing on the pack lock;
+        the holder's `torrent_files` inserts needed `KEY SHARE` on it — lock
+        reordered, `FOR NO KEY UPDATE`); Validator conditional PASS → fixed:
+        error-state phantoms limited to finished files, recheck cap 2 with
+        10-min cooldown, sparse zero-filled files count as absent,
+        `_complete_file` refuses them, manual chooser on the same lock rule.
+        Orchestrator 2026-10-29: diffs read, merged main server 5193 passed,
+        client 1385, `make lint` clean, head 8b6f2d4e1a73.
   - [ ] **C — production**: deploy A and B together (A's pack re-claim
         relies on B's recheck); `redo-copies --trip 5 --failed` plus
         `--episodes 1`; after the S4 copies, `redo-copies --trip 4
