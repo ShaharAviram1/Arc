@@ -1737,9 +1737,23 @@ async def search_release(ctx: JobContext) -> None:
     # retries in production, each one re-adding and re-selecting the pack while
     # nothing about it was committed. Everything read to decide whether to take
     # it is a read.
-    anime_id = await ctx.session.scalar(select(Episode.anime_id).where(Episode.id == episode_id))
-    if anime_id is None:
+    found_row = (
+        await ctx.session.execute(
+            select(Episode.anime_id, Episode.state).where(Episode.id == episode_id)
+        )
+    ).first()
+    if found_row is None:
         ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
+        return
+    anime_id, seen_state = found_row
+    if seen_state not in SEARCHABLE:
+        # Unlocked, and only ever a reason to stop: a search with nothing to do
+        # must not queue behind a sibling's Nyaa round-trip for the pack lock.
+        # The locked re-read below decides everything else.
+        ctx.log.info(
+            "episode is past searching",
+            extra={"episode_id": episode_id, "state": seen_state.value},
+        )
         return
     anime = await ctx.session.get(Anime, anime_id)
     if anime is None:  # pragma: no cover - the foreign key forbids it

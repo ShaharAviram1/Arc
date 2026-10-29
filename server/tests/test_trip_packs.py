@@ -779,6 +779,32 @@ async def test_sibling_trip_searches_queue_behind_one_another_without_deadlockin
         assert await _reselects(api_factory) == [torrents[0].id], "attached, not re-added"
 
 
+@pg
+async def test_a_search_with_nothing_to_do_does_not_wait_for_the_pack_lock(
+    api_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M20.4: the unlocked state check comes before the show's pack lock."""
+    async with api_factory() as setup:
+        wired, episodes, anime = await _trip(
+            setup, monkeypatch, tmp_path, anilist_id=962720, email="idle@arc.test"
+        )
+        episodes[3].state = EpisodeState.DOWNLOADING
+        await setup.commit()
+        episode_id, anime_id = episodes[3].id, anime.id
+
+    async with api_factory() as holder:
+        await holder.execute(
+            select(text(f"pg_advisory_xact_lock({TRIP_PACK_LOCK_KEY}, {anime_id})"))
+        )
+        async with api_factory() as session:
+            await asyncio.wait_for(
+                search_release(context(session, wired.settings, {"episode_id": episode_id})),
+                timeout=5,
+            )
+        await holder.rollback()
+    assert wired.nyaa.queries == []
+
+
 async def _reselects(factory: SessionFactory) -> list[int]:
     async with factory() as session:
         jobs = (await session.scalars(select(Job).where(Job.type == QBIT_RESELECT))).all()
