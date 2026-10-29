@@ -14,26 +14,29 @@ source turns out broken (:mod:`arc.services.media.offline`).
 (``failed=True``), and/or the ``episode_ids`` named. Skipped, with the reason
 in the report: an episode the trip does not hold; a ``cancelled`` or
 ``expired`` row (``ended``); a ``delivered`` row the device let go
-(``released``); an episode the trip's user has finished (``watched``); and an
-episode an ``offline_encode`` is queued or running for right now
-(``encoding``) — except the one encode redoing its own episode.
+(``released``); an episode the trip's user has finished (``watched``); an
+episode a job is reading the source of right now — a copy, a transcode or a
+remux (``encoding``), except the one encode redoing its own episode; and one
+whose source the deleter refused to remove (``busy``: it is searching,
+downloading, matching or preparing) — its copy row is left untouched.
 
-**What each one gets**, in this order:
+**What each one gets**, in this order — the source first, so that a refusal
+changes nothing:
 
-a. The copy's **file** is removed (the path is derived from the id) and, if
-   it has a row, the row goes back to ``queued`` with nothing of the old copy
-   on it (no source, size, ETag, error or ready time) and ``redone_at = now``.
-   With no row at all (the settle took it) none is made: the link path, or
-   :func:`~arc.services.acquisition.wants._requeue_trip_copies`, queues the
-   encode when the new source arrives.
-b. The **source** goes through retention's own deleter
+a. The **source** goes through retention's own deleter
    (:func:`~arc.services.retention.delete.delete_episode_files`, the copy
    kept out of its targets): a single's torrent removed with its files, a
    pack's file given back through its claim, the episode reset to
    ``not_wanted``. A ``ready`` episode keeps its source — it streams from it —
    and its copy is queued again from it at once. An episode with no source
    (nothing linked, no file claimed) has nothing to remove and keeps its
-   state.
+   state. A refusal skips the episode (``busy``).
+b. The copy's **file** is removed (the path is derived from the id) and, if
+   it has a row, the row goes back to ``queued`` with nothing of the old copy
+   on it (no source, size, ETag, error or ready time) and ``redone_at = now``.
+   With no row at all (the settle took it) none is made: the link path, or
+   :func:`~arc.services.acquisition.wants._requeue_trip_copies`, queues the
+   encode when the new source arrives.
 c. Every **delivered**, unreleased, unwatched row on the episode in an active
    trip goes back to ``pending`` (:func:`~arc.services.trips.deliver.repend`)
    and every pending one has its clock restarted: ``available_at = now``, as
@@ -72,10 +75,10 @@ from arc.models import (
     TripState,
 )
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.media.copies import encoding_episode_ids
 from arc.services.media.names import (
     OFFLINE_WHY_TRIP,
     enqueue_offline_encode,
-    latest_offline_jobs,
     offline_path_for,
 )
 from arc.services.playback.progress import completed_episode_ids
@@ -96,6 +99,7 @@ SKIP_ENDED = "ended"
 SKIP_RELEASED = "released"
 SKIP_WATCHED = "watched"
 SKIP_ENCODING = "encoding"
+SKIP_BUSY = "busy"
 
 _ENDED: frozenset[TripEpisodeState] = frozenset(
     {TripEpisodeState.CANCELLED, TripEpisodeState.EXPIRED}
@@ -267,8 +271,8 @@ async def redo_copies(
             watched[user_id] = await completed_episode_ids(
                 session, user_id=user_id, episode_ids=sorted(chosen)
             )
-    live_jobs = await latest_offline_jobs(session, sorted(chosen))
-    encoding = {episode_id for episode_id, job in live_jobs.items() if job.id != exclude_job_id}
+    # Anything reading the source: a copy, a transcode, a remux (§5.3c).
+    encoding = await encoding_episode_ids(session, sorted(chosen), exclude_job_id=exclude_job_id)
 
     redone: list[int] = []
     sources_removed = 0
@@ -291,23 +295,9 @@ async def redo_copies(
             skipped.append((episode_id, reason))
             continue
 
-        # a. The copy: file gone, row back to queued and stamped.
-        removed_file = _remove_copy_file(settings, episode_id)
-        copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
-        if copy is not None:
-            reset_copy(copy, now=now)
-
-        # b. The source.
+        # a. The source first: if it cannot go now, nothing else changes.
         source_removed = False
-        if episode.state is EpisodeState.READY:
-            # It streams from that source; the copy is made from it again.
-            await enqueue_offline_encode(
-                session,
-                episode_id,
-                why=OFFLINE_WHY_TRIP,
-                priority=await trip_copy_priority(session, episode_id),
-            )
-        else:
+        if episode.state is not EpisodeState.READY:
             targets = await targets_for_episode(session, settings, episode_id)
             targets = replace(targets, offline_file=None, offline_copy=False)
             if not targets.empty or targets.torrent_file_ids:
@@ -320,8 +310,28 @@ async def redo_copies(
                     keep_copy=True,
                     exclude_job_id=exclude_job_id,
                 )
-                source_removed = outcome.acted
-                sources_removed += int(outcome.acted)
+                if not outcome.acted:
+                    # In flight (searching, downloading, matching, preparing)
+                    # or a reader holds it: the copy row is left as it was, so
+                    # the one automatic retry is not spent on nothing.
+                    skipped.append((episode_id, SKIP_BUSY))
+                    continue
+                source_removed = True
+                sources_removed += 1
+
+        # b. The copy: file gone, row back to queued and stamped.
+        removed_file = _remove_copy_file(settings, episode_id)
+        copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
+        if copy is not None:
+            reset_copy(copy, now=now)
+        if episode.state is EpisodeState.READY:
+            # It streams from that source; the copy is made from it again.
+            await enqueue_offline_encode(
+                session,
+                episode_id,
+                why=OFFLINE_WHY_TRIP,
+                priority=await trip_copy_priority(session, episode_id),
+            )
 
         # c. Every live row on it waits for the new copy.
         for row in rows:
@@ -409,6 +419,7 @@ async def redo_after_broken_source(
 
 __all__ = [
     "REASON_REDO",
+    "SKIP_BUSY",
     "SKIP_ENCODING",
     "SKIP_ENDED",
     "SKIP_NOT_IN_TRIP",

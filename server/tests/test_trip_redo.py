@@ -50,12 +50,13 @@ from arc.services.acquisition.rules import BYTES_PER_GB
 from arc.services.acquisition.wants import REASON_TRIP_ENDED, compute_wants
 from arc.services.jobs.registry import JobContext
 from arc.services.library.link import link
-from arc.services.media.names import OFFLINE_ENCODE, offline_path_for
+from arc.services.media.names import OFFLINE_ENCODE, REMUX, TRANSCODE, offline_path_for
 from arc.services.media.offline import NO_SOURCE_DURATION, SOURCE_GONE_MESSAGE, offline_encode
 from arc.services.media.transcode import TranscodeError, reset_semaphore
 from arc.services.trips.create import TripConflict, create_trip
 from arc.services.trips.names import TRIP_RELEASE
 from arc.services.trips.redo import (
+    SKIP_BUSY,
     SKIP_ENCODING,
     SKIP_ENDED,
     SKIP_NOT_IN_TRIP,
@@ -768,3 +769,47 @@ async def test_the_redone_copy_is_made_from_the_new_source_and_a_second_failure_
         assert fresh.exists(), "the second failure keeps its source"
         await session.refresh(episode)
         assert episode.state is EpisodeState.MATCHED
+
+
+# --- Fix loop: the source first ---------------------------------------------
+
+
+async def test_a_busy_source_leaves_the_copy_and_the_retry_alone(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """The deleter refuses an episode in flight: nothing changes, the retry is not spent."""
+    _, trip, episodes = await a_trip(db_session, 991201, "redo-busy@arc.test", settings)
+    media, _, source = await pack_source(db_session, settings, episodes[0], info_hash="e" * 40)
+    episodes[0].state = EpisodeState.DOWNLOADING
+    await failed_copy(db_session, settings, episodes[0], media_file_id=media.id, leftover=True)
+    await deliver(db_session, trip, episodes[0])
+
+    report = await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
+
+    assert report.redone == ()
+    assert report.skipped == ((episodes[0].id, SKIP_BUSY),)
+    copy = await db_session.get(OfflineCopy, episodes[0].id, populate_existing=True)
+    assert copy is not None and copy.state is OfflineCopyState.FAILED
+    assert copy.redone_at is None
+    assert offline_path_for(settings, episodes[0].id).exists()
+    assert source.exists()
+    assert (await row_of(db_session, trip, episodes[0])).state is TripEpisodeState.DELIVERED
+    assert await pending_jobs(db_session, COMPUTE_WANTS) == []
+
+
+@pytest.mark.parametrize("reader", [REMUX, TRANSCODE])
+async def test_any_source_reader_counts_as_encoding(
+    db_session: AsyncSession, settings: Settings, reader: str
+) -> None:
+    _, trip, episodes = await a_trip(
+        db_session, 991202 + (reader == TRANSCODE), f"redo-{reader}@arc.test", settings
+    )
+    await failed_copy(db_session, settings, episodes[0])
+    db_session.add(
+        Job(type=reader, payload={"episode_id": episodes[0].id}, status=JobStatus.PENDING)
+    )
+    await db_session.flush()
+
+    report = await redo_copies(db_session, settings, trip=trip, now=now(), failed=True)
+
+    assert report.skipped == ((episodes[0].id, SKIP_ENCODING),)
