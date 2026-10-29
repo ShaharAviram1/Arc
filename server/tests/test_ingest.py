@@ -8,6 +8,7 @@ the machine running the suite is not what these tests are about, and
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -531,6 +532,100 @@ class TestInFlight:
 
         assert result.skipped_unfinished == 1
         assert {Path(row.path).name for row in await rows(db_session)} == set()
+
+    async def test_a_pack_directory_with_no_torrent_row_is_not_indexed(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        """Owner incident 2026-10-29: a pack in the client before its row committed.
+
+        Sparse, full-size, old mtime — the scan's own tests all pass on it — and
+        no ``torrents`` row names its directory, so nothing about it is known.
+        """
+        unknown = data_dir / "downloads" / "batch" / ("ef" * 20) / "Iruma S4"
+        for number in range(1, 8):
+            sparse(unknown / IRUMA.format(number))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 0
+        assert result.skipped_unfinished == 7
+        assert await rows(db_session) == []
+        assert await match_jobs(db_session) == []
+
+    async def test_a_known_pack_is_still_decided_file_by_file_beside_an_unknown_one(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        await _pack(db_session, 2, complete=frozenset({0}))
+        sparse(_pack_file(data_dir, 0))
+        sparse(_pack_file(data_dir, 1))
+        sparse(data_dir / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(9))
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.added == 1
+        assert result.skipped_unfinished == 2
+        assert [row.path for row in await rows(db_session)] == [
+            str(_pack_file(data_dir, 0).resolve())
+        ]
+
+    async def test_an_earlier_row_under_an_unknown_pack_directory_is_pruned(
+        self, db_session: AsyncSession, library_settings: Settings, data_dir: Path
+    ) -> None:
+        """What the incident's scan wrote is removed when the scan meets it again."""
+        path = sparse(data_dir / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(3))
+        db_session.add(
+            MediaFile(
+                path=str(path.resolve()),
+                size=760 * 1024 * 1024,
+                parsed={"title": "Iruma"},
+                review_state=ReviewState.PENDING,
+            )
+        )
+        await db_session.flush()
+
+        result = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert result.pruned == 1
+        assert await rows(db_session) == []
+
+    async def test_an_unknown_pack_directory_is_logged_once_and_not_every_pass(
+        self,
+        db_session: AsyncSession,
+        library_settings: Settings,
+        data_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An orphaned ``batch/<dir>`` must not make the scan line fire every two minutes."""
+        ingest._UNKNOWN_PACKS_LOGGED.clear()
+        sparse(data_dir / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(4))
+
+        with caplog.at_level(logging.INFO, logger=ingest.log.name):
+            first = await ingest.scan(db_session, library_settings, probe=False)
+            second = await ingest.scan(db_session, library_settings, probe=False)
+
+        assert first.skipped_unfinished == second.skipped_unfinished == 1
+        said = [record.getMessage() for record in caplog.records]
+        assert said.count("files under a pack directory arc has no record of are not indexed") == 1
+        assert "library scan finished" not in said
+        ingest._UNKNOWN_PACKS_LOGGED.clear()
+
+    async def test_a_symlinked_downloads_directory_still_fences_unknown_packs(
+        self, db_session: AsyncSession, settings: Settings, tmp_path: Path
+    ) -> None:
+        real = tmp_path / "real"
+        (real / "downloads").mkdir(parents=True)
+        (real / "manual").mkdir()
+        linked = tmp_path / "linked"
+        linked.symlink_to(real)
+        sparse(real / "downloads" / "batch" / ("ef" * 20) / IRUMA.format(5))
+        configured = settings.model_copy(
+            update={"data_dir": linked, "library_settle_seconds": SETTLE}
+        )
+
+        result = await ingest.scan(db_session, configured, probe=False)
+
+        assert result.added == 0
+        assert result.skipped_unfinished == 1
 
     async def test_a_singles_preallocated_file_is_not_indexed(
         self, db_session: AsyncSession, library_settings: Settings, data_dir: Path

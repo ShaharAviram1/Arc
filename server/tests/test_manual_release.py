@@ -1122,6 +1122,9 @@ async def test_a_stale_search_does_not_overwrite_a_manual_choice(
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
 
     assert wired.nyaa.queries == [], "the search saw downloading and stopped"
+    # Since M20.4 the search stops on an unlocked read before it re-reads the
+    # row into the identity map, so the row is read back here.
+    await db_session.refresh(episode)
     assert episode.state is EpisodeState.DOWNLOADING
 
 

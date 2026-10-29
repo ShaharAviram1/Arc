@@ -28,7 +28,14 @@ otherwise reach a user.
   (``acquisition.jobs._complete`` / ``_complete_file``), which indexes it with
   the matcher's prior once the client says it is complete; a row the scan
   wrote earlier for one is deleted when the scan meets it again
-  (:func:`prune_unfinished`).
+  (:func:`prune_unfinished`). **A pack directory with no ``torrents`` row at
+  all** is unfinished whole (owner incident 2026-10-29): a search adds and
+  starts a pack in the client *before* its transaction commits, and in
+  production ten sibling searches retried a deadlock for four minutes while
+  the pack downloaded with no committed row — the scan indexed seven sparse,
+  half-written files of it, the matcher linked them and the offline encoder ran
+  on them. Nothing under ``<downloads>/batch/`` is Arc's to index except what a
+  pack row records as complete.
 * **Not new.** ``media_files.path`` is unique, so a path Arc already has a row
   for is left alone. That is what makes a rescan free and what makes this safe
   to run beside a qBittorrent hand-off that inserts the same row (M6).
@@ -182,10 +189,20 @@ class InFlight:
     (their ``torrent_files`` row has ``completed_at``, or progress at
     :data:`~arc.services.acquisition.qbit.COMPLETE_PROGRESS`); anything else
     under that directory is unfinished, whatever state the pack is in.
+
+    ``batch_root`` is ``<downloads>/batch`` (owner incident 2026-10-29): a file
+    in a directory under it that is **not** one of ``packs`` belongs to a pack
+    with no ``torrents`` row — added to the client by a search whose
+    transaction has not committed (or never will) — and is unfinished too.
     """
 
     singles: frozenset[str] = frozenset()
     packs: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    batch_root: str | None = None
+
+    def empty(self) -> bool:
+        """Whether nothing at all can be held (no singles, packs or batch root)."""
+        return not self.singles and not self.packs and self.batch_root is None
 
     def holds(self, absolute: str) -> bool:
         """Whether ``absolute`` (a resolved path) is a file still being downloaded."""
@@ -195,7 +212,34 @@ class InFlight:
         for directory, complete in self.packs.items():
             if absolute.startswith(directory + os.sep):
                 return absolute not in complete
-        return False
+        # Under ``<downloads>/batch/<something>/`` and no row for it: a pack
+        # Arc has not committed (yet), never the library's.
+        return self.unknown_pack(absolute) is not None
+
+    def unknown_pack(self, absolute: str) -> str | None:
+        """The ``batch/<dir>`` holding ``absolute`` when no pack row names it, else ``None``."""
+        if self.batch_root is None or not absolute.startswith(self.batch_root + os.sep):
+            return None
+        name, separator, _ = absolute[len(self.batch_root) + 1 :].partition(os.sep)
+        if not separator:
+            return None
+        directory = self.batch_root + os.sep + name
+        return None if directory in self.packs else directory
+
+
+#: The ``batch/<dir>`` directories with no pack row this process has already
+#: logged (M20.4). Process-local: a restart says each one once more.
+_UNKNOWN_PACKS_LOGGED: set[str] = set()
+
+
+def _note_unknown_pack(directory: str) -> None:
+    if directory in _UNKNOWN_PACKS_LOGGED:
+        return
+    _UNKNOWN_PACKS_LOGGED.add(directory)
+    log.info(
+        "files under a pack directory arc has no record of are not indexed",
+        extra={"directory": directory},
+    )
 
 
 async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
@@ -206,7 +250,9 @@ async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
     worker's side of the mount, so no path reported by another process is
     trusted here.
     """
-    root = settings.downloads_dir
+    # Resolved, like every path the scan compares against (M20.4): a symlinked
+    # downloads directory must not silently switch the fence off.
+    root = settings.downloads_dir.resolve()
     singles = await session.scalars(
         select(Torrent.episode_id).where(
             Torrent.kind == TorrentKind.SINGLE,
@@ -246,6 +292,7 @@ async def in_flight(session: AsyncSession, settings: Settings) -> InFlight:
     return InFlight(
         singles=single_dirs,
         packs={directory: frozenset(files) for directory, files in packs.items()},
+        batch_root=str(root / BATCH_DIR),
     )
 
 
@@ -267,9 +314,9 @@ async def prune_unfinished(
     their transactions. Returns the deleted rows, for the log and the report.
     """
     fence = fence if fence is not None else await in_flight(session, settings)
-    if not fence.singles and not fence.packs:
+    if fence.empty():
         return []
-    prefix = str(settings.downloads_dir) + os.sep
+    prefix = str(settings.downloads_dir.resolve()) + os.sep
     rows = await session.scalars(
         select(MediaFile).where(
             MediaFile.review_state == ReviewState.PENDING,
@@ -413,10 +460,15 @@ async def scan(
     pruned = await prune_unfinished(session, settings, fence)
     resolved: dict[Path, str] = {}
     unfinished = 0
+    orphaned = 0
     for path in candidates:
         absolute = str(path.resolve())
         if fence.holds(absolute):
             unfinished += 1
+            unknown = fence.unknown_pack(absolute)
+            if unknown is not None:
+                orphaned += 1
+                _note_unknown_pack(unknown)
             continue
         resolved[path] = absolute
 
@@ -448,11 +500,14 @@ async def scan(
         remaining=remaining,
         paths=tuple(added),
     )
+    # A ``batch/<dir>`` with no row is counted every pass but said once
+    # (:func:`_note_unknown_pack`): a directory a deleted pack left behind
+    # would otherwise make this line fire every two minutes for ever.
     if (
         result.added
         or result.skipped_recent
         or result.skipped_partial
-        or result.skipped_unfinished
+        or result.skipped_unfinished - orphaned
         or result.pruned
         or result.remaining
     ):

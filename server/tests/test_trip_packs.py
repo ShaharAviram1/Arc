@@ -10,6 +10,7 @@ exactly as before. Nyaa and qBittorrent are mocked as in
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
+from arc.db import SessionFactory
 from arc.models import (
     Anime,
     Episode,
@@ -685,6 +687,128 @@ async def test_a_trip_search_holds_the_shows_pack_lock(
         ).bindparams(anime=anime.id, key=TRIP_PACK_LOCK_KEY % (1 << 32))
     )
     assert held == 1
+
+
+async def _a_search_waits_on_an_advisory_lock(factory: SessionFactory) -> None:
+    """Block until some other transaction is queued on an advisory lock."""
+    for _ in range(200):
+        async with factory() as probe:
+            waiting = await probe.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("no sibling search ever queued on the trip's pack lock")
+
+
+@pg
+@pytest.mark.parametrize("sibling_searching", [False, True])
+async def test_sibling_trip_searches_queue_behind_one_another_without_deadlocking(
+    api_factory: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sibling_searching: bool,
+) -> None:
+    """Owner incident 2026-10-29: ten sibling searches, one pack, four minutes of deadlocks.
+
+    Two **committing** searches of one finished show's trip. The first is
+    paused inside its pack take (holding the show's pack lock) until the second
+    is queued on that lock; the first then writes its ``torrent_files`` rows,
+    whose foreign keys touch the sibling's episode row. Before the fix the
+    sibling had locked that row ``FOR UPDATE`` before queuing, and Postgres
+    broke the cycle with ``DeadlockDetectedError``. Now the sibling takes no
+    row lock until it holds the pack lock, so it waits, then sees the committed
+    pack: its episode was taken along (``downloading``), or — when it was
+    already ``searching`` and so not taken along — it attaches to the pack
+    without asking Nyaa or adding anything.
+    """
+    async with api_factory() as setup:
+        wired, episodes, _anime = await _trip(
+            setup,
+            monkeypatch,
+            tmp_path,
+            anilist_id=962710 + int(sibling_searching),
+            email=f"siblings{int(sibling_searching)}@arc.test",
+        )
+        if sibling_searching:
+            episodes[2].state = EpisodeState.SEARCHING
+        await setup.commit()
+        ids = {number: row.id for number, row in episodes.items()}
+    wired.qbit.add_files(BATCH_HASH, _pack_names(*range(1, 13)))
+
+    async def run(episode_id: int, job_id: int) -> None:
+        async with api_factory() as session:
+            await search_release(
+                context(session, wired.settings, {"episode_id": episode_id}, job_id=job_id)
+            )
+            await session.commit()
+
+    original = qbit_module.QbitClient.files
+    sibling: list[asyncio.Task[None]] = []
+
+    async def files(self: qbit_module.QbitClient, info_hash: str) -> list[qbit_module.FileInfo]:
+        listed = await original(self, info_hash)
+        if not sibling:
+            sibling.append(asyncio.create_task(run(ids[2], 2)))
+            await _a_search_waits_on_an_advisory_lock(api_factory)
+        return listed
+
+    monkeypatch.setattr(qbit_module.QbitClient, "files", files)
+
+    await run(ids[1], 1)
+    await sibling[0]
+
+    assert len(wired.qbit.uploaded) == 1, "the pack was added once"
+    async with api_factory() as check:
+        torrents = (await check.scalars(select(Torrent))).all()
+        assert [torrent.info_hash for torrent in torrents] == [BATCH_HASH]
+        wanted = (
+            await check.scalars(
+                select(TorrentFile.episode_id).where(
+                    TorrentFile.torrent_id == torrents[0].id, TorrentFile.wanted.is_(True)
+                )
+            )
+        ).all()
+        assert sorted(wanted) == sorted(ids.values()), "every trip episode, each claimed once"
+        states = (
+            await check.scalars(select(Episode.state).where(Episode.id.in_(list(ids.values()))))
+        ).all()
+        assert set(states) == {EpisodeState.DOWNLOADING}
+    if sibling_searching:
+        assert await _reselects(api_factory) == [torrents[0].id], "attached, not re-added"
+
+
+@pg
+async def test_a_search_with_nothing_to_do_does_not_wait_for_the_pack_lock(
+    api_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M20.4: the unlocked state check comes before the show's pack lock."""
+    async with api_factory() as setup:
+        wired, episodes, anime = await _trip(
+            setup, monkeypatch, tmp_path, anilist_id=962720, email="idle@arc.test"
+        )
+        episodes[3].state = EpisodeState.DOWNLOADING
+        await setup.commit()
+        episode_id, anime_id = episodes[3].id, anime.id
+
+    async with api_factory() as holder:
+        await holder.execute(
+            select(text(f"pg_advisory_xact_lock({TRIP_PACK_LOCK_KEY}, {anime_id})"))
+        )
+        async with api_factory() as session:
+            await asyncio.wait_for(
+                search_release(context(session, wired.settings, {"episode_id": episode_id})),
+                timeout=5,
+            )
+        await holder.rollback()
+    assert wired.nyaa.queries == []
+
+
+async def _reselects(factory: SessionFactory) -> list[int]:
+    async with factory() as session:
+        jobs = (await session.scalars(select(Job).where(Job.type == QBIT_RESELECT))).all()
+        return [int(job.payload["torrent_id"]) for job in jobs]
 
 
 @pg

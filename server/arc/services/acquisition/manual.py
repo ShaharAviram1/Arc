@@ -1219,7 +1219,11 @@ async def _lock(session: AsyncSession, episodes: Sequence[Episode]) -> list[Epis
             select(Episode)
             .where(Episode.id.in_([episode.id for episode in episodes]))
             .order_by(Episode.number)
-            .with_for_update(skip_locked=True)
+            # ``FOR NO KEY UPDATE``, the one row-locking rule across
+            # acquisition (M20.4, the 2026-10-29 deadlock): it excludes every
+            # other locker but not a ``torrent_files`` insert that only
+            # references the episode.
+            .with_for_update(skip_locked=True, key_share=True)
             .execution_options(populate_existing=True)
         )
     ).all()

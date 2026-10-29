@@ -258,6 +258,51 @@ METADATA_STATES: frozenset[str] = frozenset({"metaDL", "forcedMetaDL"})
 #: against a client that had stopped.
 ERROR_STATES: frozenset[str] = frozenset({"error", "missingFiles"})
 
+#: The states a torrent is in while the client re-reads its pieces from disk
+#: (M20.4): a recheck Arc asked for, or the client's own resume check — and
+#: ``moving``/``allocating``, which are the same kind of busy. A file's
+#: progress is not to be believed while one runs, so a pack in one of these is
+#: left to finish — no complete is stamped, no recheck is asked for again, and
+#: nothing is a stall.
+CHECKING_STATES: frozenset[str] = frozenset(
+    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData", "moving", "allocating"}
+)
+
+#: How long after asking for a pack's recheck Arc waits before asking again
+#: (M20.4). The client moves into :data:`CHECKING_STATES` within seconds, so
+#: this only matters for a client that answers the recheck and then reports the
+#: same fault again: once a minute for ever would be a loop, not a repair.
+RECHECK_COOLDOWN: float = 10 * 60.0
+
+#: How many rechecks one pack gets while its files stay absent (M20.4). After
+#: that the pack is no longer a wait: :func:`stall_reason` and its
+#: :data:`ERROR_STATES` rule decide, as they did before rechecks existed.
+RECHECK_ATTEMPTS: int = 2
+
+#: Below how many allocated bytes a file the client created is no file at all
+#: (M20.4): libtorrent pre-allocates a selected file at its full size, sparse,
+#: so neither the size nor the mtime says whether a byte is in it. A file over
+#: :data:`SPARSE_LARGE` needs 1 % of its size allocated; a smaller one all of
+#: its size or 64 KiB, whichever is less.
+SPARSE_LARGE: int = 8 * 1024 * 1024
+SPARSE_SMALL_FLOOR: int = 64 * 1024
+
+
+@dataclass(slots=True)
+class _Recheck:
+    """One pack's rechecks while its files stay absent (:data:`_RECHECKED`)."""
+
+    asked: float
+    count: int = 1
+    #: Whether "giving up" has been logged, so it is logged once.
+    gave_up: bool = False
+
+
+#: ``info hash → its rechecks``. Process-local and lossy by design, like the
+#: pack memo: forgetting costs one more recheck. Dropped when the pack's files
+#: are fine again (:func:`_rechecks_done`), and after a day regardless.
+_RECHECKED: dict[str, _Recheck] = {}
+
 #: And the states that mean "the client is trying to download this **now**".
 #: An allow-list, deliberately: most of the other states are ones where making
 #: no progress is correct. ``queuedDL`` is a torrent waiting its turn behind
@@ -871,7 +916,10 @@ async def _lock_targets(
         await session.scalars(
             select(Episode)
             .where(Episode.id.in_(ids))
-            .with_for_update(skip_locked=True)
+            # ``NO KEY UPDATE`` like the search's own lock (2026-10-29): it
+            # still skips a row another search holds, and it does not block a
+            # ``torrent_files`` insert that only references the episode.
+            .with_for_update(skip_locked=True, key_share=True)
             .execution_options(populate_existing=True)
         )
     ).all()
@@ -1703,11 +1751,64 @@ async def search_release(ctx: JobContext) -> None:
         await _requeue_paused(ctx, episode_id, now=now, message=HELD_LOG)
         return
 
+    # **The show's pack lock before any row lock** (owner incident 2026-10-29).
+    # A trip queues its searches all at once (FR-A12), and two of them choosing,
+    # adding and claiming one pack together is a race: a trip-only search of a
+    # finished show holds ``('trip_pack', anime)`` until it commits, so the next
+    # sibling's attach below sees the pack. It is taken *here*, before this
+    # episode's row is locked, because the holder's ``torrent_files`` insert
+    # takes ``FOR KEY SHARE`` on every sibling episode the pack holds: a
+    # sibling that had locked its own row and then queued on this lock was a
+    # cycle Postgres broke with ``DeadlockDetectedError`` — four minutes of
+    # retries in production, each one re-adding and re-selecting the pack while
+    # nothing about it was committed. Everything read to decide whether to take
+    # it is a read.
+    found_row = (
+        await ctx.session.execute(
+            select(Episode.anime_id, Episode.state).where(Episode.id == episode_id)
+        )
+    ).first()
+    if found_row is None:
+        ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
+        return
+    anime_id, seen_state = found_row
+    if seen_state not in SEARCHABLE:
+        # Unlocked, and only ever a reason to stop: a search with nothing to do
+        # must not queue behind a sibling's Nyaa round-trip for the pack lock.
+        # The locked re-read below decides everything else.
+        ctx.log.info(
+            "episode is past searching",
+            extra={"episode_id": episode_id, "state": seen_state.value},
+        )
+        return
+    anime = await ctx.session.get(Anime, anime_id)
+    if anime is None:  # pragma: no cover - the foreign key forbids it
+        raise RuntimeError(f"episode {episode_id} has no anime row")
+    # The kill switch, read once and used twice (FR-D2, FR-A11). It gates the
+    # attach as well as the pick: enabling a file in a pack Arc already holds
+    # is still fetching more, and "fetch no more of this" is what an admin who
+    # turns it off means. What it does not stop is the episodes a pack already
+    # has claims for — those bytes are in flight and stranding them is not what
+    # a kill switch is for.
+    fallback = await batch_fallback(ctx.session)
+    trip_only = episode_id in await trip_only_episode_ids(ctx.session, [episode_id])
+    if (
+        fallback
+        and nyaa_module.deep_search(anime)
+        and not nyaa_module.is_single(anime)
+        and trip_only
+    ):
+        await ctx.session.execute(select(func.pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime.id)))
+
     # Locked and re-read (FR-A13): a manual choice may have committed this row
     # to ``downloading`` after an earlier read left it stale in the identity
-    # map, and a search must never overwrite that.
+    # map, and a search must never overwrite that. ``FOR NO KEY UPDATE``, not
+    # ``FOR UPDATE``: it excludes every other locker of the row exactly as
+    # before, but not another search's ``torrent_files`` insert that merely
+    # *references* this episode (``FOR KEY SHARE``) — the other half of the
+    # 2026-10-29 deadlock, for a search that takes no pack lock.
     episode = await ctx.session.get(
-        Episode, episode_id, with_for_update=True, populate_existing=True
+        Episode, episode_id, with_for_update={"key_share": True}, populate_existing=True
     )
     if episode is None:
         ctx.log.info("episode went away before it was searched", extra={"id": episode_id})
@@ -1728,39 +1829,17 @@ async def search_release(ctx: JobContext) -> None:
         ctx.log.info("nobody wants this episode any more", extra={"episode_id": episode_id})
         return
 
-    anime = await ctx.session.get(Anime, episode.anime_id)
-    if anime is None:  # pragma: no cover - the foreign key forbids it
-        raise RuntimeError(f"episode {episode_id} has no anime row")
-
     transition(episode, EpisodeState.SEARCHING, reason="looking for a release")
     await ctx.session.flush()
 
-    # The kill switch, read once and used twice (FR-D2, FR-A11). It gates the
-    # attach as well as the pick: enabling a file in a pack Arc already holds
-    # is still fetching more, and "fetch no more of this" is what an admin who
-    # turns it off means. What it does not stop is the episodes a pack already
-    # has claims for — those bytes are in flight and stranding them is not what
-    # a kill switch is for.
-    fallback = await batch_fallback(ctx.session)
     # How much better seeded a season pack must be before a finished show takes
     # it instead of its single (FR-A4, owner 2026-10-20); 0 means never. Under
     # the same kill switch as every other pack.
     ratio = await batch_prefer_ratio(ctx.session)
     prefer_packs = fallback and ratio > 0
-    trip_only = episode.id in await trip_only_episode_ids(ctx.session, [episode.id])
     # A trip-only search takes no thinly seeded pack, by any route (owner
     # incident 2026-10-06): not preferred, not attached to, not as fallback.
     min_seeders = await trip_pack_min_seeders(ctx.session) if trip_only else None
-    if (
-        fallback
-        and nyaa_module.deep_search(anime)
-        and not nyaa_module.is_single(anime)
-        and trip_only
-    ):
-        # A trip queues its searches all at once (FR-A12), and two of them
-        # choosing, adding and claiming one pack together is a race: held until
-        # this job commits, so the next sibling's attach below sees the pack.
-        await ctx.session.execute(select(func.pg_advisory_xact_lock(TRIP_PACK_LOCK_KEY, anime.id)))
     if fallback:
         # Before Nyaa is asked anything at all (FR-A11): a batch Arc already
         # has may hold this episode's file, and turning that file on is the
@@ -2346,6 +2425,9 @@ class BatchPoll:
     #: client's answer disagreed with the rows, and **the rows are the
     #: instruction** (:func:`_sync_batch_files`).
     reselect: int | None = None
+    #: The hash to recheck, or ``None`` (M20.4): a wanted file the client
+    #: calls complete is absent or empty on disk (:func:`_absent_on_disk`).
+    recheck: str | None = None
 
 
 async def _batch_files(
@@ -2391,6 +2473,97 @@ async def _claimed_episodes(
     return {episode.id: episode for episode in rows.all()}
 
 
+def _pack_file_path(
+    settings: Settings, torrent: Torrent, row: TorrentFile, info: TorrentInfo
+) -> Path:
+    """Where one of a pack's files is, as the worker sees it (FR-A11).
+
+    The torrent's own save path plus the file's own name, through ``host_path``
+    — which refuses anything not under the configured downloads root. The one
+    place the path is built, for :func:`_complete_file` and for
+    :func:`_absent_on_disk`.
+    """
+    reported = torrent.save_path or info.save_path
+    if not reported:
+        raise QbitError(f"qbittorrent reported no path for {info.hash}")
+    return host_path(
+        str(PurePosixPath(reported) / row.path),
+        downloads_path=settings.qbit_downloads_path,
+        host_downloads=settings.downloads_dir,
+    )
+
+
+def _absent_on_disk(
+    settings: Settings, torrent: Torrent, row: TorrentFile, info: TorrentInfo
+) -> bool:
+    """Whether a pack's file is missing or empty on disk (M20.4, FR-A11).
+
+    Owner incident 2026-10-29: retention deleted a held pack's files, a later
+    want re-selected them, and the client — which still believed it had those
+    pieces — reported them complete at once; libtorrent then recreated one at
+    zero bytes and never created the other. A zero-byte file is never a video,
+    so "empty" counts as "absent". A path that cannot be built is not
+    answered here (``False``): that is :func:`_complete_file`'s error to raise.
+    """
+    try:
+        path = _pack_file_path(settings, torrent, row, info)
+    except QbitError:
+        return False
+    try:
+        if not path.is_file():
+            return True
+        found = path.stat()
+    except OSError:
+        return True
+    return sparse_file(found.st_size, getattr(found, "st_blocks", None))
+
+
+def sparse_file(size: int, blocks: int | None) -> bool:
+    """Whether a file of ``size`` bytes with ``blocks`` 512-byte blocks holds nothing.
+
+    Empty is nothing; and a file whose allocation is under the floor
+    (:data:`SPARSE_LARGE`, :data:`SPARSE_SMALL_FLOOR`) is a pre-allocated shell
+    the client never wrote to. A filesystem that reports no block count is
+    believed about the size alone.
+    """
+    if size <= 0:
+        return True
+    if blocks is None:
+        return False
+    allocated = blocks * 512
+    floor = size // 100 if size > SPARSE_LARGE else min(SPARSE_SMALL_FLOOR, size)
+    return allocated < floor
+
+
+def _recheck_step(info_hash: str) -> str:
+    """What to do about a pack whose files are absent: ``recheck``, ``wait`` or ``give_up``.
+
+    A recheck at most every :data:`RECHECK_COOLDOWN`, and at most
+    :data:`RECHECK_ATTEMPTS` of them while the files stay absent; then
+    ``give_up`` — no longer a wait, so the stall rule decides.
+    """
+    key = info_hash.lower()
+    now = time.monotonic()
+    for stale in [k for k, entry in _RECHECKED.items() if now - entry.asked >= 24 * 3600]:
+        del _RECHECKED[stale]
+    entry = _RECHECKED.get(key)
+    if entry is None:
+        _RECHECKED[key] = _Recheck(asked=now)
+        return "recheck"
+    if entry.count >= RECHECK_ATTEMPTS:
+        return "give_up"
+    if now - entry.asked < RECHECK_COOLDOWN:
+        return "wait"
+    entry.asked = now
+    entry.count += 1
+    return "recheck"
+
+
+def _rechecks_done(info_hash: str) -> None:
+    """The pack's files are fine again: its recheck count starts over."""
+    _RECHECKED.pop(info_hash.lower(), None)
+
+
 async def _complete_file(
     ctx: JobContext,
     torrent: Torrent,
@@ -2416,17 +2589,13 @@ async def _complete_file(
     ``downloaded`` and the next poll tries again, which is why this is retried
     from the row's ``completed_at`` rather than from the client's progress.
     """
-    reported = torrent.save_path or info.save_path
-    if not reported:
-        raise QbitError(f"qbittorrent reported no path for {info.hash}")
-    path = host_path(
-        str(PurePosixPath(reported) / row.path),
-        downloads_path=ctx.settings.qbit_downloads_path,
-        host_downloads=ctx.settings.downloads_dir,
-    )
+    path = _pack_file_path(ctx.settings, torrent, row, info)
     name = PurePosixPath(row.path).name
     transition(episode, EpisodeState.DOWNLOADED, reason=f"{name} finished downloading")
-    if not path.is_file():
+    if _absent_on_disk(ctx.settings, torrent, row, info):
+        # Missing, empty or a sparse shell (M20.4): never handed to the
+        # matcher. The next poll's rule for a stamped row whose episode is
+        # still ``downloaded`` clears the stamp and asks for a recheck.
         ctx.log.warning(
             "a finished batch file is not readable yet, will look again next poll",
             extra={"episode_id": episode.id, "path": str(path), "hash": info.hash},
@@ -2563,14 +2732,27 @@ async def _retry_stalled_pack_episodes(
     return retried
 
 
+@dataclass(frozen=True, slots=True)
+class _Synced:
+    """What :func:`_sync_batch_files` found."""
+
+    synced: int = 0
+    drifted: bool = False
+    #: Wanted rows the client called complete that are absent or empty on disk
+    #: (M20.4), by ``file_index``: not stamped, progress reset, and the pack
+    #: wants a recheck.
+    phantom: tuple[int, ...] = ()
+
+
 def _sync_batch_files(
     ctx: JobContext,
     torrent: Torrent,
     rows: Sequence[TorrentFile],
     listed: Mapping[int, FileInfo],
     *,
+    info: TorrentInfo,
     now: datetime,
-) -> tuple[int, bool]:
+) -> _Synced:
     """Write every file's own progress, and say whether the selection drifted.
 
     Matched by ``file_index``, which is the client's own numbering and the only
@@ -2591,12 +2773,22 @@ def _sync_batch_files(
     of mind: Arc says what it is fetching, says so in the log when it has to
     say it twice, and an operator who wants a file left alone has Arc's own
     controls for it.
+
+    **A complete is believed only when the file is on disk** (owner incident
+    2026-10-29). A wanted file the client calls complete is stamped
+    ``completed_at`` only once :func:`_absent_on_disk` says it is there with
+    bytes in it; otherwise its progress is reset to 0 and it is counted in
+    ``phantom``, for the caller to ask the client for a recheck. While the
+    client is checking (:data:`CHECKING_STATES`) nothing is stamped at all:
+    a file's progress is not an answer until the check is done.
     """
     synced = 0
     drifted = False
+    phantom: list[int] = []
+    checking = info.state in CHECKING_STATES
     for row in rows:
-        info = listed.get(row.file_index)
-        if info is None:
+        file_info = listed.get(row.file_index)
+        if file_info is None:
             ctx.log.warning(
                 "the client does not list a file arc recorded for this batch",
                 extra={
@@ -2607,9 +2799,9 @@ def _sync_batch_files(
                 },
             )
             continue
-        row.progress = info.progress
+        row.progress = file_info.progress
         synced += 1
-        if row.wanted != info.wanted:
+        if row.wanted != file_info.wanted:
             drifted = True
             ctx.log.warning(
                 "a batch's selection in the client disagrees with arc's rows",
@@ -2619,14 +2811,18 @@ def _sync_batch_files(
                     "file_index": row.file_index,
                     "episode_id": row.episode_id,
                     "wanted": row.wanted,
-                    "priority": info.priority,
+                    "priority": file_info.priority,
                 },
             )
         if not row.wanted:
             continue
-        if row.completed_at is None and info.complete:
+        if row.completed_at is None and file_info.complete and not checking:
+            if _absent_on_disk(ctx.settings, torrent, row, info):
+                row.progress = 0.0
+                phantom.append(row.file_index)
+                continue
             row.completed_at = now
-    return synced, drifted
+    return _Synced(synced=synced, drifted=drifted, phantom=tuple(phantom))
 
 
 async def _poll_batch(
@@ -2740,12 +2936,87 @@ async def _poll_batch(
     # The one request this loop can make, and the condition under which it does
     # not: a pack with every wanted file in, sitting stopped where the last poll
     # left it, has nothing to tell Arc that Arc does not already know.
+    # **Files the client has and the disk does not** (owner incident
+    # 2026-10-29). A pack in :data:`ERROR_STATES` — ``missingFiles`` is the
+    # client saying so outright — whose wanted file is absent or empty on disk
+    # is asked to recheck, on its *current* state and not only on a transition:
+    # the row may have said ``error`` for hours. The rows go back to pending
+    # first, so the pack counts as unfinished and ``qbit_reselect``'s
+    # disposition (KEEP) starts it rather than stopping it, and an episode left
+    # ``downloaded`` by "not readable yet" is handed off by the ordinary retry
+    # once the file is really there.
+    #
+    # Only a file Arc **stamped** complete is examined here — in an error
+    # state, or while its episode still sits ``downloaded`` (a stamp from
+    # before this rule, production's 0-byte ``13v2``). A file that never
+    # finished is not a phantom: a pack that errors mid-download stalls on the
+    # first poll exactly as before (FR-A6). A file the client lists complete
+    # but Arc never stamped is :func:`_sync_batch_files`' to catch.
+    checking = info.state in CHECKING_STATES
+    absent: list[TorrentFile] = []
+    if not checking:
+        for row in wanted:
+            if row.completed_at is None:
+                continue
+            holder = None if row.episode_id is None else episodes.get(row.episode_id)
+            suspect = info.state in ERROR_STATES or (
+                holder is not None and holder.state is EpisodeState.DOWNLOADED
+            )
+            if suspect and _absent_on_disk(ctx.settings, torrent, row, info):
+                absent.append(row)
+        for row in absent:
+            row.completed_at = None
+            row.progress = 0.0
+
     synced = 0
     drifted = False
+    phantom: tuple[int, ...] = ()
     if any(row.completed_at is None for row in wanted) or info.state not in SETTLED_STATES:
         listed = {info_row.index: info_row for info_row in await qbit.files(torrent.info_hash)}
-        synced, drifted = _sync_batch_files(ctx, torrent, rows, listed, now=now)
+        found = _sync_batch_files(ctx, torrent, rows, listed, info=info, now=now)
+        synced, drifted, phantom = found.synced, found.drifted, found.phantom
     reselect = torrent.id if drifted else None
+    # One recheck per pack per poll, none while the client is checking or
+    # within :data:`RECHECK_COOLDOWN` of the last one, and at most
+    # :data:`RECHECK_ATTEMPTS` while the files stay absent: until then a wait,
+    # and so is the stall rule below; after it, the stall rule decides.
+    trouble = sorted({row.file_index for row in absent} | set(phantom))
+    waiting = checking
+    recheck: str | None = None
+    if trouble and not checking:
+        step = _recheck_step(info.hash)
+        if step == "recheck":
+            recheck = info.hash
+            waiting = True
+            # Back through ``qbit_reselect``: KEEP starts a pack with a pending file.
+            reselect = torrent.id
+            ctx.log.warning(
+                "pack file reported complete but absent on disk; rechecking",
+                extra={
+                    "torrent_id": torrent.id,
+                    "hash": torrent.info_hash,
+                    "state": info.state,
+                    "file_indexes": trouble[:20],
+                },
+            )
+        elif step == "wait":
+            waiting = True
+        else:
+            entry = _RECHECKED.get(info.hash.lower())
+            if entry is not None and not entry.gave_up:
+                entry.gave_up = True
+                ctx.log.error(
+                    f"pack rechecked {RECHECK_ATTEMPTS} times and still has absent files;"
+                    " giving up",
+                    extra={
+                        "torrent_id": torrent.id,
+                        "hash": torrent.info_hash,
+                        "state": info.state,
+                        "file_indexes": trouble[:20],
+                    },
+                )
+    elif not checking and info.state not in ERROR_STATES:
+        _rechecks_done(info.hash)
 
     # The hand-off is driven by the **row**, not by this listing: an episode
     # whose file was complete last poll but not yet readable is still sitting in
@@ -2786,9 +3057,13 @@ async def _poll_batch(
             reselect=reselect,
         )
 
-    reason = stall_reason(info, metadata_after=metadata_after, no_bytes_after=no_bytes_after)
+    reason = (
+        None
+        if waiting
+        else stall_reason(info, metadata_after=metadata_after, no_bytes_after=no_bytes_after)
+    )
     if reason is None:
-        return BatchPoll(synced=synced, finished=finished, reselect=reselect)
+        return BatchPoll(synced=synced, finished=finished, reselect=reselect, recheck=recheck)
 
     torrent.qbit_state = QBIT_STALLED
     given_up = _give_up_on(ctx, pending, episodes, reason=manual_stall(torrent, reason))
@@ -2901,6 +3176,8 @@ async def poll_qbit(ctx: JobContext) -> None:
     seeding: list[str] = []
     stalled: list[str] = []
     stopping: list[str] = []
+    #: Packs whose absent files the client still calls complete (M20.4).
+    rechecking: list[str] = []
     #: Packs whose selection in the client has drifted from Arc's rows. Queued
     #: rather than written here: ``qbit_reselect`` is the only writer of a
     #: pack's selection, and this loop is holding a transaction.
@@ -3060,6 +3337,8 @@ async def poll_qbit(ctx: JobContext) -> None:
                 stopping.append(outcome.stop)
             if outcome.reselect is not None:
                 repair.append(outcome.reselect)
+            if outcome.recheck is not None:
+                rechecking.append(outcome.recheck)
 
         # **The rows first, then the client.** The flush is what makes the
         # deletion safe to fail: the episode is already ``unavailable`` and the
@@ -3085,6 +3364,11 @@ async def poll_qbit(ctx: JobContext) -> None:
             await ctx.session.flush()
         if stalled:
             await qbit.delete(stalled, delete_files=True)
+        # After the flush too: the rows already say the file is pending, so a
+        # client that stops answering here leaves a pack the next poll asks
+        # again (M20.4).
+        if rechecking:
+            await qbit.recheck(rechecking)
 
         # Packs to stop, **and keep** (FR-A11), for either of two reasons: every
         # file Arc asked for is in, or the pack was given up on while holding a
