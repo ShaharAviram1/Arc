@@ -19,7 +19,10 @@ episode a job is reading the source of right now — a copy, a transcode or a
 remux (``encoding``), except the one encode redoing its own episode; and one
 whose source the deleter refused to remove (``busy``: it is searching,
 downloading, matching or preparing) or could not reach the torrent client for
-(``client``) — its copy row is left untouched.
+(``client``) — its copy row is left untouched; and one whose copy a device
+fetched within the settle's quiet window (``held``,
+:func:`~arc.services.trips.settle.fetch_hold`, the remake's rule): run again
+later.
 
 **What each one gets**, in this order — the source first, so that a refusal
 changes nothing:
@@ -94,6 +97,7 @@ from arc.services.retention.sweep import safe_path, targets_for_episode
 from arc.services.trips.create import TRIP_NOT_ACTIVE, TripConflict
 from arc.services.trips.deliver import repend
 from arc.services.trips.rules import trip_copy_priority
+from arc.services.trips.settle import fetch_hold
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +112,7 @@ SKIP_WATCHED = "watched"
 SKIP_ENCODING = "encoding"
 SKIP_BUSY = "busy"
 SKIP_CLIENT = "client"
+SKIP_HELD = "held"
 
 _ENDED: frozenset[TripEpisodeState] = frozenset(
     {TripEpisodeState.CANCELLED, TripEpisodeState.EXPIRED}
@@ -323,6 +328,12 @@ async def redo_copies(
         if reason is not None:
             skipped.append((episode_id, reason))
             continue
+        copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
+        if copy is not None and fetch_hold(copy.last_served_at, None, now=now) is not None:
+            # A device is downloading the old copy right now: not cut short
+            # under it (the remake's rule); the operator runs it again later.
+            skipped.append((episode_id, SKIP_HELD))
+            continue
 
         # a. The source first: if it cannot go now, nothing else changes.
         source_removed = False
@@ -378,7 +389,6 @@ async def redo_copies(
 
         # b. The copy: file gone, row back to queued and stamped.
         removed_file = _remove_copy_file(settings, episode_id)
-        copy = await session.get(OfflineCopy, episode_id, populate_existing=True)
         if copy is not None:
             reset_copy(copy, now=now)
         if episode.state is EpisodeState.READY:
@@ -481,6 +491,7 @@ __all__ = [
     "SKIP_CLIENT",
     "SKIP_ENCODING",
     "SKIP_ENDED",
+    "SKIP_HELD",
     "SKIP_NOT_IN_TRIP",
     "SKIP_RELEASED",
     "SKIP_WATCHED",

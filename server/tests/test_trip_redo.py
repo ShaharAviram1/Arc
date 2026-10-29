@@ -63,6 +63,7 @@ from arc.services.trips.redo import (
     SKIP_CLIENT,
     SKIP_ENCODING,
     SKIP_ENDED,
+    SKIP_HELD,
     SKIP_NOT_IN_TRIP,
     SKIP_RELEASED,
     SKIP_WATCHED,
@@ -958,3 +959,27 @@ async def test_a_finished_single_is_rejected_not_remembered(
     assert torrent.qbit_state == QBIT_REJECTED, "kept, so the search skips this hash"
     assert torrent.evicted_at is None, "not the remembered release"
     assert episodes[0].state is EpisodeState.NOT_WANTED
+
+
+async def test_a_copy_a_device_is_fetching_is_held(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    _, trip, episodes = await a_trip(db_session, 991240, "redo-held@arc.test", settings)
+    copy = await failed_copy(db_session, settings, episodes[0], leftover=True)
+    copy.state = OfflineCopyState.READY
+    copy.last_served_at = now() - timedelta(minutes=2)
+    await db_session.flush()
+
+    report = await redo_copies(
+        db_session, settings, trip=trip, now=now(), episode_ids=[episodes[0].id]
+    )
+
+    assert report.skipped == ((episodes[0].id, SKIP_HELD),)
+    assert offline_path_for(settings, episodes[0].id).exists()
+    assert copy.redone_at is None
+
+    later = now() + timedelta(hours=1)
+    again = await redo_copies(
+        db_session, settings, trip=trip, now=later, episode_ids=[episodes[0].id]
+    )
+    assert again.redone == (episodes[0].id,)
