@@ -573,18 +573,26 @@ stores — which rows a reader has dismissed — lives in that browser's
    `downloaded`, ingest the largest video file (`library.ingest_file`, called
    inline) and enqueue `match_file` for the row it wrote.
    For a pack (§5.1a) a file is complete only when the client says so **and**
-   it is on disk with bytes (`_absent_on_disk`, M20.4, owner incident
-   2026-10-29): otherwise its progress is reset, `torrents/recheck` is asked
-   for (`QbitClient.recheck`) and `qbit_reselect` is queued so KEEP starts the
-   pack. A pack in `error`/`missingFiles` with an absent wanted file gets the
-   same on its current state, its rows going back to pending; while the client
-   is in `CHECKING_STATES`, or within `RECHECK_COOLDOWN` (10 min, process-local)
-   of Arc's last recheck, the pack waits — no stamp, no second recheck, no
-   stall. A pack in an error state whose wanted files are all there still
-   stalls as before. `search_release` takes the trip's
-   `('trip_pack', anime)` advisory lock **before** it locks its own episode row
-   (`FOR NO KEY UPDATE`, as `_lock_targets` now is): the old order — row lock
-   `FOR UPDATE`, then queue on the advisory lock — met the holder's
+   it is on disk with bytes allocated (`_absent_on_disk`: missing, empty, or a
+   sparse pre-allocated shell — under 1 % allocated above 8 MiB, under
+   `min(64 KiB, size)` below; M20.4, owner incident 2026-10-29): otherwise its
+   progress is reset, `torrents/recheck` is asked for (`QbitClient.recheck`)
+   and `qbit_reselect` is queued so KEEP starts the pack. A row Arc already
+   **stamped** is re-examined while the pack is in `error`/`missingFiles` or
+   while its episode still sits `downloaded`, and the hand-off itself refuses
+   an absent file; a file that never finished is never a phantom, so a pack
+   that errors mid-download stalls on the first poll as before, and one whose
+   completed files are all there still stalls. While the client is in
+   `CHECKING_STATES` (checking, `moving`, `allocating`), or within
+   `RECHECK_COOLDOWN` (10 min) of Arc's last recheck, the pack waits — no
+   stamp, no second recheck, no stall — for at most `RECHECK_ATTEMPTS` (2)
+   rechecks while the files stay absent (process-local count, reset once they
+   are fine); after that one error line ("giving up") and the stall rule
+   decides. `search_release` reads the episode's state unlocked and stops if
+   it is past searching, then takes the trip's `('trip_pack', anime)` advisory
+   lock **before** it locks its own episode row (`FOR NO KEY UPDATE`, as
+   `_lock_targets` and the manual choice's `_lock` now are): the old order —
+   row lock `FOR UPDATE`, then queue on the advisory lock — met the holder's
    `torrent_files` insert, whose foreign key takes `FOR KEY SHARE` on every
    sibling episode, and Postgres broke the cycle with `DeadlockDetectedError`.
 
@@ -1508,7 +1516,9 @@ owner 2026-10-13).**
    The scan's fence (`ingest.in_flight`, FR-L1) also holds every file under
    `<downloads>/batch/<dir>/` whose `<dir>` is no `torrents` row's hash
    (`InFlight.batch_root`, M20.4): a search adds and starts a pack before its
-   transaction commits, and such a directory is never the library's.
+   transaction commits, and such a directory is never the library's. Each
+   such directory is logged once per process and does not by itself make the
+   "library scan finished" line fire.
 2. `match_file`: candidates = expected episode (if Arc downloaded it, prior
    0.6) ∪ local anime cache fuzzy hits ∪ AniList search hits. Score =
    weighted title similarity (token-set ratio over romaji/english/synonyms),
@@ -7333,3 +7343,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-28 — Many-trips review fixes (§5.4d, §5b). The estimate is on `TripLimits` only (no client read it on `TripOut`) and is not queried for the demo account. `otherTripsReserve` applies `TRIP_FIT_MARGIN` to the reserved episodes as well as the new trip's (`fitBytes`), counts only what is still to come of a downloading or paused record, and skips an episode the viewer declined on this device.
 - 2026-10-28 — `remake-copies --delivered-before ISO8601` (§5.4e Remake; spec FR-A12): `remake_stale(…, delivered_before=)` also re-pends a delivered, unreleased, unwatched row delivered before the time whose copy the settle already deleted (no copy row); a current copy row still wins; naive timestamps read as UTC. No schema change, no new dependency, no MAL-writing code.
 - 2026-10-29 — M20.4 Task B: **pack hygiene after the trip 5 incident** (§5.1 step 4, §5.2 step 1; spec FR-A11, FR-L1). `InFlight.batch_root`: an unknown `batch/<dir>` is unfinished whole. `QbitClient.recheck` (`torrents/recheck`); `_sync_batch_files` stamps `completed_at` only when `_absent_on_disk` is false and the client is not checking, else resets progress; `_poll_batch` resets and rechecks an `ERROR_STATES` pack's absent wanted files on its current state, queues `qbit_reselect`, and skips the stall rule while waiting (`CHECKING_STATES`, `RECHECK_COOLDOWN`). `search_release` takes the trip pack advisory lock before its row lock, and its row locks are `FOR NO KEY UPDATE` — the deadlock root cause. The duplicate "file priorities written" lines were the deadlock's retries re-running the whole take, so no separate dedupe. No schema change, no new dependency, no MAL-writing code.
+- 2026-10-29 — M20.4 Task B after validation and review (§5.1 step 4, §5.2 step 1): only stamped rows (pack in an error state, or episode still `downloaded`) and files the client lists complete are checked against the disk, so a pack erroring mid-download stalls at once as before; `sparse_file` treats a pre-allocated shell as absent; `_complete_file` refuses an absent file; `RECHECK_ATTEMPTS` = 2 then the stall rule; `CHECKING_STATES` gains `moving`, `allocating`; manual `_lock` is `FOR NO KEY UPDATE`; `search_release` stops on an unlocked past-searching read before the pack lock; the scan's fence uses the resolved downloads root and logs an unknown `batch/<dir>` once. No schema change, no new dependency.
