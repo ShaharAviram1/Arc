@@ -3082,4 +3082,13 @@ through the same edge, without the grace period.
   out broken (missing, unreadable, no length, or the copy shorter than it) is
   redone **automatically once** while a trip waits on it; a second failure
   stays failed, and encoder failures are never redone. The copy check refuses
-  a source that reports no length instead of skipping the length check.
+  a source that reports no length instead of skipping the length check — a
+  "Keep offline" request copy included, which is refused the same way and is
+  never redone (no trip waits on it; the device takes the full-size file).
+  Small calls made with it (orchestrator, after review): a redo leaves an
+  episode whose download or preparation is still under way, or whose copy a
+  device is fetching at that moment, for a later run; a single release that
+  delivered a broken file is not fetched again — the next search picks
+  another release — while a season pack's file is fetched again from the
+  same pack; and a trip episode waiting for its re-fetched source shows
+  searching or downloading on the device rather than a failure.

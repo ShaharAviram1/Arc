@@ -1944,7 +1944,8 @@ drift for an episode with no rendition.
   `mdat` read from the top-level box headers). A source with **no** duration
   (`chosen_duration` None — a real source always has the container's) is
   refused as `the source reports no duration` (`NO_SOURCE_DURATION`), by
-  `check_probe` and, before any encode is spent, by `encode_copy` (2026-10-29:
+  `probe_problem` and, before any encode is spent, by `encode_copy` — for a
+  `request` ("Keep offline") copy too, which is never redone (2026-10-29:
   a half-downloaded pack member reported none, the check was skipped, and a
   9.9 MB copy went to the iPad); then, for a `request`, the
   episode row is re-read `FOR UPDATE` (the lock `request_copy` and
@@ -1959,15 +1960,22 @@ drift for an episode with no rendition.
   **A broken source is redone once** (owner, 2026-10-29): the source gone
   (`SOURCE_GONE_MESSAGE`), ffprobe returning nothing (`plan.SourceUnreadable`,
   a `PlanError`), no source duration, or a copy short of its source
-  (`offline.source_problem` over the refusal; `BrokenSource`, a
-  `CopyRefused`) — after `_fail` commits, `_redo_once` calls
+  (`probe_problem` returns a `CopyProblem(message, source=True)`; raised as
+  `BrokenSource`, a `CopyRefused`). Each is recorded in the copy's `error`
+  behind `BROKEN_SOURCE_PREFIX` ("the source file is broken: "), the gone
+  source under its own sentence, so `failed_on_broken_source(error)` can tell
+  them apart later. After `_fail` commits, `_redo_once` calls
   `trips.redo.redo_after_broken_source(…, exclude_job_id=<this job>)` and
-  commits: it acts only when an **active** trip has a `pending` row on the
-  episode, the copy's `redone_at` is null and the episode is not `ready`, and
-  then is `redo_copies` for that episode (§5.4e Redo), logging `offline copy
-  redone after a broken source`. A redo that raises is rolled back and
-  re-raised, so the runner retries the job. Wrong codec, height, audio or
-  faststart, and every encoder failure (non-zero exit, timeout), never redo.
+  commits: it acts only when an **active** trip whose user has not watched the
+  episode has a `pending` row on it, the copy's `redone_at` is null and the
+  episode is not `ready`, and then is `redo_copies(…, automatic=True)` for
+  that episode under that trip (§5.4e Redo), logging `offline copy redone
+  after a broken source`. A redo that raises (the torrent client unreachable)
+  is rolled back and re-raised, so the runner retries the job; the retry finds
+  the `failed` row with a broken-source error and no `redone_at` and goes
+  straight to `_redo_once` instead of encoding the broken file again. Wrong
+  codec, height, audio or faststart, and every encoder failure (non-zero
+  exit, timeout), never redo.
   A `queued`/`preparing` row with no live job behind it (attempts used up,
   row gone) reads `failed` to clients and is re-queued by the next request.
   `settings_key` is recorded only: a settings change re-makes nothing by
@@ -3668,8 +3676,8 @@ above), so what is settled here is the **copy** — file and row — and the
   half-downloaded pack files — one 9.9 MB copy delivered, five `failed` on
   `matched` episodes whose files were gone, nothing to restart them).
   `trips.redo.redo_copies(session, settings, *, trip, now, episode_ids=None,
-  failed=False, exclude_job_id=None) → RedoReport{trip_id, redone, skipped,
-  sources_removed, repended}`, run by `python -m arc.cli redo-copies --trip ID
+  failed=False, exclude_job_id=None, automatic=False) → RedoReport{trip_id,
+  redone, skipped, sources_removed, repended}`, run by `python -m arc.cli redo-copies --trip ID
   (--episodes 1,3,4 | --failed)` (numbers mapped through the trip's rows; one
   commit; `trip 5: N redone (episodes …), N sources removed, N re-pended, N
   skipped` and one line per skip; an unknown or ended trip exits 1). Selects
@@ -3677,22 +3685,33 @@ above), so what is settled here is the **copy** — file and row — and the
   `TripConflict(trip_not_active)` unless active. **Skipped** with a reason:
   not in the trip, `cancelled`/`expired` (`ended`), delivered with
   `released_at` (`released`), completed by the trip's user (`watched`), a
-  live `offline_encode` other than `exclude_job_id` (`encoding`). Locks as
-  Remake: every active trip holding a selected episode `FOR UPDATE` in id
-  order, their rows, then the episodes. Per episode: (a) `offline/<id>.mp4`
-  unlinked (path from the id, re-checked against the roots); a copy row goes
-  `queued` with `error`, `media_file_id`, `size`, `etag`, `ready_at` cleared
-  and `redone_at = now` — no row is created where the settle took it; (b) a
-  `ready` episode keeps its source and gets `enqueue_offline_encode(why=trip)`;
-  otherwise, when anything is linked or claimed, `retention.delete.
-  delete_episode_files(…, keep_copy=True, exclude_job_id=)` with the copy out
-  of the targets — a single's torrent removed from the client with its files
+  live source reader — `offline_encode`, `transcode`, `remux`, live remux
+  (`copies.encoding_episode_ids`) — other than `exclude_job_id` (`encoding`),
+  an episode that turned `ready` under the locks on the automatic path
+  (`ready`), a copy a device fetched within the settle's quiet window
+  (`held`, `settle.fetch_hold`, Remake's rule: run again later), and — after
+  the source step — `busy` and `client`, below. Locks as Remake: every active
+  trip holding a selected episode `FOR UPDATE` in id order, their rows, then
+  the episodes. Per episode, **the source first**, so that a refusal changes
+  nothing: (a) a `ready` episode keeps its source; otherwise, when anything is
+  linked or claimed, `retention.delete.delete_episode_files(…, keep_copy=True,
+  exclude_job_id=)` with the copy out of the targets. A refusal (`acted`
+  false: the episode searching, downloading, matching or preparing, or a
+  reader holds it) skips the episode as `busy` and an unreachable client
+  (`QbitError`) as `client` — the copy row untouched and the one automatic
+  retry not spent; the automatic path re-raises `QbitError` instead. When it
+  acts: a single's torrent removed from the client with its files
   and, when it had finished, its row kept as `rejected` (out of the deleter's
   `torrent_ids`, so not the remembered release of FR-T3: the hash keeps a row
   and the next search picks another release; orchestrator's call
   2026-10-29), a pack's file given back (`release_files`, `qbit_reselect`;
   the pack is re-claimed as usual), `media_files` rows gone, episode →
-  `not_wanted`; (c) in every active trip, a `delivered`, unreleased,
+  `not_wanted`. (b) Then the copy, after the client call and the rows, as
+  retention orders it: `offline/<id>.mp4` unlinked (path from the id,
+  re-checked against the roots); a copy row goes `queued` with `error`,
+  `media_file_id`, `size`, `etag`, `ready_at` cleared and `redone_at = now` —
+  no row is created where the settle took it; a `ready` episode gets
+  `enqueue_offline_encode(why=trip)` from its kept source. (c) In every active trip, a `delivered`, unreleased,
   unwatched row → `repend(row, available_at=now)` and a `pending` row →
   `available_at = now` (Remake's clock rule). Then one `compute_wants`: the
   pending trip row revives the want (a `trip ended` drop included) and the
@@ -7372,3 +7391,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-28 — Many-trips review fixes (§5.4d, §5b). The estimate is on `TripLimits` only (no client read it on `TripOut`) and is not queried for the demo account. `otherTripsReserve` applies `TRIP_FIT_MARGIN` to the reserved episodes as well as the new trip's (`fitBytes`), counts only what is still to come of a downloading or paused record, and skips an episode the viewer declined on this device.
 - 2026-10-28 — `remake-copies --delivered-before ISO8601` (§5.4e Remake; spec FR-A12): `remake_stale(…, delivered_before=)` also re-pends a delivered, unreleased, unwatched row delivered before the time whose copy the settle already deleted (no copy row); a current copy row still wins; naive timestamps read as UTC. No schema change, no new dependency, no MAL-writing code.
 - 2026-10-29 (owner) — **Redo a trip's copies; a broken source is redone once** (§4 `offline_copies.redone_at`, §5.3b, §5.4e Redo, §9 CLI; spec FR-P6, FR-A12; production trip 5: copies encoded from half-downloaded pack files). New `trips/redo.py` (`redo_copies`, `redo_after_broken_source`, `RedoReport`) and `arc.cli redo-copies --trip ID (--episodes N,N | --failed)`; `offline_copies.redone_at` (revision `8b6f2d4e1a73`). `offline_encode` classifies source problems (`SOURCE_GONE_MESSAGE`, `plan.SourceUnreadable`, `NO_SOURCE_DURATION`, shortfall → `BrokenSource`) and redoes the episode once when an active trip waits on it; encoder failures never. `check_probe` refuses `duration=None` (`the source reports no duration`) and `encode_copy` refuses it before encoding. `delete_episode_files` and `encoding_episode_ids` take `exclude_job_id`. No new dependency, no MAL-writing code.
+- 2026-10-29 — Redo after validation and review (§5.3b, §5.4e Redo, §5.4e phase; spec FR-P6, FR-A12). `redo_copies` runs the source step first and touches the copy only when the deleter acted (or there was nothing to delete): a refusal is skipped `busy`, an unreachable client `client` (the automatic path re-raises), a copy a device is fetching `held`; every source reader (transcode, remux, live remux, copy) counts as `encoding`; the copy's file is unlinked after the deleter's client call and rows. A finished single's `torrents` row is kept as `rejected` rather than remembered (orchestrator's call), so the next search picks another release; a pack member is re-claimed as before. `trip_phase` lets a `queued`, redone copy with no job fall through to the episode's state (`PhaseFacts.redone`). `probe_problem` returns `CopyProblem(message, source)`; broken-source failures are written behind `BROKEN_SOURCE_PREFIX`, and a retried job whose row says so redoes instead of re-encoding. The automatic redo picks the first active trip whose user has not watched the episode and skips one that turned `ready` under the locks. No new schema beyond `redone_at`, no new dependency, no MAL-writing code.
