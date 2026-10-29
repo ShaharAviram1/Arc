@@ -520,7 +520,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `episodes` | id, anime_id, number, title, still_url (AniList `streamingEpisodes.thumbnail`; title and still are both written **only where null**, so a confirmed manual title survives every refresh), air_at, air_at_estimated (true when synthesised from a MAL broadcast slot), state (enum, §6 of spec), state_changed_at, unavailable_reason, last_search_at / last_search_forms / last_search_results (FR-A7, 2026-09-14: when `search_release` last asked Nyaa about this episode, how many query forms ran and how many distinct releases they returned between them *before* the filter — smallints, nullable, no backfill, written on every attempt that reaches Nyaa and never cleared. Three columns rather than a blob because all three are rendered on one line of the show page, and because "6 forms, 0 results" is what separates a query that matches nothing from a filter that keeps nothing) |
 | `media_files` | id, episode_id (nullable until matched), path (unique), size (BIGINT), parsed (JSONB), match_confidence, match_candidates (JSONB), review_state, llm_suggestion (JSONB), created_at |
 | `renditions` | id, episode_id (unique), dir, playlist_path (`index.m3u8` for a transcode, `video.m3u8` for a remux), duration, width, height, subtitle_lang, audio_lang, ready_at, kind (VARCHAR(16) NOT NULL DEFAULT `'transcode'`; `remux` since M20 — how it was made, §5.3c), text_subtitles (BOOL NOT NULL DEFAULT false; a WebVTT track `subs.vtt` is in the directory and served as an HLS subtitle rendition; never true for a transcode) |
-| `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most every five minutes since M20 T8 — hourly before; the idle rule counts from it, else from ready_at, and retention's "copy being sent" hold reads it against a ten-minute window), error. M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
+| `offline_copies` | episode_id (PK, FK CASCADE), state (`queued` \| `preparing` \| `ready` \| `failed`, varchar enum, default `queued`), size (BIGINT), etag (the strong validator the media route answers with, `"<size hex>-<mtime_ns hex>"`, stored so a device can later say which copy it holds), codec (`h264` \| `hevc`), height, crf, audio_bitrate, settings_key (16-hex sha256 over codec/height/CRF/preset/audio bitrate/languages — what the copy was made with), media_file_id (FK SET NULL, the source it was made from), ready_at, last_served_at (touched by `GET /media/{id}/offline.mp4` at most every five minutes since M20 T8 — hourly before; the idle rule counts from it, else from ready_at, and retention's "copy being sent" hold reads it against a ten-minute window), error, redone_at (TIMESTAMPTZ NULL, M20.4, revision `8b6f2d4e1a73`: when the copy was last redone from a freshly fetched source — `redo-copies` or the encode's one automatic redo; set, that retry is spent, §5.4e Redo). M19 T1 (FR-P6), revision `2abfab654407`, which also seeds `offline_idle_days`. **No path column**: the file is `DATA_DIR/offline/<episode_id>.mp4` (`media/names.offline_path_for`). No progress column: progress is the `offline_encode` job's payload |
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once, drives retention grace), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at |
 | `show_pins` | user_id (FK CASCADE) + anime_id (FK CASCADE) (PK pair), created_at. A user's "Keep files" on a show (FR-T8, M20 T8, revision `911eca1dfc62`): delete after watching skips every episode of a show with **any** row here; only the floor eviction (§5.7) may still remove them. Written only by `services/pins.py` (`INSERT … ON CONFLICT DO NOTHING` / `DELETE`, both idempotent). No index beyond the key: a few rows per user, read whole once an hour |
@@ -1941,7 +1941,12 @@ drift for an episode with no rendition.
   streams' own lengths (`duration` or Matroska's `DURATION` tag), the
   container's only when neither states one, because the container is as long
   as its longest stream and that is often an unchosen dub — and `moov` before
-  `mdat` read from the top-level box headers); then, for a `request`, the
+  `mdat` read from the top-level box headers). A source with **no** duration
+  (`chosen_duration` None — a real source always has the container's) is
+  refused as `the source reports no duration` (`NO_SOURCE_DURATION`), by
+  `check_probe` and, before any encode is spent, by `encode_copy` (2026-10-29:
+  a half-downloaded pack member reported none, the check was skipped, and a
+  9.9 MB copy went to the iPad); then, for a `request`, the
   episode row is re-read `FOR UPDATE` (the lock `request_copy` and
   `delete_episode_files` take) and the copy is dropped if the episode left
   `ready` meanwhile; `os.replace` onto `offline/<id>.mp4`; row → `ready` with
@@ -1951,6 +1956,18 @@ drift for an episode with no rendition.
   is gone, a source with no video stream, an ffmpeg without libass, a finished
   encode that fails validation (`CopyRefused`) — is committed `failed` and the
   job ends without a retry, since another full encode would fail the same way.
+  **A broken source is redone once** (owner, 2026-10-29): the source gone
+  (`SOURCE_GONE_MESSAGE`), ffprobe returning nothing (`plan.SourceUnreadable`,
+  a `PlanError`), no source duration, or a copy short of its source
+  (`offline.source_problem` over the refusal; `BrokenSource`, a
+  `CopyRefused`) — after `_fail` commits, `_redo_once` calls
+  `trips.redo.redo_after_broken_source(…, exclude_job_id=<this job>)` and
+  commits: it acts only when an **active** trip has a `pending` row on the
+  episode, the copy's `redone_at` is null and the episode is not `ready`, and
+  then is `redo_copies` for that episode (§5.4e Redo), logging `offline copy
+  redone after a broken source`. A redo that raises is rolled back and
+  re-raised, so the runner retries the job. Wrong codec, height, audio or
+  faststart, and every encoder failure (non-zero exit, timeout), never redo.
   A `queued`/`preparing` row with no live job behind it (attempts used up,
   row gone) reads `failed` to clients and is re-queued by the next request.
   `settings_key` is recorded only: a settings change re-makes nothing by
@@ -3645,6 +3662,41 @@ above), so what is settled here is the **copy** — file and row — and the
   the device may hold that copy, and the ETag rule decides. Without the
   flag nothing copyless is touched (production 2026-10-28: trip 4's
   episodes 13 and 14 had been settled; only 12 still had its stale row).
+- **Redo** (owner, 2026-10-29: trip 5's copies were encoded from
+  half-downloaded pack files — one 9.9 MB copy delivered, five `failed` on
+  `matched` episodes whose files were gone, nothing to restart them).
+  `trips.redo.redo_copies(session, settings, *, trip, now, episode_ids=None,
+  failed=False, exclude_job_id=None) → RedoReport{trip_id, redone, skipped,
+  sources_removed, repended}`, run by `python -m arc.cli redo-copies --trip ID
+  (--episodes 1,3,4 | --failed)` (numbers mapped through the trip's rows; one
+  commit; `trip 5: N redone (episodes …), N sources removed, N re-pended, N
+  skipped` and one line per skip; an unknown or ended trip exits 1). Selects
+  the named trip's rows whose copy is `failed` and/or the episode ids named;
+  `TripConflict(trip_not_active)` unless active. **Skipped** with a reason:
+  not in the trip, `cancelled`/`expired` (`ended`), delivered with
+  `released_at` (`released`), completed by the trip's user (`watched`), a
+  live `offline_encode` other than `exclude_job_id` (`encoding`). Locks as
+  Remake: every active trip holding a selected episode `FOR UPDATE` in id
+  order, their rows, then the episodes. Per episode: (a) `offline/<id>.mp4`
+  unlinked (path from the id, re-checked against the roots); a copy row goes
+  `queued` with `error`, `media_file_id`, `size`, `etag`, `ready_at` cleared
+  and `redone_at = now` — no row is created where the settle took it; (b) a
+  `ready` episode keeps its source and gets `enqueue_offline_encode(why=trip)`;
+  otherwise, when anything is linked or claimed, `retention.delete.
+  delete_episode_files(…, keep_copy=True, exclude_job_id=)` with the copy out
+  of the targets — a single's torrent removed (remembered, FR-T3), a pack's
+  file given back (`release_files`, `qbit_reselect`), `media_files` rows gone,
+  episode → `not_wanted`; (c) in every active trip, a `delivered`, unreleased,
+  unwatched row → `repend(row, available_at=now)` and a `pending` row →
+  `available_at = now` (Remake's clock rule). Then one `compute_wants`: the
+  pending trip row revives the want (a `trip ended` drop included) and the
+  episode goes `not_wanted → wanted`, is searched and fetched; `link` queues
+  `offline_encode(why=trip)` for the matched trip episode and the handler
+  makes the `queued` row from the new source; `trip_copy_ready` then releases
+  the source as for any trip copy. `delete_episode_files`'s in-flight guard
+  and `copies.encoding_episode_ids` take `exclude_job_id` for the encode
+  redoing its own episode. Flushed, not committed; no list entry or MAL
+  write.
 - **Authorisation** (`media.copies.may_fetch_copy`, asked by
   `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
   account; a `ready` episode's copy → any account; a non-`ready` episode's →
@@ -4912,7 +4964,7 @@ Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
 heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
 `caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
 `api` container → up. Ops runbook: `deploy/README.md`; CLI:
-`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media,remake-copies}`.
+`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media,remake-copies,redo-copies}`.
 `demo-list` takes `--user-email`, one or more `--add TITLE`, `--status`
 (any `ListStatus` value, default `watching`), `--progress N` and `--demo`
 (sets `users.is_demo`): **one status group and one progress per invocation**,
@@ -7313,3 +7365,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-28 (owner) — **Any number of active trips per user, one per show; the device's room is the limit; the copy size estimate comes from the server** (§4 `trips`, §5.4d, §5.4e, §5b; spec FR-A12, FR-S9 item 8). Revision `5d3e9a7c1b20` (on `c4b8e1f2a9d6`) swaps `ux_trips_one_active_per_user` for `ux_trips_one_active_per_show` on `(user_id, anime_id) WHERE state = 'active'`; its downgrade raises while a user has more than one active trip. `trips.create.active_trip(session, user_id, anime_id)` and `active_trips(session, user_id)`; 409 `trip_active` now means "this show already has a trip". `GET /api/trips` (list, oldest first) replaces `GET /api/trips/current`. New `trips/estimate.py` (`copy_estimate_bytes`, median of the newest 20 current-key ready copies; `names.FALLBACK_COPY_BYTES` 260 MB, the 1080p HEVC CRF 28 copies measuring ~254 MB) on `TripLimits`. Everything else already reasoned per episode across all trips (delivered accounting, the device skip, `drop_queued_copies`/`_drop_unneeded_encode`, the storage hold, the sweep, `_trip_wants`, keyed per (user, episode) — safe because two active trips of one user never share an episode) and is unchanged; the copy priority stays `600 + 10 × position` within its own trip. Client: `useActiveTrips` (`['trips','active']`), `autoKeep(trips, manager)`, the show card's room check sets aside the other trips' remaining episodes at the server's estimate (`otherTripsReserve`, `TRIP_FIT_MARGIN` 1.1), the Downloads page lists every active trip. No new dependency, no new MAL-writing code.
 - 2026-10-28 — Many-trips review fixes (§5.4d, §5b). The estimate is on `TripLimits` only (no client read it on `TripOut`) and is not queried for the demo account. `otherTripsReserve` applies `TRIP_FIT_MARGIN` to the reserved episodes as well as the new trip's (`fitBytes`), counts only what is still to come of a downloading or paused record, and skips an episode the viewer declined on this device.
 - 2026-10-28 — `remake-copies --delivered-before ISO8601` (§5.4e Remake; spec FR-A12): `remake_stale(…, delivered_before=)` also re-pends a delivered, unreleased, unwatched row delivered before the time whose copy the settle already deleted (no copy row); a current copy row still wins; naive timestamps read as UTC. No schema change, no new dependency, no MAL-writing code.
+- 2026-10-29 (owner) — **Redo a trip's copies; a broken source is redone once** (§4 `offline_copies.redone_at`, §5.3b, §5.4e Redo, §9 CLI; spec FR-P6, FR-A12; production trip 5: copies encoded from half-downloaded pack files). New `trips/redo.py` (`redo_copies`, `redo_after_broken_source`, `RedoReport`) and `arc.cli redo-copies --trip ID (--episodes N,N | --failed)`; `offline_copies.redone_at` (revision `8b6f2d4e1a73`). `offline_encode` classifies source problems (`SOURCE_GONE_MESSAGE`, `plan.SourceUnreadable`, `NO_SOURCE_DURATION`, shortfall → `BrokenSource`) and redoes the episode once when an active trip waits on it; encoder failures never. `check_probe` refuses `duration=None` (`the source reports no duration`) and `encode_copy` refuses it before encoding. `delete_episode_files` and `encoding_episode_ids` take `exclude_job_id`. No new dependency, no MAL-writing code.
