@@ -114,20 +114,26 @@ export async function readFile(name: string): Promise<File | null> {
 
 /**
  * `episode-<digits>.mp4` and `episode-<digits>-o.mp4`, and either with `-b`
- * (the second slot a replacement downloads into, {@link altNameFor}): the
- * only names Arc ever writes.
+ * or `-c` (the other slots a replacement downloads into, {@link slotsFor}):
+ * the only names Arc ever writes.
  */
-export const EPISODE_FILE = /^episode-\d+(?:-o)?(?:-b)?\.mp4$/
+export const EPISODE_FILE = /^episode-\d+(?:-o)?(?:-[bc])?\.mp4$/
 
 /**
- * The other slot of a copy's file: `episode-9-o.mp4` ↔ `episode-9-o-b.mp4`.
- * A replacement of a held copy downloads into the slot the copy is not in,
- * so the copy stays playable until the new one is whole (M20.4 E).
+ * Every slot a copy's file may live in, its plain name first:
+ * `episode-9-o.mp4`, `episode-9-o-b.mp4`, `episode-9-o-c.mp4`. A replacement
+ * of a held copy downloads into a slot no record names, so the copy stays
+ * playable until the new one is whole — and another account's copy in a
+ * slot is never cut (M20.4 E).
  */
+export function slotsFor(name: string): string[] {
+  const base = name.replace(/-[bc]\.mp4$/, '.mp4')
+  return [base, base.replace(/\.mp4$/, '-b.mp4'), base.replace(/\.mp4$/, '-c.mp4')]
+}
+
+/** The first slot of `name` other than itself: what a replacement tries first. */
 export function altNameFor(name: string): string {
-  return name.endsWith('-b.mp4')
-    ? name.replace(/-b\.mp4$/, '.mp4')
-    : name.replace(/\.mp4$/, '-b.mp4')
+  return slotsFor(name).find((slot) => slot !== name) ?? name
 }
 
 /**

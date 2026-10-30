@@ -503,9 +503,10 @@ async function download(
       if (startOver) {
         const from = file.getSize()
         file.truncate(0)
-        file.flush()
+        // Cut: said at once, whatever the flush after it does.
         startOver = false
         if (from > 0) deps.post({ type: 'truncated', name, from })
+        file.flush()
       }
       file.write(bytes, { at: offset })
       file.flush()
@@ -542,8 +543,9 @@ async function download(
         // Part of the chunk landed before the handle closed (or the old file
         // was never cut): start it again.
         file.truncate(offset)
-        file.flush()
         if (startOver && offset === 0) deps.post({ type: 'truncated', name, from: size })
+        startOver = false
+        file.flush()
       }
       startOver = false
       file.write(bytes, { at: offset })

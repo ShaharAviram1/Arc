@@ -167,6 +167,8 @@ self.onmessage = (event: MessageEvent<WorkerCommand>) => {
     }
     return
   }
+  // A command this build does not know (a newer page, an older worker): ignored.
+  if ((command as { cmd?: unknown }).cmd !== 'download') return
   if (current === null) {
     start(command)
     return

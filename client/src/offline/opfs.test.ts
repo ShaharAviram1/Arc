@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { altNameFor, EPISODE_FILE, fileSize } from '@/offline/opfs'
+import { altNameFor, EPISODE_FILE, fileSize, slotsFor } from '@/offline/opfs'
 
 /** What a size read can say (M20.4 E): a size, missing, or "could not ask". */
 
@@ -53,8 +53,14 @@ describe('altNameFor', () => {
   it('alternates a copy between its two slots, both swept by name', () => {
     expect(altNameFor('episode-9-o.mp4')).toBe('episode-9-o-b.mp4')
     expect(altNameFor('episode-9-o-b.mp4')).toBe('episode-9-o.mp4')
+    expect(altNameFor('episode-9-o-c.mp4')).toBe('episode-9-o.mp4')
+    expect(slotsFor('episode-9-o-c.mp4')).toEqual([
+      'episode-9-o.mp4',
+      'episode-9-o-b.mp4',
+      'episode-9-o-c.mp4',
+    ])
     expect(altNameFor('episode-9.mp4')).toBe('episode-9-b.mp4')
-    for (const name of ['episode-9-o.mp4', 'episode-9-o-b.mp4', 'episode-9-b.mp4']) {
+    for (const name of ['episode-9-o.mp4', 'episode-9-o-b.mp4', 'episode-9-o-c.mp4']) {
       expect(EPISODE_FILE.test(name)).toBe(true)
     }
     expect(EPISODE_FILE.test('episode-9-x.mp4')).toBe(false)

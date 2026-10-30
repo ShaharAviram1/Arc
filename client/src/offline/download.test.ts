@@ -896,3 +896,25 @@ describe('hashFile', () => {
     await expect(hashFile(10, () => Promise.resolve(new Uint8Array(0)))).rejects.toThrow()
   })
 })
+
+describe('runDownload says when it cut a file (M20.4 E)', () => {
+  it('posts truncated even when the flush after the cut throws', async () => {
+    const handle = new FakeHandle(content(30, 3))
+    let flushes = 0
+    handle.flush = () => {
+      flushes += 1
+      if (flushes === 1) throw new DOMException('closed', 'InvalidStateError')
+    }
+    const file = content(25)
+    const { deps, messages } = harness({
+      fetch: rangeServer(() => ({ bytes: file, etag: '"a"' })),
+      handle,
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(messages.filter((m) => m.type === 'truncated')).toEqual([
+      { type: 'truncated', name: COMMAND.name, from: 30 },
+    ])
+  })
+})

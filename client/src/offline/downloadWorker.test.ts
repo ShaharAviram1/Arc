@@ -110,4 +110,13 @@ describe('the download worker', () => {
       sha256: null,
     })
   })
+
+  it('ignores a command it does not know', () => {
+    send({ cmd: 'nonsense', name: 'episode-1.mp4' } as unknown as WorkerCommand)
+    send(download('episode-1.mp4', 1))
+    send(download('episode-2.mp4', 2))
+    send(download('episode-3.mp4', 3))
+
+    expect(posted).toEqual([{ type: 'released', name: 'episode-2.mp4', run: 2 }])
+  })
 })
