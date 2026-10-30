@@ -45,7 +45,11 @@ export interface LocalCopy {
   /** False until the device has been asked; the player waits for it. */
   checked: boolean
   url: string | null
-  /** The file would not play: drop it and stream instead (when there is a stream). */
+  /**
+   * The element refused the file: it is checked, and played once more from a
+   * new URL when it checks out (M20.4 E); otherwise — or the second time —
+   * the page streams instead, when there is a stream.
+   */
   fail: () => void
 }
 
@@ -77,10 +81,12 @@ export function useLocalCopy(episodeId: number, manager: DownloadManager = downl
     checked: current.checked,
     url: current.url,
     fail: () => {
-      // Not re-minted: the record becomes `failed` / `unreadable` with a Try
-      // again, and the page streams when there is a stream (FR-S9).
-      manager.markUnplayable(episodeId)
-      setState({ id: episodeId, checked: true, url: null })
+      // The manager checks the file before it believes the error: a fresh URL
+      // for a file that checks out, else `null`, and the page streams when
+      // there is a stream (FR-S9). The old URL stays until it answers.
+      void manager.playbackFailed(episodeId).then((url) => {
+        setState((now) => (now.id === episodeId ? { id: episodeId, checked: true, url } : now))
+      })
     },
   }
 }
