@@ -74,6 +74,19 @@ TRIP_SWEEP: Final[str] = "trip_sweep"
 OFFLINE_SETTLE_PRIORITY: Final[int] = TRIP_RELEASE_PRIORITY
 TRIP_SWEEP_PRIORITY: Final[int] = 190
 
+#: Off since 2026-10-30 (orchestrator's call under the owner's "a held copy is
+#: never lost mid-trip"; was on since 2026-10-06): end a trip ``finished``
+#: inside the confirmation that leaves nothing pending. Off, a trip stays
+#: active until its ``deadline_at`` — so the server keeps its copies (the
+#: settle's keep rule) and re-offers a lost one for the whole trip — and the
+#: hourly sweep ends it then (``finished`` when every row was delivered, else
+#: ``expired``), or the user cancels it, or starts the next trip on the show
+#: once nothing is pending (:func:`~arc.services.trips.create.create_trip`).
+#: Setting it back to ``True`` restores the old behaviour in full: the
+#: confirmation and the sweep end a trip as soon as nothing is pending,
+#: ``finished`` when anything was delivered.
+FINISH_ON_LAST_CONFIRM: bool = False
+
 #: The least time a delivered copy stays after the latest confirmation on the
 #: episode (owner's small call, 2026-10-05). Since 2026-10-30 a copy is kept
 #: while its active trip's device holds it unwatched (the settle's keep rule),
@@ -176,6 +189,7 @@ async def enqueue_trip_sweep(session: AsyncSession) -> Job:
 
 __all__ = [
     "FALLBACK_COPY_BYTES",
+    "FINISH_ON_LAST_CONFIRM",
     "OFFLINE_SETTLE",
     "OFFLINE_SETTLE_PRIORITY",
     "TRIP_BATCH_MIN",

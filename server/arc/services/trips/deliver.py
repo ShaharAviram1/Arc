@@ -25,10 +25,12 @@ TripNotFound`, so a trip id is never confirmed to exist):
   create.TripConflict`, ``copy_mismatch``; logged with both values) and
   changes nothing, so the device downloads it again. A confirmation without
   them (a client from before) is taken on the length check, as before, and
-  a copy made before 2026-10-30 has no hash to compare. When the
-  confirmation leaves nothing of the trip pending, the trip ends
-  ``finished`` there and then (:data:`FINISH_ON_LAST_CONFIRM`) so the next
-  one can start at once, and its copies' settles are queued.
+  a copy made before 2026-10-30 has no hash to compare. A confirmation
+  that leaves nothing of the trip pending no longer ends it (2026-10-30;
+  :data:`~arc.services.trips.names.FINISH_ON_LAST_CONFIRM`, off): the trip
+  stays active until its deadline, so its copies stay on the server. With
+  the switch on, the trip ends ``finished`` there and then and its copies'
+  settles are queued.
 * **released** — the device deleted its copy. ``released_at`` is stamped on a
   delivered row: trip bookkeeping (the phase, the "again" offer) and nothing
   else. A delivered episode is **not** kept out of the user's window (owner,
@@ -60,6 +62,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import TypeGuard
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,6 +82,7 @@ from arc.models import (
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.media.copies import file_matches
 from arc.services.media.names import offline_path_for
+from arc.services.trips import names
 from arc.services.trips.cancel import drop_queued_copies
 from arc.services.trips.create import (
     COPY_MISMATCH,
@@ -91,12 +95,6 @@ from arc.services.trips.create import (
 from arc.services.trips.names import TRIP_SETTLE_DELAY, enqueue_trip_settles
 from arc.services.trips.rules import pending_episode_ids
 from arc.services.trips.sweep import end_if_nothing_pending
-
-#: On (owner, 2026-10-06; kept a constant so it can be turned off): end the
-#: trip ``finished`` inside the confirmation that leaves nothing pending, so
-#: the user can start the next one at once. The hourly sweep stays the safety
-#: net for every other ending.
-FINISH_ON_LAST_CONFIRM: bool = True
 
 log = logging.getLogger(__name__)
 
@@ -180,12 +178,15 @@ def confirmed_state(state: TripEpisodeState, *, trip_active: bool) -> TripEpisod
     return state
 
 
-def copy_mismatch(copy: OfflineCopy | None, *, sha256: str | None, size: int | None) -> bool:
+def copy_mismatch(
+    copy: OfflineCopy | None, *, sha256: str | None, size: int | None
+) -> TypeGuard[OfflineCopy]:
     """Whether what a device says it holds is not this ``ready`` copy. Pure.
 
     Only a ``ready`` copy is compared, and only on what both sides have: a
     device that sends no hash (a client from before 2026-10-30) or a copy
     made before hashes were kept is judged on the size alone, or not at all.
+    ``None`` for either means "unknown", never a mismatch.
     """
     if copy is None or copy.state is not OfflineCopyState.READY:
         return False
@@ -225,7 +226,7 @@ async def confirm_delivered(
         )
         await session.flush()
         return row
-    if copy is not None and copy_mismatch(copy, sha256=sha256, size=size):
+    if copy_mismatch(copy, sha256=sha256, size=size):
         log.warning(
             "trip copy confirmation refused: the device's bytes are not the copy",
             extra={
@@ -258,7 +259,7 @@ async def confirm_delivered(
     if changed:
         dropped = await _drop_unneeded_encode(session, episode_id)
         await enqueue_compute_wants(session)
-        if FINISH_ON_LAST_CONFIRM:
+        if names.FINISH_ON_LAST_CONFIRM:
             await end_if_nothing_pending(session, trip, now=now)
         if trip.state is not TripState.ACTIVE:
             # The trip has ended (here, or before this late confirmation):
@@ -383,7 +384,6 @@ async def ask_again(
 
 
 __all__ = [
-    "FINISH_ON_LAST_CONFIRM",
     "ask_again",
     "confirm_delivered",
     "confirmed_state",

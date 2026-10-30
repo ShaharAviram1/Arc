@@ -123,12 +123,14 @@ async def test_delivering_one_trip_leaves_the_other_alone(
 
     await db_session.refresh(one)
     await db_session.refresh(two)
-    assert one.state is TripState.FINISHED, "its last confirmation ends it"
+    # Since 2026-10-30 a trip is held until its deadline, not ended by its
+    # last confirmation: both stay active, the other untouched.
+    assert one.state is TripState.ACTIVE, "held until its deadline"
     assert two.state is TripState.ACTIVE
     assert set((await states(db_session, two)).values()) == {TripEpisodeState.PENDING}
     assert (await delivered_to(db_session, [user.id]))[user.id] == {e.id for e in first[:2]}
     assert await pending_episode_ids(db_session) >= {e.id for e in second[:2]}
-    assert [trip.id for trip in await active_trips(db_session, user.id)] == [two.id]
+    assert [trip.id for trip in await active_trips(db_session, user.id)] == [one.id, two.id]
 
     await release_delivered(
         db_session, user=user, trip_id=one.id, episode_id=first[0].id, now=now()

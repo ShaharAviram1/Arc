@@ -12,10 +12,13 @@ settle's (:mod:`arc.services.trips.settle`):
    route serves only ``pending`` and ``delivered`` rows), so there is no hour
    to wait for — a download still running at that moment ends with a 404, by
    design.
-2. **The end of a trip.** An active trip with no ``pending`` row left ends:
-   ``finished`` when at least one of its episodes reached a device, else
-   ``expired`` (:func:`ending_state`; "reached a device" is ``delivered_at``
-   set, whatever the row's state); ``ended_at`` is stamped. Its rows stay as
+2. **The end of a trip.** An active trip with no ``pending`` row left ends
+   once its ``deadline_at`` has passed (2026-10-30: until then it holds its
+   delivered copies, :data:`~arc.services.trips.names.FINISH_ON_LAST_CONFIRM`
+   off): ``finished`` when every row was delivered (released or not), else
+   ``expired`` (:func:`ending_state`); ``ended_at`` is stamped. With the
+   switch on, it ends as soon as nothing is pending, ``finished`` when at
+   least one episode reached a device (``delivered_at`` set). Its rows stay as
    they are, as history. The trips are locked first and each one's rows read
    after, so an "again" committed meanwhile keeps its trip active.
 3. **The safety net.** A copy of an episode that is not ``ready`` (nor
@@ -54,6 +57,7 @@ from arc.models import (
     TripState,
 )
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.trips import names
 from arc.services.trips.names import enqueue_offline_settle
 from arc.services.trips.rules import held_episode_ids, pending_episode_ids, trip_copy_days
 
@@ -77,13 +81,25 @@ def expiry_due(
     return deadline_at <= now
 
 
-def ending_state(*, any_delivered: bool) -> TripState:
+def ending_state(
+    *, any_delivered: bool, all_delivered: bool, finish_on_last_confirm: bool
+) -> TripState:
     """How a trip with nothing pending ends. Pure.
 
-    ``finished`` when some episode reached a device; ``expired`` when none did
-    (every row ran out its clock).
+    Since 2026-10-30 (``finish_on_last_confirm`` off): ``finished`` when every
+    row is delivered, else ``expired``. With it on, as before: ``finished``
+    when some episode reached a device, ``expired`` when none did.
     """
-    return TripState.FINISHED if any_delivered else TripState.EXPIRED
+    done = any_delivered if finish_on_last_confirm else all_delivered
+    return TripState.FINISHED if done else TripState.EXPIRED
+
+
+def may_end(*, deadline_at: datetime, now: datetime, finish_on_last_confirm: bool) -> bool:
+    """Whether a trip with nothing pending may end now. Pure.
+
+    At once with the switch on; otherwise only once its deadline has passed.
+    """
+    return finish_on_last_confirm or deadline_at <= now
 
 
 @dataclass(slots=True)
@@ -124,15 +140,22 @@ async def _expire(session: AsyncSession, sweep: TripSweep, *, now: datetime) -> 
 
 
 async def end_if_nothing_pending(
-    session: AsyncSession, trip: Trip, *, now: datetime
+    session: AsyncSession, trip: Trip, *, now: datetime, any_time: bool = False
 ) -> TripState | None:
     """End an active trip, already locked ``FOR UPDATE``, if no row is pending.
 
     Asked in a statement of its own **after** the lock is held, so an "again"
     that re-pended the last row and committed while this waited is seen. Rows
     are left as they are. Returns the new state, or ``None`` when it stays.
+    Before its deadline only with the switch on (:func:`may_end`) or
+    ``any_time`` (the next trip on the show is starting).
     """
     if trip.state is not TripState.ACTIVE:
+        return None
+    switch = names.FINISH_ON_LAST_CONFIRM
+    if not any_time and not may_end(
+        deadline_at=trip.deadline_at, now=now, finish_on_last_confirm=switch
+    ):
         return None
     pending = await session.scalar(
         select(TripEpisode.episode_id)
@@ -146,7 +169,19 @@ async def end_if_nothing_pending(
         .where(TripEpisode.trip_id == trip.id, TripEpisode.delivered_at.is_not(None))
         .limit(1)
     )
-    trip.state = ending_state(any_delivered=delivered is not None)
+    undelivered = await session.scalar(
+        select(TripEpisode.episode_id)
+        .where(
+            TripEpisode.trip_id == trip.id,
+            TripEpisode.state != TripEpisodeState.DELIVERED,
+        )
+        .limit(1)
+    )
+    trip.state = ending_state(
+        any_delivered=delivered is not None,
+        all_delivered=undelivered is None,
+        finish_on_last_confirm=switch,
+    )
     trip.ended_at = now
     await session.flush()
     return trip.state
@@ -225,5 +260,6 @@ __all__ = [
     "end_if_nothing_pending",
     "ending_state",
     "expiry_due",
+    "may_end",
     "sweep_trips",
 ]

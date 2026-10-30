@@ -50,6 +50,7 @@ from arc.services.media.download import stat_etag
 from arc.services.media.names import OFFLINE_ENCODE, offline_path_for
 from arc.services.retention.delete import delete_copy
 from arc.services.trips import jobs as trip_jobs  # noqa: F401  (registers the handlers)
+from arc.services.trips import names as trip_names
 from arc.services.trips.create import TRIP_NOT_ACTIVE, TripConflict, TripNotFound, create_trip
 from arc.services.trips.deliver import ask_again, confirm_delivered, release_delivered
 from arc.services.trips.hooks import stamp_available, trip_copy_ready
@@ -75,6 +76,25 @@ from tests.acquisition_helpers import (
 from tests.retention_helpers import write_source_file
 
 pytestmark = pytest.mark.pg
+
+
+@pytest.fixture(autouse=True)
+def _finish_on_last_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the switch on (its behaviour before 2026-10-30).
+
+    They are about the settle, the sweep and "again" once a trip has ended,
+    which the one-episode trips here reach at their confirmation. The default
+    since 2026-10-30 — a trip held until its deadline — is covered by
+    :mod:`tests.test_trip_verified`; a test that wants it asks for
+    ``switch_off``.
+    """
+    monkeypatch.setattr(trip_names, "FINISH_ON_LAST_CONFIRM", True)
+
+
+@pytest.fixture
+def switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trip_names, "FINISH_ON_LAST_CONFIRM", False)
+
 
 FINISHED = "FINISHED"
 
@@ -191,8 +211,17 @@ def test_expiry_is_counted_from_the_copy_else_from_the_deadline() -> None:
 
 
 def test_a_trip_ends_finished_if_anything_reached_a_device() -> None:
-    assert ending_state(any_delivered=True) is TripState.FINISHED
-    assert ending_state(any_delivered=False) is TripState.EXPIRED
+    def ending(any_delivered: bool, all_delivered: bool, switch: bool) -> TripState:
+        return ending_state(
+            any_delivered=any_delivered, all_delivered=all_delivered, finish_on_last_confirm=switch
+        )
+
+    assert ending(True, False, True) is TripState.FINISHED
+    assert ending(False, False, True) is TripState.EXPIRED
+    # Since 2026-10-30 (switch off) at the deadline: every row or nothing.
+    assert ending(True, True, False) is TripState.FINISHED
+    assert ending(True, False, False) is TripState.EXPIRED
+    assert ending(False, False, False) is TripState.EXPIRED
 
 
 def test_settle_waits_an_hour_from_the_latest_confirmation() -> None:
@@ -669,17 +698,18 @@ async def test_a_trip_finishes_at_its_last_confirmation(
 async def test_the_sweep_finishes_a_trip_when_confirmations_do_not(
     db_session: AsyncSession, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The hourly sweep is the safety net (the switch off, or a row expired)."""
-    from arc.services.trips import deliver
+    """With the switch off (the default since 2026-10-30) the sweep ends a
+    trip with nothing pending at its deadline, and not before."""
 
-    monkeypatch.setattr(deliver, "FINISH_ON_LAST_CONFIRM", False)
+    monkeypatch.setattr(trip_names, "FINISH_ON_LAST_CONFIRM", False)
     rows = await show(db_session, 985030)
     user, trip = await trip_with_copies(db_session, settings, rows, "finish-sweep@arc.test")
     await confirm_delivered(
         db_session, user=user, trip_id=trip.id, episode_id=rows[0].id, etag=None, now=now()
     )
 
-    swept = await sweep_trips(db_session, now=now())
+    assert (await sweep_trips(db_session, now=now())).ended == {}, "held until the deadline"
+    swept = await sweep_trips(db_session, now=trip.deadline_at + timedelta(seconds=1))
 
     assert swept.ended == {trip.id: TripState.FINISHED}
 
@@ -1017,7 +1047,7 @@ def test_the_trip_touch_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     assert copies.touch_interval(trip_only) == copies.SERVED_TOUCH_SECONDS
 
 
-async def test_finishing_on_the_last_confirmation_is_on(
+async def test_finishing_on_the_last_confirmation_is_on_when_switched_on(
     db_session: AsyncSession, settings: Settings
 ) -> None:
     rows = await show(db_session, 985028)
