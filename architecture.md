@@ -3099,7 +3099,15 @@ pure stepper, refusal and row-status rules), `components/Trip.tsx`
   and Downloads, where a foreign trip reads "Kept on another device" (panel
   rows via `tripRowStatus(…, elsewhere)`, episode rows with no keep button,
   a muted Downloads group) and keeps only Cancel trip; `useCreateTrip` and
-  `useAskAgain` send `device_id`.
+  `useAskAgain` send `device_id`. Until the device id has been read (one
+  IndexedDB read, not awaited by the launch) a trip that names a device is
+  `tripPlace` `unknown`: drawn neutral ("Checking this device…", no Ask
+  again, keep, Choose pack or out-of-space banner), never guessed to be this
+  device's. A download of a trip another device has since claimed is no
+  longer resumed by auto-keep and stays paused here (the viewer may delete it;
+  a finished copy stays playable). Downloads with nothing on the device but
+  another device's trips says "Nothing is downloaded to this device; the
+  trips below are kept on another device."
 - **A copy re-made on the server** (owner, 2026-10-28; §5.4e "Remake").
   `TripEpisodeOut.etag` is the copy's ETag whenever `url` is set. A
   `downloaded` **small** record with a non-null `etag` that differs from a
@@ -3610,7 +3618,15 @@ above), so what is settled here is the **copy** — file and row — and the
   `device_id` null is **claimed** inside the same transaction by the first
   confirmation or "again" that names a device (logged "trip claimed by a
   device") — the one-way migration for trips made before the column; a
-  release never claims. `confirm_delivered` (`POST …/delivered {etag?, device_id?}` → 204): a `pending`
+  release never claims, and neither does an "again" refused for an ended
+  trip (the claim follows the `trip_not_active` check). The operator can set
+  or clear the device directly (`arc.cli trip-device`, §8). Two devices
+  confirming an unclaimed trip at once serialise on the trip lock: the first
+  claims it, the second gets the 409. **Deploy note:** reload every client
+  after a deploy of this change — an old client cannot start a trip (422, it
+  sends no `device_id`) and, on a claimed trip, retries its refused
+  confirmation every tick until it is updated (the old client does not treat
+  409 as final). `confirm_delivered` (`POST …/delivered {etag?, device_id?}` → 204): a `pending`
   row goes `delivered`, and so does an `expired` one **while the trip is
   still active** (`confirmed_state`, pure); a `cancelled` row, or an
   `expired` row of an ended trip, keeps its state and only gets
@@ -5056,7 +5072,8 @@ Volumes: `arc_data` (`/data`: downloads, renditions, manual, fonts, worker
 heartbeat), `pgdata`, `backups`, `qbit_config`, `caddy_data`,
 `caddy_config`. `make up` = build → `alembic upgrade head` in a one-off
 `api` container → up. Ops runbook: `deploy/README.md`; CLI:
-`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media,remake-copies,redo-copies}`.
+`python -m arc.cli {status,invite,warm-catalogue,import-catalogue,demo-list,recs,prune-unfinished-media,remake-copies,redo-copies,trip-device}`.
+`trip-device --trip ID (--device UUID | --clear)` (owner, 2026-10-30; `trips.device.assign_device`, v4 checked by `canonical_device_id`, which the API's `parse_device_id` also uses) sets or clears an **active** trip's `device_id` for any user, logs "trip assigned to a device by the operator", and exits 1 for a malformed id or an unknown or ended trip — the way to give a trip to a device before any client claims it, or to re-home the trips of a device whose storage was reset (it comes back with a new id).
 `demo-list` takes `--user-email`, one or more `--add TITLE`, `--status`
 (any `ListStatus` value, default `watching`), `--progress N` and `--demo`
 (sets `users.is_demo`): **one status group and one progress per invocation**,
@@ -7464,3 +7481,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-29 — M20.4 Task C: **a stopped pack with a wanted file still to fetch is started** (§5.1 step 4; spec FR-A11; production torrent 112 sat `stoppedDL` at 20 % after `qbit_reselect` started it mid-check). `_poll_batch` returns `BatchPoll.start` for a pack in `SETTLED_STATES` with a pending wanted row when it is not checking, not waiting on a recheck and has no re-selection queued; `poll_qbit` starts it after the flush and logs once per entry into the state (`_STARTED`). Started directly rather than through `qbit_reselect`: a wanted row is KEEP by `batch.disposition`, so the job would only rewrite an unchanged selection. The every-file-in stop and the stall rule are unchanged and decide first. No schema change, no new dependency.
 - 2026-10-29 — M20.4 Task C after review (§5.1 step 4): the start waits out a pause and the storage hold (FR-T6), skips a pack whose only pending files are a recheck's absent ones or whose rechecks were given up on, counts only rows with an episode, and stops after `START_ATTEMPTS` (10) ignored starts with one error line until the memo expires a day after the first ask (not handed to the stall rule); starts go after the stops; a pack running with nothing wanted is stopped (withdraw race). Orchestrator's call: a stop made by hand in the qBittorrent WebUI is not respected — Arc is the only operator of packs on its host.
 - 2026-10-30 (owner) — **A trip belongs to the device that started it** (§4 `trips.device_id`, §5.4d Auto-keep, §5.4e Create and Delivery, §5b; spec FR-A12, FR-S9 item 8). Several open devices each ran auto-keep on the same trip and fought over its rows (a copy settled after one device's confirmation never reached the iPad; re-made copies were fetched everywhere). Revision `3f7a1c9e5b42` (on `8b6f2d4e1a73`) adds nullable `trips.device_id` (String(36)). `POST /api/anime/{id}/trip` requires `device_id` (`parse_device_id`, 422); `TripOut.device_id`. `confirm_delivered` / `release_delivered` / `ask_again` take the caller's device and refuse another with 409 `trip_other_device` (`TRIP_OTHER_DEVICE`, `deliver.device_may_act`); a null-device trip is claimed by the first confirm or "again" naming a device (the one-way migration for production's running trip). Device id optional on those three routes so a cached client keeps confirming an unclaimed trip. Client: `DownloadManager.thisDevice()`, `tripIsHere`, `useThisDevice`, foreign trips skipped by `autoKeep` and the room reserve, shown "Kept on another device" with only Cancel; 409 `trip_other_device` ends confirmation without touching the file. No new dependency, no MAL-writing code.
+- 2026-10-30 — Task D after review (§5.4d, §5.4e Delivery, §8 CLI; spec FR-A12, FR-S9 item 8): `arc.cli trip-device --trip ID (--device UUID | --clear)` over new `trips/device.py` (`assign_device`, `canonical_device_id`; `api.devices.parse_device_id` now delegates to it) so production's trip 6 is assigned to the iPad right after the deploy; `ask_again` claims only after the `trip_not_active` check; a pg test races two devices' confirmations of an unclaimed trip (one succeeds, one gets `trip_other_device`, one device recorded). Client: tri-state `tripPlace` (`here`/`elsewhere`/`unknown`) — neutral rows while this device's id is unread; Choose pack only on this device's trip; the launch no longer awaits the id; the Downloads empty state is reworded when only another device's trips are listed. No schema change, no new dependency, no MAL-writing code.
