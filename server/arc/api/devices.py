@@ -36,10 +36,10 @@ from typing import Annotated, Any, Final, Self
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi import Path as PathParam
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, SessionDep, SettingsDep
-from arc.api.trip_schemas import MAX_COPY_BYTES, SHA256_PATTERN
+from arc.api.trip_schemas import MAX_COPY_BYTES, SHA256_PATTERN, HeldVariant
 from arc.models.devices import HOLDING_ETAG_LENGTH
 from arc.services.acquisition.holdings import MAX_HOLDINGS, HoldingDetail, replace_holdings
 from arc.services.devices.reports import MAX_REPORT_BYTES, MAX_REPORT_EVENTS, store_report
@@ -79,6 +79,9 @@ class HeldEpisode(BaseModel):
     etag: str | None = Field(default=None, max_length=HOLDING_ETAG_LENGTH)
     size: int | None = Field(default=None, ge=0, le=MAX_COPY_BYTES)
     sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    #: The small copy (absent = small) or the full-size file. Either one
+    #: counts as held, so neither triggers the lost-copy re-pend.
+    variant: HeldVariant | None = None
 
 
 class HoldingsIn(BaseModel):
@@ -115,7 +118,8 @@ class ReportEvent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    at: AwareDatetime
+    #: ISO 8601, as the device's clock wrote it (``toISOString``); stored as sent.
+    at: datetime
     kind: str = Field(min_length=1, max_length=64)
     episode_id: EpisodeIdField | None = None
     detail: dict[str, Any] | None = None

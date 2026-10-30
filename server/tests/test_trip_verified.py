@@ -290,6 +290,24 @@ async def test_an_old_shape_confirmation_still_works(
     assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.DELIVERED
 
 
+async def test_a_full_size_confirmation_is_not_checked_against_the_copy(
+    owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987008, device_id=IPAD)
+    await hash_copy(api_factory, settings, ids[1])
+    body = {"device_id": IPAD, "sha256": "0" * 64, "size": 1, "variant": "full"}
+
+    response = await owner_client.post(delivered_url(trip_id, ids[1]), json=body)
+
+    assert response.status_code == 204, response.text
+    assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.DELIVERED
+    small = {**body, "variant": "small"}
+    refused = await owner_client.post(delivered_url(trip_id, ids[2]), json=small)
+    assert refused.status_code == 409 and refused.json()["detail"] == COPY_MISMATCH
+    bad = {**body, "variant": "medium"}
+    assert (await owner_client.post(delivered_url(trip_id, ids[2]), json=bad)).status_code == 422
+
+
 # --- Holdings: two shapes -----------------------------------------------------
 
 
@@ -351,7 +369,9 @@ async def test_a_delivered_copy_the_device_lost_is_re_pended(
     before = datetime.now(UTC)
 
     response = await owner_client.put(
-        holdings_url(), json={"episodes": [{"episode_id": ids[2], "size": 1}]}
+        holdings_url(),
+        # A full-size file of an episode is held as well: never re-pended.
+        json={"episodes": [{"episode_id": ids[2], "size": 1, "variant": "full"}]},
     )
 
     assert response.status_code == 204
@@ -567,7 +587,7 @@ async def test_a_report_is_stored_pruned_and_printed(
     [
         {},
         {"events": [{"kind": "x"}]},
-        {"events": [{"at": "2026-10-30T03:30:00", "kind": "naive time"}]},
+        {"events": [{"at": "not a time", "kind": "x"}]},
         {"events": [{"at": "2026-10-30T03:30:00Z", "kind": ""}]},
         {"events": [{"at": "2026-10-30T03:30:00Z", "kind": "x", "extra": 1}]},
         {"events": [{"at": "2026-10-30T03:30:00Z", "kind": "x"}] * 501},

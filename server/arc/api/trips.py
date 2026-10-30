@@ -196,8 +196,9 @@ async def delivered(
             trip_id=trip_id,
             episode_id=episode_id,
             etag=body.etag,
-            sha256=body.sha256,
-            size=body.size,
+            # A full-size file is the device's own choice: nothing to compare.
+            sha256=body.sha256 if body.variant != "full" else None,
+            size=body.size if body.variant != "full" else None,
             now=now(),
             device_id=_device(body.device_id),
         )

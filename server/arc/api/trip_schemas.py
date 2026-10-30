@@ -8,6 +8,7 @@ because both :mod:`arc.api.trips` and :mod:`arc.api.anime_schemas` need it.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
@@ -16,6 +17,9 @@ from arc.models import TripState
 from arc.services.catalog import preferred_title
 from arc.services.trips.phase import TripPhase
 from arc.services.trips.view import TripFacts
+
+#: The two files a device may hold for an episode (owner, 2026-10-30).
+type HeldVariant = Literal["small", "full"]
 
 #: A SHA-256 digest in hex; either case is accepted and compared lower-case.
 SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
@@ -61,6 +65,10 @@ class DeliveredIn(BaseModel):
     device_id: str | None = Field(default=None, min_length=32, max_length=45)
     sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     size: int | None = Field(default=None, ge=0, le=MAX_COPY_BYTES)
+    #: Which file the device holds: the small copy (absent = small) or the
+    #: full-size source it chose instead. Only a small one is checked against
+    #: the copy's hash and size.
+    variant: HeldVariant | None = None
 
 
 class AgainIn(BaseModel):
@@ -181,6 +189,7 @@ class TripOut(BaseModel):
 
 __all__ = [
     "MAX_COPY_BYTES",
+    "HeldVariant",
     "SHA256_PATTERN",
     "AgainIn",
     "DeliveredIn",

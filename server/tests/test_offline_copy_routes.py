@@ -415,6 +415,7 @@ async def test_post_queues_a_copy_and_answers_202(
         "size": None,
         "url": None,
         "codecs": "avc1.640028",
+        "sha256": None,
     }
     again = await client.post(api_path(ready))
     assert again.status_code == 202
@@ -436,6 +437,7 @@ async def test_post_on_an_available_copy_answers_its_url(
         "size": len(COPY_BYTES),
         "url": f"/media/{episode_id}/offline.mp4",
         "codecs": "avc1.640028",
+        "sha256": None,
     }
 
 
@@ -501,6 +503,7 @@ async def test_get_reports_the_progress_of_a_copy_being_made(
         "size": None,
         "url": None,
         "codecs": "avc1.640028",
+        "sha256": None,
     }
 
 
@@ -544,6 +547,7 @@ async def test_the_show_page_carries_each_episodes_copy(
         "size": len(COPY_BYTES),
         "url": f"/media/{ready}/offline.mp4",
         "codecs": "avc1.640028",
+        "sha256": None,
     }
     assert rows[2]["offline"] is None
 
@@ -569,6 +573,7 @@ async def test_a_ready_episode_with_no_source_and_no_copy_reads_unavailable(
         "size": None,
         "url": None,
         "codecs": None,
+        "sha256": None,
     }
 
 
