@@ -3445,6 +3445,73 @@ whether it was granted. A downloaded episode keeps playing after retention
 (§5.7) removed the server's rendition, and after a server re-encode (the
 older copy plays; no hint yet).
 
+**A held copy is never destroyed; delivered means verified (M20.4 E, owner
+2026-10-30, after a trip copy was lost mid-flight).** The client side of the
+rule, all in `offline/downloads.ts`, `offline/download.ts`,
+`offline/downloadWorker.ts`, `offline/opfs.ts`, `offline/sha256.ts` and
+`offline/eventLog.ts`:
+
+- **Hold the truncate.** A `fresh` run and every restart cut nothing until a
+  valid 206 for the first chunk is in hand; the worker then truncates and
+  posts `truncated` (even if the flush fails). A run that ends before that is
+  `intact`: file unchanged, `offset` its size. A run that ends `intact` with
+  the file at its recorded total puts the record back to `downloaded` (URL
+  and name kept; a known digest re-checked later, a mismatch is `unreadable`,
+  kept). A small copy's 404 asks the server again only when the run left no
+  bytes.
+- **SHA-256.** The worker hashes every byte written (incremental pure-TS
+  SHA-256; a resumed run reads its prefix back first); `done` carries
+  `sha256`. A `hash` command answers `{size, sha256}` for a held file off the
+  main thread.
+- **Slots.** A copy's file may be `episode-N[-o].mp4`, `-b` or `-c`. A re-made
+  trip copy downloads into a slot no record names (or shares another
+  account's copy of the same ETag), the old copy playing as `previous`. The
+  old file is dropped only after the new record is durably stored
+  (`isPersistent`) and the player has left the episode. A refused or failed
+  replacement restores the old copy (keeping `replacedFor`; a worker error or
+  another window clears it). An interrupted one resumes into its half-made
+  file.
+- **Two-read reconcile.** At launch a downloaded copy that reads short or
+  missing is shown as stored, read again after 1.5 s, and only then: missing
+  or empty twice → `evicted` (unless a whole copy sits in another slot no
+  record names, which is adopted after its size — and digest, when known —
+  checks); short → `failed`/`size`; unreadable → unchanged. A record
+  mid-replacement is settled by reading both files. A whole file promotes a
+  record to `downloaded` only when the record vouches for it (`fresh !==
+  true`, or `evicted`), never `unreadable`/`mismatch`. The sweep spares every
+  file any record names, with or without a URL, and every slot of a
+  replacement.
+- **Media error.** A media error re-checks the file (size, digest) and plays a
+  verified file once more from a newly minted URL (the old URL revoked only
+  after); a second error in the same viewing marks it `unreadable`; an
+  unreadable or unhashable file is never marked.
+- **Mismatch.** A published digest that differs refetches once (file kept
+  until the fresh run's first 206), then `failed`/`mismatch`. A 409
+  `copy_mismatch` on a small copy drops the file and refetches once; on a
+  full-size copy it ends the asking and keeps the file.
+- **Confirmations, holdings and releases.** The confirmation carries
+  `{etag, device_id, sha256, size, variant}`. Taking a trip copy off the
+  device queues its release (`DELETE …/delivered?device_id=`) in IndexedDB
+  `meta` (`trip-releases:<user>`), retried at launch, on return to the screen,
+  on reconnect, after a landed outbox flush and after each remove, until the
+  server answers 2xx, 403, 404, 409 or 422 (a 401 stays queued). While any
+  release of the account waits, the holdings report goes in the ids-only
+  shape `{episode_ids}`, which the server does not re-pend from; once none
+  waits it goes as `{episodes:[{episode_id, etag, size, sha256, variant}]}`,
+  sent at launch, on reconnect, after each completed download and each
+  delete; a changed copy under the same ids is sent again.
+- **Self re-ask.** A trip record `preparing` with no URL on a `delivered` row
+  calls `…/again` once (`tripReasked`); no network retries on a later pass;
+  never for another device's trip.
+- **Event log and report.** The manager logs its decisions (reconcile reads,
+  state changes with reasons, truncations, drops, replaces, server answers,
+  re-asks, holdings, reports) to a 500-entry ring buffer in IndexedDB `meta`
+  (`event-log`), writes batched per second, each entry tagged locally with
+  the account of the record it concerns (device-level events with none).
+  Downloads → **Send report** posts the signed-in account's entries and the
+  device's own to `POST /api/devices/{id}/report {events:[{at, kind,
+  episode_id?, detail?}]}`.
+
 ### 5.4e Trips, part 1: data and acquisition (M19 T3, FR-A12)
 
 "Prepare for a trip" on a show takes the next X **aired** episodes after the

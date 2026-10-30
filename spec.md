@@ -1460,6 +1460,17 @@ that the course professor can log in at any time, and the owner uses it daily.
      to the device again (FR-A12). The download manager keeps a log of its own
      decisions on the device, which **Send report** posts to the server for
      the operator (FR-A15).
+  **A held copy is never removed on doubtful evidence** (M20.4 E, owner
+  2026-10-30). A copy kept on a device is removed only by the user (Remove),
+  by the watched-removal rule, by the server's own word that it is not the
+  server's copy (`copy_mismatch`, small copy only), or — when a re-made copy
+  replaces it — once the new copy is whole and on record and the episode is
+  not open in the player. A storage read the device cannot answer, a media
+  error, a 404 or a lost network never removes or truncates a held copy. A
+  trip record left waiting on a row the server counts as delivered asks the
+  server again once by itself. Downloads has a **Send report** control that
+  posts the device's download log (this account's entries only) for the
+  operator to read.
 - FR-S10 **Subtitles at play time** (M20). A streamed episode whose rendition
   carries a text track (a remux, FR-P1/FR-P7) plays with that track showing,
   in FR-P2's language. The player's control bar has a **CC** button, shown
