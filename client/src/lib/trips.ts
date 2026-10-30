@@ -19,7 +19,7 @@ import {
 import { ApiError, apiFetch } from '@/lib/api'
 import { animeQueryKey, type AnimeDetail, type EpisodeOut } from '@/lib/anime'
 import { errorDetail } from '@/lib/auth'
-import { codecsPlayable, type DownloadRecord, type Downloads } from '@/offline/downloads'
+import { codecsPlayable, downloads, type DownloadRecord, type Downloads } from '@/offline/downloads'
 import { deviceName, estimate } from '@/offline/opfs'
 
 /** Where one trip episode stands on the server (`TripEpisodeOut.phase`). */
@@ -72,7 +72,57 @@ export interface Trip {
   state: TripState
   created_at: string
   deadline_at: string
+  /**
+   * The device that downloads this trip (owner, 2026-10-30): its own v4 UUID
+   * (`offline/store.ts` `deviceId`), or null for a trip made before devices
+   * were recorded that no device has claimed yet. Optional on the wire for an
+   * older payload, where it reads as null.
+   */
+  device_id?: string | null
   episodes: TripEpisode[]
+}
+
+/**
+ * Where `trip` downloads, as this device sees it (owner, 2026-10-30: a trip
+ * downloads only to the device that started it): `here` — this device's, or
+ * one that names no device yet (anyone's until a device confirms a copy, and
+ * the server then records it); `elsewhere` — another device's; `unknown` — it
+ * names a device and this device's own id (`here`) has not been read yet. An
+ * `unknown` trip is drawn neutral, with nothing to tap but Cancel.
+ */
+export type TripPlace = 'here' | 'elsewhere' | 'unknown'
+
+export function tripPlace(trip: Pick<Trip, 'device_id'>, here: string | null): TripPlace {
+  const owner = trip.device_id ?? null
+  if (owner === null) return 'here'
+  if (here === null) return 'unknown'
+  return owner === here ? 'here' : 'elsewhere'
+}
+
+/**
+ * Whether this device may keep `trip`: anything but {@link tripPlace}'s
+ * `elsewhere` — the room check counts an `unknown` trip, to be safe.
+ */
+export function tripIsHere(trip: Pick<Trip, 'device_id'>, here: string | null): boolean {
+  return tripPlace(trip, here) !== 'elsewhere'
+}
+
+/** The query key {@link useThisDevice} keeps this device's id under. */
+export const DEVICE_ID_QUERY_KEY = ['device', 'id'] as const
+
+/**
+ * This device's own id (`DownloadManager.thisDevice`), or null until it is
+ * read. Read once; it never changes for the life of the browser's storage.
+ */
+export function useThisDevice(): string | null {
+  const { data } = useQuery<string, Error>({
+    queryKey: DEVICE_ID_QUERY_KEY,
+    queryFn: () => downloads().thisDevice(),
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+  })
+  return data ?? null
 }
 
 /**
@@ -142,7 +192,9 @@ const STILL_TO_COME: ReadonlySet<TripPhase> = new Set<TripPhase>([
 
 /**
  * The bytes the account's **other** active trips still have to bring to the
- * device (owner, 2026-10-28: the device's room is shared by every trip). Each
+ * device (owner, 2026-10-28: the device's room is shared by every trip) —
+ * only the trips this device keeps ({@link tripIsHere} with `here`, owner
+ * 2026-10-30: a trip started on another device never comes here). Each
  * episode not yet delivered, expired or given up on counts one estimate with
  * the margin ({@link fitBytes}), less what this device already holds of it:
  * a downloaded copy counts nothing, a download under way or paused counts
@@ -156,11 +208,13 @@ export function otherTripsReserve(
   perEpisode: number,
   records: Downloads = {},
   isDeclined: (tripId: number, episodeId: number) => boolean = () => false,
+  here: string | null = null,
 ): number {
   const each = fitBytes(perEpisode)
   let reserved = 0
   for (const trip of trips ?? []) {
     if (trip.anime_id === animeId || trip.state !== 'active') continue
+    if (!tripIsHere(trip, here)) continue
     for (const episode of trip.episodes) {
       if (!STILL_TO_COME.has(episode.phase)) continue
       const record = records[episode.episode_id]
@@ -336,6 +390,7 @@ export function tripErrorMessage(error: unknown): string {
 export function askAgainErrorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return 'Could not reach Arc. Try again when you are online.'
   if (errorDetail(error) === 'trip_not_active') return 'This trip has ended.'
+  if (errorDetail(error) === 'trip_other_device') return KEPT_ELSEWHERE_SENTENCE
   return 'Could not ask for it again. Try again.'
 }
 
@@ -377,14 +432,17 @@ function refreshAfterTrip(client: QueryClient, animeIds: readonly number[]): voi
   for (const id of animeIds) void client.invalidateQueries({ queryKey: animeQueryKey(id) })
 }
 
-/** "Prepare for a trip": `POST /api/anime/{id}/trip {count}`. */
+/**
+ * "Prepare for a trip": `POST /api/anime/{id}/trip {count, device_id}` — the
+ * trip is this device's to download (owner, 2026-10-30).
+ */
 export function useCreateTrip(animeId: number): UseMutationResult<Trip, Error, number> {
   const client = useQueryClient()
   return useMutation<Trip, Error, number>({
-    mutationFn: (count) =>
+    mutationFn: async (count) =>
       apiFetch<Trip>(`/api/anime/${String(animeId)}/trip`, {
         method: 'POST',
-        body: JSON.stringify({ count }),
+        body: JSON.stringify({ count, device_id: await downloads().thisDevice() }),
       }),
     onSuccess: (trip) => {
       // The panel replaces the control at once; the refetch confirms it.
@@ -426,13 +484,14 @@ export interface AskAgainInput {
   episodeId: number
 }
 
-/** "Ask again" for an expired or released episode: `POST …/again` → the trip. */
+/** "Ask again" for an expired or released episode: `POST …/again {device_id}` → the trip. */
 export function useAskAgain(): UseMutationResult<Trip, Error, AskAgainInput> {
   const client = useQueryClient()
   return useMutation<Trip, Error, AskAgainInput>({
-    mutationFn: ({ tripId, episodeId }) =>
+    mutationFn: async ({ tripId, episodeId }) =>
       apiFetch<Trip>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/again`, {
         method: 'POST',
+        body: JSON.stringify({ device_id: await downloads().thisDevice() }),
       }),
     onSuccess: (trip, { animeId }) => {
       client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
@@ -445,6 +504,14 @@ export function useAskAgain(): UseMutationResult<Trip, Error, AskAgainInput> {
 }
 
 /* --- One trip episode, as this device sees it --------------------------- */
+
+/** The row line, and the Downloads group's name, for a trip another device keeps. */
+export const KEPT_ELSEWHERE = 'Kept on another device'
+
+/** The row line while this device's own id is still being read ({@link tripPlace} `unknown`). */
+export const CHECKING_DEVICE = 'Checking this device…'
+
+const KEPT_ELSEWHERE_SENTENCE = 'This trip downloads to the device that started it.'
 
 export interface TripRowStatus {
   /** "On this device · 98 MB", "Downloading 42%", "Making the small copy 30%", … */
@@ -464,14 +531,35 @@ function whole(fraction: number | null | undefined): number | null {
 /**
  * The trip panel's line for one episode: the device's record first (it is
  * what the viewer will carry), else the server's phase. `declined` is an
- * episode this account took off the device by hand.
+ * episode this account took off the device by hand. `place` is where the
+ * trip downloads ({@link tripPlace}, owner 2026-10-30): for `elsewhere` every
+ * row says it is kept on another device, for `unknown` that this device is
+ * being checked, and neither offers anything — but a copy this device already
+ * holds (fetched before the trip was claimed) is still said to be here.
  */
 export function tripRowStatus(
   episode: TripEpisode,
   record: DownloadRecord | undefined,
   declined: boolean,
   formatBytes: (bytes: number) => string,
+  place: TripPlace = 'here',
 ): TripRowStatus {
+  if (place !== 'here') {
+    if (record?.state === 'downloaded') {
+      return {
+        label: `On this device · ${formatBytes(record.bytes)}`,
+        tone: 'ok',
+        percent: null,
+        askAgain: false,
+      }
+    }
+    return {
+      label: place === 'elsewhere' ? KEPT_ELSEWHERE : CHECKING_DEVICE,
+      tone: 'muted',
+      percent: null,
+      askAgain: false,
+    }
+  }
   if (record !== undefined) {
     switch (record.state) {
       case 'downloaded':

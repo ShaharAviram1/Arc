@@ -24,13 +24,23 @@
  * - every trip copy the server has not heard about yet is confirmed again;
  * - and watched copies leave the device (`removeWatched`, owner 2026-10-08).
  *
+ * **Only this device's trips** (owner, 2026-10-30): a trip downloads to the
+ * device that started it (`trip.device_id`, this device's own id from
+ * `DownloadManager.thisDevice`). A trip another device started is left alone
+ * entirely — nothing fetched, adopted or confirmed for it — while one that
+ * names no device (made before 2026-10-30, not yet claimed) is kept as
+ * before; the server records the first device that confirms one of its
+ * copies, and every other device then leaves it be. A copy of such a trip
+ * already on this device stays here (its confirmations are refused, which
+ * ends the asking without touching the file).
+ *
  * Not for the demo account, nor where the browser cannot keep files (no OPFS
  * or no workers); nothing runs while nobody is signed in.
  */
 
 import { useEffect } from 'react'
 import type { User } from '@/lib/auth'
-import { tripCopyUrl, useActiveTrips, type Trip } from '@/lib/trips'
+import { tripCopyUrl, tripIsHere, useActiveTrips, type Trip } from '@/lib/trips'
 import { downloads, type DownloadManager } from '@/offline/downloads'
 import { canDownloadInApp } from '@/offline/opfs'
 
@@ -42,8 +52,12 @@ import { canDownloadInApp } from '@/offline/opfs'
 export async function autoKeep(trips: readonly Trip[], manager: DownloadManager): Promise<void> {
   await manager.whenHydrated()
   if (manager.ownerId === null) return
+  // Unreadable (storage refused): only the trips no device has claimed.
+  const here = await manager.thisDevice().catch(() => null)
+  const keeps = (trip: Trip) =>
+    here === null ? (trip.device_id ?? null) === null : tripIsHere(trip, here)
   for (const trip of trips) {
-    if (trip.state !== 'active') continue
+    if (trip.state !== 'active' || !keeps(trip)) continue
     for (const episode of trip.episodes) {
       // The server's own URL, only while the copy can be downloaded.
       const url = tripCopyUrl(episode)

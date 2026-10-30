@@ -4,6 +4,7 @@ import { ApiError } from '@/lib/api'
 import {
   askAgainErrorMessage,
   copyEstimateOf,
+  KEPT_ELSEWHERE,
   otherTripsReserve,
   TRIP_COPY_ESTIMATE_FALLBACK,
   tripCandidates,
@@ -11,6 +12,8 @@ import {
   tripCountMax,
   tripErrorMessage,
   tripEstimateLabel,
+  tripIsHere,
+  tripPlace,
   tripRoomFor,
   tripRangeLabel,
   tripRowStatus,
@@ -288,5 +291,82 @@ describe('a trip episode, as this device sees it', () => {
       label: 'Removed from this device',
       askAgain: true,
     })
+  })
+})
+
+describe('a trip belongs to the device that started it (owner, 2026-10-30)', () => {
+  const HERE = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f'
+  const THERE = '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d'
+
+  it('is this device’s when it names it, names none (not claimed yet), or the id is unknown', () => {
+    expect(tripIsHere({ device_id: HERE }, HERE)).toBe(true)
+    expect(tripIsHere({ device_id: null }, HERE)).toBe(true)
+    expect(tripIsHere({}, HERE)).toBe(true)
+    expect(tripIsHere({ device_id: THERE }, HERE)).toBe(false)
+    expect(tripIsHere({ device_id: THERE }, null)).toBe(true)
+  })
+
+  it('places a trip here, elsewhere, or unknown while this device’s id is unread', () => {
+    expect(tripPlace({ device_id: HERE }, HERE)).toBe('here')
+    expect(tripPlace({ device_id: null }, null)).toBe('here')
+    expect(tripPlace({ device_id: THERE }, HERE)).toBe('elsewhere')
+    expect(tripPlace({ device_id: THERE }, null)).toBe('unknown')
+  })
+
+  it('draws a neutral row, with nothing to tap, while this device is being checked', () => {
+    const expired: TripEpisode = {
+      episode_id: 9001,
+      number: 1,
+      phase: 'expired',
+      progress: null,
+      size: null,
+      delivered: false,
+    }
+    expect(tripRowStatus(expired, undefined, false, bytes, 'unknown')).toEqual({
+      label: 'Checking this device…',
+      tone: 'muted',
+      percent: null,
+      askAgain: false,
+    })
+  })
+
+  it('sets aside room only for the trips this device keeps', () => {
+    const trips = [
+      { ...tripOf(1, 10, ['available', 'searching']), device_id: HERE },
+      { ...tripOf(2, 20, ['available', 'searching', 'searching']), device_id: THERE },
+      { ...tripOf(3, 30, ['available']), device_id: null },
+    ]
+    expect(otherTripsReserve(trips, 99, 100, {}, () => false, HERE)).toBe(330)
+    expect(otherTripsReserve(trips, 99, 100, {}, () => false, THERE)).toBe(440)
+  })
+
+  it('says each row of another device’s trip is kept there, and offers nothing', () => {
+    const episode: TripEpisode = {
+      episode_id: 9001,
+      number: 1,
+      phase: 'available',
+      progress: 1,
+      size: 98,
+      delivered: false,
+    }
+    for (const phase of ['available', 'delivered', 'expired', 'searching'] as const) {
+      expect(tripRowStatus({ ...episode, phase }, undefined, true, bytes, 'elsewhere')).toEqual({
+        label: KEPT_ELSEWHERE,
+        tone: 'muted',
+        percent: null,
+        askAgain: false,
+      })
+    }
+    // A copy fetched here before another device claimed the trip stays, and says so.
+    const done = downloadedRecord(1, PLAY_INFO, 210)
+    expect(tripRowStatus(episode, done, false, bytes, 'elsewhere')).toMatchObject({
+      label: 'On this device · 210 B',
+      askAgain: false,
+    })
+  })
+
+  it('says a refused Ask again in a sentence', () => {
+    const refused = new ApiError(409, { detail: 'trip_other_device' })
+    expect(askAgainErrorMessage(refused)).toBe('This trip downloads to the device that started it.')
   })
 })

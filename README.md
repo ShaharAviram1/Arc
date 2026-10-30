@@ -151,6 +151,7 @@ uv run python -m arc.cli demo-list --user-email prof@example.edu \
 uv run python -m arc.cli recs --user-email prof@example.edu    # one picks run
 uv run python -m arc.cli remake-copies --trip 4                # re-make a trip's copies with the current OFFLINE_* settings
 uv run python -m arc.cli redo-copies --trip 5 --failed         # redo a trip's failed copies from a freshly fetched source
+uv run python -m arc.cli trip-device --trip 6 --device <UUID>  # give a trip to one device (--clear: any device may claim it)
 ```
 
 In production the same commands run inside the api container, which already
@@ -222,6 +223,9 @@ to seed and caps its upload. Both are in
 cp .env.example .env      # then fill in the production keys — see below
 make up                   # build, migrate, start
 ```
+
+After a deploy, reload Arc on every device: an old client cannot start a
+trip (422) and keeps retrying a refused trip confirmation until it is updated.
 
 `make up` is three steps in order: `docker compose build`, then the migration
 as a one-off `api` container (`… run --rm api alembic upgrade head`), then

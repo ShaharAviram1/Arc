@@ -11,7 +11,12 @@ import { Outbox, type Send } from '@/offline/outbox'
 import { memoryStore, type KeyStore } from '@/offline/store'
 import { wireWatchedRemoval } from '@/offline/useDownloads'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
-import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
+import {
+  downloadedRecord,
+  managerHarness,
+  recordEntry,
+  TEST_DEVICE_ID,
+} from '@/test/downloadFixtures'
 
 /**
  * A watched copy leaves the device by itself (FR-S9, owner 2026-10-08): once
@@ -123,7 +128,7 @@ describe('removing watched copies', () => {
     )
 
     expect(manager.record(9001)).toBeUndefined()
-    expect(releaseDelivered).toHaveBeenCalledWith(77, 9001)
+    expect(releaseDelivered).toHaveBeenCalledWith(77, 9001, TEST_DEVICE_ID)
     // And the trip does not fetch it again.
     expect(manager.isDeclined(77, 9001)).toBe(true)
   })

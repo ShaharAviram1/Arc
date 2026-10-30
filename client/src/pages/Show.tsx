@@ -68,7 +68,15 @@ import {
   type WatchState,
 } from '@/lib/playback'
 import { CHANGEABLE_STATES } from '@/lib/releases'
-import { PHASE_LABEL, tripCandidates, tripCodecsPlayable, type TripEpisode } from '@/lib/trips'
+import {
+  KEPT_ELSEWHERE,
+  PHASE_LABEL,
+  tripCandidates,
+  tripCodecsPlayable,
+  tripPlace,
+  useThisDevice,
+  type TripEpisode,
+} from '@/lib/trips'
 import { canPlayTypeHere } from '@/offline/downloads'
 import { canDownloadInApp } from '@/offline/opfs'
 import { useDownload } from '@/offline/useDownloads'
@@ -398,11 +406,15 @@ function tripEpisodeState(
   episode: EpisodeOut,
   trip: TripEpisode | undefined,
   onDevice: boolean,
+  elsewhere = false,
 ): EpisodeState | null {
   if (episode.state === 'ready') return null
   if (trip !== undefined) {
     if (onDevice)
       return { label: 'On this device', tone: 'bright', percent: null, progressLabel: '' }
+    // A trip another device keeps (owner, 2026-10-30): nothing of it comes here.
+    if (elsewhere)
+      return { label: `Trip · ${KEPT_ELSEWHERE}`, tone: 'muted', percent: null, progressLabel: '' }
     const moving = trip.phase === 'downloading' || trip.phase === 'preparing'
     const percent =
       moving && trip.progress !== null
@@ -1080,8 +1092,13 @@ function EpisodeRow({
   isAdmin: boolean
   canDownload: boolean
   timezone?: string
-  /** The viewer's trip holds this episode (M19): its id and the episode's phase. */
-  trip?: { id: number; episode: TripEpisode }
+  /**
+   * The viewer's trip holds this episode (M19): its id, the episode's phase,
+   * and whether another device keeps the trip (`elsewhere`) or this device has
+   * not been checked yet (`neutral`) — owner, 2026-10-30: either way the row
+   * offers nothing to keep.
+   */
+  trip?: { id: number; episode: TripEpisode; elsewhere?: boolean; neutral?: boolean }
 }) {
   const record = useDownload(episode.id)
   const onDevice = canDownload && record?.state === 'downloaded'
@@ -1093,7 +1110,8 @@ function EpisodeRow({
   const watchState: WatchState | undefined = fetchable ? { demand: true } : undefined
   const title = episode.title ?? `Episode ${String(episode.number)}`
   const state =
-    tripEpisodeState(episode, trip?.episode, onDevice) ?? episodeState(episode, timezone)
+    tripEpisodeState(episode, trip?.episode, onDevice, trip?.elsewhere === true) ??
+    episodeState(episode, timezone)
   const problem = episodeProblem(episode)
 
   return (
@@ -1198,7 +1216,7 @@ function EpisodeRow({
             <OfflineButton
               episode={episode}
               trip={
-                trip === undefined
+                trip === undefined || trip.elsewhere === true || trip.neutral === true
                   ? null
                   : {
                       id: trip.id,
@@ -1425,6 +1443,7 @@ function Episodes({
   // no still now falls back to the show's backdrop or its poster, so there is
   // nothing left for the line to explain. `tmdb_mapped` still decides whether
   // the page polls for stills that are on their way (`awaitingStills`).
+  const here = useThisDevice()
   return (
     <section className="mt-14">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1440,6 +1459,8 @@ function Episodes({
         <div className="mt-5 flex flex-col gap-0.5">
           {anime.episodes.map((episode) => {
             const tripEpisode = anime.trip?.episodes.find((row) => row.episode_id === episode.id)
+            const place =
+              anime.trip === null || anime.trip === undefined ? 'here' : tripPlace(anime.trip, here)
             return (
               <EpisodeRow
                 key={episode.id}
@@ -1451,7 +1472,12 @@ function Episodes({
                 trip={
                   anime.trip === null || anime.trip === undefined || tripEpisode === undefined
                     ? undefined
-                    : { id: anime.trip.id, episode: tripEpisode }
+                    : {
+                        id: anime.trip.id,
+                        episode: tripEpisode,
+                        elsewhere: place === 'elsewhere',
+                        neutral: place === 'unknown',
+                      }
                 }
               />
             )

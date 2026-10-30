@@ -3,7 +3,14 @@ import { Link } from 'react-router-dom'
 import { Artwork, buttonClass, Chip, cx, EmptyState, FOCUS_RING, RowGroup } from '@/components/ui'
 import { useMe } from '@/lib/auth'
 import { formatSize } from '@/lib/review'
-import { useActiveTrips, useCancelTrip, type Trip } from '@/lib/trips'
+import {
+  KEPT_ELSEWHERE,
+  tripPlace,
+  useActiveTrips,
+  useCancelTrip,
+  useThisDevice,
+  type Trip,
+} from '@/lib/trips'
 import { coverUrl } from '@/offline/cache'
 import {
   COPY_NOTE,
@@ -38,6 +45,9 @@ import { useDownloads, useRemoveWatched } from '@/offline/useDownloads'
  * their way, the rows as ever, and — while the trip is the account's active
  * one and the server can be reached — Cancel trip, confirmed in the page. A
  * trip copy the server has not yet heard arrived says so quietly on its row.
+ * A trip started on another device (owner, 2026-10-30: a trip downloads only
+ * to the device that started it) is listed apart, muted, under "Kept on
+ * another device": nothing of it comes here, but it can still be cancelled.
  *
  * **Watched copies leave by themselves** (owner, 2026-10-08): the switch
  * "Remove episodes once watched" (on by default, per device) and a Keep
@@ -50,6 +60,10 @@ const LEDE = 'Episodes kept inside Arc on this device. They play with no connect
 
 const EMPTY_MESSAGE =
   'Nothing is downloaded to this device yet. Tap the download button beside a ready episode on a show page, or in the player.'
+
+/** Nothing here, but the account's trips are kept on another device (owner, 2026-10-30). */
+const EMPTY_ELSEWHERE_MESSAGE =
+  'Nothing is downloaded to this device; the trips below are kept on another device.'
 
 const UNSUPPORTED =
   'This browser can’t keep episodes inside Arc. They still stream whenever Arc is reachable.'
@@ -373,9 +387,12 @@ function TripGroup({
   records,
   trip,
   renderRow,
+  elsewhere = false,
 }: {
   tripId: number
   records: DownloadRecord[]
+  /** Another device keeps this trip: shown muted, with nothing to fetch. */
+  elsewhere?: boolean
   /**
    * The server's answer for this trip when it is one of the account's active
    * trips (it can be cancelled); undefined for an ended trip, or offline.
@@ -401,13 +418,27 @@ function TripGroup({
   return (
     <section
       aria-label={`Trip · ${show}`}
-      className="rounded-card border-[0.5px] border-[var(--arc-border)] sm:p-1.5"
+      className={cx(
+        'rounded-card border-[0.5px] border-[var(--arc-border)] sm:p-1.5',
+        elsewhere && 'opacity-70',
+      )}
     >
       <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 pt-2.5 pb-1">
         <div className="min-w-0">
-          <h2 className="text-[16px] font-medium text-[var(--arc-text)]">{heading}</h2>
+          <h2
+            className={cx(
+              'text-[16px] font-medium',
+              elsewhere ? 'text-[var(--arc-text-muted)]' : 'text-[var(--arc-text)]',
+            )}
+          >
+            {heading}
+          </h2>
           <p className="text-[13px] text-[var(--arc-text-muted)] tabular-nums">
-            {first === undefined ? 'Nothing on this device yet' : tripCounts(records)}
+            {elsewhere
+              ? KEPT_ELSEWHERE
+              : first === undefined
+                ? 'Nothing on this device yet'
+                : tripCounts(records)}
           </p>
         </div>
         {active ? (
@@ -478,6 +509,7 @@ export function Downloads() {
   const records = useDownloads()
   const { data: me } = useMe()
   const { data: active } = useActiveTrips(me !== undefined && me !== null && !me.is_demo)
+  const here = useThisDevice()
   const [confirming, setConfirming] = useState<number | null>(null)
   const items = Object.values(records).sort((a, b) => {
     const show = a.snapshot.anime.title.preferred.localeCompare(b.snapshot.anime.title.preferred)
@@ -494,8 +526,15 @@ export function Downloads() {
   // device has nothing of yet too, so it can be seen and cancelled here.
   for (const trip of active ?? []) if (!trips.has(trip.id)) trips.set(trip.id, [])
   const activeById = new Map((active ?? []).map((trip) => [trip.id, trip]))
-  // The newest trip first: a larger id is a later trip.
-  const groups = [...trips.entries()].sort(([a], [b]) => b - a)
+  // The newest trip first: a larger id is a later trip. A trip another device
+  // keeps is listed apart (owner, 2026-10-30).
+  const isElsewhere = (tripId: number) => {
+    const trip = activeById.get(tripId)
+    return trip !== undefined && tripPlace(trip, here) === 'elsewhere'
+  }
+  const sorted = [...trips.entries()].sort(([a], [b]) => b - a)
+  const groups = sorted.filter(([tripId]) => !isElsewhere(tripId))
+  const elsewhere = sorted.filter(([tripId]) => isElsewhere(tripId))
 
   const renderRow = (record: DownloadRecord) => (
     <DownloadRow
@@ -534,7 +573,13 @@ export function Downloads() {
         ))}
         {items.length === 0 && groups.length === 0 ? (
           <EmptyState
-            message={canDownloadInApp() ? EMPTY_MESSAGE : UNSUPPORTED}
+            message={
+              !canDownloadInApp()
+                ? UNSUPPORTED
+                : elsewhere.length > 0
+                  ? EMPTY_ELSEWHERE_MESSAGE
+                  : EMPTY_MESSAGE
+            }
             action={
               <Link to="/" className={buttonClass('secondary')}>
                 Go to Watch Now
@@ -545,6 +590,26 @@ export function Downloads() {
           <RowGroup>{loose.map(renderRow)}</RowGroup>
         )}
 
+        {elsewhere.length === 0 ? null : (
+          <section aria-labelledby="kept-elsewhere" className="flex flex-col gap-3">
+            <h2
+              id="kept-elsewhere"
+              className="text-[13px] font-medium tracking-[0.02em] text-[var(--arc-text-muted)] uppercase"
+            >
+              {KEPT_ELSEWHERE}
+            </h2>
+            {elsewhere.map(([tripId, group]) => (
+              <TripGroup
+                key={tripId}
+                tripId={tripId}
+                records={group}
+                trip={activeById.get(tripId)}
+                renderRow={renderRow}
+                elsewhere
+              />
+            ))}
+          </section>
+        )}
         <StorageCard used={used} />
 
         <ul className="flex list-disc flex-col gap-1.5 pl-5 text-[13px] text-[var(--arc-text-muted)]">

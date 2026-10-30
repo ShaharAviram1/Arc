@@ -32,6 +32,10 @@ EMAIL = "traveller@arc.test"
 PASSWORD = "travellerpassword"
 OTHER_EMAIL = "stayer@arc.test"
 OTHER_PASSWORD = "stayerpassword"
+#: The device that starts every trip here (owner, 2026-10-30: a trip is its
+#: device's), and another device of the same user.
+DEVICE = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+OTHER_DEVICE = "0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d"
 
 
 @pytest.fixture
@@ -63,7 +67,9 @@ async def user_id(factory: SessionFactory, email: str = EMAIL) -> int:
 
 
 async def test_anonymous_callers_get_401(api_client: AsyncClient) -> None:
-    assert (await api_client.post("/api/anime/1/trip", json={"count": 2})).status_code == 401
+    assert (
+        await api_client.post("/api/anime/1/trip", json={"count": 2, "device_id": DEVICE})
+    ).status_code == 401
     assert (await api_client.get("/api/trips")).status_code == 401
     assert (await api_client.delete("/api/trips/1")).status_code == 401
 
@@ -73,7 +79,9 @@ async def test_a_trip_is_created_and_read_back(
 ) -> None:
     anime_id = await a_show(api_factory, anilist_id=981001, aired=6)
 
-    response = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 10})
+    response = await user_client.post(
+        f"/api/anime/{anime_id}/trip", json={"count": 10, "device_id": DEVICE}
+    )
 
     assert response.status_code == 201, response.text
     body = response.json()
@@ -94,6 +102,7 @@ async def test_a_trip_is_created_and_read_back(
         "url",
         "etag",
     }
+    assert body["device_id"] == DEVICE
     assert body["episodes"][0]["delivered"] is False
     assert body["episodes"][0]["url"] is None, "no copy yet"
     assert body["episodes"][0]["etag"] is None
@@ -120,10 +129,14 @@ async def test_trips_on_several_shows_are_listed_oldest_first(
 
     made = []
     for anime_id in (first, second, third):
-        response = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})
+        response = await user_client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+        )
         assert response.status_code == 201, response.text
         made.append(response.json()["id"])
-    same = await user_client.post(f"/api/anime/{second}/trip", json={"count": 2})
+    same = await user_client.post(
+        f"/api/anime/{second}/trip", json={"count": 2, "device_id": DEVICE}
+    )
     assert (same.status_code, same.json()["detail"]) == (409, TRIP_ACTIVE)
 
     listed = (await user_client.get("/api/trips")).json()
@@ -133,7 +146,9 @@ async def test_trips_on_several_shows_are_listed_oldest_first(
     assert (await user_client.delete(f"/api/trips/{made[1]}")).status_code == 204
     listed = (await user_client.get("/api/trips")).json()
     assert [trip["id"] for trip in listed] == [made[0], made[2]]
-    again = await user_client.post(f"/api/anime/{second}/trip", json={"count": 2})
+    again = await user_client.post(
+        f"/api/anime/{second}/trip", json={"count": 2, "device_id": DEVICE}
+    )
     assert again.status_code == 201, "the show's trip ended, so it may have another"
 
 
@@ -143,8 +158,12 @@ async def test_the_show_page_carries_its_own_trip_and_the_estimate(
     first = await a_show(api_factory, anilist_id=981013)
     second = await a_show(api_factory, anilist_id=981014)
     third = await a_show(api_factory, anilist_id=981015)
-    one = (await user_client.post(f"/api/anime/{first}/trip", json={"count": 2})).json()
-    two = (await user_client.post(f"/api/anime/{second}/trip", json={"count": 3})).json()
+    one = (
+        await user_client.post(f"/api/anime/{first}/trip", json={"count": 2, "device_id": DEVICE})
+    ).json()
+    two = (
+        await user_client.post(f"/api/anime/{second}/trip", json={"count": 3, "device_id": DEVICE})
+    ).json()
 
     page_one = (await user_client.get(f"/api/anime/{first}")).json()
     page_two = (await user_client.get(f"/api/anime/{second}")).json()
@@ -162,14 +181,22 @@ async def test_the_show_page_carries_its_own_trip_and_the_estimate(
 async def test_the_refusals(user_client: AsyncClient, api_factory: SessionFactory) -> None:
     anime_id = await a_show(api_factory, anilist_id=981002, aired=3)
 
-    bad = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 0})
+    bad = await user_client.post(
+        f"/api/anime/{anime_id}/trip", json={"count": 0, "device_id": DEVICE}
+    )
     assert (bad.status_code, bad.json()["detail"]) == (422, COUNT_OUT_OF_RANGE)
-    too_many = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 51})
+    too_many = await user_client.post(
+        f"/api/anime/{anime_id}/trip", json={"count": 51, "device_id": DEVICE}
+    )
     assert (too_many.status_code, too_many.json()["detail"]) == (422, COUNT_OUT_OF_RANGE)
     assert (
-        await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": "2"})
+        await user_client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": "2", "device_id": DEVICE}
+        )
     ).status_code == 422
-    assert (await user_client.post("/api/anime/999999/trip", json={"count": 2})).status_code == 404
+    assert (
+        await user_client.post("/api/anime/999999/trip", json={"count": 2, "device_id": DEVICE})
+    ).status_code == 404
 
     async with api_factory() as session:
         anime_user = await user_id(api_factory)
@@ -178,15 +205,19 @@ async def test_the_refusals(user_client: AsyncClient, api_factory: SessionFactor
         assert anime is not None and user is not None
         await make_entry(session, user, anime, progress=3)
         await session.commit()
-    caught_up = await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})
+    caught_up = await user_client.post(
+        f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+    )
     assert (caught_up.status_code, caught_up.json()["detail"]) == (422, NOTHING_AIRED)
 
     other = await a_show(api_factory, anilist_id=981003)
     assert (
-        await user_client.post(f"/api/anime/{other}/trip", json={"count": 2})
+        await user_client.post(f"/api/anime/{other}/trip", json={"count": 2, "device_id": DEVICE})
     ).status_code == 201
     # The same show again is refused; another show is not (owner, 2026-10-28).
-    again = await user_client.post(f"/api/anime/{other}/trip", json={"count": 2})
+    again = await user_client.post(
+        f"/api/anime/{other}/trip", json={"count": 2, "device_id": DEVICE}
+    )
     assert (again.status_code, again.json()["detail"]) == (409, TRIP_ACTIVE)
 
 
@@ -202,7 +233,9 @@ async def test_the_demo_account_is_refused(
         await session.commit()
     async with api_transport(api_app) as client:
         await login(client, "demo@arc.test", "demopassword123")
-        response = await client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})
+        response = await client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+        )
     assert (response.status_code, response.json()["detail"]) == (403, DEMO_REFUSED)
 
 
@@ -210,7 +243,11 @@ async def test_only_the_owner_can_cancel_and_others_see_404(
     api_app: FastAPI, api_factory: SessionFactory, user_client: AsyncClient
 ) -> None:
     anime_id = await a_show(api_factory, anilist_id=981005)
-    trip = (await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})).json()
+    trip = (
+        await user_client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+        )
+    ).json()
     await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
     async with api_transport(api_app) as other:
         await login(other, OTHER_EMAIL, OTHER_PASSWORD)
@@ -239,7 +276,11 @@ async def test_the_show_page_carries_the_trip_and_trip_only(
     assert before["trip"] is None
     assert all(row["trip_only"] is False for row in before["episodes"])
 
-    posted = (await user_client.post(f"/api/anime/{anime_id}/trip", json={"count": 2})).json()
+    posted = (
+        await user_client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+        )
+    ).json()
     async with api_factory() as session:
         await compute_wants(session)
         await session.commit()
@@ -315,3 +356,30 @@ async def test_the_show_page_reads_the_estimate_for_everyone_but_the_demo(
         demo_body = (await client.get(f"/api/anime/{anime_id}")).json()
     assert demo_body["trip_limits"]["copy_estimate_bytes"] == FALLBACK_COPY_BYTES
     assert calls == [1], "no estimate query for the demo account"
+
+
+async def test_the_trip_records_the_device_that_started_it(
+    user_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """A trip is its device's (owner, 2026-10-30): the id is required and canonical."""
+    anime_id = await a_show(api_factory, anilist_id=981120, aired=4)
+
+    for body in (
+        {"count": 2},
+        {"count": 2, "device_id": "not-a-uuid-not-a-uuid-not-a-uuid-xx"},
+        # A version 1 UUID is not a device's.
+        {"count": 2, "device_id": "c232ab00-9414-11ec-b3c8-9e6bdeced846"},
+    ):
+        refused = await user_client.post(f"/api/anime/{anime_id}/trip", json=body)
+        assert refused.status_code == 422, refused.text
+    assert (await user_client.get("/api/trips")).json() == []
+
+    made = await user_client.post(
+        f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": OTHER_DEVICE.upper()}
+    )
+    assert made.status_code == 201, made.text
+    assert made.json()["device_id"] == OTHER_DEVICE
+    (listed,) = (await user_client.get("/api/trips")).json()
+    assert listed["device_id"] == OTHER_DEVICE
+    show = (await user_client.get(f"/api/anime/{anime_id}")).json()
+    assert show["trip"]["device_id"] == OTHER_DEVICE

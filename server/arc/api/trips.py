@@ -2,13 +2,15 @@
 
 Three routes, thin over :mod:`arc.services.trips`:
 
-* ``POST /api/anime/{id}/trip`` ``{count}`` → **201** :class:`~arc.api.
+* ``POST /api/anime/{id}/trip`` ``{count, device_id}`` → **201** :class:`~arc.api.
   trip_schemas.TripOut`. Refusals carry a short code as ``detail``: **403**
   ``demo_account``; **409** ``trip_active`` (this show already has the
   caller's active trip: one per show, any number of shows) or
   ``storage_held`` (FR-T6); **422** ``count_out_of_range`` (1..
   ``trip_max_episodes``) or ``nothing_aired`` (no aired episode after the
-  caller's progress); **404** for an unknown show.
+  caller's progress) or a ``device_id`` that is not a v4 UUID; **404** for an
+  unknown show. The trip is the asking device's to download (owner,
+  2026-10-30).
 * ``GET /api/trips`` → the caller's active trips, oldest first (``[]`` for
   none).
 * ``DELETE /api/trips/{id}`` → **204**. The caller's own trip only; anybody
@@ -26,6 +28,12 @@ episode not in the trip, or anybody else's trip, is a 404):
   trip_schemas.TripOut`: a delivered or expired episode is asked for again;
   409 ``trip_not_active`` once the trip has ended.
 
+Each of the three names the calling device: ``device_id`` in the POST bodies,
+the ``device_id`` query parameter on the DELETE (422 when it is not a v4
+UUID). A trip that records another device answers **409**
+``trip_other_device``; a trip that records none is claimed by the first
+device to confirm or re-ask (:mod:`arc.services.trips.deliver`).
+
 Nothing here writes to a list entry or to MyAnimeList.
 """
 
@@ -35,7 +43,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi import Path as PathParam
 
 from arc.api.deps import (
@@ -47,9 +55,11 @@ from arc.api.deps import (
     SessionDep,
     SettingsDep,
 )
-from arc.api.trip_schemas import DeliveredIn, TripIn, TripOut
+from arc.api.devices import parse_device_id
+from arc.api.trip_schemas import AgainIn, DeliveredIn, TripIn, TripOut
 from arc.services.trips.cancel import cancel_trip
 from arc.services.trips.create import (
+    TRIP_OTHER_DEVICE,
     TripConflict,
     TripError,
     TripForbidden,
@@ -66,6 +76,17 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["trips"])
 
 TripId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="A trip row id.")]
+
+#: The calling device on the DELETE, which has no body.
+DeviceQuery = Annotated[
+    str | None,
+    Query(min_length=32, max_length=45, description="The calling device's own UUID (v4)."),
+]
+
+
+def _device(raw: str | None) -> str | None:
+    """The canonical device id, ``None`` when the client named none, or a 422."""
+    return None if raw is None else parse_device_id(raw)
 
 
 def now() -> datetime:
@@ -95,7 +116,7 @@ def _http(exc: TripError) -> HTTPException:
         403: {"description": "demo_account"},
         404: {"description": "anime not found"},
         409: {"description": "trip_active | storage_held"},
-        422: {"description": "count_out_of_range | nothing_aired"},
+        422: {"description": "count_out_of_range | nothing_aired | bad device_id"},
     },
 )
 async def start_trip(
@@ -105,9 +126,16 @@ async def start_trip(
     session: SessionDep,
     settings: SettingsDep,
 ) -> TripOut:
+    device_id = parse_device_id(body.device_id)
     try:
         created = await create_trip(
-            session, settings, user=user, anime_id=anime_id, count=body.count, now=now()
+            session,
+            settings,
+            user=user,
+            anime_id=anime_id,
+            count=body.count,
+            now=now(),
+            device_id=device_id,
         )
     except TripError as exc:
         raise _http(exc) from exc
@@ -146,7 +174,10 @@ async def cancel(trip_id: TripId, user: CurrentUser, session: SessionDep) -> Res
     "/api/trips/{trip_id}/episodes/{episode_id}/delivered",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="A device holds this trip episode's copy (FR-A12)",
-    responses={404: {"description": "trip or episode not found"}},
+    responses={
+        404: {"description": "trip or episode not found"},
+        409: {"description": TRIP_OTHER_DEVICE},
+    },
 )
 async def delivered(
     trip_id: TripId,
@@ -163,6 +194,7 @@ async def delivered(
             episode_id=episode_id,
             etag=body.etag,
             now=now(),
+            device_id=_device(body.device_id),
         )
     except TripError as exc:
         raise _http(exc) from exc
@@ -174,14 +206,26 @@ async def delivered(
     "/api/trips/{trip_id}/episodes/{episode_id}/delivered",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="A device deleted its copy of this trip episode (FR-A12)",
-    responses={404: {"description": "trip or episode not found"}},
+    responses={
+        404: {"description": "trip or episode not found"},
+        409: {"description": TRIP_OTHER_DEVICE},
+    },
 )
 async def released(
-    trip_id: TripId, episode_id: EpisodeId, user: CurrentUser, session: SessionDep
+    trip_id: TripId,
+    episode_id: EpisodeId,
+    user: CurrentUser,
+    session: SessionDep,
+    device_id: DeviceQuery = None,
 ) -> Response:
     try:
         await release_delivered(
-            session, user=user, trip_id=trip_id, episode_id=episode_id, now=now()
+            session,
+            user=user,
+            trip_id=trip_id,
+            episode_id=episode_id,
+            now=now(),
+            device_id=_device(device_id),
         )
     except TripError as exc:
         raise _http(exc) from exc
@@ -195,7 +239,7 @@ async def released(
     summary="Ask for a delivered or expired trip episode again (FR-A12)",
     responses={
         404: {"description": "trip or episode not found"},
-        409: {"description": "trip_not_active"},
+        409: {"description": f"trip_not_active | {TRIP_OTHER_DEVICE}"},
     },
 )
 async def again(
@@ -204,10 +248,17 @@ async def again(
     user: CurrentUser,
     session: SessionDep,
     settings: SettingsDep,
+    body: AgainIn | None = None,
 ) -> TripOut:
     try:
         trip = await ask_again(
-            session, settings, user=user, trip_id=trip_id, episode_id=episode_id, now=now()
+            session,
+            settings,
+            user=user,
+            trip_id=trip_id,
+            episode_id=episode_id,
+            now=now(),
+            device_id=_device(body.device_id if body is not None else None),
         )
     except TripError as exc:
         raise _http(exc) from exc

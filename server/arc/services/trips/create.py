@@ -82,6 +82,9 @@ COUNT_OUT_OF_RANGE = "count_out_of_range"
 NOTHING_AIRED = "nothing_aired"
 TRIP_NOT_FOUND = "trip not found"
 TRIP_NOT_ACTIVE = "trip_not_active"
+#: A device other than the one that started the trip tried to confirm,
+#: release or re-ask one of its copies (owner, 2026-10-30).
+TRIP_OTHER_DEVICE = "trip_other_device"
 
 
 class TripError(Exception):
@@ -285,8 +288,14 @@ async def create_trip(
     anime_id: int,
     count: int,
     now: datetime,
+    device_id: str | None = None,
 ) -> TripCreated:
-    """Start a trip; raise a :class:`TripError` for each refusal. Flushed, not committed."""
+    """Start a trip; raise a :class:`TripError` for each refusal. Flushed, not committed.
+
+    ``device_id`` is the canonical UUID of the device that asked: the trip is
+    that device's to download (owner, 2026-10-30). The route always sends one;
+    ``None`` makes a trip any device may claim, as every trip before was.
+    """
     if user.is_demo:
         raise TripForbidden(DEMO_REFUSED)
     anime = await session.get(Anime, anime_id)
@@ -329,6 +338,7 @@ async def create_trip(
         state=TripState.ACTIVE,
         created_at=now,
         deadline_at=now + timedelta(days=await trip_copy_days(session)),
+        device_id=device_id,
     )
     try:
         # A savepoint, so a request racing this one onto the one-active-trip-
@@ -393,6 +403,7 @@ async def create_trip(
             "user_id": user.id,
             "anime_id": anime_id,
             "trip_id": trip.id,
+            "device_id": device_id,
             "requested": count,
             "taken": len(taken),
             "first": trip.first_number,
@@ -412,6 +423,7 @@ __all__ = [
     "TRIP_ACTIVE",
     "TRIP_NOT_ACTIVE",
     "TRIP_NOT_FOUND",
+    "TRIP_OTHER_DEVICE",
     "TripConflict",
     "TripCreated",
     "TripError",

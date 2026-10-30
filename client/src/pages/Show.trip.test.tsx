@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,7 +18,12 @@ import {
   TEST_USER,
   type MockRoutes,
 } from '@/test/apiMock'
-import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
+import {
+  downloadedRecord,
+  managerHarness,
+  recordEntry,
+  TEST_DEVICE_ID,
+} from '@/test/downloadFixtures'
 
 /**
  * "Prepare for a trip" on the show page (M19 T6, FR-A12): the control, its
@@ -54,6 +59,17 @@ function trip(episodes: TripEpisode[], patch: Partial<Trip> = {}): Trip {
     episodes,
     ...patch,
   }
+}
+
+function renderShowUnmountable() {
+  const router = createMemoryRouter([{ path: '/anime/:id', element: <Show /> }], {
+    initialEntries: [`/anime/${String(FRIEREN.id)}`],
+  })
+  return render(
+    <QueryClientProvider client={createQueryClient()}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  )
 }
 
 function renderShow() {
@@ -258,7 +274,10 @@ describe('Prepare for a trip', () => {
     routes[DETAIL] = { body: { ...FRIEREN_DETAIL, trip: made } }
     await user.click(screen.getByRole('button', { name: 'Prepare 2 episodes' }))
 
-    expect(jsonBodyOf(callTo(fetchMock, TRIP_PATH))).toEqual({ count: 2 })
+    expect(jsonBodyOf(callTo(fetchMock, TRIP_PATH))).toEqual({
+      count: 2,
+      device_id: TEST_DEVICE_ID,
+    })
     expect(await screen.findByRole('heading', { name: 'Trip · Episodes 2–4' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Prepare for a trip' })).not.toBeInTheDocument()
   })
@@ -470,6 +489,121 @@ describe('the active trip', () => {
     expect(requestsMade(fetchMock)).toContain(
       `POST /api/trips/${String(TRIP_ID)}/episodes/9005/again`,
     )
+    expect(
+      jsonBodyOf(callTo(fetchMock, `/api/trips/${String(TRIP_ID)}/episodes/9005/again`)),
+    ).toEqual({ device_id: TEST_DEVICE_ID })
+  })
+
+  it('shows a trip another device keeps, with nothing to fetch or ask again (owner, 2026-10-30)', async () => {
+    installManager()
+    const elsewhere = trip(
+      [
+        tripEpisode(9002, 2, 'available', {
+          progress: 1,
+          size: 98_000_000,
+          url: '/media/9002/offline.mp4',
+        }),
+        tripEpisode(9005, 5, 'expired'),
+        tripEpisode(9007, 7, 'delivered', { delivered: true }),
+      ],
+      { device_id: '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d' },
+    )
+    const fetchMock = api({
+      [DETAIL]: { body: withTrip(elsewhere) },
+      [`DELETE /api/trips/${String(TRIP_ID)}`]: { status: 204 },
+    })
+    const user = userEvent.setup()
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    // This device's id is read once; the rows follow it.
+    await waitFor(() => {
+      expect(
+        within(panel)
+          .getAllByRole('listitem')
+          .map((item) => item.textContent),
+      ).toEqual([
+        'Episode 2Kept on another device',
+        'Episode 5Kept on another device',
+        'Episode 7Kept on another device',
+      ])
+    })
+    expect(within(panel).queryByRole('button', { name: /^Ask again/ })).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/on this device$/)).not.toBeInTheDocument()
+    // The episode rows offer nothing to keep either.
+    expect(screen.queryByRole('button', { name: 'Keep episode 2 offline' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('Trip · Kept on another device').length).toBeGreaterThan(0)
+    // Cancelling stays the user's, from any device.
+    await user.click(within(panel).getByRole('button', { name: 'Cancel trip' }))
+    const ask = screen.getByRole('group', { name: 'Cancel this trip?' })
+    await user.click(within(ask).getByRole('button', { name: 'Cancel trip' }))
+    expect(requestsMade(fetchMock)).toContain(`DELETE /api/trips/${String(TRIP_ID)}`)
+  })
+
+  it('offers no Choose pack on a trip another device keeps', async () => {
+    installManager()
+    api({
+      [DETAIL]: {
+        body: withTrip({ ...ACTIVE, device_id: '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d' }),
+      },
+    })
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    await waitFor(() => {
+      expect(within(panel).getAllByText('Kept on another device').length).toBeGreaterThan(0)
+    })
+    expect(within(panel).queryByRole('button', { name: /Choose pack/ })).not.toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+  })
+
+  it('draws a trip neutral while this device’s id is still being read', async () => {
+    // A device id that never arrives: the panel never guesses whose trip it is.
+    const harness = managerHarness({ deviceId: () => new Promise<string>(() => undefined) })
+    harness.manager.setOwner(TEST_USER.id)
+    setDownloads(harness.manager)
+    api({ [DETAIL]: { body: withTrip({ ...ACTIVE, device_id: TEST_DEVICE_ID }) } })
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    const lines = within(panel)
+      .getAllByRole('listitem')
+      .map((item) => item.textContent)
+    expect(lines).toEqual(
+      ACTIVE.episodes.map((e) => `Episode ${String(e.number)}Checking this device…`),
+    )
+    expect(within(panel).queryByRole('button', { name: /^Ask again/ })).not.toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: /Choose pack/ })).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/on this device/)).not.toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+  })
+
+  it('offers Choose pack on this device’s own trip', async () => {
+    installManager()
+    api({ [DETAIL]: { body: withTrip({ ...ACTIVE, device_id: TEST_DEVICE_ID }) } })
+
+    renderShow()
+
+    expect(await screen.findByRole('button', { name: /Choose pack/ })).toBeInTheDocument()
+  })
+
+  it('keeps a trip that names this device, or none yet, as its own', async () => {
+    installManager()
+    for (const device_id of [TEST_DEVICE_ID, null]) {
+      api({ [DETAIL]: { body: withTrip({ ...ACTIVE, device_id }) } })
+      const { unmount } = renderShowUnmountable()
+      expect(await screen.findByRole('button', { name: 'Ask again for episode 5' })).toBeVisible()
+      unmount()
+    }
   })
 
   it('drives the row’s keep-offline button by the phase', async () => {

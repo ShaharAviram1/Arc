@@ -848,3 +848,21 @@ def test_offline_copies_redone_at_goes_up_and_down(
         assert _column(test_database_url, "offline_copies", "redone_at") == column
     finally:
         command.upgrade(config, "head")
+
+
+TRIPS_DEVICE_ID = "3f7a1c9e5b42"
+BEFORE_TRIPS_DEVICE_ID = REDONE_AT
+
+
+def test_trips_device_id_goes_up_and_down(pg_engine: AsyncEngine, test_database_url: str) -> None:
+    """``trips.device_id`` (owner, 2026-10-30): a nullable varchar(36), and reversible."""
+    config = alembic_config(test_database_url)
+    column = ("character varying", "YES")
+    assert _column(test_database_url, "trips", "device_id") == column
+    try:
+        command.downgrade(config, BEFORE_TRIPS_DEVICE_ID)
+        assert _column(test_database_url, "trips", "device_id") is None
+        command.upgrade(config, TRIPS_DEVICE_ID)
+        assert _column(test_database_url, "trips", "device_id") == column
+    finally:
+        command.upgrade(config, "head")

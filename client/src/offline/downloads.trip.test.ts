@@ -3,7 +3,12 @@ import { ApiError } from '@/lib/api'
 import type { DownloadRecord } from '@/offline/downloads'
 import { memoryStore } from '@/offline/store'
 import { PLAY_INFO } from '@/test/animeFixtures'
-import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
+import {
+  downloadedRecord,
+  managerHarness,
+  recordEntry,
+  TEST_DEVICE_ID,
+} from '@/test/downloadFixtures'
 
 /**
  * Trip copies on the device (M19 T6, FR-A12, FR-S9): kept straight from the
@@ -79,7 +84,7 @@ describe('confirming a trip copy', () => {
 
     worker.emit({ type: 'done', name: SMALL, offset: 210, total: 210, etag: '"o"', run: 1 })
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
     await vi.waitFor(() => {
       expect(manager.record(9001)?.confirm).toBe('done')
     })
@@ -122,7 +127,7 @@ describe('confirming a trip copy', () => {
     harness.manager.setOwner(ALICE)
     await harness.manager.hydrate()
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
     await vi.waitFor(() => {
       expect(harness.manager.record(9001)?.confirm).toBe('done')
     })
@@ -143,6 +148,53 @@ describe('confirming a trip copy', () => {
     })
     harness.manager.confirmPending()
     expect(confirmDelivered).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops asking, and keeps the file, when another device keeps the trip (owner, 2026-10-30)', async () => {
+    const confirmDelivered = vi.fn(() =>
+      Promise.reject(new ApiError(409, { detail: 'trip_other_device' })),
+    )
+    const harness = managerHarness({
+      confirmDelivered,
+      initial: [recordEntry(tripRecord({ confirm: 'pending' }))],
+    })
+    harness.files.set(SMALL, 210)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+
+    await vi.waitFor(() => {
+      expect(harness.manager.record(9001)?.confirm).toBe('done')
+    })
+    harness.manager.confirmPending()
+    harness.manager.nudge()
+    expect(confirmDelivered).toHaveBeenCalledTimes(1)
+    expect(harness.manager.record(9001)).toMatchObject({ state: 'downloaded', tripId: TRIP })
+    expect(harness.removed).toEqual([])
+    expect(harness.files.get(SMALL)).toBe(210)
+  })
+
+  it('keeps asking after any other 409', async () => {
+    const confirmDelivered = vi
+      .fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(new ApiError(409, { detail: 'trip_not_active' }))
+      .mockResolvedValue(null)
+    const harness = managerHarness({
+      confirmDelivered,
+      initial: [recordEntry(tripRecord({ confirm: 'pending' }))],
+    })
+    harness.files.set(SMALL, 210)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+    await vi.waitFor(() => {
+      expect(confirmDelivered).toHaveBeenCalledTimes(1)
+    })
+    await Promise.resolve()
+    expect(harness.manager.record(9001)?.confirm).toBe('pending')
+
+    harness.manager.confirmPending()
+    await vi.waitFor(() => {
+      expect(harness.manager.record(9001)?.confirm).toBe('done')
+    })
   })
 
   it('never confirms another account’s copy', async () => {
@@ -170,7 +222,7 @@ describe('adoptTrip', () => {
 
     harness.manager.adoptTrip(9001, TRIP, null)
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
     expect(harness.manager.record(9001)).toMatchObject({ tripId: TRIP, variant: 'full' })
     expect(harness.worker.commands).toEqual([])
   })
@@ -251,7 +303,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
 
     worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"n"', run: 1 })
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"', TEST_DEVICE_ID)
     expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"n"' })
   })
 
@@ -305,7 +357,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
 
     harness.manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
     expect(harness.worker.commands).toEqual([])
     expect(harness.removed).toEqual([])
   })
@@ -342,7 +394,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
       .mockReturnValueOnce(first.promise)
       .mockResolvedValue(null)
     const { manager, worker } = await holding({ confirm: 'pending' }, { confirmDelivered })
-    expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"o"')
+    expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
 
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
     await vi.waitFor(() => {
@@ -352,7 +404,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     first.resolve()
 
     await vi.waitFor(() => {
-      expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"n"')
+      expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"n"', TEST_DEVICE_ID)
     })
     await vi.waitFor(() => {
       expect(manager.record(9001)).toMatchObject({ etag: '"n"', confirm: 'done' })
@@ -389,7 +441,7 @@ describe('taking a trip copy off the device', () => {
 
     await harness.manager.remove(9001)
 
-    expect(releaseDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001)
+    expect(releaseDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
     expect(harness.manager.isDeclined(TRIP, 9001)).toBe(true)
     expect(await notes.get('trip-skip:1:77:9001')).toBe(true)
 

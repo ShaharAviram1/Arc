@@ -26,6 +26,10 @@ thing they always want to know, and three repairs:
                           (``--episodes 1,3``) or every one whose copy failed
                           (``--failed``) (owner, 2026-10-29;
                           :mod:`arc.services.trips.redo`).
+* ``trip-device``       — assign an active trip to a device (``--device
+                          UUID``) or clear it (``--clear``, any device may
+                          claim it again) (owner, 2026-10-30;
+                          :mod:`arc.services.trips.device`).
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
 and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
@@ -37,7 +41,8 @@ no row until they are made again, with the current settings; a second run
 still reports the stale copies it skipped or found held, and re-makes the
 held ones once the device has stopped fetching them). ``redo-copies`` run
 twice redoes twice — it is a repair the operator asks for — but each run only
-resets rows and queues the same deduplicated work.
+resets rows and queues the same deduplicated work. ``trip-device`` twice
+leaves the same device.
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -64,6 +69,8 @@ Run it from ``server/``::
     uv run python -m arc.cli remake-copies --trip 4 --delivered-before 2026-10-28T12:00:00Z
     uv run python -m arc.cli redo-copies --trip 5 --failed
     uv run python -m arc.cli redo-copies --trip 5 --episodes 1,3,4
+    uv run python -m arc.cli trip-device --trip 6 --device 6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f
+    uv run python -m arc.cli trip-device --trip 6 --clear
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -129,7 +136,8 @@ from arc.services.recs import (
     run_recommendations,
 )
 from arc.services.retention.sweep import retained_bytes
-from arc.services.trips.create import TripConflict
+from arc.services.trips.create import TripConflict, TripNotFound
+from arc.services.trips.device import assign_device, canonical_device_id
 from arc.services.trips.redo import redo_copies
 from arc.services.trips.remake import remake_stale
 
@@ -711,6 +719,41 @@ async def cmd_redo_copies(
     return 0
 
 
+# --- trip-device ------------------------------------------------------------
+
+
+async def cmd_trip_device(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Assign an active trip to a device, or clear it (FR-A12, owner 2026-10-30).
+
+    ``--device`` must be a version-4 UUID (the device's own id, as its
+    holdings report and its trip calls name it); ``--clear`` makes the trip
+    claimable by the next device to confirm a copy. An unknown or ended trip,
+    or a malformed id, exits 1 with nothing written.
+    """
+    device: str | None = None
+    if not args.clear:
+        try:
+            device = canonical_device_id(args.device)
+        except ValueError:
+            print(f"not a version 4 UUID: {args.device!r}", file=sys.stderr)
+            return EXIT_FAILED
+    try:
+        trip = await assign_device(session, trip_id=args.trip, device_id=device)
+    except TripNotFound:
+        await session.rollback()
+        print(f"no trip with id {args.trip}", file=sys.stderr)
+        return EXIT_FAILED
+    except TripConflict:
+        await session.rollback()
+        print(f"trip {args.trip} is not active", file=sys.stderr)
+        return EXIT_FAILED
+    await session.commit()
+    print(f"trip {trip.id}: " + (f"device {device}" if device else "no device (claimable)"))
+    return 0
+
+
 # --- wiring -----------------------------------------------------------------
 
 type Command = Callable[[AsyncSession, Settings, argparse.Namespace], Awaitable[int]]
@@ -835,6 +878,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--failed", action="store_true", help="every episode of the trip whose copy failed"
     )
     redo.set_defaults(handler=cmd_redo_copies)
+
+    trip_device = sub.add_parser(
+        "trip-device",
+        help="assign an active trip to a device, or clear it so a device may claim it",
+    )
+    trip_device.add_argument(
+        "--trip", type=int, required=True, metavar="ID", help="the active trip"
+    )
+    which = trip_device.add_mutually_exclusive_group(required=True)
+    which.add_argument("--device", metavar="UUID", help="the device's own id (a v4 UUID)")
+    which.add_argument(
+        "--clear", action="store_true", help="no device: the next to confirm a copy claims it"
+    )
+    trip_device.set_defaults(handler=cmd_trip_device)
 
     return parser
 

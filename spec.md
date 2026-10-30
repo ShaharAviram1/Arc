@@ -603,7 +603,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   trip's deadline (14 days after the trip was made); a trip with nothing left
   waiting **ends** — finished at the confirmation of its last episode, or at
   the hourly check (expired if nothing reached the device) — and the user may
-  then start another on that show at once. **An episode wanted both by a trip and by the
+  then start another on that show at once. **A trip downloads to the device
+  that started it** (owner, 2026-10-30): the trip records that device, and
+  only it downloads the copies, confirms them and says it deleted them; the
+  user's other devices see the trip but do not fetch it, and a confirmation,
+  release or "again" from another device is refused (so devices never fight
+  over one trip's copies). Cancelling stays the user's, from any device. A
+  trip made before this rule records no device and is claimed by the first
+  device that confirms one of its copies or asks for one again — the one-way
+  path for trips already running; a copy another device fetched before the
+  claim stays on it and plays there; one it had not finished is not
+  restarted for the trip, but a download already queued or stopped by the
+  device may still finish there (its confirmation is then refused) unless
+  the viewer deletes it. The operator can assign a trip to a device, or re-home it
+  (`trip-device`): a device whose storage was reset gets a new id, and its
+  trips need re-homing. **An episode wanted both by a trip and by the
   user's window (or anybody's) is not trip-only**: it keeps its source and
   gets its full HLS rendition for normal viewing as well as the small copy;
   only an episode wanted by trips alone loses its source when the copy is
@@ -1313,7 +1327,12 @@ that the course professor can log in at any time, and the owner uses it daily.
      episode or one no longer on this device, **Cancel trip** behind an
      in-page confirmation, and a line saying downloads run while Arc is open
      and that the server keeps each copy until this device has it (at most
-     until the trip's deadline).
+     until the trip's deadline). A trip started on another device (owner,
+     2026-10-30; FR-A12) shows each row as "Kept on another device" and
+     offers neither Ask again, a keep button nor Choose pack; Cancel trip
+     stays, and the room check counts only this device's trips. In the
+     moment before the device knows its own id, a trip that names a device
+     reads "Checking this device…" and offers nothing but Cancel.
      **While Arc is open** (any page, the player included) the device asks
      about the trip on opening, every minute, when Arc comes back on screen
      or online, and when the live stream says a copy changed; each episode
@@ -1329,7 +1348,11 @@ that the course professor can log in at any time, and the owner uses it daily.
      Downloads page groups a trip's episodes under "Trip · show · N
      episodes · total size" with how many are on the device and how many
      are still on their way, and offers Cancel trip while it is the active
-     trip and Arc is reachable. In the player, a trip-only episode with no
+     trip and Arc is reachable; a trip another device keeps is listed apart,
+     muted, under "Kept on another device" (with nothing on the device, the
+     page says "Nothing is downloaded to this device; the trips below are
+     kept on another device."). Only this device's trips (and
+     one no device has claimed yet) download by themselves. In the player, a trip-only episode with no
      copy on this device says "This episode is only for your device — keep
      it offline first" with a link to Downloads; with a copy it plays from
      the device; previous / next prefer a downloaded episode where the
@@ -3111,3 +3134,14 @@ through the same edge, without the grace period.
 - 2026-10-29 — FR-A11: a pack the client holds stopped while a wanted file is
   still to fetch is started again by the poll (production torrent 112 sat
   stopped at 20 % after a start landed during the client's recheck).
+- 2026-10-30 (owner) — FR-A12, FR-S9 item 8: a trip downloads to the device
+  that started it. Other devices of the same user see it ("Kept on another
+  device") but do not fetch it, and their confirmations, releases and
+  "again" are refused; cancelling stays allowed from any device. A trip made
+  before this records no device and is claimed by the first device that
+  confirms a copy or asks again (the owner had several devices open on
+  2026-10-29 and they fought over the same trip's copies).
+- 2026-10-30 — FR-A12: the operator can assign or re-home a trip's device
+  (`trip-device`); FR-S9 item 8: a trip reads "Checking this device…" until
+  the device knows its id, Choose pack is only on this device's trip, and
+  Downloads says when every trip listed is another device's.
