@@ -176,8 +176,9 @@ let current: { url: string; name: string } | null = null
 export async function blobUrlFor(name: string): Promise<string | null> {
   const file = await readFile(name)
   if (file === null || file.size === 0) return null
-  revokeCurrent()
+  // The new URL exists before the old one is revoked.
   const url = URL.createObjectURL(file.slice(0, file.size, EPISODE_MIME))
+  revokeCurrent()
   current = { url, name }
   return url
 }

@@ -84,8 +84,11 @@ export function useLocalCopy(episodeId: number, manager: DownloadManager = downl
       // The manager checks the file before it believes the error: a fresh URL
       // for a file that checks out, else `null`, and the page streams when
       // there is a stream (FR-S9). The old URL stays until it answers.
-      void manager.playbackFailed(episodeId).then((url) => {
+      const settle = (url: string | null) => {
         setState((now) => (now.id === episodeId ? { id: episodeId, checked: true, url } : now))
+      }
+      manager.playbackFailed(episodeId).then(settle, () => {
+        settle(null)
       })
     },
   }
