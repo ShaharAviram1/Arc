@@ -1013,7 +1013,7 @@ export class DownloadManager {
 
   /** Note one decision in the event log (M20.4 E). */
   private log(kind: string, episodeId?: number, detail?: string): void {
-    this.events.note(kind, episodeId, detail)
+    this.events.note(kind, episodeId, detail, this.owner)
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -1752,7 +1752,9 @@ export class DownloadManager {
    * server could not be told, so the page can say so. The log is kept.
    */
   async sendReport(): Promise<number> {
-    const events = await this.events.entries()
+    // Only this account's entries, and the device's own (owner, 2026-10-30:
+    // a shared iPad's report must not carry another account's episodes).
+    const events = await this.events.entries(this.owner)
     const device = await this.thisDevice()
     await this.postReport(device, events)
     this.log('report', undefined, `sent ${String(events.length)} entries`)

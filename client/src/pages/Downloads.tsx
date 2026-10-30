@@ -375,7 +375,7 @@ function SendReport() {
       <h2 className="text-[16px] font-medium text-[var(--arc-text)]">Something went wrong?</h2>
       <p className="mt-2 text-[14px] text-[var(--arc-text-muted)]">
         Arc keeps a short diary of what it did with the downloads on this device. Sending it lets
-        the server’s owner see what happened.
+        the server’s owner see what happened. Only your account’s entries are sent.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button

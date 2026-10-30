@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { EVENT_LOG_KEY, EVENT_LOG_MAX, EventLog, type DeviceEvent } from '@/offline/eventLog'
 import { memoryStore, type KeyStore } from '@/offline/store'
 
@@ -53,8 +53,42 @@ describe('EventLog', () => {
     expect(await log.entries()).toEqual([])
 
     const store = memoryStore()
-    new EventLog(store).note('reconcile', 3)
-    await new EventLog(store).entries()
+    const first = new EventLog(store)
+    first.note('reconcile', 3)
+    await first.entries()
     expect(await new EventLog(store).entries()).toHaveLength(1)
+  })
+})
+
+describe('EventLog per account and in batches', () => {
+  it('sends only this account’s entries and the device’s own, never the account', async () => {
+    const log = new EventLog(memoryStore())
+    log.note('state', 1, 'a', 7)
+    log.note('state', 2, 'b', 8)
+    log.note('dropped', undefined, 'sweep', null)
+
+    expect(await log.entries(7)).toEqual([
+      expect.objectContaining({ kind: 'state', episode_id: 1 }),
+      expect.objectContaining({ kind: 'dropped' }),
+    ])
+    for (const event of await log.entries()) expect(event).not.toHaveProperty('user')
+  })
+
+  it('writes a burst once, after a second', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = memoryStore()
+      const update = vi.spyOn(store, 'update')
+      const log = new EventLog(store)
+      log.note('a')
+      log.note('b')
+      log.note('c')
+      expect(update).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(update).toHaveBeenCalledTimes(1)
+      expect(await store.get(EVENT_LOG_KEY)).toHaveLength(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
