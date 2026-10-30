@@ -14,6 +14,7 @@ import { reportOffline, reportOnline, resetNetwork } from '@/offline/network'
 import type { FlushOutcome, Outbox } from '@/offline/outbox'
 import { memoryStore, type KeyStore } from '@/offline/store'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
+import { jsonBodyOf, mockApi } from '@/test/apiMock'
 import {
   downloadedRecord,
   managerHarness,
@@ -38,6 +39,8 @@ interface Setup {
   put?: (deviceId: string, ids: number[]) => Promise<unknown>
   clock?: { now: number }
   demo?: boolean
+  /** Use the real request (through `fetch`) instead of the recording fake. */
+  wire?: boolean
 }
 
 async function launch(setup: Setup = {}) {
@@ -48,13 +51,17 @@ async function launch(setup: Setup = {}) {
   const clock = setup.clock ?? { now: START }
   const harness = managerHarness({
     initial: setup.initial,
-    putHoldings: (device, episodes) => {
-      bodies.push(episodes)
-      return put(
-        device,
-        episodes.map((episode) => episode.episode_id),
-      )
-    },
+    ...(setup.wire === true ? { putHoldings: undefined } : {}),
+    putHoldings:
+      setup.wire === true
+        ? undefined
+        : (device, episodes) => {
+            bodies.push(episodes)
+            return put(
+              device,
+              episodes.map((episode) => episode.episode_id),
+            )
+          },
     meta,
     now: () => clock.now,
     isOnline: setup.online ?? (() => true),
@@ -104,10 +111,31 @@ describe('reportHoldings', () => {
 
     expect(bodies).toEqual([
       [
-        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32) },
-        { episode_id: 9002, etag: '"e"', size: 1000, sha256: null },
+        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32), variant: 'full' },
+        { episode_id: 9002, etag: '"e"', size: 1000, sha256: null, variant: 'full' },
       ],
     ])
+  })
+
+  it('says which copy each holding is, on the wire', async () => {
+    const fetchMock = mockApi({
+      [`PUT /api/devices/${TEST_DEVICE_ID}/holdings`]: { status: 204 },
+    })
+    const small = {
+      ...downloadedRecord(ALICE),
+      name: 'episode-9001-o.mp4',
+      variant: 'small' as const,
+      sha256: 'ab'.repeat(32),
+    }
+    await launch({ initial: [recordEntry(small)], put: undefined, wire: true })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT')
+    expect(jsonBodyOf(call?.[1])).toEqual({
+      episodes: [
+        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32), variant: 'small' },
+      ],
+    })
   })
 
   it('sends again when a copy changed under the same ids', async () => {
@@ -119,7 +147,9 @@ describe('reportHoldings', () => {
     const changed = { ...downloadedRecord(ALICE), etag: '"f"' }
     const second = await launch({ initial: [recordEntry(changed)], meta })
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
-    expect(second.bodies).toEqual([[{ episode_id: 9001, etag: '"f"', size: 1000, sha256: null }]])
+    expect(second.bodies).toEqual([
+      [{ episode_id: 9001, etag: '"f"', size: 1000, sha256: null, variant: 'full' }],
+    ])
   })
 
   it('reports a completed download with the digest the worker computed', async () => {
@@ -136,7 +166,9 @@ describe('reportHoldings', () => {
     })
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
 
-    expect(bodies).toEqual([[{ episode_id: 9001, etag: '"e"', size: 10, sha256: 'cd'.repeat(32) }]])
+    expect(bodies).toEqual([
+      [{ episode_id: 9001, etag: '"e"', size: 10, sha256: 'cd'.repeat(32), variant: 'full' }],
+    ])
   })
 
   it('sends nothing at a first launch that holds nothing', async () => {

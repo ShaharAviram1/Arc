@@ -331,6 +331,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"', TEST_DEVICE_ID, {
       sha256: null,
       size: 300,
+      variant: 'small',
     })
     expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"n"', name: SMALL_B })
     expect(manager.record(9001)?.previous).toBeUndefined()

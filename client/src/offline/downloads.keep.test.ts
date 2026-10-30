@@ -9,6 +9,7 @@ import {
   recordEntry,
   TEST_DEVICE_ID,
 } from '@/test/downloadFixtures'
+import { jsonBodyOf, mockApi } from '@/test/apiMock'
 
 /**
  * A held copy is never destroyed, and "delivered" means verified (M20.4 E,
@@ -392,6 +393,7 @@ describe('verified delivery (M20.4 E)', () => {
     expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"', TEST_DEVICE_ID, {
       sha256: SHA_A,
       size: 210,
+      variant: 'small',
     })
   })
 
@@ -475,6 +477,28 @@ describe('verified delivery (M20.4 E)', () => {
       expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'mismatch' })
     })
     expect(files.has(SMALL)).toBe(false)
+  })
+
+  it('names the copy in the confirmation body', async () => {
+    const fetchMock = mockApi({
+      [`POST /api/trips/${String(TRIP)}/episodes/9001/delivered`]: { status: 204 },
+    })
+    const full = downloadedRecord(ALICE)
+    const { manager } = await launch([full], { [FULL]: 1000 }, { confirmDelivered: undefined })
+
+    manager.adoptTrip(9001, TRIP, COPY_URL, null)
+
+    await vi.waitFor(() => {
+      expect(manager.record(9001)?.confirm).toBe('done')
+    })
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+    expect(jsonBodyOf(call?.[1])).toEqual({
+      etag: '"e"',
+      device_id: TEST_DEVICE_ID,
+      sha256: null,
+      size: 1000,
+      variant: 'full',
+    })
   })
 
   it('never drops a full-size copy over a copy_mismatch, and stops asking', async () => {

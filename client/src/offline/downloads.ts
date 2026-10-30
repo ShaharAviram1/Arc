@@ -325,6 +325,11 @@ export interface TripEpisodeFacts {
 export interface DeliveryProof {
   sha256: string | null
   size: number
+  /**
+   * Which copy this is: the server checks the digest and size only against
+   * its small copy (`small`), never for a full-size file (`full`).
+   */
+  variant: CopyVariant
 }
 
 /** One episode in the holdings report (`PUT /api/devices/{id}/holdings`, M20.4 E). */
@@ -333,6 +338,8 @@ export interface HeldEpisode {
   etag: string | null
   size: number
   sha256: string | null
+  /** Which copy is held; the server checks digest and size for `small` only. */
+  variant: CopyVariant
 }
 
 /** What the manager needs of a worker, so a test can hand it a fake. */
@@ -440,7 +447,13 @@ function defaultConfirmDelivered(
 ): Promise<unknown> {
   return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
     method: 'POST',
-    body: JSON.stringify({ etag, device_id: deviceId, sha256: proof.sha256, size: proof.size }),
+    body: JSON.stringify({
+      etag,
+      device_id: deviceId,
+      sha256: proof.sha256,
+      size: proof.size,
+      variant: proof.variant,
+    }),
   })
 }
 
@@ -1672,6 +1685,7 @@ export class DownloadManager {
         etag: copy.etag,
         size: copy.total,
         sha256: copy.sha256 ?? null,
+        variant: record.variant,
       })
     }
     // Over the server's cap, keep the highest ids: the newest episodes, which
@@ -2374,7 +2388,11 @@ export class DownloadManager {
       if (current.confirm !== 'done') this.patch(key, { confirm: 'done' })
     }
     const { episodeId, etag } = record
-    const proof: DeliveryProof = { sha256: record.sha256 ?? null, size: record.total }
+    const proof: DeliveryProof = {
+      sha256: record.sha256 ?? null,
+      size: record.total,
+      variant: record.variant,
+    }
     void this.withDevice((device) =>
       this.confirmDelivered(tripId, episodeId, etag, device, proof),
     ).then(
