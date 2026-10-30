@@ -18,7 +18,6 @@ form, so two spellings of one UUID are one device.
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Final
 
@@ -28,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, SessionDep
 from arc.services.acquisition.holdings import MAX_HOLDINGS, replace_holdings
+from arc.services.trips.device import canonical_device_id
 
 log = logging.getLogger(__name__)
 
@@ -59,14 +59,11 @@ class HoldingsIn(BaseModel):
 def parse_device_id(raw: str) -> str:
     """The canonical text of a version-4 UUID, or a 422."""
     try:
-        parsed = uuid.UUID(raw)
+        return canonical_device_id(raw)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=BAD_DEVICE_ID
         ) from exc
-    if parsed.version != 4:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=BAD_DEVICE_ID)
-    return str(parsed)
 
 
 @router.put(
