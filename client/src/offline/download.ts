@@ -40,6 +40,15 @@
  * screen. A full disk (`QuotaExceededError`) ends `paused` with reason `quota`
  * — never `failed` — and the file is cut back to the chunk boundary.
  *
+ * **Nothing is cut before the server answers** (M20.4 E, owner 2026-10-30). A
+ * `fresh` run and every restart leave the old bytes where they are until a
+ * 206 for offset 0 is in hand; only then is the file truncated (`truncated`)
+ * and the chunk written. A 404, a refusal, no network or a pause before that
+ * ends the run with the file exactly as it was, and the terminal message
+ * says so (`intact`, with `offset` its size). Every byte written is fed to
+ * an incremental SHA-256 (a resumed run reads the part on disk back first),
+ * and `done` carries the digest.
+ *
  * **The terminal message is posted only after the file is closed** (from the
  * `finally`), so a manager that deletes the file on hearing it never races a
  * handle that is still open.
