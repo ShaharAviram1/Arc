@@ -759,7 +759,7 @@ export interface ManagerOptions {
   /** Whether Arc can reach its server now (`offlineNow`, observed). */
   isOnline?: () => boolean
   /** `PUT /api/devices/{device_id}/holdings {episodes}` (M20, FR-S9; per-copy facts M20.4 E). */
-  putHoldings?: (deviceId: string, episodes: HeldEpisode[]) => Promise<unknown>
+  putHoldings?: (deviceId: string, report: HoldingsReport) => Promise<unknown>
   /** This device's own id ({@link deviceId}). */
   deviceId?: () => Promise<string>
   /** Where the last holdings report is remembered (IndexedDB `meta`). */
@@ -792,11 +792,37 @@ function defaultWorker(): WorkerLike {
   }
 }
 
-function defaultPutHoldings(device: string, episodes: HeldEpisode[]): Promise<unknown> {
+/**
+ * One holdings report's body: the per-copy shape (M20.4 E), or — while a
+ * trip release still waits to reach the server — the older ids-only shape,
+ * which the server never re-pends from (a missing id there is not read as
+ * "lost", so a deletion whose release has not landed is not fetched again).
+ */
+export type HoldingsReport = { episodes: HeldEpisode[] } | { episode_ids: number[] }
+
+function defaultPutHoldings(device: string, report: HoldingsReport): Promise<unknown> {
   return apiFetch<null>(`/api/devices/${encodeURIComponent(device)}/holdings`, {
     method: 'PUT',
-    body: JSON.stringify({ episodes }),
+    body: JSON.stringify(report),
   })
+}
+
+/** A trip release the server has not answered yet (`DELETE …/delivered`). */
+export interface PendingRelease {
+  trip_id: number
+  episode_id: number
+  /** When the copy was taken off the device (ISO 8601). */
+  at: string
+}
+
+/** The `meta` key of an account's trip releases waiting to be sent. */
+export function releasesKey(userId: number): string {
+  return `trip-releases:${String(userId)}`
+}
+
+/** Whether a release's failure is the server's final word (it heard, or there is nothing to release). */
+function releaseIsSettled(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 404 || error.status === 409)
 }
 
 /** How long the launch reconcile waits before it reads a short or missing file a second time. */
@@ -905,7 +931,9 @@ export class DownloadManager {
   private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
   private readonly loadCompleted: (episodeIds: number[]) => Promise<CompletedEpisode[]>
   private readonly isOnline: () => boolean
-  private readonly putHoldings: (deviceId: string, episodes: HeldEpisode[]) => Promise<unknown>
+  private readonly putHoldings: (deviceId: string, report: HoldingsReport) => Promise<unknown>
+  /** A flush of the queued trip releases in flight, so two triggers make one. */
+  private releasing_: Promise<void> | null = null
   private readonly deviceId: () => Promise<string>
   private readonly meta: KeyStore
 
@@ -1260,6 +1288,7 @@ export class DownloadManager {
     // awaited — a storage that never answers must not hold the launch).
     void this.thisDevice().catch(() => undefined)
     this.confirmPending()
+    void this.flushReleases()
     await this.passWatched()
     void this.syncWatched()
     // Launch: tell the server what this device holds (M20, FR-S9).
@@ -1768,16 +1797,15 @@ export class DownloadManager {
     this.all.delete(key)
     if (record.tripId !== undefined) {
       // A trip episode taken off the device by hand: the server stops counting
-      // it as held (best effort — a lost call only means the window keeps
-      // skipping it until the trip ends), and the auto-keep hook leaves it
-      // alone until "Ask again".
+      // it as held, and the auto-keep hook leaves it alone until "Ask again".
+      // The release is queued durably and sent until the server answers
+      // (M20.4 E): a lost one would let the next holdings report read the
+      // deletion as a loss, and the episode would be fetched again.
       const declined = declineKey(record.userId, record.tripId, record.episodeId)
       this.declined.add(declined)
       void this.notes.put(declined, true).catch(() => undefined)
-      const { tripId, episodeId } = record
-      void this.withDevice((device) => this.releaseDelivered(tripId, episodeId, device)).catch(
-        () => undefined,
-      )
+      await this.queueRelease(record.userId, record.tripId, record.episodeId)
+      void this.flushReleases()
     }
     this.prior.delete(key)
     this.log(
@@ -1829,6 +1857,8 @@ export class DownloadManager {
   async reportHoldingsIfPending(): Promise<void> {
     const owner = this.owner
     if (owner === null || this.demo) return
+    // The outbox's flush landed: a release still waiting goes now too.
+    void this.flushReleases()
     const note = await this.meta.get<HoldingsNote>(holdingsKey(owner))
     if (note?.pending === true) this.reportHoldings()
   }
@@ -1872,7 +1902,11 @@ export class DownloadManager {
     if (this.owner !== owner || this.demo) return
     const episodes = this.heldEpisodes(owner)
     const ids = episodes.map((episode) => episode.episode_id)
-    const sig = JSON.stringify(episodes)
+    // The per-copy shape only once no release of this account waits to be
+    // sent; until then the ids-only shape, which the server never re-pends from.
+    const legacy = (await this.pendingReleases(owner)).length > 0
+    const report: HoldingsReport = legacy ? { episode_ids: ids } : { episodes }
+    const sig = JSON.stringify(report)
     const key = holdingsKey(owner)
     const last = await this.meta.get<HoldingsNote>(key)
     if (last === undefined && ids.length === 0) return // Nothing held, nothing ever said.
@@ -1892,9 +1926,13 @@ export class DownloadManager {
       return
     }
     try {
-      await this.putHoldings(await this.deviceId(), episodes)
+      await this.putHoldings(await this.deviceId(), report)
       await this.meta.put(key, { ids, sig, sentAt: this.now() } satisfies HoldingsNote)
-      this.log('holdings', undefined, `sent ${String(ids.length)}: ${ids.join(',')}`)
+      this.log(
+        'holdings',
+        undefined,
+        `sent ${String(ids.length)}${legacy ? ' (ids only: a release waits)' : ''}: ${ids.join(',')}`,
+      )
     } catch (error) {
       this.log('holdings', undefined, `not sent: ${String(error)}`)
       if (isUnreachable(error) || (error instanceof ApiError && error.status >= 500)) {
@@ -1907,6 +1945,92 @@ export class DownloadManager {
       }
       // Anything else (a 4xx) is tried again at the next of the four moments.
     }
+  }
+
+  /* --- Trip releases, durably (M20.4 E) ----------------------------------------- */
+
+  /** Remember a release to send, in `meta`, before anything is tried. */
+  private async queueRelease(userId: number, tripId: number, episodeId: number): Promise<void> {
+    const at = this.stamp()
+    await this.meta
+      .update<PendingRelease[]>(releasesKey(userId), (current) => {
+        const list = Array.isArray(current) ? current : []
+        if (list.some((item) => item.trip_id === tripId && item.episode_id === episodeId)) {
+          return undefined
+        }
+        return [...list, { trip_id: tripId, episode_id: episodeId, at }]
+      })
+      .catch(() => undefined)
+    this.log('release', episodeId, `trip ${String(tripId)}: queued`)
+  }
+
+  /** The releases of `userId` still waiting for the server. */
+  private async pendingReleases(userId: number): Promise<PendingRelease[]> {
+    try {
+      const found = await this.meta.get<PendingRelease[]>(releasesKey(userId))
+      return Array.isArray(found) ? found : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Send the signed-in account's queued releases, oldest first, until one
+   * gets no answer. A 2xx, 404 or 409 settles a release (it is taken off the
+   * queue); anything else leaves it for the next trigger: launch, return to
+   * the screen, reconnect, a landed outbox flush, the next remove. Once the
+   * queue is empty the holdings report goes again, in the per-copy shape.
+   * Never rejects.
+   */
+  flushReleases(): Promise<void> {
+    this.releasing_ ??= this.flushReleasesOnce().finally(() => {
+      this.releasing_ = null
+    })
+    return this.releasing_
+  }
+
+  private async flushReleasesOnce(): Promise<void> {
+    const owner = this.owner
+    if (owner === null || this.demo) return
+    const pending = await this.pendingReleases(owner)
+    if (pending.length === 0) return
+    let device: string
+    try {
+      device = await this.thisDevice()
+    } catch {
+      return
+    }
+    let settledAny = false
+    for (const item of pending) {
+      if (this.owner !== owner) return
+      let settled: boolean
+      try {
+        await this.releaseDelivered(item.trip_id, item.episode_id, device)
+        settled = true
+      } catch (error) {
+        settled = releaseIsSettled(error)
+        this.log(
+          'release',
+          item.episode_id,
+          `trip ${String(item.trip_id)}: ${error instanceof ApiError ? String(error.status) : String(error)}${settled ? ' (settled)' : ''}`,
+        )
+        if (!settled && (isUnreachable(error) || !(error instanceof ApiError))) break
+      }
+      if (!settled) continue
+      settledAny = true
+      this.log('release', item.episode_id, `trip ${String(item.trip_id)}: delivered`)
+      await this.meta
+        .update<PendingRelease[]>(releasesKey(owner), (current) => {
+          if (!Array.isArray(current)) return undefined
+          const left = current.filter(
+            (other) => !(other.trip_id === item.trip_id && other.episode_id === item.episode_id),
+          )
+          return left.length === 0 ? null : left
+        })
+        .catch(() => undefined)
+    }
+    // No release waits any more: the per-copy report may go.
+    if (settledAny && (await this.pendingReleases(owner)).length === 0) this.reportHoldings()
   }
 
   /**
@@ -1930,6 +2054,7 @@ export class DownloadManager {
     // Whatever is waiting on the server asks now rather than at the next tick.
     this.poll()
     this.confirmPending()
+    void this.flushReleases()
     const key = this.active
     const active = key === null ? undefined : this.all.get(key)
     if (key !== null && active !== undefined && active.url !== null) {
@@ -1968,7 +2093,10 @@ export class DownloadManager {
     let wasOffline = offlineNow()
     const unsubscribe = subscribeNetwork(() => {
       const offline = offlineNow()
-      if (wasOffline && !offline) this.reportHoldings()
+      if (wasOffline && !offline) {
+        void this.flushReleases()
+        this.reportHoldings()
+      }
       wasOffline = offline
     })
     const hourly = setInterval(() => {

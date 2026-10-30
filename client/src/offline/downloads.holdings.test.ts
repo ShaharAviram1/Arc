@@ -4,9 +4,11 @@ import {
   HOLDINGS_DEBOUNCE_MS,
   HOLDINGS_REFRESH_MS,
   holdingsKey,
+  releasesKey,
   MAX_HOLDINGS,
   type DownloadRecord,
   type HeldEpisode,
+  type HoldingsReport,
   type HoldingsNote,
 } from '@/offline/downloads'
 import { wireWatchedRemoval } from '@/offline/useDownloads'
@@ -41,12 +43,15 @@ interface Setup {
   demo?: boolean
   /** Use the real request (through `fetch`) instead of the recording fake. */
   wire?: boolean
+  release?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
 }
 
 async function launch(setup: Setup = {}) {
   const put = vi.fn(setup.put ?? (() => Promise.resolve(null)))
   /** Every body sent, whole (M20.4 E); `put` sees only the ids. */
   const bodies: HeldEpisode[][] = []
+  /** Every report whole, either shape. */
+  const reports: HoldingsReport[] = []
   const meta = setup.meta ?? memoryStore()
   const clock = setup.clock ?? { now: START }
   const harness = managerHarness({
@@ -55,13 +60,17 @@ async function launch(setup: Setup = {}) {
     putHoldings:
       setup.wire === true
         ? undefined
-        : (device, episodes) => {
-            bodies.push(episodes)
+        : (device, report) => {
+            reports.push(report)
+            if ('episodes' in report) bodies.push(report.episodes)
             return put(
               device,
-              episodes.map((episode) => episode.episode_id),
+              'episodes' in report
+                ? report.episodes.map((episode) => episode.episode_id)
+                : report.episode_ids,
             )
           },
+    ...(setup.release === undefined ? {} : { releaseDelivered: setup.release }),
     meta,
     now: () => clock.now,
     isOnline: setup.online ?? (() => true),
@@ -73,7 +82,7 @@ async function launch(setup: Setup = {}) {
   }
   harness.manager.setOwner(ALICE, { demo: setup.demo === true })
   await harness.manager.hydrate()
-  return { ...harness, put, bodies, meta, clock }
+  return { ...harness, put, bodies, reports, meta, clock }
 }
 
 const held = (info = PLAY_INFO) => recordEntry(downloadedRecord(ALICE, info))
@@ -389,5 +398,75 @@ describe('reportHoldings', () => {
     harness.manager.reportHoldings()
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
     expect(put).not.toHaveBeenCalled()
+  })
+})
+
+describe('trip releases, durably (M20.4 E)', () => {
+  const TRIP = 77
+  const tripCopy = () =>
+    recordEntry({
+      ...downloadedRecord(ALICE),
+      name: 'episode-9001-o.mp4',
+      url: '/media/9001/offline.mp4',
+      variant: 'small',
+      tripId: TRIP,
+      confirm: 'done',
+    })
+
+  it('queues a release that found no network, reports ids only until it lands, then the full shape', async () => {
+    const release = vi
+      .fn<(tripId: number, episodeId: number, deviceId: string) => Promise<unknown>>()
+      .mockRejectedValueOnce(new TypeError('Load failed'))
+      .mockResolvedValue(null)
+    const { manager, reports, meta } = await launch({
+      initial: [tripCopy(), held(PLAY_INFO_EPISODE_2)],
+      release,
+    })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    reports.length = 0
+
+    await manager.remove(9001)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(release).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
+    expect(await meta.get(releasesKey(ALICE))).toEqual([
+      { trip_id: TRIP, episode_id: 9001, at: expect.any(String) as unknown },
+    ])
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(reports).toEqual([{ episode_ids: [9002] }])
+
+    // Back on screen: the release goes, and the next report is the full shape.
+    manager.nudge()
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(release).toHaveBeenCalledTimes(2)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+    expect(reports.at(-1)).toEqual({
+      episodes: [{ episode_id: 9002, etag: '"e"', size: 1000, sha256: null, variant: 'full' }],
+    })
+  })
+
+  it.each([404, 409])('drops a release the server answers %i', async (status) => {
+    const release = vi.fn(() => Promise.reject(new ApiError(status, { detail: 'x' })))
+    const { manager, meta } = await launch({ initial: [tripCopy()], release })
+
+    await manager.remove(9001)
+    await manager.flushReleases()
+
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+  })
+
+  it('keeps a release the server failed (5xx) and sends it at the next launch', async () => {
+    const meta = memoryStore()
+    const failing = vi.fn(() => Promise.reject(new ApiError(500, { detail: 'boom' })))
+    const first = await launch({ initial: [tripCopy()], release: failing, meta })
+    await first.manager.remove(9001)
+    await first.manager.flushReleases()
+    expect(await meta.get(releasesKey(ALICE))).toHaveLength(1)
+
+    const ok = vi.fn(() => Promise.resolve(null))
+    await launch({ release: ok, meta })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(ok).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
   })
 })
