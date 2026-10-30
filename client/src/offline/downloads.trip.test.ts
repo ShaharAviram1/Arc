@@ -382,7 +382,7 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     expect(worker.commands).toHaveLength(1)
   })
 
-  it('keeps the old copy when the replacement is paused, and may try again later', async () => {
+  it('keeps the old copy when the replacement is paused by hand', async () => {
     const { manager, worker, removed } = await holding()
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
 
@@ -391,7 +391,8 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     await vi.waitFor(() => {
       expect(manager.record(9001)).toMatchObject({ state: 'downloaded', name: SMALL, etag: '"o"' })
     })
-    expect(manager.record(9001)?.replacedFor).toBeUndefined()
+    // A pause by hand keeps `replacedFor`: only the server's offer retries.
+    expect(manager.record(9001)?.replacedFor).toBe('"n"')
     worker.emit({ type: 'paused', name: SMALL_B, offset: 0, intact: true, run: 1 })
     await vi.waitFor(() => {
       expect(removed).toEqual([SMALL_B])
@@ -399,32 +400,73 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     expect(removed).not.toContain(SMALL)
   })
 
-  it('brings the old copy back at a launch that finds a replacement half done', async () => {
-    const record = tripRecord({
+  function midReplacement(patch: Partial<DownloadRecord> = {}): DownloadRecord {
+    return tripRecord({
       confirm: 'done',
       name: SMALL_B,
       state: 'downloading',
-      etag: null,
+      etag: '"n"',
       bytes: 40,
-      total: 0,
-      fresh: true,
+      total: 300,
+      fresh: false,
       replacedFor: '"n"',
       previous: { name: SMALL, etag: '"o"', total: 210, sha256: null, confirm: 'done' },
+      ...patch,
     })
+  }
+
+  async function relaunch(record: DownloadRecord, files: Record<string, number>) {
     const harness = managerHarness({ initial: [recordEntry(record)] })
-    harness.files.set(SMALL, 210)
-    harness.files.set(SMALL_B, 40)
+    for (const [name, size] of Object.entries(files)) harness.files.set(name, size)
     harness.manager.setOwner(ALICE)
     await harness.manager.hydrate()
+    return harness
+  }
 
-    expect(harness.manager.record(9001)).toMatchObject({
+  it('resumes a half-done replacement after a launch, the old copy playing meanwhile', async () => {
+    const { manager, removed } = await relaunch(midReplacement(), { [SMALL]: 210, [SMALL_B]: 40 })
+
+    expect(manager.record(9001)).toMatchObject({
+      state: 'paused',
+      reason: 'interrupted',
+      autoResume: true,
+      name: SMALL_B,
+      bytes: 40,
+      previous: { name: SMALL },
+    })
+    expect(await manager.playableUrl(9001)).toBe(`blob:${SMALL}`)
+    expect(removed).toEqual([])
+  })
+
+  it('undoes a replacement that had nothing yet, and sweeps its empty file', async () => {
+    const { manager, removed } = await relaunch(midReplacement({ bytes: 0, total: 0 }), {
+      [SMALL]: 210,
+      [SMALL_B]: 0,
+    })
+
+    expect(manager.record(9001)).toMatchObject({
       state: 'downloaded',
       name: SMALL,
       etag: '"o"',
       bytes: 210,
       replacedFor: '"n"',
     })
-    expect(harness.removed).toEqual([SMALL_B])
+    expect(removed).toEqual([SMALL_B])
+  })
+
+  it('adopts a whole new copy whose record was saved before the old file went', async () => {
+    const { manager, removed } = await relaunch(midReplacement({ bytes: 300 }), { [SMALL_B]: 300 })
+
+    expect(manager.record(9001)).toMatchObject({
+      state: 'downloaded',
+      name: SMALL_B,
+      etag: '"n"',
+      bytes: 300,
+      // Confirmed at launch, with the new ETag.
+      confirm: 'done',
+    })
+    expect(manager.record(9001)?.previous).toBeUndefined()
+    expect(removed).toEqual([])
   })
 
   it('keeps a copy whose ETag is the server’s', async () => {

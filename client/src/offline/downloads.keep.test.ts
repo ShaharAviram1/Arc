@@ -74,7 +74,8 @@ describe('the launch reconcile (M20.4 E)', () => {
   it('marks evicted only a file that is missing on both reads', async () => {
     const { manager, reads } = await launch([downloadedRecord(ALICE)])
 
-    expect(reads).toEqual([FULL, FULL])
+    // Its own slot twice, then the other slots for a whole copy no record names.
+    expect(reads).toEqual([FULL, FULL, 'episode-9001-b.mp4', 'episode-9001-c.mp4'])
     expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'evicted' })
     const events = await manager.events.entries()
     expect(events.some((event) => event.detail?.includes('evicted') === true)).toBe(true)
@@ -227,10 +228,12 @@ describe('a media error on a downloaded copy (M20.4 E)', () => {
     const revoked = revokes.count
 
     expect(await manager.playbackFailed(9001)).toBe(`blob:${FULL}`)
-    expect(revokes.count).toBeGreaterThan(revoked)
+    // The old URL is not revoked before a new one exists (minting does that).
+    expect(revokes.count).toBe(revoked)
     expect(manager.record(9001)?.state).toBe('downloaded')
 
     expect(await manager.playbackFailed(9001)).toBeNull()
+    expect(revokes.count).toBeGreaterThan(revoked)
     expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'unreadable' })
     // Nothing on disk is touched.
     expect(removed).toEqual([])
@@ -418,7 +421,8 @@ describe('verified delivery (M20.4 E)', () => {
       expect(worker.commands).toHaveLength(2)
     })
     expect(worker.lastCommand()).toMatchObject({ name: SMALL, fresh: true, etag: null })
-    expect(removed).toEqual([SMALL])
+    // The device's own finding drops nothing: the fresh run cuts it later.
+    expect(removed).toEqual([])
     expect(manager.record(9001)).toMatchObject({ state: 'downloading', rechecked: true })
 
     done(2)
@@ -426,6 +430,8 @@ describe('verified delivery (M20.4 E)', () => {
       expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'mismatch' })
     })
     expect(confirmDelivered).not.toHaveBeenCalled()
+    expect(removed).toEqual([])
+    expect(files.get(SMALL)).toBe(210)
     expect(await kinds(manager)).toContain('mismatch')
   })
 

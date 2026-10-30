@@ -138,6 +138,7 @@ export function managerHarness(
     hashOf: (name) =>
       Promise.resolve({ size: files.get(name) ?? null, sha256: hashes.get(name) ?? null }),
     rereadMs: 0,
+    durable: () => Promise.resolve(true),
     removeFrom: (name) => {
       removed.push(name)
       files.delete(name)

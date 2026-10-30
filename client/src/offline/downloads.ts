@@ -124,7 +124,6 @@ import {
 } from '@/offline/download'
 import { EventLog, type DeviceEvent } from '@/offline/eventLog'
 import {
-  altNameFor,
   blobUrlFor,
   bytesOf,
   fileNameFor,
@@ -133,13 +132,14 @@ import {
   deviceName,
   removeFile,
   requestPersistence,
+  slotsFor,
   revokeCurrent,
   type CopyVariant,
   type SizeRead,
 } from '@/offline/opfs'
 import { offlineNow, subscribeNetwork } from '@/offline/network'
 import { outbox } from '@/offline/outbox'
-import { deviceId as storedDeviceId, openStore, type KeyStore } from '@/offline/store'
+import { deviceId as storedDeviceId, isPersistent, openStore, type KeyStore } from '@/offline/store'
 
 export type DownloadState =
   'preparing' | 'queued' | 'downloading' | 'paused' | 'downloaded' | 'failed'
@@ -613,6 +613,14 @@ function awaitingServer(record: DownloadRecord): boolean {
   )
 }
 
+/** One stored record at launch: as read, and — when already decided — what it becomes. */
+interface Launched {
+  key: string
+  record: DownloadRecord
+  read: SizeRead
+  final?: DownloadRecord
+}
+
 /** A downloaded copy whose first launch read says short or missing: read it again first. */
 function doubts(record: DownloadRecord, read: SizeRead): boolean {
   return record.state === 'downloaded' && read !== 'unreadable' && bytesOf(read) !== record.total
@@ -729,6 +737,11 @@ export interface ManagerOptions {
   events?: EventLog
   /** How long the launch reconcile waits before reading a short or missing file again. */
   rereadMs?: number
+  /**
+   * Whether what the store writes survives a reload (`isPersistent`): a
+   * replaced copy's old file is dropped only when it does.
+   */
+  durable?: () => Promise<boolean>
   /** `DELETE /api/trips/{id}/episodes/{eid}/delivered?device_id=`: the device deleted its copy. */
   releaseDelivered?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
   /**
@@ -878,6 +891,9 @@ export class DownloadManager {
   private readonly postReport: (deviceId: string, events: DeviceEvent[]) => Promise<unknown>
   private readonly hashOf: (name: string) => Promise<{ size: number | null; sha256: string | null }>
   private readonly rereadMs: number
+  private readonly durable: () => Promise<boolean>
+  /** Old files of finished replacements, by episode, waiting for the player to be left. */
+  private retiring = new Map<number, string[]>()
   /** The manager's diary (M20.4 E): every decision about a copy, for "Send report". */
   readonly events: EventLog
   private readonly releaseDelivered: (
@@ -998,6 +1014,7 @@ export class DownloadManager {
     this.postReport = options.postReport ?? defaultPostReport
     this.hashOf = options.hashOf ?? ((name) => this.hashInWorker(name))
     this.rereadMs = options.rereadMs ?? REREAD_MS
+    this.durable = options.durable ?? isPersistent
     this.releaseDelivered = options.releaseDelivered ?? defaultReleaseDelivered
     this.notes = options.notes ?? openStore('player')
     this.queuedFor = options.queuedFor ?? defaultQueuedFor
@@ -1047,7 +1064,7 @@ export class DownloadManager {
   private write(record: DownloadRecord): void {
     this.all.set(keyOfRecord(record), record)
     this.emit()
-    void this.store.put(keyOfRecord(record), record)
+    void this.store.put(keyOfRecord(record), record).catch(() => undefined)
   }
 
   private patch(key: string, patch: Partial<DownloadRecord>): DownloadRecord | null {
@@ -1088,6 +1105,12 @@ export class DownloadManager {
     for (const [key, record] of this.all) {
       if (record.userId === userId) continue
       if (record.state === 'queued' || record.state === 'downloading') {
+        this.events.note(
+          'state',
+          record.episodeId,
+          `${record.state} → paused (interrupted): account changed`,
+          record.userId,
+        )
         this.all.set(key, {
           ...record,
           state: 'paused',
@@ -1096,7 +1119,7 @@ export class DownloadManager {
           autoResume: false,
           updated_at: this.stamp(),
         })
-        void this.store.put(key, this.all.get(key))
+        void this.store.put(key, this.all.get(key)).catch(() => undefined)
       }
     }
     this.queue = this.queue.filter((key) => this.all.get(key)?.userId === userId)
@@ -1166,36 +1189,64 @@ export class DownloadManager {
     } catch {
       // Nothing remembered: the hook may offer a removed trip episode again.
     }
-    const stored: [string, DownloadRecord, SizeRead][] = []
+    const stored: Launched[] = []
     for (const [key, value] of await this.store.entries<DownloadRecord>()) {
       if (typeof value !== 'object' || value === null) continue
-      const record = withoutReplacement(normalise(value))
+      const record = normalise(value)
+      if (record.previous !== undefined) {
+        stored.push({ key, ...(await this.settleReplacement(record)) })
+        continue
+      }
       // A record with no URL yet names no bytes; whatever is on disk under its
       // name is somebody else's, or an orphan.
       const read = holdsNoFile(record) ? 0 : await this.sizeOf(record.name)
-      stored.push([key, record, read])
+      stored.push({ key, record, read })
     }
     // A downloaded copy that read short or missing is read once more, after a
-    // pause, before anything is decided about it (M20.4 E).
-    const doubtful = stored.filter(([, record, read]) => doubts(record, read))
+    // pause, before anything is decided about it (M20.4 E). Until then it is
+    // shown as it was stored, so the page is not empty meanwhile.
+    const doubtful = stored.filter(
+      (entry) => entry.final === undefined && doubts(entry.record, entry.read),
+    )
+    const shown = new Map<string, DownloadRecord>()
+    for (const entry of stored) {
+      const next = doubtful.includes(entry)
+        ? entry.record
+        : (entry.final ?? this.reconcileOne(entry.record, entry.read))
+      // A launch-time record may have been written while this tab was
+      // starting one of its own; the in-memory one is newer.
+      if (!this.all.has(entry.key)) {
+        this.all.set(entry.key, next)
+        shown.set(entry.key, next)
+      }
+    }
     if (doubtful.length > 0) {
+      this.emit()
       if (this.rereadMs > 0) await new Promise((resolve) => setTimeout(resolve, this.rereadMs))
       for (const entry of doubtful) {
-        const [, record, first] = entry
-        entry[2] = await this.sizeOf(record.name)
+        const { record, read: first } = entry
+        entry.read = await this.sizeOf(record.name)
         this.log(
           'reconcile',
           record.episodeId,
-          `${record.name}: read ${String(first)}, then ${String(entry[2])}, of ${String(record.total)}`,
+          `${record.name}: read ${String(first)}, then ${String(entry.read)}, of ${String(record.total)}`,
         )
+        if (bytesOf(entry.read) === 0 && entry.read !== 'unreadable') {
+          // Gone from its own slot: a whole copy in another slot no record
+          // names is this one (a replacement whose record was not saved).
+          const found = await this.wholeElsewhere(record)
+          if (found !== null) {
+            entry.record = { ...record, name: found }
+            entry.read = record.total
+            this.log('reconcile', record.episodeId, `${record.name} gone; adopted ${found}, whole`)
+          }
+        }
+        const next = this.reconcileOne(entry.record, entry.read)
+        if (this.all.get(entry.key) === shown.get(entry.key)) this.all.set(entry.key, next)
       }
     }
-    for (const [key, record, read] of stored) {
-      const next = this.reconcileOne(record, read)
-      // A launch-time record may have been written while this tab was
-      // starting one of its own; the in-memory one is newer.
-      if (!this.all.has(key)) this.all.set(key, next)
-      void this.store.put(key, this.all.get(key))
+    for (const entry of stored) {
+      void this.store.put(entry.key, this.all.get(entry.key)).catch(() => undefined)
     }
     await this.sweep()
     this.emit()
@@ -1225,6 +1276,92 @@ export class DownloadManager {
    * the storage could not answer (`'unreadable'`) is evidence of nothing:
    * the record keeps its state and its bytes. Everything is logged.
    */
+  /**
+   * A record stored mid-replacement (Arc closed, or its last write did not
+   * land, before the new copy was recorded whole). The old copy, when its
+   * file is whole, is the record again — or, when the half-made new one has
+   * bytes, stays the one that plays while the replacement resumes by itself.
+   * A new copy that is whole while the old file is gone is adopted. Nothing
+   * else is decided without reading both files (M20.4 E).
+   */
+  private async settleReplacement(
+    record: DownloadRecord,
+  ): Promise<{ record: DownloadRecord; read: SizeRead; final?: DownloadRecord }> {
+    const previous = record.previous
+    if (previous === undefined) return { record, read: await this.sizeOf(record.name) }
+    const old = await this.sizeOf(previous.name)
+    const fresh = await this.sizeOf(record.name)
+    const oldWhole = previous.total > 0 && old === previous.total
+    if (!oldWhole && old !== 'unreadable' && record.total > 0 && fresh === record.total) {
+      this.log(
+        'reconcile',
+        record.episodeId,
+        `${previous.name} ${String(old)}; adopted ${record.name}, whole`,
+      )
+      const adopted: DownloadRecord = {
+        ...record,
+        previous: undefined,
+        state: 'downloaded',
+        bytes: fresh,
+        fresh: false,
+        sha256: null,
+        reason: null,
+        message: null,
+        ...(record.tripId === undefined ? {} : { confirm: 'pending' as const }),
+      }
+      return { record: adopted, read: fresh, final: adopted }
+    }
+    if (oldWhole && record.state !== 'failed' && typeof fresh === 'number' && fresh > 0) {
+      this.log(
+        'reconcile',
+        record.episodeId,
+        `replacement ${record.name} at ${String(fresh)}; ${previous.name} plays meanwhile`,
+      )
+      const paused: DownloadRecord = {
+        ...record,
+        bytes: fresh,
+        state: 'paused',
+        reason: 'interrupted',
+        message: BACKGROUNDED,
+        autoResume: true,
+      }
+      return { record: paused, read: fresh, final: paused }
+    }
+    this.log(
+      'reconcile',
+      record.episodeId,
+      `replacement ${record.name} undone; ${previous.name} again`,
+    )
+    return { record: withoutReplacement(record), read: old }
+  }
+
+  /** Another record (any account) that names `name`, as its file or its kept copy. */
+  private otherNaming(name: string, except: string): DownloadRecord | undefined {
+    for (const [key, record] of this.all) {
+      if (key === except) continue
+      if (record.name === name || record.previous?.name === name) return record
+    }
+    return undefined
+  }
+
+  /** A slot of `record`'s copy, other than its own, that no record names and holds the whole copy. */
+  private async wholeElsewhere(record: DownloadRecord): Promise<string | null> {
+    if (record.total <= 0) return null
+    for (const slot of slotsFor(record.name)) {
+      if (slot === record.name || this.namedByAny(slot)) continue
+      if ((await this.sizeOf(slot)) === record.total) return slot
+    }
+    return null
+  }
+
+  /** Whether any record (any account) names `name`, as its file or its kept copy. */
+  private namedByAny(name: string): boolean {
+    for (const record of this.all.values()) {
+      if (record.name === name || record.previous?.name === name) return true
+    }
+    return false
+  }
+
   private reconcileOne(record: DownloadRecord, read: SizeRead): DownloadRecord {
     if (record.state === 'preparing') {
       // The server carries on making it whether Arc is open or not; the
@@ -1239,11 +1376,19 @@ export class DownloadManager {
       return this.relaunched(record, record.bytes)
     }
     const bytes = read === 'missing' ? 0 : read
-    if (record.total > 0 && bytes === record.total) {
+    // A whole file is the copy again — unless nothing vouches for it (a fresh
+    // record not evicted), or it was found unplayable or not the server's.
+    const promotable =
+      (record.fresh !== true || record.reason === 'evicted') &&
+      !(
+        record.state === 'failed' &&
+        (record.reason === 'unreadable' || record.reason === 'mismatch')
+      )
+    if (record.total > 0 && bytes === record.total && promotable) {
       if (record.state !== 'downloaded') {
         this.log('reconcile', record.episodeId, `${record.state} → downloaded (file whole)`)
       }
-      return { ...record, bytes, state: 'downloaded', reason: null, message: null }
+      return { ...record, bytes, state: 'downloaded', reason: null, message: null, fresh: false }
     }
     if (record.state === 'downloaded') {
       if (bytes === 0) {
@@ -1280,15 +1425,25 @@ export class DownloadManager {
   private relaunched(record: DownloadRecord, bytes: number): DownloadRecord {
     const reason: PauseReason =
       record.reason === 'by-hand' || record.reason === 'quota' ? record.reason : 'interrupted'
+    if (record.state !== 'paused') {
+      this.log('state', record.episodeId, `${record.state} → paused (${reason}) at launch`)
+    }
     return { ...record, bytes, state: 'paused', reason, message: MESSAGES[reason] }
   }
 
-  /** Remove every episode file no record names: the orphans of an interrupted delete. */
+  /**
+   * Remove every episode file no record names: the orphans of an interrupted
+   * delete. A file named by any record is spared, whether or not the record
+   * has a URL yet (M20.4 E), and so is every slot of a record mid-replacement.
+   */
   private async sweep(): Promise<void> {
     const named = new Set<string>()
     for (const record of this.all.values()) {
-      if (!holdsNoFile(record)) named.add(record.name)
-      if (record.previous !== undefined) named.add(record.previous.name)
+      named.add(record.name)
+      if (record.previous !== undefined) {
+        named.add(record.previous.name)
+        for (const slot of slotsFor(record.name)) named.add(slot)
+      }
     }
     for (const name of await this.listFiles()) {
       if (!named.has(name) && !this.releasing.has(name)) {
@@ -1374,11 +1529,18 @@ export class DownloadManager {
    * Resolves to the URL to try, or `null` to stream.
    */
   async playbackFailed(episodeId: number): Promise<string | null> {
+    // The old URL stays live until a new one exists (minting revokes it) or
+    // the answer is to stream.
+    const url = await this.checkAfterError(episodeId)
+    if (url === null) this.revokeUrl()
+    return url
+  }
+
+  private async checkAfterError(episodeId: number): Promise<string | null> {
     const record = this.snapshot[episodeId]
     if (record === undefined || record.state !== 'downloaded') return null
     const key = keyOfRecord(record)
     this.urls.delete(key)
-    this.revokeUrl()
     const failures = (this.playFailures.get(key) ?? 0) + 1
     this.playFailures.set(key, failures)
     this.log('play-error', episodeId, `media error ${String(failures)} on ${record.name}`)
@@ -1508,9 +1670,11 @@ export class DownloadManager {
     // Stop waiting on the server: the server keeps or expires its copy itself.
     this.asking.delete(key)
     if (this.probe === key) this.probe = null
+    this.prior.delete(key)
     if (record.previous !== undefined) {
       // A replacement paused by hand: the copy on the device stays as it was.
-      void this.keepPrevious(key, 'paused by hand', true)
+      // `replacedFor` stays: only the server offering it again later retries.
+      void this.keepPrevious(key, 'paused by hand')
       this.pump()
       return
     }
@@ -1557,7 +1721,7 @@ export class DownloadManager {
     }
     // Try again on a copy that failed: should the run end without touching
     // the file, what it was comes back (M20.4 E).
-    if (record.state === 'failed') this.prior.set(key, record)
+    if (record.state === 'failed' || record.state === 'paused') this.prior.set(key, record)
     if (record.reason === 'quota') {
       // The probe: tried alone, ahead of everything the space hold kept back.
       this.probe = key
@@ -2012,6 +2176,7 @@ export class DownloadManager {
     const bytes = shared === undefined ? 0 : bytesOf(await this.sizeOf(name))
     const current = this.all.get(key)
     if (current === undefined || current.userId !== this.owner || !awaitingServer(current)) return
+    this.log('state', current.episodeId, `${current.state} → queued (${variant} copy)`)
     this.write({
       ...current,
       name,
@@ -2048,7 +2213,9 @@ export class DownloadManager {
     if (owner === null) return
     const key = keyOf(owner, input.episodeId)
     if (this.all.has(key)) {
-      this.adoptTrip(input.episodeId, input.tripId, input.url, input.etag ?? null)
+      this.adoptTrip(input.episodeId, input.tripId, input.url, input.etag ?? null, {
+        sha256: input.sha256 ?? null,
+      })
       return
     }
     if (this.starting.has(key)) return
@@ -2210,25 +2377,45 @@ export class DownloadManager {
       sha256: record.sha256 ?? null,
       confirm: record.confirm,
     }
-    const name = altNameFor(record.name)
+    // A slot no record names — or one another account already holds this
+    // very copy in, which is shared rather than cut (M20.4 E).
+    let name: string | null = null
+    let shared: DownloadRecord | undefined
+    for (const slot of slotsFor(record.name)) {
+      if (slot === record.name) continue
+      const other = this.otherNaming(slot, key)
+      if (other === undefined) {
+        name = slot
+        break
+      }
+      if (other.state === 'downloaded' && other.name === slot && other.etag === etag) {
+        name = slot
+        shared = other
+        break
+      }
+    }
+    if (name === null) {
+      this.log('replace', record.episodeId, `no free slot beside ${record.name}; kept as it is`)
+      return
+    }
     this.doomed.delete(name)
     this.urls.delete(key)
     this.log(
       'replace',
       record.episodeId,
-      `${record.name} (${String(record.etag)}) → ${name} (${etag}); the old copy stays until it is whole`,
+      `${record.name} (${String(record.etag)}) → ${name} (${etag}${shared === undefined ? '' : ', shared'}); the old copy stays until it is whole`,
     )
     this.patch(key, {
       previous,
       name,
       url,
       state: 'queued',
-      etag: null,
-      bytes: 0,
-      total: 0,
-      sha256: null,
+      etag: shared?.etag ?? null,
+      bytes: shared?.total ?? 0,
+      total: shared?.total ?? 0,
+      sha256: shared?.sha256 ?? null,
       expected,
-      fresh: true,
+      fresh: shared === undefined,
       confirm: undefined,
       replacedFor: etag,
       reasked: false,
@@ -2241,38 +2428,19 @@ export class DownloadManager {
   }
 
   /**
-   * A Try again that ended without touching the file (`intact`, M20.4 E):
-   * when the file is still the whole copy the record had — a copy wrongly
-   * taken for evicted, say, and the server's copy since gone — it is
-   * `downloaded` again and plays; a copy that failed for being unreadable or
-   * mismatched stays that, with the server's words. Answers whether it
-   * handled the failure; `false` leaves it to the usual path.
+   * A Try again (or Resume) that ended without touching the file (`intact`,
+   * M20.4 E). A copy found unplayable or not the server's stays that, with
+   * the server's words. Otherwise, whatever the record was — downloaded,
+   * evicted, `size`, `error`, paused — a file still the size of its whole
+   * copy is that copy: `downloaded` again, its URL and name kept, and its
+   * digest checked afterwards when one is known (a mismatch marks it
+   * `unreadable`, never drops it). Answers whether it handled the failure;
+   * `false` leaves it to the usual path.
    */
   private restored(key: string, size: number, words: string): boolean {
     const prior = this.prior.get(key)
     this.prior.delete(key)
     if (prior === undefined) return false
-    const whole = prior.total > 0 && size === prior.total
-    const wasCopy =
-      prior.state === 'downloaded' || (prior.state === 'failed' && prior.reason === 'evicted')
-    if (whole && wasCopy) {
-      this.log(
-        'kept',
-        prior.episodeId,
-        `${prior.name} is whole (${String(size)}): downloaded again`,
-      )
-      this.patch(key, {
-        state: 'downloaded',
-        bytes: size,
-        total: prior.total,
-        etag: prior.etag,
-        sha256: prior.sha256 ?? null,
-        fresh: false,
-        reason: null,
-        message: null,
-      })
-      return true
-    }
     if (
       prior.state === 'failed' &&
       (prior.reason === 'unreadable' || prior.reason === 'mismatch')
@@ -2289,14 +2457,84 @@ export class DownloadManager {
       })
       return true
     }
-    return false
+    if (!(prior.total > 0 && size === prior.total)) return false
+    this.log(
+      'kept',
+      prior.episodeId,
+      `${prior.name} is whole (${String(size)}) after ${prior.state}/${String(prior.reason)}: downloaded again`,
+    )
+    this.patch(key, {
+      state: 'downloaded',
+      bytes: size,
+      total: prior.total,
+      etag: prior.etag,
+      sha256: prior.sha256 ?? null,
+      fresh: false,
+      reason: null,
+      message: null,
+    })
+    const recorded = prior.sha256 ?? null
+    if (recorded !== null) void this.checkDigest(key, recorded)
+    return true
+  }
+
+  /** A restored copy's digest, checked off the main thread: a mismatch is `unreadable`, kept. */
+  private async checkDigest(key: string, recorded: string): Promise<void> {
+    const record = this.all.get(key)
+    if (record === undefined) return
+    const found = await this.hashOf(record.name)
+    const current = this.all.get(key)
+    if (current?.state !== 'downloaded' || current.name !== record.name) return
+    if (found.sha256 !== null && found.sha256 !== recorded) {
+      this.log('verify', record.episodeId, `sha256 ${found.sha256} is not ${recorded}`)
+      this.patch(key, {
+        state: 'failed',
+        reason: 'unreadable',
+        message: MESSAGES.unreadable,
+        fresh: true,
+      })
+    }
+  }
+
+  /**
+   * Drop a replaced copy's old file — only once the record that names the
+   * new one is durably stored (a lost write would leave a record pointing at
+   * the old file), and never while the player has the episode open (the
+   * drop then waits for it to be left). M20.4 E.
+   */
+  private async retireOld(key: string, record: DownloadRecord, oldName: string): Promise<void> {
+    try {
+      await this.store.put(key, record)
+    } catch (error) {
+      this.log(
+        'replace',
+        record.episodeId,
+        `kept ${oldName}: the record was not saved (${String(error)})`,
+      )
+      return
+    }
+    if (!(await this.durable())) {
+      this.log('replace', record.episodeId, `kept ${oldName}: storage is not persistent`)
+      return
+    }
+    if (this.playing.has(record.episodeId)) {
+      this.log('replace', record.episodeId, `${oldName} goes when the player is left`)
+      this.retiring.set(record.episodeId, [...(this.retiring.get(record.episodeId) ?? []), oldName])
+      return
+    }
+    this.log('replace', record.episodeId, `${record.name} is whole and saved; dropping ${oldName}`)
+    await this.dropFile(oldName, key)
   }
 
   /**
    * A replacement that will not finish: the record is its old copy again
    * (all but `replacedFor`), and the half-made new file goes.
    */
-  private async keepPrevious(key: string, why: string, forget = false): Promise<void> {
+  private async keepPrevious(
+    key: string,
+    why: string,
+    { forget = false, dropNew = true }: { forget?: boolean; dropNew?: boolean } = {},
+  ): Promise<void> {
     const record = this.all.get(key)
     const previous = record?.previous
     if (record === undefined || previous === undefined) return
@@ -2317,7 +2555,8 @@ export class DownloadManager {
       // Not the server's doing: the same new copy may be tried again.
       ...(forget ? { replacedFor: undefined } : {}),
     })
-    await this.dropFile(record.name, key)
+    // The half-made new copy goes — unless another window is writing it.
+    if (dropNew) await this.dropFile(record.name, key)
   }
 
   /**
@@ -2325,6 +2564,8 @@ export class DownloadManager {
    * still holds it; one the worker still has open goes when it lets go.
    */
   private async dropFile(name: string, except?: string): Promise<void> {
+    // Another record vouches for these bytes (its own file, or a copy kept
+    // through a replacement): kept.
     if (this.sharedRecord(name, except) !== undefined) return
     if (this.releasing.has(name)) {
       this.doomed.add(name)
@@ -2400,6 +2641,8 @@ export class DownloadManager {
     ).then(
       () => {
         this.log('confirmed', episodeId, `trip ${String(tripId)} ${String(etag)}`)
+        // The server took this copy: a mismatch before it is behind us.
+        if (this.all.get(key)?.rechecked === true) this.patch(key, { rechecked: false })
         settled(true)
       },
       (error: unknown) => {
@@ -2420,7 +2663,9 @@ export class DownloadManager {
           // The server says the file here is not its copy: the one case a
           // held file is dropped, and fetched again.
           this.confirming.delete(key)
-          void this.fetchAgain(key, 'the server refused the copy (copy_mismatch)')
+          void this.fetchAgain(key, 'the server refused the copy (copy_mismatch)', {
+            serverSaid: true,
+          })
           return
         }
         settled(confirmIsFinal(error))
@@ -2429,12 +2674,18 @@ export class DownloadManager {
   }
 
   /**
-   * The copy on the device is not the server's (its SHA-256 differed, or the
-   * server answered `copy_mismatch`): the file is dropped and the copy fetched
-   * afresh, once; a second mismatch is `failed` / `mismatch`. A replacement
-   * that mismatches twice keeps its old copy instead.
+   * The copy on the device is not the server's (its SHA-256 differed from the
+   * published one, or the server answered `copy_mismatch`): the copy is
+   * fetched afresh, once; a second mismatch is `failed` / `mismatch`. The
+   * file is dropped only on the server's `copy_mismatch` (`serverSaid`);
+   * otherwise the fresh run cuts it once the server has sent its
+   * replacement. A replacement that mismatches twice keeps its old copy.
    */
-  private async fetchAgain(key: string, why: string): Promise<void> {
+  private async fetchAgain(
+    key: string,
+    why: string,
+    { serverSaid }: { serverSaid: boolean },
+  ): Promise<void> {
     const record = this.all.get(key)
     if (record === undefined) return
     this.log('mismatch', record.episodeId, why)
@@ -2448,10 +2699,12 @@ export class DownloadManager {
         reason: 'mismatch',
         message: MESSAGES.mismatch,
         fresh: true,
-        bytes: 0,
+        bytes: serverSaid ? 0 : record.bytes,
         confirm: undefined,
       })
-      await this.dropFile(record.name, key)
+      // Dropped only on the server's own word; a digest the device found
+      // different leaves the file (Try again cuts it once the server sends).
+      if (serverSaid) await this.dropFile(record.name, key)
       return
     }
     this.patch(key, {
@@ -2466,7 +2719,7 @@ export class DownloadManager {
       reason: null,
       message: null,
     })
-    await this.dropFile(record.name, key)
+    if (serverSaid) await this.dropFile(record.name, key)
     const current = this.all.get(key)
     if (current?.state !== 'queued') return
     if (!this.queue.includes(key)) this.queue.push(key)
@@ -2595,8 +2848,18 @@ export class DownloadManager {
       if (left) return
       left = true
       const count = (this.playing.get(episodeId) ?? 1) - 1
-      if (count <= 0) this.playing.delete(episodeId)
-      else this.playing.set(episodeId, count)
+      if (count > 0) {
+        this.playing.set(episodeId, count)
+        return
+      }
+      this.playing.delete(episodeId)
+      // A replacement finished while it played: its old file goes now.
+      const waiting = this.retiring.get(episodeId) ?? []
+      this.retiring.delete(episodeId)
+      for (const name of waiting) {
+        this.log('replace', episodeId, `player left; dropping ${name}`)
+        void this.dropFile(name)
+      }
     }
   }
 
@@ -2754,6 +3017,10 @@ export class DownloadManager {
     const wasProbe = this.probe === key
     if (wasProbe) this.probe = null
     if (reason === 'quota' || wasProbe || strikes >= STRIKES_FOR_SPACE) {
+      if (this.all.get(key)?.previous !== undefined) {
+        void this.keepPrevious(key, 'out of space')
+        return
+      }
       this.patch(key, {
         state: 'paused',
         reason: 'quota',
@@ -2814,7 +3081,7 @@ export class DownloadManager {
     this.activeRun = null
     this.log('worker', undefined, `worker failed: ${reason}`)
     if (key !== null && this.all.get(key)?.previous !== undefined) {
-      void this.keepPrevious(key, `the worker failed (${reason})`, true)
+      void this.keepPrevious(key, `the worker failed (${reason})`, { forget: true })
     } else if (key !== null) {
       this.patch(key, {
         state: 'failed',
@@ -2938,7 +3205,11 @@ export class DownloadManager {
           this.active = null
           this.activeRun = null
           if (record.previous !== undefined) {
-            void this.keepPrevious(key, 'another window holds the file', true)
+            // That window is writing the new file: it is not ours to drop.
+            void this.keepPrevious(key, 'another window holds the file', {
+              forget: true,
+              dropNew: false,
+            })
           } else {
             this.patch(key, { state: 'paused', reason: 'elsewhere', message: MESSAGES.elsewhere })
           }
@@ -2946,15 +3217,17 @@ export class DownloadManager {
         }
         break
       case 'paused':
-        if (running && record.previous !== undefined) {
-          // The device stopped a replacement: the old copy stays, and the
-          // next trip pass may try the new one again.
+        if (running && record.previous !== undefined && message.reason !== 'interrupted') {
+          // Out of space (or a pause nobody else accounts for) during a
+          // replacement: the old copy stays as it was, `replacedFor` too.
           this.active = null
           this.activeRun = null
-          void this.keepPrevious(key, `stopped (${message.reason ?? 'paused'})`, true)
+          void this.keepPrevious(key, `stopped (${message.reason ?? 'paused'})`)
           this.pump()
           break
         }
+        // An interrupted replacement keeps its half-made file and resumes
+        // into it like any download, the old copy playing meanwhile.
         this.patch(key, { bytes: message.offset })
         if (running) {
           this.prior.delete(key)
@@ -3023,7 +3296,14 @@ export class DownloadManager {
         }
         // The server dropped the small copy (idle sweep, re-encode): ask it
         // again, once, and carry on from its answer.
-        if (message.code === 'gone' && record.variant === 'small' && record.reasked !== true) {
+        // Never for a file the run left whole and untouched: a record with
+        // no URL names no bytes, and those bytes are a copy (M20.4 E).
+        if (
+          message.code === 'gone' &&
+          record.variant === 'small' &&
+          record.reasked !== true &&
+          !(message.intact === true && message.offset > 0)
+        ) {
           this.log(
             'reask',
             record.episodeId,
@@ -3057,12 +3337,14 @@ export class DownloadManager {
             this.active = null
             this.activeRun = null
           }
-          void this.fetchAgain(key, `sha256 ${sha256} is not the server’s ${expected}`)
+          void this.fetchAgain(key, `sha256 ${sha256} is not the server’s ${expected}`, {
+            serverSaid: false,
+          })
           if (running) this.pump()
           break
         }
         const previous = record.previous
-        this.patch(key, {
+        const done = this.patch(key, {
           state: 'downloaded',
           bytes: message.offset,
           total: message.total,
@@ -3074,19 +3356,16 @@ export class DownloadManager {
           reasked: false,
           tripReasked: false,
           previous: undefined,
+          // A digest the server published, and matched: no mismatch pending.
+          ...(expected !== null && sha256 === expected ? { rechecked: false } : {}),
           // A trip copy that has arrived is told to the server (M19 T6).
           ...(record.tripId === undefined ? {} : { confirm: 'pending' as const }),
         })
         this.playFailures.delete(key)
-        if (previous !== undefined) {
-          // The new copy is whole: only now does the old one go.
+        if (previous !== undefined && done !== null) {
+          // The new copy is whole: the old one goes once that is on record.
           this.urls.delete(key)
-          this.log(
-            'replace',
-            record.episodeId,
-            `${message.name} is whole; dropping ${previous.name}`,
-          )
-          void this.dropFile(previous.name, key)
+          void this.retireOld(key, done, previous.name)
         }
         if (running) this.wrote(key)
         if (running) {
