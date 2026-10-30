@@ -2162,7 +2162,7 @@ owner's word.
         `_complete_file` refuses them, manual chooser on the same lock rule.
         Orchestrator 2026-10-29: diffs read, merged main server 5193 passed,
         client 1385, `make lint` clean, head 8b6f2d4e1a73.
-  - [ ] **D — a trip belongs to the device that started it** (owner
+  - [x] **D — a trip belongs to the device that started it** (owner
         2026-10-30: "downloads are per user and not per device … we need
         this to be requesting-device only"). Yesterday every device with Arc
         open ran the trip auto-keep, confirmed and released the same rows,
@@ -2175,8 +2175,19 @@ owner's word.
         the client auto-keeps, reserves space for and offers controls only on
         its own trips, and shows other devices' trips as "Kept on another
         device". Cancelling stays allowed from any device.
-  - [ ] **C — production**: A and B deployed 2026-10-29 11:34 UTC (see the
-        verification record); the stopped-pack restart and D still to deploy; `redo-copies --trip 5 --failed` plus
+        Shipped as 45812a7…86c9cb5, merged 8fbd3b4: Validator PASS on
+        A–E (two devices on a real DB, full-table snapshots unchanged after
+        every refusal, the hook over the real trips query); Reviewer: no
+        blockers, fixes landed (operator `trip-device --trip ID --device
+        UUID | --clear`, neutral "Checking this device…" until the id is
+        read, Choose pack hidden on a foreign trip, Downloads wording for
+        foreign-only trips, claim only after the active check, a
+        concurrent-claim test). Orchestrator 2026-10-30: merged main server
+        5234 passed, client 1404, `make lint` clean, head 3f7a1c9e5b42.
+  - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
+        stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC
+        (8fbd3b4, head 3f7a1c9e5b42, health 200, backup first); trip 6 assigned
+        to the iPad with `trip-device` at 06:41 before any client could claim it; `redo-copies --trip 5 --failed` plus
         `--episodes 1`; after the S4 copies, `redo-copies --trip 4
         --episodes 13` (14 heals through the recheck); verify the iPad
         picks them up.
