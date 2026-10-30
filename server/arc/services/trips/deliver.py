@@ -97,6 +97,16 @@ _AGAIN_FROM: frozenset[TripEpisodeState] = frozenset(
 )
 
 
+def _claim(trip: Trip, user: User, device_id: str | None) -> None:
+    """A trip that records no device becomes ``device_id``'s (when one is named)."""
+    if trip.device_id is None and device_id is not None:
+        trip.device_id = device_id
+        log.info(
+            "trip claimed by a device",
+            extra={"trip_id": trip.id, "user_id": user.id, "device_id": device_id},
+        )
+
+
 def device_may_act(trip_device: str | None, caller_device: str | None) -> bool:
     """Whether ``caller_device`` may confirm, release or re-ask this trip's copies. Pure.
 
@@ -139,12 +149,8 @@ async def _row(
             extra={"trip_id": trip.id, "episode_id": episode_id, "user_id": user.id},
         )
         raise TripConflict(TRIP_OTHER_DEVICE)
-    if claim and trip.device_id is None and device_id is not None:
-        trip.device_id = device_id
-        log.info(
-            "trip claimed by a device",
-            extra={"trip_id": trip.id, "user_id": user.id, "device_id": device_id},
-        )
+    if claim:
+        _claim(trip, user, device_id)
     await session.scalar(select(Episode.id).where(Episode.id == episode_id).with_for_update())
     return trip, row
 
@@ -300,9 +306,11 @@ async def ask_again(
     :class:`TripConflict` (``trip_not_active``) once the trip has ended. A
     ``pending`` row is left as it is.
     """
-    trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=True)
+    trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=False)
     if trip.state is not TripState.ACTIVE:
         raise TripConflict(TRIP_NOT_ACTIVE)
+    # Claimed only by an "again" that is honoured, never by a refused one.
+    _claim(trip, user, device_id)
     if row.state in _AGAIN_FROM:
         previous = row.state
         copy = await session.get(OfflineCopy, episode_id)
