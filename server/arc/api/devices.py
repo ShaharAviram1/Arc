@@ -36,7 +36,8 @@ from typing import Annotated, Any, Final, Self
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi import Path as PathParam
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, SessionDep, SettingsDep
 from arc.api.trip_schemas import MAX_COPY_BYTES, SHA256_PATTERN, HeldVariant
@@ -99,18 +100,47 @@ class HoldingsIn(BaseModel):
         return self
 
     def held(self) -> tuple[list[int], dict[int, HoldingDetail]]:
-        """The ids, and the detail each one came with (none in the old shape)."""
+        """The distinct ids, and the detail each one came with.
+
+        None in the old shape; none for a ``full`` entry either — its etag,
+        size and hash describe the full-size file, not the small copy the
+        columns are about, so they are not stored.
+        """
         if self.episodes is None:
-            return list(self.episode_ids or []), {}
+            return sorted(set(self.episode_ids or [])), {}
         details = {
-            item.episode_id: HoldingDetail(etag=item.etag, size=item.size, sha256=item.sha256)
+            item.episode_id: (
+                HoldingDetail()
+                if item.variant == "full"
+                else HoldingDetail(etag=item.etag, size=item.size, sha256=item.sha256)
+            )
             for item in self.episodes
         }
-        return list(details), details
+        return sorted(details), details
 
     @property
-    def count(self) -> int:
-        return len(self.episodes if self.episodes is not None else self.episode_ids or [])
+    def detailed(self) -> bool:
+        """Whether the report uses the new shape, the only one that can re-pend."""
+        return self.episodes is not None
+
+
+#: What a report event's ``kind`` may be: a short machine word.
+REPORT_KIND_PATTERN: Final[str] = r"^[A-Za-z0-9_.:-]{1,64}$"
+
+
+def _no_nul(value: Any) -> bool:
+    """Whether no string in ``value`` (keys included) holds a NUL. Pure.
+
+    PostgreSQL's JSONB cannot store a NUL (``\\u0000`` in JSON); refused as a
+    422 rather than left to fail the insert.
+    """
+    if isinstance(value, str):
+        return "\x00" not in value
+    if isinstance(value, dict):
+        return all(_no_nul(key) and _no_nul(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_no_nul(item) for item in value)
+    return True
 
 
 class ReportEvent(BaseModel):
@@ -120,9 +150,15 @@ class ReportEvent(BaseModel):
 
     #: ISO 8601, as the device's clock wrote it (``toISOString``); stored as sent.
     at: datetime
-    kind: str = Field(min_length=1, max_length=64)
+    kind: str = Field(pattern=REPORT_KIND_PATTERN)
     episode_id: EpisodeIdField | None = None
     detail: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _storable(self) -> Self:
+        if self.detail is not None and not _no_nul(self.detail):
+            raise ValueError("detail may not contain a NUL character")
+        return self
 
 
 class ReportIn(BaseModel):
@@ -168,15 +204,18 @@ async def put_holdings(
     await replace_holdings(
         session, user_id=user.id, device_id=canonical, episode_ids=ids, now=at, details=details
     )
-    await repend_lost_copies(
-        session,
-        settings,
-        user_id=user.id,
-        device_id=canonical,
-        held=ids,
-        now=at,
-        truncated=body.count >= MAX_HOLDINGS,
-    )
+    if body.detailed:
+        # Only the new shape: the client sends it once no release of its own
+        # is still waiting to reach the server, so an absence there is a loss.
+        await repend_lost_copies(
+            session,
+            settings,
+            user_id=user.id,
+            device_id=canonical,
+            held=ids,
+            now=at,
+            truncated=len(ids) >= MAX_HOLDINGS,
+        )
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -190,20 +229,34 @@ async def put_holdings(
         413: {"description": REPORT_TOO_LARGE},
         422: {"description": BAD_DEVICE_ID},
     },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ReportIn.model_json_schema()}},
+        }
+    },
 )
 async def post_report(
     device_id: DeviceIdParam,
     request: Request,
-    body: ReportIn,
     user: CurrentUser,
     session: SessionDep,
 ) -> Response:
-    """Store the report (pruned to the newest per device); 204."""
+    """Store the report (pruned to the newest per device); 204.
+
+    The body is read here, not by FastAPI, so its size is checked **before**
+    anything parses it: a declared ``Content-Length`` over
+    :data:`MAX_REPORT_BYTES` is refused unread, and the stream is cut off as
+    soon as it passes the cap (a chunked body declares none).
+    """
     if user.is_demo:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
-    if len(await request.body()) > MAX_REPORT_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=REPORT_TOO_LARGE)
     canonical = parse_device_id(device_id)
+    raw = await _capped_body(request, MAX_REPORT_BYTES)
+    try:
+        body = ReportIn.model_validate_json(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors(include_url=False), body=None) from exc
     await store_report(
         session,
         user_id=user.id,
@@ -215,7 +268,33 @@ async def post_report(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _too_large() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=REPORT_TOO_LARGE)
+
+
+async def _capped_body(request: Request, cap: int) -> bytes:
+    """The request body, at most ``cap`` bytes, or a 413 without reading further."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > cap:
+                raise _too_large()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="bad content-length"
+            ) from exc
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > cap:
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 __all__ = [
+    "REPORT_KIND_PATTERN",
     "BAD_DEVICE_ID",
     "DEMO_REFUSED",
     "REPORT_TOO_LARGE",

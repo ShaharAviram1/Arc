@@ -195,7 +195,9 @@ async def delivered(
             user=user,
             trip_id=trip_id,
             episode_id=episode_id,
-            etag=body.etag,
+            # A full-size file has the source's ETag, never the copy's: the
+            # copy's ETag rule would hold the row pending for ever.
+            etag=body.etag if body.variant != "full" else None,
             # A full-size file is the device's own choice: nothing to compare.
             sha256=body.sha256 if body.variant != "full" else None,
             size=body.size if body.variant != "full" else None,
