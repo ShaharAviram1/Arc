@@ -68,16 +68,38 @@ async function root(): Promise<FileSystemDirectoryHandle | null> {
   }
 }
 
-/** The bytes already on the device. `0` for a file that is not there. */
-export async function fileSize(name: string): Promise<number> {
+/**
+ * What a size read found: the bytes on the device, `'missing'` when the file
+ * is definitely not there (the browser said `NotFoundError`), or
+ * `'unreadable'` when the storage could not be asked or answered with
+ * anything else. Only `'missing'` (or a size) is evidence about the file;
+ * `'unreadable'` is evidence about the read (M20.4 E, owner 2026-10-30).
+ */
+export type SizeRead = number | 'missing' | 'unreadable'
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'NotFoundError'
+  )
+}
+
+/** The bytes already on the device, or why there is no number (see {@link SizeRead}). */
+export async function fileSize(name: string): Promise<SizeRead> {
   const directory = await root()
-  if (directory === null) return 0
+  if (directory === null) return 'unreadable'
   try {
     const handle = await directory.getFileHandle(name)
     return (await handle.getFile()).size
-  } catch {
-    return 0
+  } catch (error) {
+    return isNotFound(error) ? 'missing' : 'unreadable'
   }
+}
+
+/** A size read as a number of bytes on disk: `0` for anything that is not a size. */
+export function bytesOf(read: SizeRead): number {
+  return typeof read === 'number' ? read : 0
 }
 
 export async function readFile(name: string): Promise<File | null> {
@@ -90,8 +112,23 @@ export async function readFile(name: string): Promise<File | null> {
   }
 }
 
-/** `episode-<digits>.mp4` and `episode-<digits>-o.mp4`: the only names Arc ever writes. */
-export const EPISODE_FILE = /^episode-\d+(?:-o)?\.mp4$/
+/**
+ * `episode-<digits>.mp4` and `episode-<digits>-o.mp4`, and either with `-b`
+ * (the second slot a replacement downloads into, {@link altNameFor}): the
+ * only names Arc ever writes.
+ */
+export const EPISODE_FILE = /^episode-\d+(?:-o)?(?:-b)?\.mp4$/
+
+/**
+ * The other slot of a copy's file: `episode-9-o.mp4` ↔ `episode-9-o-b.mp4`.
+ * A replacement of a held copy downloads into the slot the copy is not in,
+ * so the copy stays playable until the new one is whole (M20.4 E).
+ */
+export function altNameFor(name: string): string {
+  return name.endsWith('-b.mp4')
+    ? name.replace(/-b\.mp4$/, '.mp4')
+    : name.replace(/\.mp4$/, '-b.mp4')
+}
 
 /**
  * Every episode file in the origin-private file system, for the launch-time
