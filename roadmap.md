@@ -2184,7 +2184,7 @@ owner's word.
         foreign-only trips, claim only after the active check, a
         concurrent-claim test). Orchestrator 2026-10-30: merged main server
         5234 passed, client 1404, `make lint` clean, head 3f7a1c9e5b42.
-  - [ ] **E — a held copy is never destroyed, and "delivered" means verified**
+  - [x] **E — a held copy is never destroyed, and "delivered" means verified**
         (owner 2026-10-30, after episode 15 of trip 4 was lost mid-flight).
         Audit of the client found no automatic path that drops a downloaded
         file except the replace-on-new-copy; the likely chain was a record
@@ -2214,10 +2214,31 @@ owner's word.
         small copy"), the full source still goes as soon as the copy is made;
         `POST /api/devices/{id}/report` stores the device's event log for the
         operator (`arc.cli device-report --device UUID`).
+        Shipped: E1 (client) eaddc3f…671eb7a merged 65b8c54 — Validator pass 1
+        FAIL (a whole file recorded failed/size, retried, 404, swept) and a
+        Reviewer blocker (a failed record write at the end of a replace could
+        lose both files) fixed; pass 2 PASS on the deletion invariant with
+        two small defects fixed (log tagged by the record's account, release
+        settles on 403/422). E2 (server) 52fdd9b…7d4865e merged c387444 —
+        Validator PASS on all eight contract items; Reviewer blockers fixed
+        (re-pend only on the detailed holdings shape; the trip-lifetime
+        policy) and should-fixes landed (full-variant confirmation ignores the
+        ETag, retention spares held copies, a held copy never pins its
+        source, report body capped before parsing + Caddy 1 MB limit, hash
+        the staged file under the job heartbeat). Policy (orchestrator's
+        call, owner asked twice without answer, revertible by
+        `names.FINISH_ON_LAST_CONFIRM`): a trip stays active until its
+        deadline or cancel; a new trip on the same show ends one with
+        nothing pending. Orchestrator 2026-10-30: merged main server 5290
+        passed, client 1497/1498 (the one failure is the pre-existing
+        timing-sensitive live-player seek test, green on re-run), lint
+        clean, head a7c2e4f9d1b3.
   - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
         stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC
         (8fbd3b4, head 3f7a1c9e5b42, health 200, backup first); trip 6 assigned
-        to the iPad with `trip-device` at 06:41 before any client could claim it; `redo-copies --trip 5 --failed` plus
+        to the iPad with `trip-device` at 06:41 before any client could claim it;
+        E deployed 2026-10-30 08:55 UTC (e87d748, head a7c2e4f9d1b3, health
+        200, all four Caddy sites 200, backup arc-20261030T085539Z); `redo-copies --trip 5 --failed` plus
         `--episodes 1`; after the S4 copies, `redo-copies --trip 4
         --episodes 13` (14 heals through the recheck); verify the iPad
         picks them up.
