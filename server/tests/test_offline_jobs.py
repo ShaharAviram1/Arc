@@ -8,6 +8,7 @@ the handler's design turns on committing as it goes.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -137,6 +138,9 @@ async def test_a_ready_episode_gets_a_validated_copy(
         assert copy.size == info.st_size
         # The very string the media route will answer with (FR-P6).
         assert copy.etag == stat_etag(info.st_size, info.st_mtime_ns)
+        # Hashed before it went ready (owner, 2026-10-30): what a device checks.
+        assert copy.sha256 == hashlib.sha256(target.read_bytes()).hexdigest()
+        assert copy.sha256 is not None and len(copy.sha256) == 64
         assert (copy.codec, copy.height, copy.crf, copy.audio_bitrate) == ("h264", 720, 26, "96k")
         assert copy.settings_key == settings_key(OfflineOptions(), sub_lang="en", audio_lang="ja")
         assert copy.media_file_id is not None

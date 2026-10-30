@@ -79,6 +79,7 @@ from arc.services.media.copies import (
     encoding_episode_ids,
     ensure_copy_row,
     file_matches,
+    file_sha256,
     offline_options,
     publish_copy,
     settings_key,
@@ -570,6 +571,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     copy.settings_key = settings_key(options, sub_lang=sub_lang, audio_lang=audio_lang)
     copy.size = None
     copy.etag = None
+    copy.sha256 = None
     copy.ready_at = None
     copy.error = None
     publish_copy(ctx.session, episode, copy)
@@ -641,9 +643,14 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     if info is None:
         await _abandon(ctx, episode_id, reporter)
         return
+    # Hashed before the row goes ``ready``, so a ready copy made from here on
+    # always publishes its SHA-256 (owner, 2026-10-30): the device checks its
+    # bytes against it before it confirms.
+    digest = await asyncio.to_thread(file_sha256, target)
     copy.state = OfflineCopyState.READY
     copy.size = info.st_size
     copy.etag = stat_etag(info.st_size, info.st_mtime_ns)
+    copy.sha256 = digest
     copy.height = result.height
     copy.ready_at = datetime.now(UTC)
     copy.error = None

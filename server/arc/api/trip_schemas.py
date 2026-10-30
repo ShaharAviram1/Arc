@@ -97,6 +97,10 @@ class TripEpisodeOut(BaseModel):
       with) whenever ``url`` is set; else null. A device holding a copy of
       the episode under a different ETag holds one made before the copy was
       re-made (``remake-copies``, owner 2026-10-28) and replaces it.
+    * ``sha256`` — the copy's SHA-256 (lower-case hex) whenever ``url`` is
+      set and the server has one (null for copies made before 2026-10-30):
+      the device checks its bytes against it and sends it with the
+      confirmation (owner, 2026-10-30).
     """
 
     episode_id: int
@@ -107,6 +111,7 @@ class TripEpisodeOut(BaseModel):
     delivered: bool = False
     url: str | None = None
     etag: str | None = None
+    sha256: str | None = None
 
 
 class TripOut(BaseModel):
@@ -154,6 +159,7 @@ class TripOut(BaseModel):
                     delivered=row.delivered,
                     url=offline_url(row.episode_id) if row.fetchable else None,
                     etag=row.etag,
+                    sha256=row.sha256,
                 )
                 for row in facts.episodes
             ],

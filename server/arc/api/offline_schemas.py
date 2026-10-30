@@ -32,6 +32,9 @@ class OfflineOut(BaseModel):
       :func:`~arc.services.media.copies.codec_string`) for ``canPlayType``:
       the copy's own once it exists, what the server would make otherwise;
       null when there is nothing to make.
+    * ``sha256`` — the copy's SHA-256 (lower-case hex) once ``available``,
+      when the server has one (copies made before 2026-10-30 have none): the
+      device checks the bytes it downloaded against it before it trusts them.
     """
 
     state: OfflineState
@@ -39,6 +42,7 @@ class OfflineOut(BaseModel):
     size: int | None = None
     url: str | None = None
     codecs: str | None = None
+    sha256: str | None = None
 
     @classmethod
     def build(
@@ -74,6 +78,7 @@ class OfflineOut(BaseModel):
                 size=copy.size,
                 url=offline_url(episode_id),
                 codecs=codec_string(copy.codec, copy.height),
+                sha256=copy.sha256,
             )
         if state == "unavailable":
             return cls(state=state)
