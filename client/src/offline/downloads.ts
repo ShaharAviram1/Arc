@@ -820,9 +820,14 @@ export function releasesKey(userId: number): string {
   return `trip-releases:${String(userId)}`
 }
 
-/** Whether a release's failure is the server's final word (it heard, or there is nothing to release). */
+/**
+ * Whether a release's failure is the server's final word: nothing to release
+ * (404), the trip belongs elsewhere or has ended (409), this account may not
+ * (403), or the request is not one it will ever take (422). A 401 (signed
+ * out) stays queued for the next session.
+ */
 function releaseIsSettled(error: unknown): boolean {
-  return error instanceof ApiError && (error.status === 404 || error.status === 409)
+  return error instanceof ApiError && [403, 404, 409, 422].includes(error.status)
 }
 
 /** How long the launch reconcile waits before it reads a short or missing file a second time. */
@@ -918,6 +923,8 @@ export class DownloadManager {
   private readonly hashOf: (name: string) => Promise<{ size: number | null; sha256: string | null }>
   private readonly rereadMs: number
   private readonly durable: () => Promise<boolean>
+  /** Files the launch sweep leaves this time although no record names them (unread, M20.4 E). */
+  private spared = new Set<string>()
   /** Old files of finished replacements, by episode, waiting for the player to be left. */
   private retiring = new Map<number, string[]>()
   /** The manager's diary (M20.4 E): every decision about a copy, for "Send report". */
@@ -1057,8 +1064,20 @@ export class DownloadManager {
   }
 
   /** Note one decision in the event log (M20.4 E). */
-  private log(kind: string, episodeId?: number, detail?: string): void {
-    this.events.note(kind, episodeId, detail, this.owner)
+  /**
+   * Note one decision in the event log (M20.4 E). `about` is the record it
+   * concerns — its account tags the entry, so Send report never carries
+   * another account's episodes — or an episode of the signed-in account, or
+   * nothing for the device's own (the launch sweep, the worker).
+   */
+  private log(kind: string, about?: DownloadRecord | number, detail?: string): void {
+    if (about === undefined) {
+      this.events.note(kind, undefined, detail, null)
+    } else if (typeof about === 'number') {
+      this.events.note(kind, about, detail, this.owner)
+    } else {
+      this.events.note(kind, about.episodeId, detail, about.userId)
+    }
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -1102,7 +1121,7 @@ export class DownloadManager {
     if (next.state !== existing.state) {
       // Every change of state, with its reason: the diary's backbone.
       const why = next.reason === null ? '' : ` (${next.reason})`
-      this.log('state', next.episodeId, `${existing.state} → ${next.state}${why}`)
+      this.log('state', next, `${existing.state} → ${next.state}${why}`)
     }
     this.write(next)
     return next
@@ -1256,7 +1275,7 @@ export class DownloadManager {
         entry.read = await this.sizeOf(record.name)
         this.log(
           'reconcile',
-          record.episodeId,
+          record,
           `${record.name}: read ${String(first)}, then ${String(entry.read)}, of ${String(record.total)}`,
         )
         if (bytesOf(entry.read) === 0 && entry.read !== 'unreadable') {
@@ -1266,7 +1285,7 @@ export class DownloadManager {
           if (found !== null) {
             entry.record = { ...record, name: found }
             entry.read = record.total
-            this.log('reconcile', record.episodeId, `${record.name} gone; adopted ${found}, whole`)
+            this.log('reconcile', record, `${record.name} gone; adopted ${found}, whole`)
           }
         }
         const next = this.reconcileOne(entry.record, entry.read)
@@ -1321,10 +1340,12 @@ export class DownloadManager {
     const old = await this.sizeOf(previous.name)
     const fresh = await this.sizeOf(record.name)
     const oldWhole = previous.total > 0 && old === previous.total
-    if (!oldWhole && old !== 'unreadable' && record.total > 0 && fresh === record.total) {
+    if (!oldWhole && record.total > 0 && fresh === record.total) {
+      // An old file that could not be read stays on disk through this launch.
+      if (old === 'unreadable') this.spared.add(previous.name)
       this.log(
         'reconcile',
-        record.episodeId,
+        record,
         `${previous.name} ${String(old)}; adopted ${record.name}, whole`,
       )
       const adopted: DownloadRecord = {
@@ -1343,7 +1364,7 @@ export class DownloadManager {
     if (oldWhole && record.state !== 'failed' && typeof fresh === 'number' && fresh > 0) {
       this.log(
         'reconcile',
-        record.episodeId,
+        record,
         `replacement ${record.name} at ${String(fresh)}; ${previous.name} plays meanwhile`,
       )
       const paused: DownloadRecord = {
@@ -1356,11 +1377,7 @@ export class DownloadManager {
       }
       return { record: paused, read: fresh, final: paused }
     }
-    this.log(
-      'reconcile',
-      record.episodeId,
-      `replacement ${record.name} undone; ${previous.name} again`,
-    )
+    this.log('reconcile', record, `replacement ${record.name} undone; ${previous.name} again`)
     return { record: withoutReplacement(record), read: old }
   }
 
@@ -1376,9 +1393,19 @@ export class DownloadManager {
   /** A slot of `record`'s copy, other than its own, that no record names and holds the whole copy. */
   private async wholeElsewhere(record: DownloadRecord): Promise<string | null> {
     if (record.total <= 0) return null
+    const recorded = record.sha256 ?? null
     for (const slot of slotsFor(record.name)) {
       if (slot === record.name || this.namedByAny(slot)) continue
-      if ((await this.sizeOf(slot)) === record.total) return slot
+      if ((await this.sizeOf(slot)) !== record.total) continue
+      if (recorded === null) return slot
+      // A digest is known: the slot must be this very copy, read off the main thread.
+      const found = await this.hashOf(slot)
+      if (found.sha256 === recorded) return slot
+      this.log(
+        'reconcile',
+        record,
+        `${slot} is whole but sha256 ${String(found.sha256)}; not adopted`,
+      )
     }
     return null
   }
@@ -1400,7 +1427,7 @@ export class DownloadManager {
     if (read === 'unreadable') {
       // The storage did not answer: nothing is known about the file, so
       // nothing about the record changes but what a relaunch always changes.
-      this.log('reconcile', record.episodeId, `could not read ${record.name}; left ${record.state}`)
+      this.log('reconcile', record, `could not read ${record.name}; left ${record.state}`)
       if (record.state === 'downloaded' || record.state === 'failed') return record
       return this.relaunched(record, record.bytes)
     }
@@ -1415,7 +1442,7 @@ export class DownloadManager {
       )
     if (record.total > 0 && bytes === record.total && promotable) {
       if (record.state !== 'downloaded') {
-        this.log('reconcile', record.episodeId, `${record.state} → downloaded (file whole)`)
+        this.log('reconcile', record, `${record.state} → downloaded (file whole)`)
       }
       return { ...record, bytes, state: 'downloaded', reason: null, message: null, fresh: false }
     }
@@ -1424,7 +1451,7 @@ export class DownloadManager {
         // Read twice, gone twice: the device took it back (eviction, or
         // storage cleared). Said, not hidden: the row offers Keep offline
         // again, and Delete.
-        this.log('reconcile', record.episodeId, `${record.name} ${String(read)} twice → evicted`)
+        this.log('reconcile', record, `${record.name} ${String(read)} twice → evicted`)
         return {
           ...record,
           bytes,
@@ -1435,11 +1462,7 @@ export class DownloadManager {
         }
       }
       // Short, but there: the same encode's beginning, which Try again finishes.
-      this.log(
-        'reconcile',
-        record.episodeId,
-        `${record.name} short twice (${String(bytes)}) → size`,
-      )
+      this.log('reconcile', record, `${record.name} short twice (${String(bytes)}) → size`)
       return { ...record, bytes, state: 'failed', reason: 'size', message: MESSAGES.size }
     }
     if (record.state === 'failed' && record.reason === 'quota') {
@@ -1455,7 +1478,7 @@ export class DownloadManager {
     const reason: PauseReason =
       record.reason === 'by-hand' || record.reason === 'quota' ? record.reason : 'interrupted'
     if (record.state !== 'paused') {
-      this.log('state', record.episodeId, `${record.state} → paused (${reason}) at launch`)
+      this.log('state', record, `${record.state} → paused (${reason}) at launch`)
     }
     return { ...record, bytes, state: 'paused', reason, message: MESSAGES[reason] }
   }
@@ -1475,7 +1498,7 @@ export class DownloadManager {
       }
     }
     for (const name of await this.listFiles()) {
-      if (!named.has(name) && !this.releasing.has(name)) {
+      if (!named.has(name) && !this.releasing.has(name) && !this.spared.has(name)) {
         this.log('dropped', undefined, `${name}: no record names it (launch sweep)`)
         await this.removeFrom(name)
       }
@@ -1537,7 +1560,7 @@ export class DownloadManager {
     const key = keyOfRecord(record)
     this.urls.delete(key)
     this.revokeUrl()
-    this.log('unplayable', episodeId, detail)
+    this.log('unplayable', record, detail)
     this.patch(key, {
       state: 'failed',
       reason: 'unreadable',
@@ -1572,12 +1595,12 @@ export class DownloadManager {
     this.urls.delete(key)
     const failures = (this.playFailures.get(key) ?? 0) + 1
     this.playFailures.set(key, failures)
-    this.log('play-error', episodeId, `media error ${String(failures)} on ${record.name}`)
+    this.log('play-error', record, `media error ${String(failures)} on ${record.name}`)
     const read = await this.sizeOf(record.name)
     const still = (): boolean => this.all.get(key)?.state === 'downloaded'
     if (!still()) return null
     if (read === 'missing' || read === 0) {
-      this.log('verify', episodeId, `${record.name} ${String(read)}`)
+      this.log('verify', record, `${record.name} ${String(read)}`)
       this.patch(key, {
         state: 'failed',
         bytes: 0,
@@ -1588,11 +1611,11 @@ export class DownloadManager {
       return null
     }
     if (read === 'unreadable') {
-      this.log('verify', episodeId, `${record.name} could not be read; not marked`)
+      this.log('verify', record, `${record.name} could not be read; not marked`)
       return failures === 1 ? this.playableUrl(episodeId) : null
     }
     if (read !== record.total) {
-      this.log('verify', episodeId, `${record.name} is ${String(read)} of ${String(record.total)}`)
+      this.log('verify', record, `${record.name} is ${String(read)} of ${String(record.total)}`)
       this.patch(key, { state: 'failed', bytes: read, reason: 'size', message: MESSAGES.size })
       return null
     }
@@ -1603,14 +1626,14 @@ export class DownloadManager {
       if (!still()) return null
       if (found.sha256 === null) {
         verified = false
-        this.log('verify', episodeId, `${record.name} could not be hashed`)
+        this.log('verify', record, `${record.name} could not be hashed`)
       } else if (found.sha256 !== recorded) {
         this.markUnplayable(episodeId, `sha256 ${found.sha256} is not ${recorded}`)
         return null
       }
     }
     if (failures === 1) {
-      this.log('verify', episodeId, `${record.name} checks out; playing again from a new URL`)
+      this.log('verify', record, `${record.name} checks out; playing again from a new URL`)
       return this.playableUrl(episodeId)
     }
     if (!verified) return null
@@ -1808,11 +1831,7 @@ export class DownloadManager {
       void this.flushReleases()
     }
     this.prior.delete(key)
-    this.log(
-      'remove',
-      record.episodeId,
-      `${record.state}${record.watched === true ? ', watched' : ''}`,
-    )
+    this.log('remove', record, `${record.state}${record.watched === true ? ', watched' : ''}`)
     await this.store.delete(key)
     this.emit()
     if (this.active === key) this.halt(record)
@@ -1961,7 +1980,7 @@ export class DownloadManager {
         return [...list, { trip_id: tripId, episode_id: episodeId, at }]
       })
       .catch(() => undefined)
-    this.log('release', episodeId, `trip ${String(tripId)}: queued`)
+    this.events.note('release', episodeId, `trip ${String(tripId)}: queued`, userId)
   }
 
   /** The releases of `userId` still waiting for the server. */
@@ -1992,42 +2011,53 @@ export class DownloadManager {
   private async flushReleasesOnce(): Promise<void> {
     const owner = this.owner
     if (owner === null || this.demo) return
-    const pending = await this.pendingReleases(owner)
-    if (pending.length === 0) return
-    let device: string
-    try {
-      device = await this.thisDevice()
-    } catch {
-      return
-    }
+    let device: string | null = null
     let settledAny = false
-    for (const item of pending) {
-      if (this.owner !== owner) return
-      let settled: boolean
+    /** Releases tried in this flush: one queued meanwhile is tried too. */
+    const tried = new Set<string>()
+    for (;;) {
+      const pending = (await this.pendingReleases(owner)).filter(
+        (item) => !tried.has(`${String(item.trip_id)}:${String(item.episode_id)}`),
+      )
+      if (pending.length === 0 || this.owner !== owner) break
       try {
-        await this.releaseDelivered(item.trip_id, item.episode_id, device)
-        settled = true
-      } catch (error) {
-        settled = releaseIsSettled(error)
-        this.log(
-          'release',
-          item.episode_id,
-          `trip ${String(item.trip_id)}: ${error instanceof ApiError ? String(error.status) : String(error)}${settled ? ' (settled)' : ''}`,
-        )
-        if (!settled && (isUnreachable(error) || !(error instanceof ApiError))) break
+        device ??= await this.thisDevice()
+      } catch {
+        return
       }
-      if (!settled) continue
-      settledAny = true
-      this.log('release', item.episode_id, `trip ${String(item.trip_id)}: delivered`)
-      await this.meta
-        .update<PendingRelease[]>(releasesKey(owner), (current) => {
-          if (!Array.isArray(current)) return undefined
-          const left = current.filter(
-            (other) => !(other.trip_id === item.trip_id && other.episode_id === item.episode_id),
+      let unreachable = false
+      for (const item of pending) {
+        tried.add(`${String(item.trip_id)}:${String(item.episode_id)}`)
+        let settled: boolean
+        try {
+          await this.releaseDelivered(item.trip_id, item.episode_id, device)
+          settled = true
+        } catch (error) {
+          settled = releaseIsSettled(error)
+          this.log(
+            'release',
+            item.episode_id,
+            `trip ${String(item.trip_id)}: ${error instanceof ApiError ? String(error.status) : String(error)}${settled ? ' (settled)' : ''}`,
           )
-          return left.length === 0 ? null : left
-        })
-        .catch(() => undefined)
+          if (!settled && (isUnreachable(error) || !(error instanceof ApiError))) {
+            unreachable = true
+            break
+          }
+        }
+        if (!settled) continue
+        settledAny = true
+        this.log('release', item.episode_id, `trip ${String(item.trip_id)}: done`)
+        await this.meta
+          .update<PendingRelease[]>(releasesKey(owner), (current) => {
+            if (!Array.isArray(current)) return undefined
+            const left = current.filter(
+              (other) => !(other.trip_id === item.trip_id && other.episode_id === item.episode_id),
+            )
+            return left.length === 0 ? null : left
+          })
+          .catch(() => undefined)
+      }
+      if (unreachable) break
     }
     // No release waits any more: the per-copy report may go.
     if (settledAny && (await this.pendingReleases(owner)).length === 0) this.reportHoldings()
@@ -2304,7 +2334,7 @@ export class DownloadManager {
     const bytes = shared === undefined ? 0 : bytesOf(await this.sizeOf(name))
     const current = this.all.get(key)
     if (current === undefined || current.userId !== this.owner || !awaitingServer(current)) return
-    this.log('state', current.episodeId, `${current.state} → queued (${variant} copy)`)
+    this.log('state', current, `${current.state} → queued (${variant} copy)`)
     this.write({
       ...current,
       name,
@@ -2456,15 +2486,15 @@ export class DownloadManager {
     if (record === undefined || record.tripReasked === true || this.tripAsking.has(key)) return
     this.tripAsking.add(key)
     const { episodeId } = record
-    this.log('reask', episodeId, `trip ${String(tripId)}: delivered on the server, no file here`)
+    this.log('reask', record, `trip ${String(tripId)}: delivered on the server, no file here`)
     void this.withDevice((device) => this.askTripAgain(tripId, episodeId, device))
       .then(
         () => {
-          this.log('reask', episodeId, 'asked again: the server re-pends it')
+          this.log('reask', record, 'asked again: the server re-pends it')
           this.patch(key, { tripReasked: true })
         },
         (error: unknown) => {
-          this.log('reask', episodeId, `refused: ${String(error)}`)
+          this.log('reask', record, `refused: ${String(error)}`)
           if (!isUnreachable(error)) this.patch(key, { tripReasked: true })
         },
       )
@@ -2523,14 +2553,14 @@ export class DownloadManager {
       }
     }
     if (name === null) {
-      this.log('replace', record.episodeId, `no free slot beside ${record.name}; kept as it is`)
+      this.log('replace', record, `no free slot beside ${record.name}; kept as it is`)
       return
     }
     this.doomed.delete(name)
     this.urls.delete(key)
     this.log(
       'replace',
-      record.episodeId,
+      record,
       `${record.name} (${String(record.etag)}) → ${name} (${etag}${shared === undefined ? '' : ', shared'}); the old copy stays until it is whole`,
     )
     this.patch(key, {
@@ -2573,7 +2603,7 @@ export class DownloadManager {
       prior.state === 'failed' &&
       (prior.reason === 'unreadable' || prior.reason === 'mismatch')
     ) {
-      this.log('kept', prior.episodeId, `${prior.name} left as it was (${prior.reason})`)
+      this.log('kept', prior, `${prior.name} left as it was (${prior.reason})`)
       this.patch(key, {
         state: 'failed',
         bytes: size,
@@ -2588,7 +2618,7 @@ export class DownloadManager {
     if (!(prior.total > 0 && size === prior.total)) return false
     this.log(
       'kept',
-      prior.episodeId,
+      prior,
       `${prior.name} is whole (${String(size)}) after ${prior.state}/${String(prior.reason)}: downloaded again`,
     )
     this.patch(key, {
@@ -2614,7 +2644,7 @@ export class DownloadManager {
     const current = this.all.get(key)
     if (current?.state !== 'downloaded' || current.name !== record.name) return
     if (found.sha256 !== null && found.sha256 !== recorded) {
-      this.log('verify', record.episodeId, `sha256 ${found.sha256} is not ${recorded}`)
+      this.log('verify', record, `sha256 ${found.sha256} is not ${recorded}`)
       this.patch(key, {
         state: 'failed',
         reason: 'unreadable',
@@ -2634,23 +2664,19 @@ export class DownloadManager {
     try {
       await this.store.put(key, record)
     } catch (error) {
-      this.log(
-        'replace',
-        record.episodeId,
-        `kept ${oldName}: the record was not saved (${String(error)})`,
-      )
+      this.log('replace', record, `kept ${oldName}: the record was not saved (${String(error)})`)
       return
     }
     if (!(await this.durable())) {
-      this.log('replace', record.episodeId, `kept ${oldName}: storage is not persistent`)
+      this.log('replace', record, `kept ${oldName}: storage is not persistent`)
       return
     }
     if (this.playing.has(record.episodeId)) {
-      this.log('replace', record.episodeId, `${oldName} goes when the player is left`)
+      this.log('replace', record, `${oldName} goes when the player is left`)
       this.retiring.set(record.episodeId, [...(this.retiring.get(record.episodeId) ?? []), oldName])
       return
     }
-    this.log('replace', record.episodeId, `${record.name} is whole and saved; dropping ${oldName}`)
+    this.log('replace', record, `${record.name} is whole and saved; dropping ${oldName}`)
     await this.dropFile(oldName, key)
   }
 
@@ -2667,7 +2693,7 @@ export class DownloadManager {
     const previous = record?.previous
     if (record === undefined || previous === undefined) return
     this.queue = this.queue.filter((queued) => queued !== key)
-    this.log('replace', record.episodeId, `kept ${previous.name}: ${why}`)
+    this.log('replace', record, `kept ${previous.name}: ${why}`)
     this.patch(key, {
       name: previous.name,
       etag: previous.etag,
@@ -2768,7 +2794,7 @@ export class DownloadManager {
       this.confirmDelivered(tripId, episodeId, etag, device, proof),
     ).then(
       () => {
-        this.log('confirmed', episodeId, `trip ${String(tripId)} ${String(etag)}`)
+        this.log('confirmed', record, `trip ${String(tripId)} ${String(etag)}`)
         // The server took this copy: a mismatch before it is behind us.
         if (this.all.get(key)?.rechecked === true) this.patch(key, { rechecked: false })
         settled(true)
@@ -2777,7 +2803,7 @@ export class DownloadManager {
         if (error instanceof ApiError) {
           this.log(
             'server',
-            episodeId,
+            record,
             `delivered → ${String(error.status)} ${String(refusalDetail(error))}`,
           )
         }
@@ -2816,7 +2842,7 @@ export class DownloadManager {
   ): Promise<void> {
     const record = this.all.get(key)
     if (record === undefined) return
-    this.log('mismatch', record.episodeId, why)
+    this.log('mismatch', record, why)
     if (record.rechecked === true) {
       if (record.previous !== undefined) {
         await this.keepPrevious(key, `${why}, twice`)
@@ -3298,11 +3324,7 @@ export class DownloadManager {
       case 'truncated':
         // The server has sent the bytes that replace these: the old ones go now.
         this.prior.delete(key)
-        this.log(
-          'truncated',
-          record.episodeId,
-          `${message.name}: ${String(message.from)} bytes cut`,
-        )
+        this.log('truncated', record, `${message.name}: ${String(message.from)} bytes cut`)
         break
       case 'progress':
         this.prior.delete(key)
@@ -3320,7 +3342,7 @@ export class DownloadManager {
       case 'restarted':
         // The file is not cut until the new bytes arrive, so until then it
         // is vouched for by nothing: the next run starts over too.
-        this.log('restarted', record.episodeId, message.reason)
+        this.log('restarted', record, message.reason)
         this.patch(key, { bytes: 0, total: 0, etag: null, fresh: true, message: RESTARTED })
         break
       case 'retrying':
@@ -3374,7 +3396,7 @@ export class DownloadManager {
         }
         this.log(
           'failed',
-          record.episodeId,
+          record,
           `${message.code}: ${message.reason}${message.intact === true ? ' (file untouched)' : ''}`,
         )
         if (record.previous !== undefined) {
@@ -3432,11 +3454,7 @@ export class DownloadManager {
           record.reasked !== true &&
           !(message.intact === true && message.offset > 0)
         ) {
-          this.log(
-            'reask',
-            record.episodeId,
-            'the small copy is gone (404): asking the server again',
-          )
+          this.log('reask', record, 'the small copy is gone (404): asking the server again')
           this.queue = this.queue.filter((queued) => queued !== key)
           this.patch(key, {
             state: 'preparing',
@@ -3455,7 +3473,7 @@ export class DownloadManager {
         const expected = record.expected ?? null
         this.log(
           'done',
-          record.episodeId,
+          record,
           `${message.name} ${String(message.offset)} bytes ${String(message.etag)} sha256 ${String(sha256)}`,
         )
         if (expected !== null && sha256 !== null && sha256 !== expected) {

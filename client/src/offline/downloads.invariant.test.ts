@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MESSAGES, type DownloadRecord } from '@/offline/downloads'
 import { memoryStore } from '@/offline/store'
-import { PLAY_INFO } from '@/test/animeFixtures'
+import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
 import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
 
 /**
@@ -307,5 +307,68 @@ describe('rechecked is cleared once a copy checks', () => {
     })
     emit('a'.repeat(64), 2)
     expect(manager.record(9001)).toMatchObject({ state: 'downloaded', rechecked: false })
+  })
+})
+
+describe('launch adoption, carefully', () => {
+  it('adopts a whole new copy when the old file cannot be read, and leaves the old one', async () => {
+    const record = small({
+      name: SMALL_B,
+      state: 'downloading',
+      etag: '"n"',
+      bytes: 300,
+      total: 300,
+      replacedFor: '"n"',
+      previous: { name: SMALL, etag: '"o"', total: 210, sha256: null, confirm: 'done' },
+    })
+    const harness = managerHarness({ initial: [recordEntry(record)] })
+    harness.files.set(SMALL, 210)
+    harness.files.set(SMALL_B, 300)
+    harness.unreadable.add(SMALL)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+
+    expect(harness.manager.record(9001)).toMatchObject({ state: 'downloaded', name: SMALL_B })
+    expect(harness.removed).toEqual([])
+  })
+
+  it('adopts a copy from another slot only when its digest is the recorded one', async () => {
+    const recorded = small({ sha256: 'a'.repeat(64) })
+    const wrong = managerHarness({ initial: [recordEntry(recorded)] })
+    wrong.files.set(SMALL_B, 210)
+    wrong.hashes.set(SMALL_B, 'b'.repeat(64))
+    wrong.manager.setOwner(ALICE)
+    await wrong.manager.hydrate()
+    expect(wrong.manager.record(9001)).toMatchObject({ state: 'failed', reason: 'evicted' })
+
+    const right = managerHarness({ initial: [recordEntry(recorded)] })
+    right.files.set(SMALL_B, 210)
+    right.hashes.set(SMALL_B, 'a'.repeat(64))
+    right.manager.setOwner(ALICE)
+    await right.manager.hydrate()
+    expect(right.manager.record(9001)).toMatchObject({ state: 'downloaded', name: SMALL_B })
+  })
+})
+
+describe('the report carries only this account’s records', () => {
+  it('never sends what concerns another account’s record', async () => {
+    const postReport = vi.fn(() => Promise.resolve(null))
+    const bobs = { ...downloadedRecord(BOB, PLAY_INFO_EPISODE_2), state: 'downloaded' as const }
+    const harness = managerHarness({
+      initial: [recordEntry(small()), recordEntry(bobs)],
+      postReport,
+    })
+    harness.files.set(SMALL, 210)
+    // Bob's file is gone: the launch decides about his record, for him.
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+    expect(harness.manager.events).toBeDefined()
+
+    await harness.manager.sendReport()
+
+    const [, events] = postReport.mock.calls[0] as unknown as [string, { episode_id?: number }[]]
+    expect(events.some((event) => event.episode_id === 9002)).toBe(false)
+    const all = await harness.manager.events.entries()
+    expect(all.some((event) => event.episode_id === 9002)).toBe(true)
   })
 })

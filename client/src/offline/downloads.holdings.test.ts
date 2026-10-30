@@ -444,7 +444,7 @@ describe('trip releases, durably (M20.4 E)', () => {
     })
   })
 
-  it.each([404, 409])('drops a release the server answers %i', async (status) => {
+  it.each([403, 404, 409, 422])('drops a release the server answers %i', async (status) => {
     const release = vi.fn(() => Promise.reject(new ApiError(status, { detail: 'x' })))
     const { manager, meta } = await launch({ initial: [tripCopy()], release })
 
@@ -467,6 +467,49 @@ describe('trip releases, durably (M20.4 E)', () => {
     await launch({ release: ok, meta })
     await vi.advanceTimersByTimeAsync(0)
     expect(ok).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+  })
+
+  it('keeps a release answered 401 for the next session', async () => {
+    const release = vi.fn(() => Promise.reject(new ApiError(401, { detail: 'x' })))
+    const { manager, meta } = await launch({ initial: [tripCopy()], release })
+
+    await manager.remove(9001)
+    await manager.flushReleases()
+
+    expect(await meta.get(releasesKey(ALICE))).toHaveLength(1)
+  })
+
+  it('a release queued while a flush runs is sent by that flush', async () => {
+    let finish: () => void = () => undefined
+    const release = vi
+      .fn<(tripId: number, episodeId: number, deviceId: string) => Promise<unknown>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = () => {
+              resolve(null)
+            }
+          }),
+      )
+      .mockResolvedValue(null)
+    const second = recordEntry({
+      ...downloadedRecord(ALICE, PLAY_INFO_EPISODE_2),
+      name: 'episode-9002-o.mp4',
+      url: '/media/9002/offline.mp4',
+      variant: 'small',
+      tripId: TRIP,
+      confirm: 'done',
+    })
+    const { manager, meta } = await launch({ initial: [tripCopy(), second], release })
+
+    await manager.remove(9001)
+    const running = manager.flushReleases()
+    await manager.remove(9002)
+    finish()
+    await running
+
+    expect(release.mock.calls.map((call) => call[1])).toEqual([9001, 9002])
     expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
   })
 })
