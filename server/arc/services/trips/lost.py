@@ -115,13 +115,19 @@ async def repend_lost_copies(
     watched = await completed_episode_ids(
         session, user_id=user_id, episode_ids=sorted({row.episode_id for row in missing})
     )
+    lost = [row for row in missing if row.episode_id not in watched]
+    if not lost:
+        return []
+    # The episodes last, in one statement and in id order, as every trip
+    # writer takes them.
+    await session.execute(
+        select(Episode.id)
+        .where(Episode.id.in_({row.episode_id for row in lost}))
+        .order_by(Episode.id)
+        .with_for_update()
+    )
     repended: list[tuple[int, int]] = []
-    for row in missing:
-        if row.episode_id in watched:
-            continue
-        await session.scalar(
-            select(Episode.id).where(Episode.id == row.episode_id).with_for_update()
-        )
+    for row in lost:
         copy = await session.get(OfflineCopy, row.episode_id)
         on_disk = (
             copy is not None
