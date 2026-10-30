@@ -3104,8 +3104,10 @@ pure stepper, refusal and row-status rules), `components/Trip.tsx`
   `tripPlace` `unknown`: drawn neutral ("Checking this device…", no Ask
   again, keep, Choose pack or out-of-space banner), never guessed to be this
   device's. A download of a trip another device has since claimed is no
-  longer resumed by auto-keep and stays paused here (the viewer may delete it;
-  a finished copy stays playable). Downloads with nothing on the device but
+  longer adopted or started by auto-keep; one already in the manager's
+  queue, or stopped by the device (`resumeSuspended` is per record, not per
+  trip), may still finish here, and its confirmation is then refused (409,
+  final) — the viewer may delete it; a finished copy stays playable. Downloads with nothing on the device but
   another device's trips says "Nothing is downloaded to this device; the
   trips below are kept on another device."
 - **A copy re-made on the server** (owner, 2026-10-28; §5.4e "Remake").

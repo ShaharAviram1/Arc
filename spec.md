@@ -612,8 +612,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   trip made before this rule records no device and is claimed by the first
   device that confirms one of its copies or asks for one again — the one-way
   path for trips already running; a copy another device fetched before the
-  claim stays on it and plays there, while one it had not finished stays
-  paused there. The operator can assign a trip to a device, or re-home it
+  claim stays on it and plays there; one it had not finished is not
+  restarted for the trip, but a download already queued or stopped by the
+  device may still finish there (its confirmation is then refused) unless
+  the viewer deletes it. The operator can assign a trip to a device, or re-home it
   (`trip-device`): a device whose storage was reset gets a new id, and its
   trips need re-homing. **An episode wanted both by a trip and by the
   user's window (or anybody's) is not trip-only**: it keeps its source and
