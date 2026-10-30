@@ -9,7 +9,13 @@ import { rememberUser } from '@/offline/cache'
 import { setDownloads, type DownloadRecord } from '@/offline/downloads'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
 import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
-import { downloadedRecord, managerHarness, recordEntry, smallCopy } from '@/test/downloadFixtures'
+import {
+  downloadedRecord,
+  managerHarness,
+  recordEntry,
+  smallCopy,
+  TEST_DEVICE_ID,
+} from '@/test/downloadFixtures'
 
 const TITLE = PLAY_INFO.anime.title.preferred
 
@@ -356,6 +362,44 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     expect(regions[0]).toBe(other)
   })
 
+  it('lists a trip another device started apart, muted, still cancellable (owner, 2026-10-30)', async () => {
+    pretendOpfs()
+    const elsewhere = {
+      ...CURRENT,
+      id: TRIP_ID + 1,
+      anime_id: 4242,
+      anime_title: 'Kusuriya no Hitorigoto',
+      count: 3,
+      device_id: '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d',
+    }
+    const legacy = {
+      ...CURRENT,
+      id: TRIP_ID + 2,
+      anime_id: 4243,
+      anime_title: 'Dungeon Meshi',
+      device_id: null,
+    }
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/trips': { body: [{ ...CURRENT, device_id: TEST_DEVICE_ID }, elsewhere, legacy] },
+    })
+    install(tripRecords())
+
+    renderApp()
+
+    const kept = await screen.findByRole('region', { name: 'Kept on another device' })
+    const other = within(kept).getByRole('region', { name: 'Trip · Kusuriya no Hitorigoto' })
+    expect(within(other).getByText('Kept on another device')).toBeInTheDocument()
+    expect(within(other).queryByText('Nothing on this device yet')).not.toBeInTheDocument()
+    expect(within(other).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+    // This device's own trip and one no device has claimed yet are listed as ever.
+    const mine = screen.getByRole('region', { name: `Trip · ${TITLE}` })
+    const unclaimed = screen.getByRole('region', { name: 'Trip · Dungeon Meshi' })
+    expect(kept).not.toContainElement(mine)
+    expect(kept).not.toContainElement(unclaimed)
+    expect(within(unclaimed).getByText('Nothing on this device yet')).toBeInTheDocument()
+  })
+
   it('tells the server when a trip episode is deleted from the device', async () => {
     pretendOpfs()
     mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips': { body: [] } })
@@ -369,7 +413,7 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     await user.click(screen.getByRole('button', { name: 'Delete download' }))
 
     await waitFor(() => {
-      expect(releaseDelivered).toHaveBeenCalledWith(TRIP_ID, 9001)
+      expect(releaseDelivered).toHaveBeenCalledWith(TRIP_ID, 9001, TEST_DEVICE_ID)
     })
   })
 })

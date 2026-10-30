@@ -19,8 +19,10 @@ import {
   tripCandidates,
   tripCopyUrl,
   tripCountMax,
+  KEPT_ELSEWHERE,
   tripErrorMessage,
   tripEstimateLabel,
+  tripIsHere,
   tripRangeLabel,
   tripRoomFor,
   tripRowStatus,
@@ -29,6 +31,7 @@ import {
   useActiveTrips,
   useCreateTrip,
   useStorageRoom,
+  useThisDevice,
   type StorageRoom,
   type Trip,
   type TripEpisode,
@@ -57,7 +60,10 @@ import { useDownloads } from '@/offline/useDownloads'
  * `TripPanel` replaces it while the viewer's trip on this show is active: per
  * episode where it stands (the device's own record first, else the server's
  * phase), "Ask again" for an expired episode or one no longer on this device,
- * and Cancel trip behind an in-page confirmation — never `confirm()`.
+ * and Cancel trip behind an in-page confirmation — never `confirm()`. A trip
+ * started on another device (owner, 2026-10-30: a trip downloads only to the
+ * device that started it) shows each row as "Kept on another device" and
+ * offers nothing to fetch or ask again; cancelling it stays allowed.
  *
  * Neither is rendered for the demo account, nor where the browser cannot keep
  * files or play the copies; the page decides that and says it in one line.
@@ -142,11 +148,18 @@ export function TripControl({ anime }: { anime: AnimeDetail }) {
   const { data: trips } = useActiveTrips(true)
   const records = useDownloads()
   const { data: room } = useStorageRoom(open)
+  const here = useThisDevice()
 
   if (max === 0) return null
   const perEpisode = copyEstimateOf(anime.trip_limits)
-  const reserved = otherTripsReserve(trips, anime.id, perEpisode, records, (tripId, episodeId) =>
-    downloads().isDeclined(tripId, episodeId),
+  // Only this device's trips come here (owner, 2026-10-30).
+  const reserved = otherTripsReserve(
+    trips,
+    anime.id,
+    perEpisode,
+    records,
+    (tripId, episodeId) => downloads().isDeclined(tripId, episodeId),
+    here,
   )
   const roomFor = tripRoomFor(room ?? null, perEpisode, reserved)
   const cap = roomFor === null ? max : Math.max(1, Math.min(max, roomFor))
@@ -366,6 +379,7 @@ export function TripPanel({ trip }: { trip: Trip }) {
   const manager = downloads()
   const cancel = useCancelTrip()
   const [confirming, setConfirming] = useState(false)
+  const elsewhere = !tripIsHere(trip, useThisDevice())
   const held = onDeviceCount(trip, records)
   // A trip download paused because the device is full holds the whole queue:
   // said at the top of the panel, with the way to make room.
@@ -392,12 +406,18 @@ export function TripPanel({ trip }: { trip: Trip }) {
             <SuitcaseGlyph />
             {`Trip · ${range}`}
           </h2>
-          <p className="mt-1 text-[13px] text-[var(--arc-text-muted)] tabular-nums">
-            {`${String(held)} of ${String(trip.count)} on this device`}
-            {dateOf(trip.deadline_at) === ''
-              ? null
-              : ` · the server keeps each copy until this device has it, at most until ${dateOf(trip.deadline_at)}`}
-          </p>
+          {elsewhere ? (
+            <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
+              {`${KEPT_ELSEWHERE} · this trip downloads to the device that started it`}
+            </p>
+          ) : (
+            <p className="mt-1 text-[13px] text-[var(--arc-text-muted)] tabular-nums">
+              {`${String(held)} of ${String(trip.count)} on this device`}
+              {dateOf(trip.deadline_at) === ''
+                ? null
+                : ` · the server keeps each copy until this device has it, at most until ${dateOf(trip.deadline_at)}`}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* FR-A13: point the trip's pending episodes at a pack of your choosing. */}
@@ -416,7 +436,7 @@ export function TripPanel({ trip }: { trip: Trip }) {
         </div>
       </div>
 
-      {outOfSpace ? (
+      {outOfSpace && !elsewhere ? (
         <p
           role="alert"
           className="mt-3 rounded-card border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-bg)] p-3 text-[14px] leading-[1.5] text-[var(--arc-error)]"
@@ -488,12 +508,15 @@ export function TripPanel({ trip }: { trip: Trip }) {
               records[episode.episode_id],
               manager.isDeclined(trip.id, episode.episode_id),
               formatSize,
+              elsewhere,
             )}
           />
         ))}
       </ul>
 
-      <p className="mt-3 text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">{OPEN_NOTE}</p>
+      {elsewhere ? null : (
+        <p className="mt-3 text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">{OPEN_NOTE}</p>
+      )}
     </section>
   )
 }

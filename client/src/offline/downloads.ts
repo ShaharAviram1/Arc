@@ -350,26 +350,48 @@ function defaultConfirmDelivered(
   tripId: number,
   episodeId: number,
   etag: string | null,
+  deviceId: string,
 ): Promise<unknown> {
   return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
     method: 'POST',
-    body: JSON.stringify({ etag }),
+    body: JSON.stringify({ etag, device_id: deviceId }),
   })
 }
 
-function defaultReleaseDelivered(tripId: number, episodeId: number): Promise<unknown> {
-  return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
-    method: 'DELETE',
-  })
+function defaultReleaseDelivered(
+  tripId: number,
+  episodeId: number,
+  deviceId: string,
+): Promise<unknown> {
+  const query = new URLSearchParams({ device_id: deviceId })
+  return apiFetch<null>(
+    `/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered?${query.toString()}`,
+    { method: 'DELETE' },
+  )
 }
+
+/** The server's refusal of a trip call from a device that did not start the trip (2026-10-30). */
+export const TRIP_OTHER_DEVICE = 'trip_other_device'
 
 /**
  * A confirmation the server answered with a final no: the trip or the episode
- * is not this account's (404), or this account may not keep copies (403).
- * Nothing more can be told, so the record stops asking.
+ * is not this account's (404), this account may not keep copies (403), or the
+ * trip belongs to another device (409 `trip_other_device`, owner 2026-10-30).
+ * Nothing more can be told, so the record stops asking — and keeps its file:
+ * a copy already on this device stays playable here.
  */
 function confirmIsFinal(error: unknown): boolean {
-  return error instanceof ApiError && (error.status === 404 || error.status === 403)
+  if (!(error instanceof ApiError)) return false
+  if (error.status === 404 || error.status === 403) return true
+  return error.status === 409 && refusalDetail(error) === TRIP_OTHER_DEVICE
+}
+
+/** The `detail` of a refusal's body, when it is there. */
+function refusalDetail(error: ApiError): unknown {
+  const body = error.body
+  return typeof body === 'object' && body !== null
+    ? (body as { detail?: unknown }).detail
+    : undefined
 }
 
 /** The note that says this account took a trip episode off the device by hand. */
@@ -422,9 +444,7 @@ function defaultIsVisible(): boolean {
  */
 function takesFullInstead(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
-  const body = error.body
-  const detail =
-    typeof body === 'object' && body !== null ? (body as { detail?: unknown }).detail : undefined
+  const detail = refusalDetail(error)
   if (error.status === 409) return detail === 'source_gone' || detail === 'storage_held'
   if (error.status === 429) return detail === 'copy_queue_full'
   return false
@@ -511,10 +531,15 @@ export interface ManagerOptions {
   canPlayType?: (type: string) => string
   /** Whether the page is on screen; polling waits while it is not. */
   isVisible?: () => boolean
-  /** `POST /api/trips/{id}/episodes/{eid}/delivered {etag}` (M19 T6). */
-  confirmDelivered?: (tripId: number, episodeId: number, etag: string | null) => Promise<unknown>
-  /** `DELETE /api/trips/{id}/episodes/{eid}/delivered`: the device deleted its copy. */
-  releaseDelivered?: (tripId: number, episodeId: number) => Promise<unknown>
+  /** `POST /api/trips/{id}/episodes/{eid}/delivered {etag, device_id}` (M19 T6; device 2026-10-30). */
+  confirmDelivered?: (
+    tripId: number,
+    episodeId: number,
+    etag: string | null,
+    deviceId: string,
+  ) => Promise<unknown>
+  /** `DELETE /api/trips/{id}/episodes/{eid}/delivered?device_id=`: the device deleted its copy. */
+  releaseDelivered?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
   /**
    * Where the trip episodes taken off the device by hand are remembered, so
    * the auto-keep hook does not fetch them again (IndexedDB `player`).
@@ -643,8 +668,13 @@ export class DownloadManager {
     tripId: number,
     episodeId: number,
     etag: string | null,
+    deviceId: string,
   ) => Promise<unknown>
-  private readonly releaseDelivered: (tripId: number, episodeId: number) => Promise<unknown>
+  private readonly releaseDelivered: (
+    tripId: number,
+    episodeId: number,
+    deviceId: string,
+  ) => Promise<unknown>
   private readonly notes: KeyStore
   private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
   private readonly loadCompleted: (episodeIds: number[]) => Promise<CompletedEpisode[]>
@@ -655,6 +685,8 @@ export class DownloadManager {
 
   /** The signed-in account is the demo one: it holds nothing and reports nothing. */
   private demo = false
+  /** This device's own id once read ({@link thisDevice}). */
+  private knownDevice: string | null = null
   /** The debounce of {@link reportHoldings}. */
   private holdingsTimer: ReturnType<typeof setTimeout> | null = null
   /** A report in flight, so a second waits for it rather than racing it. */
@@ -846,6 +878,28 @@ export class DownloadManager {
     return this.owner
   }
 
+  /**
+   * This device's own id (`offline/store.ts` `deviceId`): what a trip is
+   * started with and what every confirmation and release names, so a trip
+   * downloads only to the device that started it (owner, 2026-10-30).
+   */
+  thisDevice(): Promise<string> {
+    if (this.knownDevice !== null) return Promise.resolve(this.knownDevice)
+    return this.deviceId().then((device) => {
+      this.knownDevice = device
+      return device
+    })
+  }
+
+  /**
+   * Run a trip call that names this device: at once when its id is known
+   * (read at launch), else once it has been read.
+   */
+  private withDevice(call: (device: string) => Promise<unknown>): Promise<unknown> {
+    if (this.knownDevice !== null) return call(this.knownDevice)
+    return this.thisDevice().then(call)
+  }
+
   /* --- Launch --------------------------------------------------------------- */
 
   /**
@@ -919,6 +973,8 @@ export class DownloadManager {
       if (record.state === 'failed' && record.reason === 'auth') this.resume(record.episodeId)
     }
     this.poll()
+    // The trip calls name this device: its id is read once, here.
+    await this.thisDevice().catch(() => undefined)
     this.confirmPending()
     await this.passWatched()
     void this.syncWatched()
@@ -1152,7 +1208,10 @@ export class DownloadManager {
       const declined = declineKey(record.userId, record.tripId, record.episodeId)
       this.declined.add(declined)
       void this.notes.put(declined, true).catch(() => undefined)
-      void this.releaseDelivered(record.tripId, record.episodeId).catch(() => undefined)
+      const { tripId, episodeId } = record
+      void this.withDevice((device) => this.releaseDelivered(tripId, episodeId, device)).catch(
+        () => undefined,
+      )
     }
     await this.store.delete(key)
     this.emit()
@@ -1745,7 +1804,8 @@ export class DownloadManager {
       }
       if (current.confirm !== 'done') this.patch(key, { confirm: 'done' })
     }
-    void this.confirmDelivered(tripId, record.episodeId, record.etag).then(
+    const { episodeId, etag } = record
+    void this.withDevice((device) => this.confirmDelivered(tripId, episodeId, etag, device)).then(
       () => {
         settled(true)
       },

@@ -9,7 +9,12 @@ import { setDownloads, type DownloadRecord } from '@/offline/downloads'
 import { autoKeep, keepsTrips, useTripAutoKeep } from '@/offline/useTripAutoKeep'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
 import { mockApi, requestsMade, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock'
-import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
+import {
+  downloadedRecord,
+  managerHarness,
+  recordEntry,
+  TEST_DEVICE_ID,
+} from '@/test/downloadFixtures'
 
 /**
  * The auto-keep hook (M19 T6, FR-A12): what one pass over the active trips
@@ -119,7 +124,7 @@ describe('autoKeep', () => {
 
     await autoKeep([trip([tripEpisode(9001, 1, 'preparing')])], manager)
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"')
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
     expect(worker.commands).toEqual([])
   })
 
@@ -255,6 +260,63 @@ describe('autoKeep', () => {
     manager.setOwner(null)
     await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
     expect(worker.commands).toEqual([])
+  })
+
+  describe('only this device’s trips (owner, 2026-10-30)', () => {
+    const ELSEWHERE = '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d'
+
+    it('fetches nothing of a trip another device started', async () => {
+      const { manager, worker } = await managerWith()
+
+      await autoKeep(
+        [{ ...trip([tripEpisode(9001, 1, 'available')]), device_id: ELSEWHERE }],
+        manager,
+      )
+
+      expect(manager.record(9001)).toBeUndefined()
+      expect(worker.commands).toEqual([])
+    })
+
+    it('neither adopts nor confirms a copy here for a trip another device keeps', async () => {
+      const confirmDelivered = vi.fn(() => Promise.resolve(null))
+      const { manager } = await managerWith([downloadedRecord(USER)], { confirmDelivered })
+      const adopt = vi.spyOn(manager, 'adoptTrip')
+
+      await autoKeep(
+        [{ ...trip([tripEpisode(9001, 1, 'available')]), device_id: ELSEWHERE }],
+        manager,
+      )
+
+      expect(adopt).not.toHaveBeenCalled()
+      expect(confirmDelivered).not.toHaveBeenCalled()
+      expect(manager.record(9001)?.tripId).toBeUndefined()
+    })
+
+    it('keeps its own trips and the ones no device has claimed yet', async () => {
+      const { manager, worker } = await managerWith()
+
+      await autoKeep(
+        [
+          { ...trip([tripEpisode(9001, 1, 'available')]), device_id: TEST_DEVICE_ID },
+          {
+            ...trip([tripEpisode(9002, 2, 'available')], 'active', TRIP + 1, 4242),
+            device_id: null,
+          },
+          {
+            ...trip([tripEpisode(9003, 3, 'available')], 'active', TRIP + 2, 4243),
+            device_id: ELSEWHERE,
+          },
+        ],
+        manager,
+      )
+
+      expect(manager.record(9001)).toMatchObject({ tripId: TRIP })
+      expect(manager.record(9002)).toMatchObject({ tripId: TRIP + 1 })
+      expect(manager.record(9003)).toBeUndefined()
+      await vi.waitFor(() => {
+        expect(worker.commands.length).toBeGreaterThan(0)
+      })
+    })
   })
 })
 
