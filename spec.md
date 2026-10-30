@@ -558,7 +558,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   means "verified on this device"** (owner, 2026-10-30): the server publishes
   each copy's SHA-256 (FR-P6), the device checks the bytes it holds against
   it and sends the hash and the size with the confirmation, and a
-  confirmation whose hash or size is not the copy's is refused (nothing
+  confirmation of the small copy whose hash or size is not the copy's is
+  refused (one for a full-size file the device kept instead is not compared;
+  nothing
   changes; the device downloads the copy again) — a device from before this
   rule, or a copy made before it (no hash), is taken on the length as
   before; a confirmation
