@@ -103,6 +103,10 @@ class Rendition(Base):
     )
 
 
+#: A SHA-256 digest as lower-case hex.
+SHA256_HEX_LENGTH = 64
+
+
 class OfflineCopy(Base):
     """The small offline copy of one episode (FR-P6, architecture.md §5.3b).
 
@@ -131,6 +135,11 @@ class OfflineCopy(Base):
     #: answers with — so a device can confirm it holds *this* copy (M19 T4).
     size: Mapped[int | None] = mapped_column(BigInteger)
     etag: Mapped[str | None] = mapped_column(String(80))
+    #: The finished file's SHA-256, lower-case hex, computed before the row
+    #: went ``ready`` (owner, 2026-10-30): a device confirms it holds a copy
+    #: only after checking its own bytes against this. Null for copies made
+    #: before the column existed (the device then skips the check).
+    sha256: Mapped[str | None] = mapped_column(String(SHA256_HEX_LENGTH))
     #: What the copy was made with: ``h264`` or ``hevc``, the height cap, the
     #: CRF and the audio bitrate, and a short hash over every setting that
     #: changes the bytes (languages included). A settings change does not
