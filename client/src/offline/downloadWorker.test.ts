@@ -73,4 +73,41 @@ describe('the download worker', () => {
 
     expect(posted).toEqual([])
   })
+
+  it('hashes a held file beside the download loop, and says when it is missing', async () => {
+    const bytes = new TextEncoder().encode('abc')
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      value: {
+        getDirectory: () =>
+          Promise.resolve({
+            getFileHandle: (name: string) =>
+              name === 'episode-5.mp4'
+                ? Promise.resolve({ getFile: () => Promise.resolve(new File([bytes], name)) })
+                : Promise.reject(new DOMException('no', 'NotFoundError')),
+          }),
+      },
+    })
+
+    send({ cmd: 'hash', name: 'episode-5.mp4', ask: 1 })
+    send({ cmd: 'hash', name: 'episode-6.mp4', ask: 2 })
+
+    await vi.waitFor(() => {
+      expect(posted).toHaveLength(2)
+    })
+    expect(posted).toContainEqual({
+      type: 'hashed',
+      name: 'episode-5.mp4',
+      ask: 1,
+      size: 3,
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    })
+    expect(posted).toContainEqual({
+      type: 'hashed',
+      name: 'episode-6.mp4',
+      ask: 2,
+      size: 0,
+      sha256: null,
+    })
+  })
 })

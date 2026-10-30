@@ -49,6 +49,8 @@
  * browser.
  */
 
+import { Sha256 } from '@/offline/sha256'
+
 /** 8 MB: big enough to be efficient, small enough to lose. */
 export const CHUNK_BYTES = 8 * 1024 * 1024
 
@@ -76,10 +78,12 @@ export interface StartCommand {
   /** The total a previous run saw in `Content-Range`, when resuming one. */
   total: number | null
   /**
-   * Throw away whatever the file already holds before starting. Set by the
-   * manager when no record vouches for the bytes on disk — an orphan from a
-   * delete, a file whose copy would not play — so nothing of unknown origin
-   * is ever resumed into.
+   * Throw away whatever the file already holds — but only once the server
+   * has answered the first request with bytes to write (M20.4 E, owner
+   * 2026-10-30): a 404, a refusal or no network before that leaves the file
+   * exactly as it was. Set by the manager when no record vouches for the
+   * bytes on disk — an orphan from a delete, a file whose copy would not
+   * play — so nothing of unknown origin is ever resumed into.
    */
   fresh: boolean
   /**
@@ -95,7 +99,18 @@ export interface PauseCommand {
   name: string
 }
 
-export type WorkerCommand = StartCommand | PauseCommand
+/**
+ * Read a file on the device and answer its size and SHA-256 (`hashed`): the
+ * re-verification of a copy that would not play (M20.4 E). Handled beside
+ * the download loop, never through it; `ask` pairs the answer with the ask.
+ */
+export interface HashCommand {
+  cmd: 'hash'
+  name: string
+  ask: number
+}
+
+export type WorkerCommand = StartCommand | PauseCommand | HashCommand
 
 /** Why a download stopped for good — each one is a different sentence in the UI. */
 export type FailCode = 'quota' | 'auth' | 'gone' | 'size' | 'error'
@@ -112,7 +127,20 @@ export type SuspendReason = 'interrupted' | 'quota'
 
 export type WorkerMessage = (
   | { type: 'progress'; name: string; offset: number; total: number; etag: string | null }
-  | { type: 'done'; name: string; offset: number; total: number; etag: string | null }
+  | {
+      type: 'done'
+      name: string
+      offset: number
+      total: number
+      etag: string | null
+      /**
+       * The SHA-256 of the whole file, hex, computed as the bytes arrived (a
+       * resumed run reads the part already on disk first); `null` when the
+       * file could not be read back for it. Absent from a worker built before
+       * M20.4 E.
+       */
+      sha256?: string | null
+    }
   | {
       type: 'paused'
       name: string
@@ -121,6 +149,8 @@ export type WorkerMessage = (
       reason?: SuspendReason
       /** The device's own words for it (`InvalidStateError: …`). */
       detail?: string
+      /** The run never wrote to or cut the file: it holds what it held before. */
+      intact?: true
     }
   | { type: 'retrying'; name: string; attempt: number; delay: number; reason: string }
   | { type: 'restarted'; name: string; reason: RestartReason }
@@ -132,7 +162,20 @@ export type WorkerMessage = (
       reason: string
       /** The file could not be written: the worker is replaced before the next download. */
       write?: boolean
+      /**
+       * The run never wrote to or cut the file (a 404 on the first request, a
+       * refusal): it holds exactly what it held before, and `offset` is its size.
+       */
+      intact?: true
     }
+  /**
+   * A run that was asked to start over (`fresh`, a re-encode) has just cut
+   * the old bytes away, `from` bytes of them — only ever after the server
+   * answered with the bytes that replace them. Not terminal.
+   */
+  | { type: 'truncated'; name: string; from: number }
+  /** The answer to a {@link HashCommand}: `size` null when the file could not be read. Not terminal. */
+  | { type: 'hashed'; name: string; ask: number; size: number | null; sha256: string | null }
   /** Another Arc window holds this file's lock and is downloading it. Terminal. */
   | { type: 'busy'; name: string }
   /**
@@ -166,6 +209,7 @@ export function isTerminal(message: WorkerMessage): message is TerminalMessage {
 /** The bit of `FileSystemSyncAccessHandle` this uses. */
 export interface SyncHandle {
   getSize(): number
+  read(buffer: Uint8Array, options: { at: number }): number
   write(data: Uint8Array, options: { at: number }): number
   truncate(size: number): void
   flush(): void
@@ -251,10 +295,59 @@ interface Held {
   handle: SyncHandle | null
   /** The last chunk boundary the file was known to reach. */
   offset: number
+  /** The file's size when the run opened it. */
+  initial: number
+  /** Whether the run has written to or cut the file at all. */
+  touched: boolean
+}
+
+/** How much of a file is read back at a time to hash it. */
+const HASH_READ_BYTES = 1024 * 1024
+
+/**
+ * The SHA-256 of the first `size` bytes of an open file: what a resumed run
+ * already has on disk, before it hashes the chunks it adds. `null` when the
+ * file cannot be read back.
+ */
+function hashPrefix(file: SyncHandle, size: number): Sha256 | null {
+  const hash = new Sha256()
+  const buffer = new Uint8Array(Math.min(HASH_READ_BYTES, Math.max(size, 1)))
+  let at = 0
+  try {
+    while (at < size) {
+      const want = Math.min(buffer.byteLength, size - at)
+      const read = file.read(buffer.subarray(0, want), { at })
+      if (read <= 0) return null
+      hash.update(buffer.subarray(0, read))
+      at += read
+    }
+  } catch {
+    return null
+  }
+  return hash
+}
+
+/**
+ * The size and SHA-256 of a whole file, read `HASH_READ_BYTES` at a time
+ * through `read` (the worker's {@link HashCommand}).
+ */
+export async function hashFile(
+  size: number,
+  read: (at: number, length: number) => Promise<Uint8Array>,
+): Promise<string> {
+  const hash = new Sha256()
+  let at = 0
+  while (at < size) {
+    const bytes = await read(at, Math.min(HASH_READ_BYTES, size - at))
+    if (bytes.byteLength === 0) throw new Error('the file ended early')
+    hash.update(bytes)
+    at += bytes.byteLength
+  }
+  return hash.hex()
 }
 
 export async function runDownload(command: StartCommand, deps: DownloadDeps): Promise<void> {
-  const held: Held = { handle: null, offset: 0 }
+  const held: Held = { handle: null, offset: 0, initial: 0, touched: false }
   let terminal: TerminalMessage | null = null
   try {
     terminal = await download(command, deps, held)
@@ -271,13 +364,21 @@ export async function runDownload(command: StartCommand, deps: DownloadDeps): Pr
             offset: held.offset,
             code: 'error',
             reason: String(error),
-            write: held.handle !== null,
+            write: held.handle !== null && held.touched,
           }
   } finally {
     try {
       held.handle?.close()
     } catch {
       // Already closed, or it never opened.
+    }
+    if (
+      terminal !== null &&
+      !held.touched &&
+      (terminal.type === 'failed' || terminal.type === 'paused')
+    ) {
+      // Nothing was written or cut: the file is as it was, and says so.
+      terminal = { ...terminal, offset: held.initial, intact: true }
     }
     // Only now: the file is no longer held, whatever the manager does next.
     if (terminal !== null) deps.post(terminal)
@@ -308,14 +409,34 @@ async function download(
 
   let file = await deps.open(name)
   held.handle = file
-  if (command.fresh) {
-    file.truncate(0)
-    file.flush()
-  }
-  let offset = file.getSize()
+  held.initial = file.getSize()
+  /**
+   * The file is to be started over, but is not cut until the server has
+   * answered with the bytes that replace it (M20.4 E): a fresh run, or a
+   * restart. Until then `offset` is 0 and the old bytes stay on disk.
+   */
+  let startOver = command.fresh
+  let offset = startOver ? 0 : held.initial
   held.offset = offset
   /** Set once a closed handle has been re-opened, until a chunk lands again. */
   let reopened = false
+  /**
+   * The SHA-256 of the file's first `hash.length` bytes; `hash` null when the
+   * file could not be read back for it (`broken`, until the file starts over).
+   */
+  const digest: { hash: Sha256 | null; broken: boolean } = { hash: null, broken: false }
+
+  /** Make the digest cover exactly the file's first `at` bytes (a resumed run reads them back once). */
+  const hashUpTo = (at: number): void => {
+    if (at === 0) {
+      digest.hash = new Sha256()
+      digest.broken = false
+      return
+    }
+    if (digest.broken || (digest.hash !== null && digest.hash.length === at)) return
+    digest.hash = hashPrefix(file, at)
+    if (digest.hash === null) digest.broken = true
+  }
 
   const failed = (code: FailCode, reason: string, at = offset): TerminalMessage => ({
     type: 'failed',
@@ -325,11 +446,14 @@ async function download(
     reason,
   })
 
-  /** Start again from zero; a failure once that has happened too often in a row. */
+  /**
+   * Start again from zero; a failure once that has happened too often in a
+   * row. Nothing is cut here: the old bytes go only when the first chunk of
+   * the new ones is in hand ({@link writeChunk}).
+   */
   const restart = (reason: RestartReason, nextEtag: string | null): TerminalMessage | null => {
     restarts += 1
-    file.truncate(0)
-    file.flush()
+    startOver = true
     offset = 0
     held.offset = 0
     total = null
@@ -358,13 +482,22 @@ async function download(
   }
 
   /**
-   * Write one chunk at `offset`. A handle the device closed is re-opened once
+   * Write one chunk at `offset` — the first of a run that starts over cuts
+   * the old file away first. A handle the device closed is re-opened once
    * per chunk: `'ok'` when the chunk landed, `'moved'` when the re-opened file
    * is shorter than `offset` (which now names its size, so the loop fetches
    * from there), or the run's terminal message.
    */
   const writeChunk = async (bytes: Uint8Array): Promise<'ok' | 'moved' | TerminalMessage> => {
+    held.touched = true
     try {
+      if (startOver) {
+        const from = file.getSize()
+        file.truncate(0)
+        file.flush()
+        startOver = false
+        if (from > 0) deps.post({ type: 'truncated', name, from })
+      }
       file.write(bytes, { at: offset })
       file.flush()
       return 'ok'
@@ -397,10 +530,13 @@ async function download(
     }
     try {
       if (size > offset) {
-        // Part of the chunk landed before the handle closed: start it again.
+        // Part of the chunk landed before the handle closed (or the old file
+        // was never cut): start it again.
         file.truncate(offset)
         file.flush()
+        if (startOver && offset === 0) deps.post({ type: 'truncated', name, from: size })
       }
+      startOver = false
       file.write(bytes, { at: offset })
       file.flush()
       return 'ok'
@@ -557,9 +693,13 @@ async function download(
       continue
     }
 
+    const at = offset
+    if (!startOver) hashUpTo(at)
     const written = await writeChunk(bytes)
     if (written === 'moved') continue
     if (written !== 'ok') return written
+    if (at === 0) hashUpTo(0)
+    if (digest.hash !== null && digest.hash.length === at) digest.hash.update(bytes)
     offset += bytes.byteLength
     held.offset = offset
     attempt = 0
@@ -568,14 +708,18 @@ async function download(
     deps.post({ type: 'progress', name, offset, total, etag })
   }
 
+  // A run that never got to start over still holds the old bytes, and says
+  // so (`intact`, added by `runDownload`).
+  if (deps.stopped()) return { type: 'paused', name, offset: file.getSize() }
   const size = file.getSize()
-  if (deps.stopped()) return { type: 'paused', name, offset: size }
-  if (total === null || size !== total) {
+  if (startOver || total === null || size !== total) {
     return failed(
       'size',
       `the file is ${String(size)} bytes but should be ${total === null ? 'a known size' : String(total)}`,
       size,
     )
   }
-  return { type: 'done', name, offset: size, total, etag }
+  hashUpTo(size)
+  const sha256 = digest.hash?.hex() ?? null
+  return { type: 'done', name, offset: size, total, etag, sha256 }
 }
