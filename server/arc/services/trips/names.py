@@ -57,10 +57,10 @@ TRIP_RELEASE_PRIORITY: Final[int] = 180
 TRIP_RELEASE_DELAY: Final[timedelta] = timedelta(seconds=15)
 
 
-#: Settle one trip episode's copy once its devices have it, or once its trip
-#: has stopped waiting for it (M19 T4, :mod:`arc.services.trips.settle`): the
-#: copy of an episode that is not ``ready`` is deleted when no trip row on it
-#: is pending any more. A job because it deletes a file and is queued for
+#: Settle one trip episode's copy once nothing keeps it (M19 T4,
+#: :mod:`arc.services.trips.settle`): the copy of an episode that is not
+#: ``ready`` is deleted when no trip row on it is pending and no active trip's
+#: device holds it unwatched (owner, 2026-10-30). A job because it deletes a file and is queued for
 #: later (:data:`TRIP_SETTLE_DELAY`).
 OFFLINE_SETTLE: Final[str] = "offline_settle"
 
@@ -74,10 +74,12 @@ TRIP_SWEEP: Final[str] = "trip_sweep"
 OFFLINE_SETTLE_PRIORITY: Final[int] = TRIP_RELEASE_PRIORITY
 TRIP_SWEEP_PRIORITY: Final[int] = 190
 
-#: How long a delivered copy stays after the device confirms it (owner's
-#: small call, 2026-10-05): long enough for a second device of the same user to
-#: finish its own download from the same copy. Measured from the **latest**
-#: confirmation on the episode, so two users' devices both get their hour.
+#: The least time a delivered copy stays after the latest confirmation on the
+#: episode (owner's small call, 2026-10-05). Since 2026-10-30 a copy is kept
+#: while its active trip's device holds it unwatched (the settle's keep rule),
+#: so this only matters once that ends — a trip that ends on its last
+#: confirmation still leaves the copy for this long. Measured from the
+#: **latest** confirmation, so two users' devices both get their hour.
 TRIP_SETTLE_DELAY: Final[timedelta] = timedelta(hours=1)
 
 #: How long a settle waits before looking again when an encode still holds

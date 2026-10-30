@@ -202,8 +202,8 @@ async def holds_trip_episode(session: AsyncSession, user_id: int, episode_id: in
 
     The question the media route asks before it serves the copy of an episode
     that is not ``ready`` (FR-P6, FR-A12), and ``/play`` before it answers
-    ``offline_only``. ``delivered`` counts so a second device of the same user
-    can fetch the copy in the hour before the settle deletes it; ``expired``
+    ``offline_only``. ``delivered`` counts so the device can fetch the copy
+    again while the server keeps it (until watched or the trip ends); ``expired``
     and ``cancelled`` do not. A ``pending`` row only ever sits on an active
     trip (cancel and the sweep end them), so the trip's own state is not read.
     """
