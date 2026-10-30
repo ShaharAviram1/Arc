@@ -2162,8 +2162,21 @@ owner's word.
         `_complete_file` refuses them, manual chooser on the same lock rule.
         Orchestrator 2026-10-29: diffs read, merged main server 5193 passed,
         client 1385, `make lint` clean, head 8b6f2d4e1a73.
-  - [ ] **C — production**: deploy A and B together (A's pack re-claim
-        relies on B's recheck); `redo-copies --trip 5 --failed` plus
+  - [ ] **D — a trip belongs to the device that started it** (owner
+        2026-10-30: "downloads are per user and not per device … we need
+        this to be requesting-device only"). Yesterday every device with Arc
+        open ran the trip auto-keep, confirmed and released the same rows,
+        so copies settled after one device's confirmation never reached the
+        iPad and re-made copies were fetched everywhere. `trips.device_id`
+        (v4 UUID from the device, one Alembic revision; NULL = legacy,
+        claimed by the first device that confirms or asks again);
+        `POST /api/anime/{id}/trip` takes `device_id`; `TripOut.device_id`;
+        confirm/release/again from another device → 409 `trip_other_device`;
+        the client auto-keeps, reserves space for and offers controls only on
+        its own trips, and shows other devices' trips as "Kept on another
+        device". Cancelling stays allowed from any device.
+  - [ ] **C — production**: A and B deployed 2026-10-29 11:34 UTC (see the
+        verification record); the stopped-pack restart and D still to deploy; `redo-copies --trip 5 --failed` plus
         `--episodes 1`; after the S4 copies, `redo-copies --trip 4
         --episodes 13` (14 heals through the recheck); verify the iPad
         picks them up.
