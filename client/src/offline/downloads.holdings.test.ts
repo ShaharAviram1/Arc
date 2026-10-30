@@ -6,6 +6,7 @@ import {
   holdingsKey,
   MAX_HOLDINGS,
   type DownloadRecord,
+  type HeldEpisode,
   type HoldingsNote,
 } from '@/offline/downloads'
 import { wireWatchedRemoval } from '@/offline/useDownloads'
@@ -41,11 +42,19 @@ interface Setup {
 
 async function launch(setup: Setup = {}) {
   const put = vi.fn(setup.put ?? (() => Promise.resolve(null)))
+  /** Every body sent, whole (M20.4 E); `put` sees only the ids. */
+  const bodies: HeldEpisode[][] = []
   const meta = setup.meta ?? memoryStore()
   const clock = setup.clock ?? { now: START }
   const harness = managerHarness({
     initial: setup.initial,
-    putHoldings: put,
+    putHoldings: (device, episodes) => {
+      bodies.push(episodes)
+      return put(
+        device,
+        episodes.map((episode) => episode.episode_id),
+      )
+    },
     meta,
     now: () => clock.now,
     isOnline: setup.online ?? (() => true),
@@ -57,7 +66,7 @@ async function launch(setup: Setup = {}) {
   }
   harness.manager.setOwner(ALICE, { demo: setup.demo === true })
   await harness.manager.hydrate()
-  return { ...harness, put, meta, clock }
+  return { ...harness, put, bodies, meta, clock }
 }
 
 const held = (info = PLAY_INFO) => recordEntry(downloadedRecord(ALICE, info))
@@ -83,8 +92,51 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
+  })
+
+  it('sends each copy’s ETag, size and SHA-256 (M20.4 E)', async () => {
+    const record = { ...downloadedRecord(ALICE), sha256: 'ab'.repeat(32) }
+    const { bodies } = await launch({ initial: [recordEntry(record), held(PLAY_INFO_EPISODE_2)] })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    expect(bodies).toEqual([
+      [
+        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32) },
+        { episode_id: 9002, etag: '"e"', size: 1000, sha256: null },
+      ],
+    ])
+  })
+
+  it('sends again when a copy changed under the same ids', async () => {
+    const meta = memoryStore()
+    const first = await launch({ initial: [held()], meta })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(first.put).toHaveBeenCalledTimes(1)
+
+    const changed = { ...downloadedRecord(ALICE), etag: '"f"' }
+    const second = await launch({ initial: [recordEntry(changed)], meta })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(second.bodies).toEqual([[{ episode_id: 9001, etag: '"f"', size: 1000, sha256: null }]])
+  })
+
+  it('reports a completed download with the digest the worker computed', async () => {
+    const { manager, worker, bodies } = await launch()
+    await manager.start({ episodeId: 9001, url: '/media/9001/episode.mp4' })
+
+    worker.emit({
+      type: 'done',
+      name: 'episode-9001.mp4',
+      offset: 10,
+      total: 10,
+      etag: '"e"',
+      sha256: 'cd'.repeat(32),
+    })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    expect(bodies).toEqual([[{ episode_id: 9001, etag: '"e"', size: 10, sha256: 'cd'.repeat(32) }]])
   })
 
   it('sends nothing at a first launch that holds nothing', async () => {
@@ -200,6 +252,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })
@@ -220,6 +273,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledTimes(2)
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })
@@ -241,6 +295,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenLastCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })

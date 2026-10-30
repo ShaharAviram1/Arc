@@ -362,6 +362,11 @@ export interface OfflineCopyOut {
   url: string | null
   /** RFC 6381, e.g. `avc1.640028` or `hvc1.1.6.L93.B0`; for the device's codec check. */
   codecs: string | null
+  /**
+   * The copy's SHA-256, hex, once it exists (M20.4 E): a download that
+   * differs is fetched again. Optional on the wire for an older server.
+   */
+  sha256?: string | null
 }
 
 /**

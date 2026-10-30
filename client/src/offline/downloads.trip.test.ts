@@ -19,6 +19,8 @@ import {
 const ALICE = 1
 const TRIP = 77
 const SMALL = 'episode-9001-o.mp4'
+/** The other slot a replacement downloads into (M20.4 E). */
+const SMALL_B = 'episode-9001-o-b.mp4'
 const COPY_URL = '/media/9001/offline.mp4'
 
 async function alice(options: Parameters<typeof managerHarness>[0] = {}) {
@@ -84,7 +86,13 @@ describe('confirming a trip copy', () => {
 
     worker.emit({ type: 'done', name: SMALL, offset: 210, total: 210, etag: '"o"', run: 1 })
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(
+      TRIP,
+      9001,
+      '"o"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
     await vi.waitFor(() => {
       expect(manager.record(9001)?.confirm).toBe('done')
     })
@@ -127,7 +135,13 @@ describe('confirming a trip copy', () => {
     harness.manager.setOwner(ALICE)
     await harness.manager.hydrate()
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(
+      TRIP,
+      9001,
+      '"o"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
     await vi.waitFor(() => {
       expect(harness.manager.record(9001)?.confirm).toBe('done')
     })
@@ -222,7 +236,13 @@ describe('adoptTrip', () => {
 
     harness.manager.adoptTrip(9001, TRIP, null)
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(
+      TRIP,
+      9001,
+      '"e"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
     expect(harness.manager.record(9001)).toMatchObject({ tripId: TRIP, variant: 'full' })
     expect(harness.worker.commands).toEqual([])
   })
@@ -279,46 +299,131 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
     return { ...harness, confirmDelivered }
   }
 
-  it('drops the old file and downloads the new copy afresh when the ETag differs', async () => {
+  it('downloads the new copy beside the old, and drops the old only once the new is whole', async () => {
     const { manager, worker, removed, confirmDelivered } = await holding()
 
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
 
-    await vi.waitFor(() => {
-      expect(worker.lastCommand()).toMatchObject({
-        cmd: 'download',
-        name: SMALL,
-        url: COPY_URL,
-        etag: null,
-        fresh: true,
-      })
+    expect(worker.lastCommand()).toMatchObject({
+      cmd: 'download',
+      name: SMALL_B,
+      url: COPY_URL,
+      etag: null,
+      fresh: true,
     })
-    expect(removed).toEqual([SMALL])
+    expect(removed).toEqual([])
     expect(manager.record(9001)).toMatchObject({
       tripId: TRIP,
       variant: 'small',
       state: 'downloading',
       replacedFor: '"n"',
+      previous: { name: SMALL, etag: '"o"', total: 210 },
     })
+    // The old copy still plays, and still counts as held.
+    expect(manager.isOnDevice(9001)).toBe(true)
+    expect(await manager.playableUrl(9001)).toBe(`blob:${SMALL}`)
 
-    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"n"', run: 1 })
+    worker.emit({ type: 'done', name: SMALL_B, offset: 300, total: 300, etag: '"n"', run: 1 })
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"', TEST_DEVICE_ID)
-    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"n"' })
+    await vi.waitFor(() => {
+      expect(removed).toEqual([SMALL])
+    })
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"n"', TEST_DEVICE_ID, {
+      sha256: null,
+      size: 300,
+    })
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"n"', name: SMALL_B })
+    expect(manager.record(9001)?.previous).toBeUndefined()
   })
 
   it('fetches the new copy once per server ETag, even if it lands under another', async () => {
     const { manager, worker } = await holding()
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
-    await vi.waitFor(() => {
-      expect(worker.commands).toHaveLength(1)
-    })
-    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"x"', run: 1 })
+    expect(worker.commands).toHaveLength(1)
+    worker.emit({ type: 'done', name: SMALL_B, offset: 300, total: 300, etag: '"x"', run: 1 })
 
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
 
     expect(worker.commands).toHaveLength(1)
     expect(manager.record(9001)).toMatchObject({ state: 'downloaded', etag: '"x"' })
+  })
+
+  it('keeps the old copy exactly as it was when the new one is refused', async () => {
+    const { manager, worker, removed, files } = await holding()
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    worker.emit({
+      type: 'failed',
+      name: SMALL_B,
+      offset: 0,
+      code: 'gone',
+      reason: 'the server no longer has this episode',
+      intact: true,
+      run: 1,
+    })
+
+    await vi.waitFor(() => {
+      expect(manager.record(9001)).toMatchObject({
+        state: 'downloaded',
+        name: SMALL,
+        etag: '"o"',
+        total: 210,
+        bytes: 210,
+        confirm: 'done',
+        replacedFor: '"n"',
+      })
+    })
+    expect(manager.record(9001)?.previous).toBeUndefined()
+    expect(files.get(SMALL)).toBe(210)
+    expect(removed).toEqual([SMALL_B])
+    // Not chased again for the same ETag, and not asked of the server again.
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+    expect(worker.commands).toHaveLength(1)
+  })
+
+  it('keeps the old copy when the replacement is paused, and may try again later', async () => {
+    const { manager, worker, removed } = await holding()
+    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
+
+    manager.pause(9001)
+
+    await vi.waitFor(() => {
+      expect(manager.record(9001)).toMatchObject({ state: 'downloaded', name: SMALL, etag: '"o"' })
+    })
+    expect(manager.record(9001)?.replacedFor).toBeUndefined()
+    worker.emit({ type: 'paused', name: SMALL_B, offset: 0, intact: true, run: 1 })
+    await vi.waitFor(() => {
+      expect(removed).toEqual([SMALL_B])
+    })
+    expect(removed).not.toContain(SMALL)
+  })
+
+  it('brings the old copy back at a launch that finds a replacement half done', async () => {
+    const record = tripRecord({
+      confirm: 'done',
+      name: SMALL_B,
+      state: 'downloading',
+      etag: null,
+      bytes: 40,
+      total: 0,
+      fresh: true,
+      replacedFor: '"n"',
+      previous: { name: SMALL, etag: '"o"', total: 210, sha256: null, confirm: 'done' },
+    })
+    const harness = managerHarness({ initial: [recordEntry(record)] })
+    harness.files.set(SMALL, 210)
+    harness.files.set(SMALL_B, 40)
+    harness.manager.setOwner(ALICE)
+    await harness.manager.hydrate()
+
+    expect(harness.manager.record(9001)).toMatchObject({
+      state: 'downloaded',
+      name: SMALL,
+      etag: '"o"',
+      bytes: 210,
+      replacedFor: '"n"',
+    })
+    expect(harness.removed).toEqual([SMALL_B])
   })
 
   it('keeps a copy whose ETag is the server’s', async () => {
@@ -357,24 +462,15 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
 
     harness.manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(
+      TRIP,
+      9001,
+      '"e"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
     expect(harness.worker.commands).toEqual([])
     expect(harness.removed).toEqual([])
-  })
-
-  it('fails the record, not the page, when the old file cannot be removed', async () => {
-    const { manager, worker } = await holding(
-      { reasked: true },
-      { removeFrom: () => Promise.reject(new Error('no access')) },
-    )
-
-    manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
-
-    await vi.waitFor(() => {
-      expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'gone' })
-    })
-    expect(manager.record(9001)?.reasked).toBe(false)
-    expect(worker.commands).toEqual([])
   })
 
   it('replaces through keepTripCopy too, when the record is already there', async () => {
@@ -394,17 +490,29 @@ describe('a trip copy re-made on the server (owner, 2026-10-28)', () => {
       .mockReturnValueOnce(first.promise)
       .mockResolvedValue(null)
     const { manager, worker } = await holding({ confirm: 'pending' }, { confirmDelivered })
-    expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"o"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenLastCalledWith(
+      TRIP,
+      9001,
+      '"o"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
 
     manager.adoptTrip(9001, TRIP, COPY_URL, '"n"')
     await vi.waitFor(() => {
       expect(worker.commands).toHaveLength(1)
     })
-    worker.emit({ type: 'done', name: SMALL, offset: 300, total: 300, etag: '"n"', run: 1 })
+    worker.emit({ type: 'done', name: SMALL_B, offset: 300, total: 300, etag: '"n"', run: 1 })
     first.resolve()
 
     await vi.waitFor(() => {
-      expect(confirmDelivered).toHaveBeenLastCalledWith(TRIP, 9001, '"n"', TEST_DEVICE_ID)
+      expect(confirmDelivered).toHaveBeenLastCalledWith(
+        TRIP,
+        9001,
+        '"n"',
+        TEST_DEVICE_ID,
+        expect.anything(),
+      )
     })
     await vi.waitFor(() => {
       expect(manager.record(9001)).toMatchObject({ etag: '"n"', confirm: 'done' })

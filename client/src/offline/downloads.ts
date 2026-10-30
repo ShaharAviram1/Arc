@@ -89,8 +89,26 @@
  * pause is sent until the worker's terminal message for that file (which the
  * worker posts only after closing it) the name is *releasing*; a delete in
  * that window is deferred to the terminal message. A new download of a file no
- * record vouches for starts `fresh` — the worker truncates it first — so an
- * orphan is never resumed into, and the launch sweep removes any orphan left.
+ * record vouches for starts `fresh` — the worker cuts it, but only once the
+ * server has answered with the bytes that replace it — so an orphan is never
+ * resumed into, and the launch sweep removes any orphan left.
+ *
+ * **A held copy is never destroyed** (M20.4 E, owner 2026-10-30, after a trip
+ * copy confirmed at 03:30 was gone by 12:44). Nothing automatic drops a
+ * downloaded file on doubtful evidence: the launch reads a short or missing
+ * file twice before it says `evicted`, and a read the storage could not
+ * answer changes nothing; Try again cuts nothing until the server has sent
+ * bytes, and a run that ended without touching the file (`intact`) puts a
+ * whole copy back to `downloaded`; a re-made trip copy downloads into the
+ * file's other slot and the old one goes only when the new one is whole; a
+ * media error re-checks the file and plays it once more before it is
+ * `unreadable`. **Delivered means verified**: the worker hashes every byte it
+ * writes (SHA-256), the confirmation and the holdings report carry the
+ * digest and the size, and the one case a held file is dropped is the
+ * server's own word that it is not its copy (`409 copy_mismatch`, or a
+ * published digest that differs) — fetched again once, then `mismatch`. Every
+ * such decision goes into an on-device log ({@link EventLog}) that "Send
+ * report" posts to the server.
  */
 
 import { apiFetch, ApiError, isUnreachable } from '@/lib/api'
@@ -104,8 +122,11 @@ import {
   type WorkerCommand,
   type WorkerMessage,
 } from '@/offline/download'
+import { EventLog, type DeviceEvent } from '@/offline/eventLog'
 import {
+  altNameFor,
   blobUrlFor,
+  bytesOf,
   fileNameFor,
   fileSize,
   listEpisodeFiles,
@@ -114,6 +135,7 @@ import {
   requestPersistence,
   revokeCurrent,
   type CopyVariant,
+  type SizeRead,
 } from '@/offline/opfs'
 import { offlineNow, subscribeNetwork } from '@/offline/network'
 import { outbox } from '@/offline/outbox'
@@ -132,8 +154,11 @@ export type { CopyVariant }
  */
 export type PauseReason = 'by-hand' | 'interrupted' | 'network' | 'elsewhere' | 'quota'
 
-/** Failures the manager itself decides, beside the worker's. */
-export type DeviceFailure = 'evicted' | 'unreadable' | 'unprepared'
+/**
+ * Failures the manager itself decides, beside the worker's. `mismatch`
+ * (M20.4 E): the copy's SHA-256 differed from the server's twice.
+ */
+export type DeviceFailure = 'evicted' | 'unreadable' | 'unprepared' | 'mismatch'
 
 export type DownloadReason = PauseReason | FailCode | DeviceFailure
 
@@ -197,6 +222,33 @@ export interface DownloadRecord {
    * and serves another cannot make the device download for ever.
    */
   replacedFor?: string
+  /**
+   * The SHA-256 of the file on the device, hex, as the worker computed it
+   * while the bytes arrived (M20.4 E); absent on records from before it, and
+   * null when the worker could not read the file back for it.
+   */
+  sha256?: string | null
+  /**
+   * The SHA-256 the server published for this copy (`TripEpisodeOut.sha256`,
+   * `OfflineCopyOut.sha256`), when it did: a finished download that differs
+   * is fetched again once, then fails `mismatch`.
+   */
+  expected?: string | null
+  /** One mismatch (the device's own check, or the server's 409) was already fetched again. */
+  rechecked?: boolean
+  /**
+   * The copy this record held before a replacement started ({@link
+   * DownloadManager.adoptTrip}, M20.4 E): it stays on the device, playable,
+   * under its own file name until the new copy (in the other slot,
+   * `altNameFor`) is whole; any other end of the replacement brings it back.
+   */
+  previous?: HeldCopy
+  /**
+   * A trip record left waiting (`preparing`, no URL) on a row the server
+   * counts as delivered asked the server for it again by itself (M20.4 E).
+   * Once per record until a download next finishes.
+   */
+  tripReasked?: boolean
   state: DownloadState
   /** Bytes on the device. */
   bytes: number
@@ -220,6 +272,15 @@ export interface DownloadRecord {
   snapshot: EpisodeSnapshot
   created_at: string
   updated_at: string
+}
+
+/** A complete copy a replacement keeps until the new one is whole. */
+export interface HeldCopy {
+  name: string
+  etag: string | null
+  total: number
+  sha256?: string | null
+  confirm?: 'pending' | 'done'
 }
 
 /** The signed-in owner's records, by episode id. */
@@ -249,6 +310,29 @@ export interface TripCopyInput {
   fullUrl?: string | null
   /** The copy's ETag (`TripEpisodeOut.etag`), so a re-made copy can replace the one held. */
   etag?: string | null
+  /** The copy's SHA-256 (`TripEpisodeOut.sha256`), checked when the download finishes. */
+  sha256?: string | null
+}
+
+/** What the trip payload says of one episode, beside its URL and ETag ({@link DownloadManager.adoptTrip}). */
+export interface TripEpisodeFacts {
+  /** The row's phase: `delivered` with a record still waiting is asked again (M20.4 E). */
+  phase?: string
+  sha256?: string | null
+}
+
+/** What the confirmation proves about the copy beside its ETag (M20.4 E). */
+export interface DeliveryProof {
+  sha256: string | null
+  size: number
+}
+
+/** One episode in the holdings report (`PUT /api/devices/{id}/holdings`, M20.4 E). */
+export interface HeldEpisode {
+  episode_id: number
+  etag: string | null
+  size: number
+  sha256: string | null
 }
 
 /** What the manager needs of a worker, so a test can hand it a fake. */
@@ -280,6 +364,7 @@ export const MESSAGES: Record<DownloadReason, string> = {
   evicted: 'Removed by the device to free space — Keep offline again.',
   unreadable: 'This download would not play. Try again to download it afresh.',
   unprepared: 'Arc could not make the smaller copy for this device. Try again.',
+  mismatch: 'The copy on this device did not match the server’s. Try again to download it afresh.',
 }
 
 /** Which copy is on the device, in words: the control's menu (M19). */
@@ -351,10 +436,29 @@ function defaultConfirmDelivered(
   episodeId: number,
   etag: string | null,
   deviceId: string,
+  proof: DeliveryProof,
 ): Promise<unknown> {
   return apiFetch<null>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/delivered`, {
     method: 'POST',
-    body: JSON.stringify({ etag, device_id: deviceId }),
+    body: JSON.stringify({ etag, device_id: deviceId, sha256: proof.sha256, size: proof.size }),
+  })
+}
+
+function defaultAskTripAgain(
+  tripId: number,
+  episodeId: number,
+  deviceId: string,
+): Promise<unknown> {
+  return apiFetch<unknown>(`/api/trips/${String(tripId)}/episodes/${String(episodeId)}/again`, {
+    method: 'POST',
+    body: JSON.stringify({ device_id: deviceId }),
+  })
+}
+
+function defaultPostReport(deviceId: string, events: DeviceEvent[]): Promise<unknown> {
+  return apiFetch<null>(`/api/devices/${encodeURIComponent(deviceId)}/report`, {
+    method: 'POST',
+    body: JSON.stringify({ events }),
   })
 }
 
@@ -374,6 +478,18 @@ function defaultReleaseDelivered(
 export const TRIP_OTHER_DEVICE = 'trip_other_device'
 
 /**
+ * The server's refusal of a confirmation whose ETag, SHA-256 or size is not
+ * the copy it made (M20.4 E): the file on the device is wrong, and the one
+ * case a held file is dropped — because the server said so.
+ */
+export const COPY_MISMATCH = 'copy_mismatch'
+
+/** Whether a refusal is {@link COPY_MISMATCH}. */
+function isCopyMismatch(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && refusalDetail(error) === COPY_MISMATCH
+}
+
+/**
  * A confirmation the server answered with a final no: the trip or the episode
  * is not this account's (404), this account may not keep copies (403), or the
  * trip belongs to another device (409 `trip_other_device`, owner 2026-10-30).
@@ -383,7 +499,10 @@ export const TRIP_OTHER_DEVICE = 'trip_other_device'
 function confirmIsFinal(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   if (error.status === 404 || error.status === 403) return true
-  return error.status === 409 && refusalDetail(error) === TRIP_OTHER_DEVICE
+  return (
+    error.status === 409 &&
+    (refusalDetail(error) === TRIP_OTHER_DEVICE || refusalDetail(error) === COPY_MISMATCH)
+  )
 }
 
 /** The `detail` of a refusal's body, when it is there. */
@@ -450,6 +569,15 @@ function takesFullInstead(error: unknown): boolean {
   return false
 }
 
+/**
+ * The file a record plays from: its own once downloaded, or the copy a
+ * replacement keeps until the new one is whole (M20.4 E); `null` for none.
+ */
+function playableName(record: DownloadRecord): string | null {
+  if (record.state === 'downloaded') return record.name
+  return record.previous?.name ?? null
+}
+
 /** A record the server has not yet given a URL: it names no bytes on disk. */
 function holdsNoFile(record: DownloadRecord): boolean {
   return record.url === null
@@ -470,6 +598,35 @@ function awaitingServer(record: DownloadRecord): boolean {
     record.state === 'preparing' ||
     (record.state === 'paused' && record.reason === 'network' && record.url === null)
   )
+}
+
+/** A downloaded copy whose first launch read says short or missing: read it again first. */
+function doubts(record: DownloadRecord, read: SizeRead): boolean {
+  return record.state === 'downloaded' && read !== 'unreadable' && bytesOf(read) !== record.total
+}
+
+/**
+ * A record stored mid-replacement (Arc closed before the new copy was whole)
+ * is its old copy again: the old file is still on the device under its own
+ * name; the half-made new one is named by nothing, and the sweep takes it.
+ */
+function withoutReplacement(record: DownloadRecord): DownloadRecord {
+  const previous = record.previous
+  if (previous === undefined) return record
+  return {
+    ...record,
+    name: previous.name,
+    etag: previous.etag,
+    total: previous.total,
+    bytes: previous.total,
+    sha256: previous.sha256 ?? null,
+    confirm: previous.confirm,
+    state: 'downloaded',
+    reason: null,
+    message: null,
+    fresh: false,
+    previous: undefined,
+  }
 }
 
 /** A record from before M19 (no `variant`) is the full-size file. */
@@ -508,8 +665,12 @@ interface WakeLockSentinelLike {
 export interface ManagerOptions {
   store?: KeyStore
   createWorker?: () => WorkerLike
-  /** What is already on disk. Injected so tests need no OPFS. */
-  sizeOf?: (name: string) => Promise<number>
+  /**
+   * What is already on disk: a size, `'missing'`, or `'unreadable'` (the
+   * storage could not answer — never taken for missing). Injected so tests
+   * need no OPFS.
+   */
+  sizeOf?: (name: string) => Promise<SizeRead>
   removeFrom?: (name: string) => Promise<void>
   /** Every episode file on disk, for the launch sweep. */
   listFiles?: () => Promise<string[]>
@@ -531,13 +692,30 @@ export interface ManagerOptions {
   canPlayType?: (type: string) => string
   /** Whether the page is on screen; polling waits while it is not. */
   isVisible?: () => boolean
-  /** `POST /api/trips/{id}/episodes/{eid}/delivered {etag, device_id}` (M19 T6; device 2026-10-30). */
+  /**
+   * `POST /api/trips/{id}/episodes/{eid}/delivered {etag, device_id, sha256,
+   * size}` (M19 T6; device 2026-10-30; proof M20.4 E).
+   */
   confirmDelivered?: (
     tripId: number,
     episodeId: number,
     etag: string | null,
     deviceId: string,
+    proof: DeliveryProof,
   ) => Promise<unknown>
+  /** `POST /api/trips/{id}/episodes/{eid}/again {device_id}`: a stuck trip record asks again (M20.4 E). */
+  askTripAgain?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
+  /** `POST /api/devices/{id}/report {events}`: the event log, sent by hand (M20.4 E). */
+  postReport?: (deviceId: string, events: DeviceEvent[]) => Promise<unknown>
+  /**
+   * The size and SHA-256 of a file on the device, read off the main thread
+   * (the worker's `hash` command). `size` null when it could not be read.
+   */
+  hashOf?: (name: string) => Promise<{ size: number | null; sha256: string | null }>
+  /** The manager's event log (M20.4 E). Defaults to one over `meta`. */
+  events?: EventLog
+  /** How long the launch reconcile waits before reading a short or missing file again. */
+  rereadMs?: number
   /** `DELETE /api/trips/{id}/episodes/{eid}/delivered?device_id=`: the device deleted its copy. */
   releaseDelivered?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
   /**
@@ -554,8 +732,8 @@ export interface ManagerOptions {
   loadCompleted?: (episodeIds: number[]) => Promise<CompletedEpisode[]>
   /** Whether Arc can reach its server now (`offlineNow`, observed). */
   isOnline?: () => boolean
-  /** `PUT /api/devices/{device_id}/holdings {episode_ids}` (M20, FR-S9). */
-  putHoldings?: (deviceId: string, episodeIds: number[]) => Promise<unknown>
+  /** `PUT /api/devices/{device_id}/holdings {episodes}` (M20, FR-S9; per-copy facts M20.4 E). */
+  putHoldings?: (deviceId: string, episodes: HeldEpisode[]) => Promise<unknown>
   /** This device's own id ({@link deviceId}). */
   deviceId?: () => Promise<string>
   /** Where the last holdings report is remembered (IndexedDB `meta`). */
@@ -588,12 +766,18 @@ function defaultWorker(): WorkerLike {
   }
 }
 
-function defaultPutHoldings(device: string, episodeIds: number[]): Promise<unknown> {
+function defaultPutHoldings(device: string, episodes: HeldEpisode[]): Promise<unknown> {
   return apiFetch<null>(`/api/devices/${encodeURIComponent(device)}/holdings`, {
     method: 'PUT',
-    body: JSON.stringify({ episode_ids: episodeIds }),
+    body: JSON.stringify({ episodes }),
   })
 }
+
+/** How long the launch reconcile waits before it reads a short or missing file a second time. */
+export const REREAD_MS = 1_500
+
+/** How long a hash of a held file may take before it counts as unreadable. */
+export const HASH_TIMEOUT_MS = 5 * 60_000
 
 /** How long {@link DownloadManager.reportHoldings} waits for more changes before it sends. */
 export const HOLDINGS_DEBOUNCE_MS = 5_000
@@ -609,6 +793,8 @@ export function holdingsKey(userId: number): string {
 /** What is remembered of the last report: the set, when it was sent, or that it waits. */
 export interface HoldingsNote {
   ids: number[]
+  /** The whole report (ids, ETags, sizes, digests) as sent, so a changed copy is sent again. */
+  sig?: string
   /** When the server took this set (ms); 0 while it waits to be sent. */
   sentAt: number
   /** The set changed while Arc could not reach the server: send it on reconnect. */
@@ -650,7 +836,7 @@ export function downloadedNeighbours(
 export class DownloadManager {
   private readonly store: KeyStore
   private readonly createWorker: () => WorkerLike
-  private readonly sizeOf: (name: string) => Promise<number>
+  private readonly sizeOf: (name: string) => Promise<SizeRead>
   private readonly removeFrom: (name: string) => Promise<void>
   private readonly listFiles: () => Promise<string[]>
   private readonly blobUrl: (name: string) => Promise<string | null>
@@ -669,7 +855,18 @@ export class DownloadManager {
     episodeId: number,
     etag: string | null,
     deviceId: string,
+    proof: DeliveryProof,
   ) => Promise<unknown>
+  private readonly askTripAgain: (
+    tripId: number,
+    episodeId: number,
+    deviceId: string,
+  ) => Promise<unknown>
+  private readonly postReport: (deviceId: string, events: DeviceEvent[]) => Promise<unknown>
+  private readonly hashOf: (name: string) => Promise<{ size: number | null; sha256: string | null }>
+  private readonly rereadMs: number
+  /** The manager's diary (M20.4 E): every decision about a copy, for "Send report". */
+  readonly events: EventLog
   private readonly releaseDelivered: (
     tripId: number,
     episodeId: number,
@@ -679,7 +876,7 @@ export class DownloadManager {
   private readonly queuedFor: (userId: number, episodeId: number) => Promise<boolean>
   private readonly loadCompleted: (episodeIds: number[]) => Promise<CompletedEpisode[]>
   private readonly isOnline: () => boolean
-  private readonly putHoldings: (deviceId: string, episodeIds: number[]) => Promise<unknown>
+  private readonly putHoldings: (deviceId: string, episodes: HeldEpisode[]) => Promise<unknown>
   private readonly deviceId: () => Promise<string>
   private readonly meta: KeyStore
 
@@ -746,10 +943,24 @@ export class DownloadManager {
   private ticker: ReturnType<typeof setInterval> | null = null
   /** Trip confirmations in flight, by key, so a tick does not send a second. */
   private confirming = new Set<string>()
-  /** Trip copies being replaced by a re-made one ({@link adoptTrip}), by key. */
-  private replacing = new Set<string>()
   /** Trip episodes taken off the device by hand: `trip-skip:<user>:<trip>:<episode>`. */
   private declined = new Set<string>()
+  /**
+   * What a record was before Try again queued it (M20.4 E): a run that ends
+   * without touching the file (`intact`) puts a whole copy back to
+   * `downloaded` instead of leaving it failed. Cleared once a byte is written.
+   */
+  private prior = new Map<string, DownloadRecord>()
+  /** Media errors per record since the player last opened it or its copy arrived ({@link playbackFailed}). */
+  private playFailures = new Map<string, number>()
+  /** Hash asks waiting for the worker's answer, by ask id. */
+  private hashAsks = new Map<
+    number,
+    (answer: { size: number | null; sha256: string | null }) => void
+  >()
+  private hashCount = 0
+  /** Trip records asking the server again right now (M20.4 E). */
+  private tripAsking = new Set<string>()
 
   constructor(options: ManagerOptions = {}) {
     this.store = options.store ?? openStore('downloads')
@@ -770,6 +981,10 @@ export class DownloadManager {
     this.canPlayType = options.canPlayType ?? defaultCanPlayType
     this.isVisible = options.isVisible ?? defaultIsVisible
     this.confirmDelivered = options.confirmDelivered ?? defaultConfirmDelivered
+    this.askTripAgain = options.askTripAgain ?? defaultAskTripAgain
+    this.postReport = options.postReport ?? defaultPostReport
+    this.hashOf = options.hashOf ?? ((name) => this.hashInWorker(name))
+    this.rereadMs = options.rereadMs ?? REREAD_MS
     this.releaseDelivered = options.releaseDelivered ?? defaultReleaseDelivered
     this.notes = options.notes ?? openStore('player')
     this.queuedFor = options.queuedFor ?? defaultQueuedFor
@@ -778,6 +993,14 @@ export class DownloadManager {
     this.putHoldings = options.putHoldings ?? defaultPutHoldings
     this.meta = options.meta ?? openStore('meta')
     this.deviceId = options.deviceId ?? (() => storedDeviceId(this.meta))
+    this.events =
+      options.events ??
+      new EventLog(this.meta, this.now, import.meta.env.DEV && import.meta.env.MODE !== 'test')
+  }
+
+  /** Note one decision in the event log (M20.4 E). */
+  private log(kind: string, episodeId?: number, detail?: string): void {
+    this.events.note(kind, episodeId, detail)
   }
 
   /* --- Store plumbing ----------------------------------------------------- */
@@ -818,6 +1041,11 @@ export class DownloadManager {
     const existing = this.all.get(key)
     if (existing === undefined) return null
     const next = { ...existing, ...patch, updated_at: this.stamp() }
+    if (next.state !== existing.state) {
+      // Every change of state, with its reason: the diary's backbone.
+      const why = next.reason === null ? '' : ` (${next.reason})`
+      this.log('state', next.episodeId, `${existing.state} → ${next.state}${why}`)
+    }
     this.write(next)
     return next
   }
@@ -925,41 +1153,32 @@ export class DownloadManager {
     } catch {
       // Nothing remembered: the hook may offer a removed trip episode again.
     }
-    const entries = await this.store.entries<DownloadRecord>()
-    for (const [key, stored] of entries) {
-      if (typeof stored !== 'object' || stored === null) continue
-      const record = normalise(stored)
+    const stored: [string, DownloadRecord, SizeRead][] = []
+    for (const [key, value] of await this.store.entries<DownloadRecord>()) {
+      if (typeof value !== 'object' || value === null) continue
+      const record = withoutReplacement(normalise(value))
       // A record with no URL yet names no bytes; whatever is on disk under its
       // name is somebody else's, or an orphan.
-      const bytes = holdsNoFile(record) ? 0 : await this.sizeOf(record.name)
-      let next: DownloadRecord
-      if (record.state === 'preparing') {
-        // The server carries on making it whether Arc is open or not; the
-        // poll picks it up again.
-        next = { ...record, bytes: 0 }
-      } else if (record.total > 0 && bytes === record.total) {
-        next = { ...record, bytes, state: 'downloaded', reason: null, message: null }
-      } else if (record.state === 'downloaded') {
-        // The device took it back (eviction, or storage cleared). Said, not
-        // hidden: the row offers Keep offline again, and Delete.
-        next = {
-          ...record,
-          bytes,
-          state: 'failed',
-          reason: 'evicted',
-          message: MESSAGES.evicted,
-          fresh: true,
-        }
-      } else if (record.state === 'failed' && record.reason === 'quota') {
-        // Before 2026-10-07 a full device was a failure; it is a pause now.
-        next = { ...record, bytes, state: 'paused', message: MESSAGES.quota }
-      } else if (record.state === 'failed') {
-        next = { ...record, bytes }
-      } else {
-        const reason: PauseReason =
-          record.reason === 'by-hand' || record.reason === 'quota' ? record.reason : 'interrupted'
-        next = { ...record, bytes, state: 'paused', reason, message: MESSAGES[reason] }
+      const read = holdsNoFile(record) ? 0 : await this.sizeOf(record.name)
+      stored.push([key, record, read])
+    }
+    // A downloaded copy that read short or missing is read once more, after a
+    // pause, before anything is decided about it (M20.4 E).
+    const doubtful = stored.filter(([, record, read]) => doubts(record, read))
+    if (doubtful.length > 0) {
+      if (this.rereadMs > 0) await new Promise((resolve) => setTimeout(resolve, this.rereadMs))
+      for (const entry of doubtful) {
+        const [, record, first] = entry
+        entry[2] = await this.sizeOf(record.name)
+        this.log(
+          'reconcile',
+          record.episodeId,
+          `${record.name}: read ${String(first)}, then ${String(entry[2])}, of ${String(record.total)}`,
+        )
       }
+    }
+    for (const [key, record, read] of stored) {
+      const next = this.reconcileOne(record, read)
       // A launch-time record may have been written while this tab was
       // starting one of its own; the in-memory one is newer.
       if (!this.all.has(key)) this.all.set(key, next)
@@ -983,13 +1202,86 @@ export class DownloadManager {
     this.reportHoldings()
   }
 
+  /**
+   * One stored record against the disk, at launch (M20.4 E, owner
+   * 2026-10-30), its file read (twice, when {@link doubts} — one odd read at
+   * launch must not lose a copy). A size equal to the total is `downloaded`.
+   * A downloaded record whose file is then definitely gone (or empty) is
+   * `evicted`; one
+   * that is short is `failed` / `size` (Try again fetches the rest). A read
+   * the storage could not answer (`'unreadable'`) is evidence of nothing:
+   * the record keeps its state and its bytes. Everything is logged.
+   */
+  private reconcileOne(record: DownloadRecord, read: SizeRead): DownloadRecord {
+    if (record.state === 'preparing') {
+      // The server carries on making it whether Arc is open or not; the
+      // poll picks it up again.
+      return { ...record, bytes: 0 }
+    }
+    if (read === 'unreadable') {
+      // The storage did not answer: nothing is known about the file, so
+      // nothing about the record changes but what a relaunch always changes.
+      this.log('reconcile', record.episodeId, `could not read ${record.name}; left ${record.state}`)
+      if (record.state === 'downloaded' || record.state === 'failed') return record
+      return this.relaunched(record, record.bytes)
+    }
+    const bytes = read === 'missing' ? 0 : read
+    if (record.total > 0 && bytes === record.total) {
+      if (record.state !== 'downloaded') {
+        this.log('reconcile', record.episodeId, `${record.state} → downloaded (file whole)`)
+      }
+      return { ...record, bytes, state: 'downloaded', reason: null, message: null }
+    }
+    if (record.state === 'downloaded') {
+      if (bytes === 0) {
+        // Read twice, gone twice: the device took it back (eviction, or
+        // storage cleared). Said, not hidden: the row offers Keep offline
+        // again, and Delete.
+        this.log('reconcile', record.episodeId, `${record.name} ${String(read)} twice → evicted`)
+        return {
+          ...record,
+          bytes,
+          state: 'failed',
+          reason: 'evicted',
+          message: MESSAGES.evicted,
+          fresh: true,
+        }
+      }
+      // Short, but there: the same encode's beginning, which Try again finishes.
+      this.log(
+        'reconcile',
+        record.episodeId,
+        `${record.name} short twice (${String(bytes)}) → size`,
+      )
+      return { ...record, bytes, state: 'failed', reason: 'size', message: MESSAGES.size }
+    }
+    if (record.state === 'failed' && record.reason === 'quota') {
+      // Before 2026-10-07 a full device was a failure; it is a pause now.
+      return { ...record, bytes, state: 'paused', message: MESSAGES.quota }
+    }
+    if (record.state === 'failed') return { ...record, bytes }
+    return this.relaunched(record, bytes)
+  }
+
+  /** What a record that was moving when Arc closed comes back as: paused. */
+  private relaunched(record: DownloadRecord, bytes: number): DownloadRecord {
+    const reason: PauseReason =
+      record.reason === 'by-hand' || record.reason === 'quota' ? record.reason : 'interrupted'
+    return { ...record, bytes, state: 'paused', reason, message: MESSAGES[reason] }
+  }
+
   /** Remove every episode file no record names: the orphans of an interrupted delete. */
   private async sweep(): Promise<void> {
-    const named = new Set(
-      [...this.all.values()].filter((record) => !holdsNoFile(record)).map((record) => record.name),
-    )
+    const named = new Set<string>()
+    for (const record of this.all.values()) {
+      if (!holdsNoFile(record)) named.add(record.name)
+      if (record.previous !== undefined) named.add(record.previous.name)
+    }
     for (const name of await this.listFiles()) {
-      if (!named.has(name) && !this.releasing.has(name)) await this.removeFrom(name)
+      if (!named.has(name) && !this.releasing.has(name)) {
+        this.log('dropped', undefined, `${name}: no record names it (launch sweep)`)
+        await this.removeFrom(name)
+      }
     }
   }
 
@@ -1001,7 +1293,8 @@ export class DownloadManager {
 
   /** Whether this episode plays from the device for the signed-in account. */
   isOnDevice(episodeId: number): boolean {
-    return this.snapshot[episodeId]?.state === 'downloaded'
+    const record = this.snapshot[episodeId]
+    return record !== undefined && playableName(record) !== null
   }
 
   /**
@@ -1011,11 +1304,12 @@ export class DownloadManager {
    */
   async playableUrl(episodeId: number): Promise<string | null> {
     const record = this.snapshot[episodeId]
-    if (record === undefined || record.state !== 'downloaded') return null
+    const name = record === undefined ? null : playableName(record)
+    if (record === undefined || name === null) return null
     const key = keyOfRecord(record)
     const known = this.urls.get(key)
     if (known !== undefined) return known
-    const url = await this.blobUrl(record.name)
+    const url = await this.blobUrl(name)
     this.urls.clear()
     if (url !== null) this.urls.set(key, url)
     return url
@@ -1028,26 +1322,111 @@ export class DownloadManager {
    */
   playableUrlNow(episodeId: number): string | null {
     const record = this.snapshot[episodeId]
-    if (record === undefined || record.state !== 'downloaded') return null
+    if (record === undefined || playableName(record) === null) return null
     return this.urls.get(keyOfRecord(record)) ?? null
   }
 
   /**
    * The element would not play the file: the record becomes `failed` /
    * `unreadable`, so the row offers Try again (a fresh download) instead of
-   * minting the same URL over the same bytes.
+   * minting the same URL over the same bytes. Nothing on disk is touched —
+   * that Try again cuts the file only once the server has sent its
+   * replacement (M20.4 E). The player goes through {@link playbackFailed},
+   * which calls this only for a second failure on a verified file.
    */
-  markUnplayable(episodeId: number): void {
+  markUnplayable(episodeId: number, detail = ''): void {
     const record = this.snapshot[episodeId]
     if (record === undefined) return
     const key = keyOfRecord(record)
     this.urls.delete(key)
     this.revokeUrl()
+    this.log('unplayable', episodeId, detail)
     this.patch(key, {
       state: 'failed',
       reason: 'unreadable',
       message: MESSAGES.unreadable,
       fresh: true,
+    })
+  }
+
+  /**
+   * The `<video>` refused this episode's file (M20.4 E, owner 2026-10-30).
+   * A media error is not proof of a bad file — a blob URL revoked under a
+   * playing element looks exactly the same — so the file is checked first:
+   * gone (or empty) is `evicted`, short is `size`, a SHA-256 that differs
+   * from the one recorded at download is `unreadable`. A file that checks
+   * out is played once more from a freshly minted URL (the answer); only a
+   * second failure on a verified file is `unreadable`. A file that could not
+   * be read for the check is never marked: the player streams instead.
+   * Resolves to the URL to try, or `null` to stream.
+   */
+  async playbackFailed(episodeId: number): Promise<string | null> {
+    const record = this.snapshot[episodeId]
+    if (record === undefined || record.state !== 'downloaded') return null
+    const key = keyOfRecord(record)
+    this.urls.delete(key)
+    this.revokeUrl()
+    const failures = (this.playFailures.get(key) ?? 0) + 1
+    this.playFailures.set(key, failures)
+    this.log('play-error', episodeId, `media error ${String(failures)} on ${record.name}`)
+    const read = await this.sizeOf(record.name)
+    const still = (): boolean => this.all.get(key)?.state === 'downloaded'
+    if (!still()) return null
+    if (read === 'missing' || read === 0) {
+      this.log('verify', episodeId, `${record.name} ${String(read)}`)
+      this.patch(key, {
+        state: 'failed',
+        bytes: 0,
+        reason: 'evicted',
+        message: MESSAGES.evicted,
+        fresh: true,
+      })
+      return null
+    }
+    if (read === 'unreadable') {
+      this.log('verify', episodeId, `${record.name} could not be read; not marked`)
+      return failures === 1 ? this.playableUrl(episodeId) : null
+    }
+    if (read !== record.total) {
+      this.log('verify', episodeId, `${record.name} is ${String(read)} of ${String(record.total)}`)
+      this.patch(key, { state: 'failed', bytes: read, reason: 'size', message: MESSAGES.size })
+      return null
+    }
+    let verified = true
+    const recorded = record.sha256 ?? null
+    if (recorded !== null) {
+      const found = await this.hashOf(record.name)
+      if (!still()) return null
+      if (found.sha256 === null) {
+        verified = false
+        this.log('verify', episodeId, `${record.name} could not be hashed`)
+      } else if (found.sha256 !== recorded) {
+        this.markUnplayable(episodeId, `sha256 ${found.sha256} is not ${recorded}`)
+        return null
+      }
+    }
+    if (failures === 1) {
+      this.log('verify', episodeId, `${record.name} checks out; playing again from a new URL`)
+      return this.playableUrl(episodeId)
+    }
+    if (!verified) return null
+    this.markUnplayable(episodeId, `a second media error on a verified file`)
+    return null
+  }
+
+  /** The size and SHA-256 of a file on the device, from the worker; nulls when it cannot say. */
+  private hashInWorker(name: string): Promise<{ size: number | null; sha256: string | null }> {
+    this.hashCount += 1
+    const ask = this.hashCount
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.hashAsks.delete(ask)) resolve({ size: null, sha256: null })
+      }, HASH_TIMEOUT_MS)
+      this.hashAsks.set(ask, (answer) => {
+        clearTimeout(timer)
+        resolve(answer)
+      })
+      this.send({ cmd: 'hash', name, ask })
     })
   }
 
@@ -1116,6 +1495,12 @@ export class DownloadManager {
     // Stop waiting on the server: the server keeps or expires its copy itself.
     this.asking.delete(key)
     if (this.probe === key) this.probe = null
+    if (record.previous !== undefined) {
+      // A replacement paused by hand: the copy on the device stays as it was.
+      void this.keepPrevious(key, 'paused by hand', true)
+      this.pump()
+      return
+    }
     this.patch(key, {
       state: 'paused',
       reason: 'by-hand',
@@ -1157,6 +1542,9 @@ export class DownloadManager {
       this.nudge()
       return
     }
+    // Try again on a copy that failed: should the run end without touching
+    // the file, what it was comes back (M20.4 E).
+    if (record.state === 'failed') this.prior.set(key, record)
     if (record.reason === 'quota') {
       // The probe: tried alone, ahead of everything the space hold kept back.
       this.probe = key
@@ -1214,12 +1602,19 @@ export class DownloadManager {
         () => undefined,
       )
     }
+    this.prior.delete(key)
+    this.log(
+      'remove',
+      record.episodeId,
+      `${record.state}${record.watched === true ? ', watched' : ''}`,
+    )
     await this.store.delete(key)
     this.emit()
     if (this.active === key) this.halt(record)
     // The worker may still hold the file; then it goes when the worker says
     // it has closed it.
     await this.dropFile(record.name)
+    if (record.previous !== undefined) await this.dropFile(record.previous.name)
     const stillShown = [...this.all.values()].some(
       (other) => other.userId === record.userId && other.animeId === record.animeId,
     )
@@ -1261,18 +1656,28 @@ export class DownloadManager {
     if (note?.pending === true) this.reportHoldings()
   }
 
-  /** The ids this device holds for `userId`: complete, not watched, sorted, capped. */
-  private heldIds(userId: number): number[] {
-    const ids = new Set<number>()
+  /**
+   * The episodes this device holds for `userId` — complete (or kept through
+   * a replacement), not watched — with each copy's ETag, size and SHA-256
+   * (M20.4 E), sorted by id and capped.
+   */
+  private heldEpisodes(userId: number): HeldEpisode[] {
+    const held = new Map<number, HeldEpisode>()
     for (const record of this.all.values()) {
-      if (record.userId === userId && record.state === 'downloaded' && record.watched !== true) {
-        ids.add(record.episodeId)
-      }
+      if (record.userId !== userId || record.watched === true) continue
+      const copy: HeldCopy | undefined = record.state === 'downloaded' ? record : record.previous
+      if (copy === undefined) continue
+      held.set(record.episodeId, {
+        episode_id: record.episodeId,
+        etag: copy.etag,
+        size: copy.total,
+        sha256: copy.sha256 ?? null,
+      })
     }
     // Over the server's cap, keep the highest ids: the newest episodes, which
     // are the ones a look-ahead window can still reach (an old episode's id is
     // behind every window), so the skip loses the least.
-    return [...ids].sort((a, b) => a - b).slice(-MAX_HOLDINGS)
+    return [...held.values()].sort((a, b) => a.episode_id - b.episode_id).slice(-MAX_HOLDINGS)
   }
 
   /** Send the set now (after the debounce), one report at a time. Never rejects. */
@@ -1287,7 +1692,9 @@ export class DownloadManager {
     if (owner === null || this.demo) return
     await this.hydrate()
     if (this.owner !== owner || this.demo) return
-    const ids = this.heldIds(owner)
+    const episodes = this.heldEpisodes(owner)
+    const ids = episodes.map((episode) => episode.episode_id)
+    const sig = JSON.stringify(episodes)
     const key = holdingsKey(owner)
     const last = await this.meta.get<HoldingsNote>(key)
     if (last === undefined && ids.length === 0) return // Nothing held, nothing ever said.
@@ -1295,6 +1702,7 @@ export class DownloadManager {
       last !== undefined &&
       last.pending !== true &&
       sameIds(last.ids, ids) &&
+      last.sig === sig &&
       this.now() - last.sentAt < HOLDINGS_REFRESH_MS
     ) {
       return
@@ -1306,9 +1714,11 @@ export class DownloadManager {
       return
     }
     try {
-      await this.putHoldings(await this.deviceId(), ids)
-      await this.meta.put(key, { ids, sentAt: this.now() } satisfies HoldingsNote)
+      await this.putHoldings(await this.deviceId(), episodes)
+      await this.meta.put(key, { ids, sig, sentAt: this.now() } satisfies HoldingsNote)
+      this.log('holdings', undefined, `sent ${String(ids.length)}: ${ids.join(',')}`)
     } catch (error) {
+      this.log('holdings', undefined, `not sent: ${String(error)}`)
       if (isUnreachable(error) || (error instanceof ApiError && error.status >= 500)) {
         // No answer, or the server failed: the next reconnect or landed flush
         // sends it again.
@@ -1319,6 +1729,20 @@ export class DownloadManager {
       }
       // Anything else (a 4xx) is tried again at the next of the four moments.
     }
+  }
+
+  /**
+   * "Send report" (M20.4 E): the whole event log to `POST
+   * /api/devices/{id}/report`, for the operator to read with `arc.cli
+   * device-report`. Resolves to how many entries went; rejects when the
+   * server could not be told, so the page can say so. The log is kept.
+   */
+  async sendReport(): Promise<number> {
+    const events = await this.events.entries()
+    const device = await this.thisDevice()
+    await this.postReport(device, events)
+    this.log('report', undefined, `sent ${String(events.length)} entries`)
+    return events.length
   }
 
   /** The app is on screen again, or back online: carry on with whatever was running. */
@@ -1461,7 +1885,9 @@ export class DownloadManager {
     }
     switch (copy.state) {
       case 'available':
-        await (copy.url === null ? this.place(key, 'full') : this.place(key, 'small', copy.url))
+        await (copy.url === null
+          ? this.place(key, 'full')
+          : this.place(key, 'small', copy.url, copy.sha256 ?? null))
         return
       case 'queued':
       case 'preparing':
@@ -1545,7 +1971,12 @@ export class DownloadManager {
    * shared-file rule as ever, per file name: another account's copy *of the
    * same variant* is resumed or confirmed; anything else on disk starts over.
    */
-  private async place(key: string, variant: CopyVariant, given?: string): Promise<void> {
+  private async place(
+    key: string,
+    variant: CopyVariant,
+    given?: string,
+    expected: string | null = null,
+  ): Promise<void> {
     const record = this.all.get(key)
     if (record === undefined) return
     const url =
@@ -1562,7 +1993,7 @@ export class DownloadManager {
     // the bytes this download is about to write.
     this.doomed.delete(name)
     const shared = this.sharedRecord(name, key)
-    const bytes = shared === undefined ? 0 : await this.sizeOf(name)
+    const bytes = shared === undefined ? 0 : bytesOf(await this.sizeOf(name))
     const current = this.all.get(key)
     if (current === undefined || current.userId !== this.owner || !awaitingServer(current)) return
     this.write({
@@ -1575,6 +2006,8 @@ export class DownloadManager {
       total: shared?.total ?? 0,
       etag: shared?.etag ?? null,
       fresh: shared === undefined,
+      sha256: shared?.sha256 ?? null,
+      expected,
       serverProgress: null,
       reason: null,
       message: null,
@@ -1634,7 +2067,7 @@ export class DownloadManager {
     } finally {
       this.starting.delete(key)
     }
-    await this.place(key, 'small', input.url)
+    await this.place(key, 'small', input.url, input.sha256 ?? null)
   }
 
   /**
@@ -1659,6 +2092,7 @@ export class DownloadManager {
     tripId: number,
     url: string | null,
     etag: string | null = null,
+    facts: TripEpisodeFacts = {},
   ): void {
     const record = this.snapshot[episodeId]
     if (record === undefined) return
@@ -1671,11 +2105,16 @@ export class DownloadManager {
     }
     const current = this.all.get(key)
     // A replacement under way places the new copy itself.
-    if (current === undefined || this.replacing.has(key)) return
+    if (current === undefined || current.previous !== undefined) return
+    const expected = facts.sha256 ?? null
     if (url !== null && etag !== null && this.remadeOnServer(current, etag)) {
-      this.replaceCopy(key, url, etag).catch(() => {
-        this.fail(key, 'gone')
-      })
+      this.replaceCopy(key, url, etag, expected)
+      return
+    }
+    if (facts.phase === 'delivered' && waitsForTrip(current) && current.state === 'preparing') {
+      // The server counts this copy as delivered, but the device holds no
+      // file for it (a 404 left it waiting with no URL): ask again, once.
+      this.askAgainFor(key, tripId)
       return
     }
     const copyGone =
@@ -1688,10 +2127,39 @@ export class DownloadManager {
       if (copyGone) {
         this.patch(key, { state: 'preparing', url: null, reason: null, message: null })
       }
-      void this.place(key, 'small', url)
+      void this.place(key, 'small', url, expected)
       return
     }
     this.confirm(key)
+  }
+
+  /**
+   * `POST …/again` for a trip record stuck waiting (M20.4 E): once per
+   * record ({@link DownloadRecord.tripReasked}). The server puts the row
+   * back to pending, and the next trip payload offers the copy's URL, which
+   * {@link adoptTrip} places as for any record waiting on its trip. No answer
+   * at all is asked again on a later pass; any answer ends the asking.
+   */
+  private askAgainFor(key: string, tripId: number): void {
+    const record = this.all.get(key)
+    if (record === undefined || record.tripReasked === true || this.tripAsking.has(key)) return
+    this.tripAsking.add(key)
+    const { episodeId } = record
+    this.log('reask', episodeId, `trip ${String(tripId)}: delivered on the server, no file here`)
+    void this.withDevice((device) => this.askTripAgain(tripId, episodeId, device))
+      .then(
+        () => {
+          this.log('reask', episodeId, 'asked again: the server re-pends it')
+          this.patch(key, { tripReasked: true })
+        },
+        (error: unknown) => {
+          this.log('reask', episodeId, `refused: ${String(error)}`)
+          if (!isUnreachable(error)) this.patch(key, { tripReasked: true })
+        },
+      )
+      .finally(() => {
+        this.tripAsking.delete(key)
+      })
   }
 
   /** Whether `record` is a small copy the server has since re-made (see {@link adoptTrip}). */
@@ -1708,34 +2176,132 @@ export class DownloadManager {
   }
 
   /**
-   * Drop the small copy on the device and fetch the server's new one in its
-   * place: the record (and its trip) stays, back to `preparing` with no ETag,
-   * and goes through {@link place} as any small copy does.
+   * Fetch the server's re-made small copy beside the one on the device
+   * (M20.4 E, owner 2026-10-30): the new copy downloads into the file's
+   * other slot (`altNameFor`) while the old one stays, playable, as the
+   * record's `previous`. Only when the new copy is whole is the old file
+   * dropped; any other end — a 404, a refusal, a pause, a worker that died,
+   * Arc closing — brings the old copy back exactly as it was, but for
+   * `replacedFor`, so the same server ETag is not chased again.
    */
-  private async replaceCopy(key: string, url: string, etag: string): Promise<void> {
+  private replaceCopy(key: string, url: string, etag: string, expected: string | null): void {
     const record = this.all.get(key)
     if (record === undefined) return
-    this.replacing.add(key)
-    try {
-      this.urls.delete(key)
+    const previous: HeldCopy = {
+      name: record.name,
+      etag: record.etag,
+      total: record.total,
+      sha256: record.sha256 ?? null,
+      confirm: record.confirm,
+    }
+    const name = altNameFor(record.name)
+    this.doomed.delete(name)
+    this.urls.delete(key)
+    this.log(
+      'replace',
+      record.episodeId,
+      `${record.name} (${String(record.etag)}) → ${name} (${etag}); the old copy stays until it is whole`,
+    )
+    this.patch(key, {
+      previous,
+      name,
+      url,
+      state: 'queued',
+      etag: null,
+      bytes: 0,
+      total: 0,
+      sha256: null,
+      expected,
+      fresh: true,
+      confirm: undefined,
+      replacedFor: etag,
+      reasked: false,
+      serverProgress: null,
+      reason: null,
+      message: null,
+    })
+    if (!this.queue.includes(key)) this.queue.push(key)
+    this.pump()
+  }
+
+  /**
+   * A Try again that ended without touching the file (`intact`, M20.4 E):
+   * when the file is still the whole copy the record had — a copy wrongly
+   * taken for evicted, say, and the server's copy since gone — it is
+   * `downloaded` again and plays; a copy that failed for being unreadable or
+   * mismatched stays that, with the server's words. Answers whether it
+   * handled the failure; `false` leaves it to the usual path.
+   */
+  private restored(key: string, size: number, words: string): boolean {
+    const prior = this.prior.get(key)
+    this.prior.delete(key)
+    if (prior === undefined) return false
+    const whole = prior.total > 0 && size === prior.total
+    const wasCopy =
+      prior.state === 'downloaded' || (prior.state === 'failed' && prior.reason === 'evicted')
+    if (whole && wasCopy) {
+      this.log(
+        'kept',
+        prior.episodeId,
+        `${prior.name} is whole (${String(size)}): downloaded again`,
+      )
       this.patch(key, {
-        state: 'preparing',
-        url: null,
-        etag: null,
-        bytes: 0,
-        total: 0,
-        confirm: undefined,
-        replacedFor: etag,
-        reasked: false,
-        serverProgress: null,
+        state: 'downloaded',
+        bytes: size,
+        total: prior.total,
+        etag: prior.etag,
+        sha256: prior.sha256 ?? null,
+        fresh: false,
         reason: null,
         message: null,
       })
-      await this.dropFile(record.name, key)
-      await this.place(key, 'small', url)
-    } finally {
-      this.replacing.delete(key)
+      return true
     }
+    if (
+      prior.state === 'failed' &&
+      (prior.reason === 'unreadable' || prior.reason === 'mismatch')
+    ) {
+      this.log('kept', prior.episodeId, `${prior.name} left as it was (${prior.reason})`)
+      this.patch(key, {
+        state: 'failed',
+        bytes: size,
+        total: prior.total,
+        etag: prior.etag,
+        fresh: true,
+        reason: prior.reason,
+        message: `${MESSAGES[prior.reason]} (${words})`,
+      })
+      return true
+    }
+    return false
+  }
+
+  /**
+   * A replacement that will not finish: the record is its old copy again
+   * (all but `replacedFor`), and the half-made new file goes.
+   */
+  private async keepPrevious(key: string, why: string, forget = false): Promise<void> {
+    const record = this.all.get(key)
+    const previous = record?.previous
+    if (record === undefined || previous === undefined) return
+    this.queue = this.queue.filter((queued) => queued !== key)
+    this.log('replace', record.episodeId, `kept ${previous.name}: ${why}`)
+    this.patch(key, {
+      name: previous.name,
+      etag: previous.etag,
+      total: previous.total,
+      bytes: previous.total,
+      sha256: previous.sha256 ?? null,
+      confirm: previous.confirm,
+      previous: undefined,
+      state: 'downloaded',
+      fresh: false,
+      reason: null,
+      message: null,
+      // Not the server's doing: the same new copy may be tried again.
+      ...(forget ? { replacedFor: undefined } : {}),
+    })
+    await this.dropFile(record.name, key)
   }
 
   /**
@@ -1746,8 +2312,10 @@ export class DownloadManager {
     if (this.sharedRecord(name, except) !== undefined) return
     if (this.releasing.has(name)) {
       this.doomed.add(name)
+      this.log('dropped', undefined, `${name}: once the worker lets go`)
       return
     }
+    this.log('dropped', undefined, name)
     await this.removeFrom(name)
   }
 
@@ -1806,14 +2374,83 @@ export class DownloadManager {
       if (current.confirm !== 'done') this.patch(key, { confirm: 'done' })
     }
     const { episodeId, etag } = record
-    void this.withDevice((device) => this.confirmDelivered(tripId, episodeId, etag, device)).then(
+    const proof: DeliveryProof = { sha256: record.sha256 ?? null, size: record.total }
+    void this.withDevice((device) =>
+      this.confirmDelivered(tripId, episodeId, etag, device, proof),
+    ).then(
       () => {
+        this.log('confirmed', episodeId, `trip ${String(tripId)} ${String(etag)}`)
         settled(true)
       },
       (error: unknown) => {
+        if (error instanceof ApiError) {
+          this.log(
+            'server',
+            episodeId,
+            `delivered → ${String(error.status)} ${String(refusalDetail(error))}`,
+          )
+        }
+        const current = this.all.get(key)
+        if (
+          isCopyMismatch(error) &&
+          current !== undefined &&
+          current.variant === 'small' &&
+          current.etag === sent
+        ) {
+          // The server says the file here is not its copy: the one case a
+          // held file is dropped, and fetched again.
+          this.confirming.delete(key)
+          void this.fetchAgain(key, 'the server refused the copy (copy_mismatch)')
+          return
+        }
         settled(confirmIsFinal(error))
       },
     )
+  }
+
+  /**
+   * The copy on the device is not the server's (its SHA-256 differed, or the
+   * server answered `copy_mismatch`): the file is dropped and the copy fetched
+   * afresh, once; a second mismatch is `failed` / `mismatch`. A replacement
+   * that mismatches twice keeps its old copy instead.
+   */
+  private async fetchAgain(key: string, why: string): Promise<void> {
+    const record = this.all.get(key)
+    if (record === undefined) return
+    this.log('mismatch', record.episodeId, why)
+    if (record.rechecked === true) {
+      if (record.previous !== undefined) {
+        await this.keepPrevious(key, `${why}, twice`)
+        return
+      }
+      this.patch(key, {
+        state: 'failed',
+        reason: 'mismatch',
+        message: MESSAGES.mismatch,
+        fresh: true,
+        bytes: 0,
+        confirm: undefined,
+      })
+      await this.dropFile(record.name, key)
+      return
+    }
+    this.patch(key, {
+      state: 'queued',
+      bytes: 0,
+      total: 0,
+      etag: null,
+      sha256: null,
+      fresh: true,
+      rechecked: true,
+      confirm: undefined,
+      reason: null,
+      message: null,
+    })
+    await this.dropFile(record.name, key)
+    const current = this.all.get(key)
+    if (current?.state !== 'queued') return
+    if (!this.queue.includes(key)) this.queue.push(key)
+    this.pump()
   }
 
   /* --- Watched copies leave by themselves (owner, 2026-10-08) ------------------------ */
@@ -1930,6 +2567,9 @@ export class DownloadManager {
    */
   enterPlayer(episodeId: number): () => void {
     this.playing.set(episodeId, (this.playing.get(episodeId) ?? 0) + 1)
+    // A new viewing: its first media error is played again ({@link playbackFailed}).
+    const owner = this.owner
+    if (owner !== null) this.playFailures.delete(keyOf(owner, episodeId))
     let left = false
     return () => {
       if (left) return
@@ -2001,7 +2641,9 @@ export class DownloadManager {
    */
   private sharedRecord(name: string, except?: string): DownloadRecord | undefined {
     for (const [key, record] of this.all) {
-      if (key === except || holdsNoFile(record)) continue
+      if (key === except) continue
+      if (record.previous?.name === name) return record
+      if (holdsNoFile(record)) continue
       if (record.name === name) return record
     }
     return undefined
@@ -2150,7 +2792,10 @@ export class DownloadManager {
     const key = this.active
     this.active = null
     this.activeRun = null
-    if (key !== null) {
+    this.log('worker', undefined, `worker failed: ${reason}`)
+    if (key !== null && this.all.get(key)?.previous !== undefined) {
+      void this.keepPrevious(key, `the worker failed (${reason})`, true)
+    } else if (key !== null) {
       this.patch(key, {
         state: 'failed',
         reason: 'error',
@@ -2176,6 +2821,9 @@ export class DownloadManager {
     }
     for (const name of this.releasing) this.settle(name)
     this.releasing.clear()
+    // A hash the worker will now never answer: unreadable.
+    for (const answer of this.hashAsks.values()) answer({ size: null, sha256: null })
+    this.hashAsks.clear()
   }
 
   /** The record a worker message is about: the running one, else the owner's by file. */
@@ -2200,6 +2848,12 @@ export class DownloadManager {
 
   /** Handle one worker message. Public for the tests; the worker is the only caller. */
   onMessage(message: WorkerMessage): void {
+    if (message.type === 'hashed') {
+      const answer = this.hashAsks.get(message.ask)
+      this.hashAsks.delete(message.ask)
+      answer?.({ size: message.size, sha256: message.sha256 })
+      return
+    }
     if (isTerminal(message)) this.settle(message.name)
     // A queued command the worker dropped unopened: nothing more to learn.
     if (message.type === 'released') return
@@ -2226,7 +2880,17 @@ export class DownloadManager {
     const running = this.active === key
 
     switch (message.type) {
+      case 'truncated':
+        // The server has sent the bytes that replace these: the old ones go now.
+        this.prior.delete(key)
+        this.log(
+          'truncated',
+          record.episodeId,
+          `${message.name}: ${String(message.from)} bytes cut`,
+        )
+        break
       case 'progress':
+        this.prior.delete(key)
         // A chunk that was in flight when he pressed pause still lands; it
         // moves the bytes but not the state.
         this.patch(key, {
@@ -2239,7 +2903,10 @@ export class DownloadManager {
         if (running) this.wrote(key)
         break
       case 'restarted':
-        this.patch(key, { bytes: 0, total: 0, etag: null, message: RESTARTED })
+        // The file is not cut until the new bytes arrive, so until then it
+        // is vouched for by nothing: the next run starts over too.
+        this.log('restarted', record.episodeId, message.reason)
+        this.patch(key, { bytes: 0, total: 0, etag: null, fresh: true, message: RESTARTED })
         break
       case 'retrying':
         if (running && message.attempt > QUIET_RETRIES) {
@@ -2248,15 +2915,29 @@ export class DownloadManager {
         break
       case 'busy':
         if (running) {
-          this.patch(key, { state: 'paused', reason: 'elsewhere', message: MESSAGES.elsewhere })
           this.active = null
           this.activeRun = null
+          if (record.previous !== undefined) {
+            void this.keepPrevious(key, 'another window holds the file', true)
+          } else {
+            this.patch(key, { state: 'paused', reason: 'elsewhere', message: MESSAGES.elsewhere })
+          }
           this.pump()
         }
         break
       case 'paused':
+        if (running && record.previous !== undefined) {
+          // The device stopped a replacement: the old copy stays, and the
+          // next trip pass may try the new one again.
+          this.active = null
+          this.activeRun = null
+          void this.keepPrevious(key, `stopped (${message.reason ?? 'paused'})`, true)
+          this.pump()
+          break
+        }
         this.patch(key, { bytes: message.offset })
         if (running) {
+          this.prior.delete(key)
           this.active = null
           this.activeRun = null
           // A pause nobody asked for: the device stopped the write.
@@ -2270,6 +2951,31 @@ export class DownloadManager {
           this.patch(key, { bytes: message.offset })
           break
         }
+        this.log(
+          'failed',
+          record.episodeId,
+          `${message.code}: ${message.reason}${message.intact === true ? ' (file untouched)' : ''}`,
+        )
+        if (record.previous !== undefined) {
+          // A replacement that failed: the copy on the device stays.
+          if (running) {
+            this.active = null
+            this.activeRun = null
+          }
+          void this.keepPrevious(key, `${message.code}: ${message.reason}`)
+          this.pump()
+          break
+        }
+        if (message.intact === true && this.restored(key, message.offset, message.reason)) {
+          if (running) {
+            this.active = null
+            this.activeRun = null
+            this.pump()
+          }
+          this.reportHoldings()
+          break
+        }
+        this.prior.delete(key)
         if (message.code === 'quota') {
           // An older worker's word for a full disk: a pause, as now.
           this.patch(key, { bytes: message.offset })
@@ -2298,6 +3004,11 @@ export class DownloadManager {
         // The server dropped the small copy (idle sweep, re-encode): ask it
         // again, once, and carry on from its answer.
         if (message.code === 'gone' && record.variant === 'small' && record.reasked !== true) {
+          this.log(
+            'reask',
+            record.episodeId,
+            'the small copy is gone (404): asking the server again',
+          )
           this.queue = this.queue.filter((queued) => queued !== key)
           this.patch(key, {
             state: 'preparing',
@@ -2310,19 +3021,53 @@ export class DownloadManager {
           void this.ask(key, 'request')
         }
         break
-      case 'done':
+      case 'done': {
+        this.prior.delete(key)
+        const sha256 = message.sha256 ?? null
+        const expected = record.expected ?? null
+        this.log(
+          'done',
+          record.episodeId,
+          `${message.name} ${String(message.offset)} bytes ${String(message.etag)} sha256 ${String(sha256)}`,
+        )
+        if (expected !== null && sha256 !== null && sha256 !== expected) {
+          // Not the copy the server made: fetched again, once (M20.4 E).
+          if (running) {
+            this.wrote(key)
+            this.active = null
+            this.activeRun = null
+          }
+          void this.fetchAgain(key, `sha256 ${sha256} is not the server’s ${expected}`)
+          if (running) this.pump()
+          break
+        }
+        const previous = record.previous
         this.patch(key, {
           state: 'downloaded',
           bytes: message.offset,
           total: message.total,
           etag: message.etag,
+          sha256,
           fresh: false,
           reason: null,
           message: null,
           reasked: false,
+          tripReasked: false,
+          previous: undefined,
           // A trip copy that has arrived is told to the server (M19 T6).
           ...(record.tripId === undefined ? {} : { confirm: 'pending' as const }),
         })
+        this.playFailures.delete(key)
+        if (previous !== undefined) {
+          // The new copy is whole: only now does the old one go.
+          this.urls.delete(key)
+          this.log(
+            'replace',
+            record.episodeId,
+            `${message.name} is whole; dropping ${previous.name}`,
+          )
+          void this.dropFile(previous.name, key)
+        }
         if (running) this.wrote(key)
         if (running) {
           this.active = null
@@ -2333,6 +3078,7 @@ export class DownloadManager {
         // A copy that has arrived is one the window can skip (M20).
         this.reportHoldings()
         break
+      }
     }
   }
 

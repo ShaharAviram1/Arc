@@ -21,6 +21,9 @@
  * - a download the device stopped (a write it would not take: Arc left the
  *   screen, or the iPad is full) is resumed — or, for a full iPad, probed —
  *   by `resumeSuspended`, never one paused by hand;
+ * - a record left waiting with no URL on a row the server counts as
+ *   delivered (a 404 after the confirmation) asks the server again, once, by
+ *   itself (M20.4 E), and then takes the copy when the trip offers it;
  * - every trip copy the server has not heard about yet is confirmed again;
  * - and watched copies leave the device (`removeWatched`, owner 2026-10-08).
  *
@@ -63,7 +66,10 @@ export async function autoKeep(trips: readonly Trip[], manager: DownloadManager)
       const url = tripCopyUrl(episode)
       const record = manager.record(episode.episode_id)
       if (record !== undefined) {
-        manager.adoptTrip(episode.episode_id, trip.id, url, episode.etag ?? null)
+        manager.adoptTrip(episode.episode_id, trip.id, url, episode.etag ?? null, {
+          phase: episode.phase,
+          sha256: episode.sha256 ?? null,
+        })
         continue
       }
       if (url === null || manager.isDeclined(trip.id, episode.episode_id)) continue
@@ -73,6 +79,7 @@ export async function autoKeep(trips: readonly Trip[], manager: DownloadManager)
           tripId: trip.id,
           url,
           etag: episode.etag ?? null,
+          sha256: episode.sha256 ?? null,
         })
       } catch {
         // No payload for it right now (no network): the next pass tries again.
