@@ -52,6 +52,7 @@ from arc.services.retention.sweep import (
     in_use_now,
     targets_for_episode,
 )
+from arc.services.trips.rules import held_episode_ids
 
 
 async def _wanted_again(ctx: JobContext, episode_id: int) -> bool:
@@ -75,6 +76,18 @@ async def _wanted_again(ctx: JobContext, episode_id: int) -> bool:
         extra={"episode_id": episode_id},
     )
     return True
+
+
+async def _held(ctx: JobContext, episode_id: int) -> bool:
+    """Whether an active trip's device holds this episode's copy unwatched.
+
+    Such a copy survives every retention deletion — the grace sweep, the
+    floor eviction and an admin's — while its source and rendition go (owner,
+    2026-10-30: a held copy is never lost mid-trip); the episode then rests
+    ``not_wanted`` holding only the copy, as a trip-only one does, and the
+    trip's settle deletes it once watched or the trip ends.
+    """
+    return bool(await held_episode_ids(ctx.session, [episode_id]))
 
 
 @register(RETENTION_SWEEP)
@@ -103,6 +116,7 @@ async def retention_sweep(ctx: JobContext) -> None:
                 target.targets,
                 reason=target.reason,
                 dry_run=dry_run,
+                keep_copy=await _held(ctx, episode.id),
             )
         except QbitUnavailable as exc:
             # Only episodes with a torrent talk to qBittorrent, and the call is
@@ -237,6 +251,7 @@ async def _evict_to_floor(
                 item.targets,
                 reason=item.reason,
                 dry_run=dry_run,
+                keep_copy=await _held(ctx, episode.id),
             )
         except QbitUnavailable as exc:
             ctx.log.warning(
@@ -280,6 +295,7 @@ async def delete_files(ctx: JobContext) -> None:
         targets,
         reason=REASON_MANUAL,
         dry_run=ctx.settings.retention_dry_run,
+        keep_copy=await _held(ctx, episode.id),
     )
     ctx.log.info(
         "manual deletion finished",

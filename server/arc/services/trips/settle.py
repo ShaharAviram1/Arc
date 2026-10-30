@@ -141,6 +141,10 @@ async def settle_episode(
     if await pending_episode_ids(session, [episode_id]):
         return Settle(episode_id, "kept", "a trip is still waiting on it")
     if await held_episode_ids(session, [episode_id]):
+        if episode.state in _LEFTOVER_STATES:
+            # The copy stays, but a source left behind does not wait for it.
+            await enqueue_trip_release(session, episode_id)
+            await session.flush()
         return Settle(episode_id, "kept", KEPT_HELD)
     latest = await latest_delivery(session, episode_id)
     due = settle_due(latest, now=now)

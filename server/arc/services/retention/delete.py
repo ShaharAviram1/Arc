@@ -392,8 +392,10 @@ async def delete_episode_files(
     """Remove everything ``targets`` names and reset the episode (FR-T3).
 
     ``keep_copy`` leaves the small offline copy, file and row, where it is:
-    the one caller is a trip-only episode whose source goes as soon as its
-    copy is made, while the copy waits for the device (FR-A12, M19 T3).
+    for a trip-only episode whose source goes as soon as its copy is made,
+    while the copy waits for the device (FR-A12, M19 T3), and for any episode
+    whose copy an active trip's device holds unwatched (owner, 2026-10-30:
+    retention's own deletions pass it then).
 
     Flushes but does not commit: the caller owns the transaction, so the rows,
     the state change and the job's own bookkeeping land together. The *files*
