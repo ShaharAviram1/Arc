@@ -973,8 +973,9 @@ export class DownloadManager {
       if (record.state === 'failed' && record.reason === 'auth') this.resume(record.episodeId)
     }
     this.poll()
-    // The trip calls name this device: its id is read once, here.
-    await this.thisDevice().catch(() => undefined)
+    // The trip calls name this device: its id is read once, here (not
+    // awaited — a storage that never answers must not hold the launch).
+    void this.thisDevice().catch(() => undefined)
     this.confirmPending()
     await this.passWatched()
     void this.syncWatched()

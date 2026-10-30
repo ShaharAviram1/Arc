@@ -73,7 +73,7 @@ import {
   PHASE_LABEL,
   tripCandidates,
   tripCodecsPlayable,
-  tripIsHere,
+  tripPlace,
   useThisDevice,
   type TripEpisode,
 } from '@/lib/trips'
@@ -1094,10 +1094,11 @@ function EpisodeRow({
   timezone?: string
   /**
    * The viewer's trip holds this episode (M19): its id, the episode's phase,
-   * and whether another device keeps the trip (owner, 2026-10-30: then the
-   * row offers nothing to keep).
+   * and whether another device keeps the trip (`elsewhere`) or this device has
+   * not been checked yet (`neutral`) — owner, 2026-10-30: either way the row
+   * offers nothing to keep.
    */
-  trip?: { id: number; episode: TripEpisode; elsewhere?: boolean }
+  trip?: { id: number; episode: TripEpisode; elsewhere?: boolean; neutral?: boolean }
 }) {
   const record = useDownload(episode.id)
   const onDevice = canDownload && record?.state === 'downloaded'
@@ -1215,7 +1216,7 @@ function EpisodeRow({
             <OfflineButton
               episode={episode}
               trip={
-                trip === undefined || trip.elsewhere === true
+                trip === undefined || trip.elsewhere === true || trip.neutral === true
                   ? null
                   : {
                       id: trip.id,
@@ -1458,8 +1459,8 @@ function Episodes({
         <div className="mt-5 flex flex-col gap-0.5">
           {anime.episodes.map((episode) => {
             const tripEpisode = anime.trip?.episodes.find((row) => row.episode_id === episode.id)
-            const elsewhere =
-              anime.trip !== null && anime.trip !== undefined && !tripIsHere(anime.trip, here)
+            const place =
+              anime.trip === null || anime.trip === undefined ? 'here' : tripPlace(anime.trip, here)
             return (
               <EpisodeRow
                 key={episode.id}
@@ -1471,7 +1472,12 @@ function Episodes({
                 trip={
                   anime.trip === null || anime.trip === undefined || tripEpisode === undefined
                     ? undefined
-                    : { id: anime.trip.id, episode: tripEpisode, elsewhere }
+                    : {
+                        id: anime.trip.id,
+                        episode: tripEpisode,
+                        elsewhere: place === 'elsewhere',
+                        neutral: place === 'unknown',
+                      }
                 }
               />
             )

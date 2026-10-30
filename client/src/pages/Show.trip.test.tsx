@@ -543,6 +543,59 @@ describe('the active trip', () => {
     expect(requestsMade(fetchMock)).toContain(`DELETE /api/trips/${String(TRIP_ID)}`)
   })
 
+  it('offers no Choose pack on a trip another device keeps', async () => {
+    installManager()
+    api({
+      [DETAIL]: {
+        body: withTrip({ ...ACTIVE, device_id: '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d' }),
+      },
+    })
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    await waitFor(() => {
+      expect(within(panel).getAllByText('Kept on another device').length).toBeGreaterThan(0)
+    })
+    expect(within(panel).queryByRole('button', { name: /Choose pack/ })).not.toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+  })
+
+  it('draws a trip neutral while this device’s id is still being read', async () => {
+    // A device id that never arrives: the panel never guesses whose trip it is.
+    const harness = managerHarness({ deviceId: () => new Promise<string>(() => undefined) })
+    harness.manager.setOwner(TEST_USER.id)
+    setDownloads(harness.manager)
+    api({ [DETAIL]: { body: withTrip({ ...ACTIVE, device_id: TEST_DEVICE_ID }) } })
+
+    renderShow()
+
+    const panel = (await screen.findByRole('heading', { name: 'Trip · Episodes 2–7' })).closest(
+      'section',
+    ) as HTMLElement
+    const lines = within(panel)
+      .getAllByRole('listitem')
+      .map((item) => item.textContent)
+    expect(lines).toEqual(
+      ACTIVE.episodes.map((e) => `Episode ${String(e.number)}Checking this device…`),
+    )
+    expect(within(panel).queryByRole('button', { name: /^Ask again/ })).not.toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: /Choose pack/ })).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/on this device/)).not.toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+  })
+
+  it('offers Choose pack on this device’s own trip', async () => {
+    installManager()
+    api({ [DETAIL]: { body: withTrip({ ...ACTIVE, device_id: TEST_DEVICE_ID }) } })
+
+    renderShow()
+
+    expect(await screen.findByRole('button', { name: /Choose pack/ })).toBeInTheDocument()
+  })
+
   it('keeps a trip that names this device, or none yet, as its own', async () => {
     installManager()
     for (const device_id of [TEST_DEVICE_ID, null]) {

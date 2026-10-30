@@ -13,6 +13,7 @@ import {
   tripErrorMessage,
   tripEstimateLabel,
   tripIsHere,
+  tripPlace,
   tripRoomFor,
   tripRangeLabel,
   tripRowStatus,
@@ -305,6 +306,30 @@ describe('a trip belongs to the device that started it (owner, 2026-10-30)', () 
     expect(tripIsHere({ device_id: THERE }, null)).toBe(true)
   })
 
+  it('places a trip here, elsewhere, or unknown while this device’s id is unread', () => {
+    expect(tripPlace({ device_id: HERE }, HERE)).toBe('here')
+    expect(tripPlace({ device_id: null }, null)).toBe('here')
+    expect(tripPlace({ device_id: THERE }, HERE)).toBe('elsewhere')
+    expect(tripPlace({ device_id: THERE }, null)).toBe('unknown')
+  })
+
+  it('draws a neutral row, with nothing to tap, while this device is being checked', () => {
+    const expired: TripEpisode = {
+      episode_id: 9001,
+      number: 1,
+      phase: 'expired',
+      progress: null,
+      size: null,
+      delivered: false,
+    }
+    expect(tripRowStatus(expired, undefined, false, bytes, 'unknown')).toEqual({
+      label: 'Checking this device…',
+      tone: 'muted',
+      percent: null,
+      askAgain: false,
+    })
+  })
+
   it('sets aside room only for the trips this device keeps', () => {
     const trips = [
       { ...tripOf(1, 10, ['available', 'searching']), device_id: HERE },
@@ -325,7 +350,7 @@ describe('a trip belongs to the device that started it (owner, 2026-10-30)', () 
       delivered: false,
     }
     for (const phase of ['available', 'delivered', 'expired', 'searching'] as const) {
-      expect(tripRowStatus({ ...episode, phase }, undefined, true, bytes, true)).toEqual({
+      expect(tripRowStatus({ ...episode, phase }, undefined, true, bytes, 'elsewhere')).toEqual({
         label: KEPT_ELSEWHERE,
         tone: 'muted',
         percent: null,
@@ -334,7 +359,7 @@ describe('a trip belongs to the device that started it (owner, 2026-10-30)', () 
     }
     // A copy fetched here before another device claimed the trip stays, and says so.
     const done = downloadedRecord(1, PLAY_INFO, 210)
-    expect(tripRowStatus(episode, done, false, bytes, true)).toMatchObject({
+    expect(tripRowStatus(episode, done, false, bytes, 'elsewhere')).toMatchObject({
       label: 'On this device · 210 B',
       askAgain: false,
     })

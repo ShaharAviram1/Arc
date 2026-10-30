@@ -22,7 +22,7 @@ import {
   KEPT_ELSEWHERE,
   tripErrorMessage,
   tripEstimateLabel,
-  tripIsHere,
+  tripPlace,
   tripRangeLabel,
   tripRoomFor,
   tripRowStatus,
@@ -379,7 +379,11 @@ export function TripPanel({ trip }: { trip: Trip }) {
   const manager = downloads()
   const cancel = useCancelTrip()
   const [confirming, setConfirming] = useState(false)
-  const elsewhere = !tripIsHere(trip, useThisDevice())
+  // Read-only unless this device keeps the trip (owner, 2026-10-30): another
+  // device's trip, or one whose device this one has not checked yet.
+  const place = tripPlace(trip, useThisDevice())
+  const elsewhere = place === 'elsewhere'
+  const mine = place === 'here'
   const held = onDeviceCount(trip, records)
   // A trip download paused because the device is full holds the whole queue:
   // said at the top of the panel, with the way to make room.
@@ -410,7 +414,7 @@ export function TripPanel({ trip }: { trip: Trip }) {
             <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
               {`${KEPT_ELSEWHERE} · this trip downloads to the device that started it`}
             </p>
-          ) : (
+          ) : !mine ? null : (
             <p className="mt-1 text-[13px] text-[var(--arc-text-muted)] tabular-nums">
               {`${String(held)} of ${String(trip.count)} on this device`}
               {dateOf(trip.deadline_at) === ''
@@ -421,7 +425,7 @@ export function TripPanel({ trip }: { trip: Trip }) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* FR-A13: point the trip's pending episodes at a pack of your choosing. */}
-          <ChoosePackButton tripId={trip.id} animeId={trip.anime_id} />
+          {mine ? <ChoosePackButton tripId={trip.id} animeId={trip.anime_id} /> : null}
           <button
             type="button"
             aria-expanded={confirming}
@@ -436,7 +440,7 @@ export function TripPanel({ trip }: { trip: Trip }) {
         </div>
       </div>
 
-      {outOfSpace && !elsewhere ? (
+      {outOfSpace && mine ? (
         <p
           role="alert"
           className="mt-3 rounded-card border-[0.5px] border-[var(--arc-border-strong)] bg-[var(--arc-bg)] p-3 text-[14px] leading-[1.5] text-[var(--arc-error)]"
@@ -508,15 +512,15 @@ export function TripPanel({ trip }: { trip: Trip }) {
               records[episode.episode_id],
               manager.isDeclined(trip.id, episode.episode_id),
               formatSize,
-              elsewhere,
+              place,
             )}
           />
         ))}
       </ul>
 
-      {elsewhere ? null : (
+      {mine ? (
         <p className="mt-3 text-[13px] leading-[1.5] text-[var(--arc-text-muted)]">{OPEN_NOTE}</p>
-      )}
+      ) : null}
     </section>
   )
 }

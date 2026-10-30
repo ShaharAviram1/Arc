@@ -83,15 +83,28 @@ export interface Trip {
 }
 
 /**
- * Whether this device keeps `trip` (owner, 2026-10-30: a trip downloads only
- * to the device that started it). A trip that names no device is anyone's
- * until one confirms a copy (the server then records it). While this
- * device's own id is not known yet (`null`), every trip reads as its own, so
- * nothing flickers to "another device" on the first paint.
+ * Where `trip` downloads, as this device sees it (owner, 2026-10-30: a trip
+ * downloads only to the device that started it): `here` — this device's, or
+ * one that names no device yet (anyone's until a device confirms a copy, and
+ * the server then records it); `elsewhere` — another device's; `unknown` — it
+ * names a device and this device's own id (`here`) has not been read yet. An
+ * `unknown` trip is drawn neutral, with nothing to tap but Cancel.
+ */
+export type TripPlace = 'here' | 'elsewhere' | 'unknown'
+
+export function tripPlace(trip: Pick<Trip, 'device_id'>, here: string | null): TripPlace {
+  const owner = trip.device_id ?? null
+  if (owner === null) return 'here'
+  if (here === null) return 'unknown'
+  return owner === here ? 'here' : 'elsewhere'
+}
+
+/**
+ * Whether this device may keep `trip`: anything but {@link tripPlace}'s
+ * `elsewhere` — the room check counts an `unknown` trip, to be safe.
  */
 export function tripIsHere(trip: Pick<Trip, 'device_id'>, here: string | null): boolean {
-  const owner = trip.device_id ?? null
-  return owner === null || here === null || owner === here
+  return tripPlace(trip, here) !== 'elsewhere'
 }
 
 /** The query key {@link useThisDevice} keeps this device's id under. */
@@ -495,6 +508,9 @@ export function useAskAgain(): UseMutationResult<Trip, Error, AskAgainInput> {
 /** The row line, and the Downloads group's name, for a trip another device keeps. */
 export const KEPT_ELSEWHERE = 'Kept on another device'
 
+/** The row line while this device's own id is still being read ({@link tripPlace} `unknown`). */
+export const CHECKING_DEVICE = 'Checking this device…'
+
 const KEPT_ELSEWHERE_SENTENCE = 'This trip downloads to the device that started it.'
 
 export interface TripRowStatus {
@@ -515,19 +531,20 @@ function whole(fraction: number | null | undefined): number | null {
 /**
  * The trip panel's line for one episode: the device's record first (it is
  * what the viewer will carry), else the server's phase. `declined` is an
- * episode this account took off the device by hand. `elsewhere` is a trip
- * another device keeps (owner, 2026-10-30): every row says so and offers
- * nothing — but a copy this device already holds (fetched before the trip
- * was claimed) is still said to be here.
+ * episode this account took off the device by hand. `place` is where the
+ * trip downloads ({@link tripPlace}, owner 2026-10-30): for `elsewhere` every
+ * row says it is kept on another device, for `unknown` that this device is
+ * being checked, and neither offers anything — but a copy this device already
+ * holds (fetched before the trip was claimed) is still said to be here.
  */
 export function tripRowStatus(
   episode: TripEpisode,
   record: DownloadRecord | undefined,
   declined: boolean,
   formatBytes: (bytes: number) => string,
-  elsewhere = false,
+  place: TripPlace = 'here',
 ): TripRowStatus {
-  if (elsewhere) {
+  if (place !== 'here') {
     if (record?.state === 'downloaded') {
       return {
         label: `On this device · ${formatBytes(record.bytes)}`,
@@ -536,7 +553,12 @@ export function tripRowStatus(
         askAgain: false,
       }
     }
-    return { label: KEPT_ELSEWHERE, tone: 'muted', percent: null, askAgain: false }
+    return {
+      label: place === 'elsewhere' ? KEPT_ELSEWHERE : CHECKING_DEVICE,
+      tone: 'muted',
+      percent: null,
+      askAgain: false,
+    }
   }
   if (record !== undefined) {
     switch (record.state) {
