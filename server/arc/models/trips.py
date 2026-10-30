@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Integer, text
+from sqlalchemy import ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
@@ -76,6 +76,11 @@ class Trip(Base):
     deadline_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     #: When it stopped being active, for any of the three reasons.
     ended_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: The device that started the trip and is the only one to download it
+    #: (owner, 2026-10-30): its canonical v4 UUID, as ``device_holdings``
+    #: stores it. Null for a trip made before this column existed; the first
+    #: device to confirm one of its copies, or to ask for one again, claims it.
+    device_id: Mapped[str | None] = mapped_column(String(36))
 
 
 class TripEpisode(Base):

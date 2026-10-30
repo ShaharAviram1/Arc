@@ -29,6 +29,9 @@ class TripIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     count: StrictInt
+    #: The asking device's own v4 UUID (owner, 2026-10-30): the trip is that
+    #: device's to download. Checked by the route (``parse_device_id``, 422).
+    device_id: str = Field(min_length=32, max_length=45)
 
 
 class DeliveredIn(BaseModel):
@@ -41,6 +44,21 @@ class DeliveredIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     etag: str | None = Field(default=None, max_length=200)
+    #: The confirming device's v4 UUID (owner, 2026-10-30). Optional so a
+    #: client from before it still confirms a trip no device has claimed; a
+    #: trip that records a device refuses a confirmation that names none.
+    device_id: str | None = Field(default=None, min_length=32, max_length=45)
+
+
+class AgainIn(BaseModel):
+    """The optional body of ``POST /api/trips/{id}/episodes/{eid}/again``.
+
+    ``device_id`` as on :class:`DeliveredIn`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str | None = Field(default=None, min_length=32, max_length=45)
 
 
 class TripLimits(BaseModel):
@@ -106,6 +124,10 @@ class TripOut(BaseModel):
     created_at: datetime
     #: ``created_at + trip_copy_days``.
     deadline_at: datetime
+    #: The device that downloads this trip (owner, 2026-10-30): its v4 UUID,
+    #: or null for a trip made before devices were recorded and not yet
+    #: claimed. Any other device shows the trip but does not fetch it.
+    device_id: str | None = None
     episodes: list[TripEpisodeOut]
 
     @classmethod
@@ -121,6 +143,7 @@ class TripOut(BaseModel):
             state=trip.state,
             created_at=trip.created_at,
             deadline_at=trip.deadline_at,
+            device_id=trip.device_id,
             episodes=[
                 TripEpisodeOut(
                     episode_id=row.episode_id,
@@ -137,4 +160,4 @@ class TripOut(BaseModel):
         )
 
 
-__all__ = ["DeliveredIn", "TripEpisodeOut", "TripIn", "TripLimits", "TripOut"]
+__all__ = ["AgainIn", "DeliveredIn", "TripEpisodeOut", "TripIn", "TripLimits", "TripOut"]

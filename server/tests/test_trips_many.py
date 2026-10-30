@@ -33,8 +33,18 @@ from arc.services.acquisition.wants import compute_wants
 from arc.services.media.copies import offline_options, settings_key
 from arc.services.media.jobs import language_rules
 from arc.services.trips.cancel import cancel_trip
-from arc.services.trips.create import active_trips, create_trip
-from arc.services.trips.deliver import ask_again, confirm_delivered, release_delivered
+from arc.services.trips.create import (
+    TRIP_OTHER_DEVICE,
+    TripConflict,
+    active_trips,
+    create_trip,
+)
+from arc.services.trips.deliver import (
+    ask_again,
+    confirm_delivered,
+    device_may_act,
+    release_delivered,
+)
 from arc.services.trips.estimate import ESTIMATE_SAMPLE, copy_estimate_bytes
 from arc.services.trips.hooks import stamp_available
 from arc.services.trips.names import FALLBACK_COPY_BYTES
@@ -270,3 +280,108 @@ async def test_the_estimate_of_an_odd_count_is_the_middle_copy(
     await copies(db_session, rows, [254_000_000, 227_000_000, 300_000_000], key, now())
 
     assert await copy_estimate_bytes(db_session, settings) == 254_000_000
+
+
+# --- Each trip is its own device's (owner, 2026-10-30) ----------------------
+
+IPAD = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+MAC = "0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d"
+
+
+def test_device_may_act() -> None:
+    assert device_may_act(None, None)
+    assert device_may_act(None, IPAD)
+    assert device_may_act(IPAD, IPAD)
+    assert not device_may_act(IPAD, MAC)
+    assert not device_may_act(IPAD, None)
+
+
+async def test_two_devices_each_keep_their_own_trip(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    user = await make_user(db_session, "many-devices@arc.test")
+    first = await show(db_session, 986201)
+    second = await show(db_session, 986202)
+    one = (
+        await create_trip(
+            db_session,
+            settings,
+            user=user,
+            anime_id=first[0].anime_id,
+            count=2,
+            now=now(),
+            device_id=IPAD,
+        )
+    ).trip
+    two = (
+        await create_trip(
+            db_session,
+            settings,
+            user=user,
+            anime_id=second[0].anime_id,
+            count=2,
+            now=now(),
+            device_id=MAC,
+        )
+    ).trip
+    assert (one.device_id, two.device_id) == (IPAD, MAC)
+    for episode in [*first[:2], *second[:2]]:
+        episode.state = EpisodeState.NOT_WANTED
+        await ready_copy(db_session, settings, episode.id)
+        await stamp_available(db_session, episode.id, now=now())
+    await db_session.flush()
+
+    with pytest.raises(TripConflict, match=TRIP_OTHER_DEVICE):
+        await confirm_delivered(
+            db_session,
+            user=user,
+            trip_id=one.id,
+            episode_id=first[0].id,
+            etag=None,
+            now=now(),
+            device_id=MAC,
+        )
+    with pytest.raises(TripConflict, match=TRIP_OTHER_DEVICE):
+        await ask_again(
+            db_session,
+            settings,
+            user=user,
+            trip_id=two.id,
+            episode_id=second[0].id,
+            now=now(),
+            device_id=IPAD,
+        )
+    assert set((await states(db_session, one)).values()) == {TripEpisodeState.PENDING}
+
+    await confirm_delivered(
+        db_session,
+        user=user,
+        trip_id=one.id,
+        episode_id=first[0].id,
+        etag=None,
+        now=now(),
+        device_id=IPAD,
+    )
+    await confirm_delivered(
+        db_session,
+        user=user,
+        trip_id=two.id,
+        episode_id=second[0].id,
+        etag=None,
+        now=now(),
+        device_id=MAC,
+    )
+    with pytest.raises(TripConflict, match=TRIP_OTHER_DEVICE):
+        await release_delivered(
+            db_session,
+            user=user,
+            trip_id=one.id,
+            episode_id=first[0].id,
+            now=now(),
+            device_id=MAC,
+        )
+    assert (await delivered_to(db_session, [user.id]))[user.id] == {first[0].id, second[0].id}
+
+    # Cancelling stays the user's, from any device: it names none.
+    await cancel_trip(db_session, user=user, trip_id=two.id, now=now())
+    assert [trip.id for trip in await active_trips(db_session, user.id)] == [one.id]

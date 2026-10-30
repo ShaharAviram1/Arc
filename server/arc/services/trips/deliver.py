@@ -36,6 +36,15 @@ TripNotFound`, so a trip id is never confirmed to exist):
   exist: a trip-only want returns, and the episode is fetched again, or its
   copy made again, or left alone because the copy is still there.
 
+**A trip is its device's** (owner, 2026-10-30). Each of the three names the
+calling device (its canonical v4 UUID, ``device_id``). A trip that records a
+device answers only that device: any other — or a caller naming none — is
+refused with :class:`~arc.services.trips.create.TripConflict`
+(``trip_other_device``) and nothing changes. A trip made before devices were
+recorded (``device_id`` null) is **claimed** by the first device that confirms
+one of its copies or asks for one again — the one-way migration path for
+trips that were already running; a release does not claim.
+
 Nothing here touches a list entry or MyAnimeList.
 """
 
@@ -63,7 +72,13 @@ from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.media.copies import file_matches
 from arc.services.media.names import offline_path_for
 from arc.services.trips.cancel import drop_queued_copies
-from arc.services.trips.create import TRIP_NOT_ACTIVE, TRIP_NOT_FOUND, TripConflict, TripNotFound
+from arc.services.trips.create import (
+    TRIP_NOT_ACTIVE,
+    TRIP_NOT_FOUND,
+    TRIP_OTHER_DEVICE,
+    TripConflict,
+    TripNotFound,
+)
 from arc.services.trips.names import TRIP_SETTLE_DELAY, enqueue_offline_settle
 from arc.services.trips.rules import pending_episode_ids
 from arc.services.trips.sweep import end_if_nothing_pending
@@ -82,10 +97,29 @@ _AGAIN_FROM: frozenset[TripEpisodeState] = frozenset(
 )
 
 
+def device_may_act(trip_device: str | None, caller_device: str | None) -> bool:
+    """Whether ``caller_device`` may confirm, release or re-ask this trip's copies. Pure.
+
+    A trip that records a device answers that device alone; one that records
+    none (made before 2026-10-30) answers any caller until it is claimed.
+    """
+    return trip_device is None or trip_device == caller_device
+
+
 async def _row(
-    session: AsyncSession, user: User, trip_id: int, episode_id: int
+    session: AsyncSession,
+    user: User,
+    trip_id: int,
+    episode_id: int,
+    *,
+    device_id: str | None,
+    claim: bool,
 ) -> tuple[Trip, TripEpisode]:
     """The caller's trip and its row for ``episode_id``, or :class:`TripNotFound`.
+
+    :class:`TripConflict` (``trip_other_device``) when the trip belongs to
+    another device. With ``claim``, a trip that records no device becomes
+    ``device_id``'s (when one is named).
 
     Locks, in the order every trip writer takes them — the trip, its row, the
     episode: the trip ``FOR UPDATE`` (what a cancel and the sweep take, so a
@@ -99,6 +133,18 @@ async def _row(
     row = await session.get(TripEpisode, (trip_id, episode_id), with_for_update=True)
     if row is None:
         raise TripNotFound(TRIP_NOT_FOUND)
+    if not device_may_act(trip.device_id, device_id):
+        log.info(
+            "trip refused a device that did not start it",
+            extra={"trip_id": trip.id, "episode_id": episode_id, "user_id": user.id},
+        )
+        raise TripConflict(TRIP_OTHER_DEVICE)
+    if claim and trip.device_id is None and device_id is not None:
+        trip.device_id = device_id
+        log.info(
+            "trip claimed by a device",
+            extra={"trip_id": trip.id, "user_id": user.id, "device_id": device_id},
+        )
     await session.scalar(select(Episode.id).where(Episode.id == episode_id).with_for_update())
     return trip, row
 
@@ -127,9 +173,10 @@ async def confirm_delivered(
     episode_id: int,
     etag: str | None,
     now: datetime,
+    device_id: str | None = None,
 ) -> TripEpisode:
     """The device holds the copy. Flushed, not committed. Idempotent."""
-    trip, row = await _row(session, user, trip_id, episode_id)
+    trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=True)
     copy = await session.get(OfflineCopy, episode_id)
     if (
         row.state is TripEpisodeState.PENDING
@@ -200,10 +247,16 @@ async def _drop_unneeded_encode(session: AsyncSession, episode_id: int) -> int:
 
 
 async def release_delivered(
-    session: AsyncSession, *, user: User, trip_id: int, episode_id: int, now: datetime
+    session: AsyncSession,
+    *,
+    user: User,
+    trip_id: int,
+    episode_id: int,
+    now: datetime,
+    device_id: str | None = None,
 ) -> TripEpisode:
     """The device deleted its copy. Flushed, not committed. Idempotent."""
-    trip, row = await _row(session, user, trip_id, episode_id)
+    trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=False)
     if row.delivered_at is not None and row.released_at is None:
         row.released_at = now
         log.info(
@@ -240,13 +293,14 @@ async def ask_again(
     trip_id: int,
     episode_id: int,
     now: datetime,
+    device_id: str | None = None,
 ) -> Trip:
     """Re-pend a delivered or expired row of an active trip. Flushed, not committed.
 
     :class:`TripConflict` (``trip_not_active``) once the trip has ended. A
     ``pending`` row is left as it is.
     """
-    trip, row = await _row(session, user, trip_id, episode_id)
+    trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=True)
     if trip.state is not TripState.ACTIVE:
         raise TripConflict(TRIP_NOT_ACTIVE)
     if row.state in _AGAIN_FROM:
@@ -278,6 +332,7 @@ __all__ = [
     "ask_again",
     "confirm_delivered",
     "confirmed_state",
+    "device_may_act",
     "release_delivered",
     "repend",
 ]

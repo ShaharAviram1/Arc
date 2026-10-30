@@ -32,7 +32,7 @@ from arc.models import (
     User,
     WatchProgress,
 )
-from arc.services.trips.create import TRIP_NOT_ACTIVE
+from arc.services.trips.create import TRIP_NOT_ACTIVE, TRIP_OTHER_DEVICE
 from arc.services.trips.names import OFFLINE_SETTLE
 from tests.conftest import add_user, api_transport, login
 from tests.test_media_stream import write_rendition
@@ -92,6 +92,7 @@ async def a_trip(
     *,
     anilist_id: int,
     episodes: int = 3,
+    device_id: str | None = None,
 ) -> tuple[int, list[int]]:
     """A show of ``episodes`` and the user's active trip on 2..last, each trip-only.
 
@@ -129,6 +130,7 @@ async def a_trip(
             last_number=episodes,
             count=episodes - 1,
             deadline_at=now + timedelta(days=14),
+            device_id=device_id,
         )
         session.add(trip)
         await session.flush()
@@ -411,3 +413,120 @@ async def test_the_url_is_null_without_a_ready_copy(
     assert by_id[ids[1]]["etag"] is None
     served = await owner_client.head(f"/media/{ids[2]}/offline.mp4")
     assert by_id[ids[2]]["etag"] == served.headers["etag"]
+
+
+# --- A trip is its device's (owner, 2026-10-30) -----------------------------
+
+DEVICE = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+OTHER_DEVICE = "0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d"
+
+
+async def trip_device(factory: SessionFactory, trip_id: int) -> str | None:
+    async with factory() as session:
+        trip = await session.get(Trip, trip_id)
+        assert trip is not None
+        return trip.device_id
+
+
+async def test_another_device_is_refused_409_and_nothing_changes(
+    owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986101, device_id=DEVICE)
+    again_url = f"/api/trips/{trip_id}/episodes/{ids[1]}/again"
+
+    for response in (
+        await owner_client.post(delivered_url(trip_id, ids[1]), json={"device_id": OTHER_DEVICE}),
+        # A client naming no device cannot act on a trip that records one.
+        await owner_client.post(delivered_url(trip_id, ids[1]), json={}),
+        await owner_client.post(again_url, json={"device_id": OTHER_DEVICE}),
+        await owner_client.post(again_url),
+    ):
+        assert (response.status_code, response.json()["detail"]) == (409, TRIP_OTHER_DEVICE)
+    assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.PENDING
+
+    mine = await owner_client.post(delivered_url(trip_id, ids[1]), json={"device_id": DEVICE})
+    assert mine.status_code == 204, mine.text
+    assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.DELIVERED
+
+    for response in (
+        await owner_client.delete(
+            delivered_url(trip_id, ids[1]), params={"device_id": OTHER_DEVICE}
+        ),
+        await owner_client.delete(delivered_url(trip_id, ids[1])),
+    ):
+        assert (response.status_code, response.json()["detail"]) == (409, TRIP_OTHER_DEVICE)
+    assert (await row_state(api_factory, trip_id, ids[1])).released_at is None
+
+    released = await owner_client.delete(
+        delivered_url(trip_id, ids[1]), params={"device_id": DEVICE}
+    )
+    assert released.status_code == 204
+    assert (await row_state(api_factory, trip_id, ids[1])).released_at is not None
+
+    again = await owner_client.post(again_url, json={"device_id": DEVICE})
+    assert again.status_code == 200, again.text
+    assert again.json()["device_id"] == DEVICE
+    assert (await trip_device(api_factory, trip_id)) == DEVICE
+
+
+async def test_a_legacy_trip_is_claimed_by_the_first_confirming_device(
+    owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    """A trip from before 2026-10-30 records no device: the first one to confirm takes it."""
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986102, episodes=4)
+    assert (await owner_client.get("/api/trips")).json()[0]["device_id"] is None
+
+    # A release does not claim, and a client naming no device still works.
+    assert (
+        await owner_client.delete(
+            delivered_url(trip_id, ids[1]), params={"device_id": OTHER_DEVICE}
+        )
+    ).status_code == 204
+    assert (await owner_client.post(delivered_url(trip_id, ids[3]), json={})).status_code == 204
+    assert (await trip_device(api_factory, trip_id)) is None
+
+    # Spelled in upper case: stored canonical.
+    claimed = await owner_client.post(
+        delivered_url(trip_id, ids[1]), json={"device_id": DEVICE.upper()}
+    )
+    assert claimed.status_code == 204, claimed.text
+    assert (await trip_device(api_factory, trip_id)) == DEVICE
+    assert (await owner_client.get("/api/trips")).json()[0]["device_id"] == DEVICE
+
+    refused = await owner_client.post(
+        delivered_url(trip_id, ids[2]), json={"device_id": OTHER_DEVICE}
+    )
+    assert (refused.status_code, refused.json()["detail"]) == (409, TRIP_OTHER_DEVICE)
+    assert (await row_state(api_factory, trip_id, ids[2])).state is TripEpisodeState.PENDING
+
+
+async def test_a_legacy_trip_is_claimed_by_asking_again(
+    owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986103)
+    await owner_client.post(delivered_url(trip_id, ids[1]), json={})
+    assert (await trip_device(api_factory, trip_id)) is None
+
+    again = await owner_client.post(
+        f"/api/trips/{trip_id}/episodes/{ids[1]}/again", json={"device_id": OTHER_DEVICE}
+    )
+
+    assert again.status_code == 200, again.text
+    assert again.json()["device_id"] == OTHER_DEVICE
+
+
+async def test_a_bad_device_id_is_422(
+    owner_client: AsyncClient, owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986104)
+    v1 = "c232ab00-9414-11ec-b3c8-9e6bdeced846"
+    for response in (
+        await owner_client.post(delivered_url(trip_id, ids[1]), json={"device_id": v1}),
+        await owner_client.post(delivered_url(trip_id, ids[1]), json={"device_id": "x" * 36}),
+        await owner_client.delete(delivered_url(trip_id, ids[1]), params={"device_id": v1}),
+        await owner_client.post(
+            f"/api/trips/{trip_id}/episodes/{ids[1]}/again", json={"device_id": "short"}
+        ),
+    ):
+        assert response.status_code == 422, response.text
+    assert (await trip_device(api_factory, trip_id)) is None
