@@ -610,10 +610,17 @@ that the course professor can log in at any time, and the owner uses it daily.
   the device does not collect **expire** `trip_copy_days` (default 14) after
   they were made (a download still running at that moment stops, by
   design), and an episode whose copy was never made expires at the
-  trip's deadline (14 days after the trip was made); a trip with nothing left
-  waiting **ends** — finished at the confirmation of its last episode, or at
-  the hourly check (expired if nothing reached the device) — and the user may
-  then start another on that show at once. **The server keeps a trip's
+  trip's deadline (14 days after the trip was made). **A trip is held until
+  its deadline** (2026-10-30, the orchestrator's call under the owner's "a
+  held copy is never lost mid-trip"; it ended at the confirmation of its last
+  episode before, and one switch in the server puts that back): once nothing
+  of it is waiting it still stays active — every episode shows as delivered,
+  the device may ask for any of them again, and the server keeps their copies
+  — and the hourly check ends it after its deadline, **finished** when every
+  episode was delivered, else **expired**; the user may cancel it any time.
+  **Starting the next trip on the show ends one with nothing left waiting**
+  (finished, its copies let go an hour later); one still waiting for an
+  episode is refused as before. **The server keeps a trip's
   small copy until the episode is watched or the trip ends** (owner,
   2026-10-30, after a confirmed copy was lost on the iPad and the server had
   already deleted its own an hour after the confirmation): the full-size
@@ -621,9 +628,16 @@ that the course professor can log in at any time, and the owner uses it daily.
   the trip is active and its user has not watched the episode — released by
   the device or not — and goes once the episode is watched (within the hour)
   or the trip has finished, been cancelled or expired (at least an hour after
-  the latest confirmation). That costs about 250 MB per delivered episode for
-  the trip's lifetime. **A device that lost a delivered copy gets it
-  again**: when the trip's own device reports what it holds (FR-A15) and a
+  the latest confirmation). Watched means watched **in Arc**: a user whose
+  progress is only recorded on MyAnimeList keeps the copies until the trip
+  ends. That costs about 260 MB per delivered episode (1080p HEVC copies
+  measure about 254–260 MB per 24 minutes) for the trip's lifetime, and
+  retention neither deletes such a copy as idle nor takes it with its
+  episode's other files (the source and rendition still go by their own
+  rules, and a held copy never keeps its source on the disk). **A device
+  that lost a delivered copy gets it again**: when the trip's own device
+  reports what it holds (FR-A15) in the per-episode form — which it sends
+  only once no "I deleted it" of its own is still on its way — and a
   delivered episode it has not said it deleted is missing from the report,
   the episode goes back in the trip and the device fetches the same copy
   again, or — if the copy is gone — it is fetched and copied again; not for
@@ -746,7 +760,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode, what the device holds of the copy — the ETag it downloaded, the
   size and the SHA-256 it computed — and a delivered trip episode missing
   from the trip's own device's report is put back in the trip (FR-A12); the
-  old shape (episode ids only) is still accepted. At most **10 devices** per user are kept,
+  old shape (episode ids only) is still accepted but never re-pends anything. At most **10 devices** per user are kept,
   the one that reported longest ago removed first (a small call, 2026-10-13:
   a browser that clears its storage mints a new device id). The server uses
   the set only for FR-A1's device skip, together with delivered trip copies
@@ -1718,14 +1732,17 @@ that the course professor can log in at any time, and the owner uses it daily.
   count towards the disk usage FR-T4 shows. **A trip's copy of an episode
   that is not `ready`** (M19 T4) — its source already deleted when the copy
   was made — is **kept while an active trip's device holds it and its user
-  has not watched it** (owner, 2026-10-30; about 250 MB per held episode for
-  the trip's lifetime), and deleted, file and record, once nothing waits for
+  has not watched it** (owner, 2026-10-30; about 260 MB per held episode for
+  the trip's lifetime, the trip held to its deadline), and deleted, file and record, once nothing waits for
   it or holds it any more: after its user has **watched** the episode (within
-  the hour), when the trip **ends** (at least an hour after the last device
+  the hour), when the trip **ends** (at its deadline, on cancel, or when the
+  next trip on the show starts; at least an hour after the last device
   confirmed it); at **expiry** (`trip_copy_days`, 14, counted
   from when the copy was made); at **cancellation** (FR-A12); and once
   its user's account is deleted. A `ready`
-  episode's copy is never deleted by a trip: it follows the idle rule above.
+  episode's copy is never deleted by a trip: it follows the idle rule above —
+  except while an active trip's device holds it unwatched, when neither the
+  idle rule nor any of retention's deletions take it (2026-10-30).
 - FR-T8 **Pin a show** (M20, owner 2026-10-13). A user may pin a show
   ("Keep files" on the show page): delete after watching (FR-T1) then skips
   every episode of it — source and rendition both are kept. A pin is per user
@@ -3196,7 +3213,15 @@ through the same edge, without the grace period.
   never destroyed, and "delivered" means verified (after episode 15 of trip 4
   was lost mid-flight). Copies carry a SHA-256; a confirmation with a hash or
   size that is not the copy's is refused; the server keeps a trip's small
-  copy until its user watches the episode or the trip ends (about 250 MB per
+  copy until its user watches the episode or the trip ends (about 260 MB per
   held episode); a delivered episode missing from the trip's own device's
   holdings report is put back in the trip; holdings carry etag, size and
   hash per episode; a device's event log can be sent for the operator.
+- 2026-10-30 (orchestrator, under the owner's "a held copy is never lost
+  mid-trip"; review of M20.4 E) — FR-A12, FR-A15, FR-T7: a trip no longer
+  ends at its last confirmation; it is held until its deadline (finished when
+  every episode was delivered, else expired) or cancelled, and starting the
+  next trip on the show ends one with nothing left waiting. Revertible by one
+  server constant (`FINISH_ON_LAST_CONFIRM`). A held copy is spared by
+  retention, never keeps its source, and is re-offered only on a per-episode
+  holdings report. The copy is ≈260 MB.

@@ -5,7 +5,9 @@ server had already deleted its copy, so the device had no way back but a
 re-encode. Since then the server keeps a trip's copy until the episode is
 watched or the trip ends (:mod:`arc.services.trips.settle`), and the device's
 holdings report (``PUT /api/devices/{id}/holdings``, FR-A15) carries what it
-actually holds. This module reads that report against the trip rows:
+actually holds. This module reads that report against the trip rows — called only for a
+report in the per-episode shape, which the client sends once no "I deleted
+it" of its own is still queued (an ids-only report never re-pends):
 
 a ``delivered``, unreleased row of an **active** trip that records **this**
 device, whose episode the report leaves out, is put back to ``pending``
@@ -21,7 +23,7 @@ trip's want fetches and copies the episode again by the ordinary paths
   from its report, and that is not a loss;
 * a row confirmed less than :data:`REPEND_GRACE` ago: a report the device
   composed just before the confirmation may arrive just after it;
-* every row, when the report is at the cap
+* every row, when the report names as many distinct episodes as the cap
   (:data:`~arc.services.acquisition.holdings.MAX_HOLDINGS`): the device
   dropped ids to fit, so an absence there proves nothing.
 

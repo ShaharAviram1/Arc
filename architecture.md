@@ -1993,9 +1993,12 @@ drift for an episode with no rendition.
   9.9 MB copy went to the iPad); then, for a `request`, the
   episode row is re-read `FOR UPDATE` (the lock `request_copy` and
   `delete_episode_files` take) and the copy is dropped if the episode left
-  `ready` meanwhile; `os.replace` onto `offline/<id>.mp4`; the published file
-  is hashed in a worker thread (`copies.file_sha256`, SHA-256 in 1 MiB reads,
-  about a second for 250 MB; owner 2026-10-30); row → `ready` with size, ETag,
+  `ready` meanwhile; `os.replace` onto `offline/<id>.mp4`; the **staged** file
+  was hashed just before, after the encode and before the episode's row lock,
+  inside the `try` that fails the copy on error and with `_keep_lock_warm`
+  beating (`offline._hash_staged`: `copies.file_sha256` in a worker thread,
+  SHA-256 in 1 MiB reads, about a second for 260 MB; owner 2026-10-30;
+  `os.replace` keeps those bytes); row → `ready` with size, ETag,
   sha256 and ready_at — so every copy made since has its hash before it is
   offered, and the device checks its bytes against it before it confirms
   (§5.4e Delivery). The staging directory is removed on every exit. A
@@ -3463,7 +3466,12 @@ worker).
   device's (owner, 2026-10-30). Refusals, in
   this order: demo account 403 `demo_account`; unknown anime 404; an active trip of the
   caller's **on this show** 409 `trip_active` (`active_trip(session, user_id,
-  anime_id)`; any number of shows may each have one — owner, 2026-10-28 — and
+  anime_id)`; since 2026-10-30 an active trip on the show with **nothing
+  pending** is first ended — `_end_finished_trip` locks it `FOR UPDATE`,
+  `sweep.end_if_nothing_pending(any_time=True)` ends it (`finished` when every
+  row is delivered, else `expired`) and `enqueue_trip_settles` queues its
+  settles at +1 h, all rolled back with the rest if the new trip is refused —
+  because a trip no longer ends at its last confirmation (Delivery below); any number of shows may each have one — owner, 2026-10-28 — and
   the partial unique index on `(user_id, anime_id)`, behind a savepoint, for
   the race); storage held 409 `storage_held` (FR-T6); count outside
   1..`trip_max_episodes` 422 `count_out_of_range`; nothing aired after progress
@@ -3657,8 +3665,12 @@ above), so what is settled here is the **copy** — file and row — and the
   commit, so nothing changes, not even a claim; without them (an old client)
   or against a copy with no hash the length check stands as before. On a
   change it queues `compute_wants` (the trip want ends), ends the trip
-  `finished` when nothing of it is pending any more
-  (`FINISH_ON_LAST_CONFIRM`, on; `sweep.end_if_nothing_pending`), and — once
+  `finished` when nothing of it is pending any more **only with
+  `names.FINISH_ON_LAST_CONFIRM` on** — off since 2026-10-30
+  (orchestrator, under the owner's "a held copy is never lost mid-trip"; one
+  constant to flip back): the trip stays active until the sweep ends it at
+  its deadline, so its copies are held and a lost one re-offered for the
+  trip's whole life, and "again" works throughout — and — once
   the trip is no longer active, ended here or before a late confirmation —
   queues `offline_settle` for every episode of the trip at `now +
   TRIP_SETTLE_DELAY` (`names.enqueue_trip_settles`; 1 h; dedupe per episode,
@@ -3679,18 +3691,22 @@ above), so what is settled here is the **copy** — file and row — and the
   searched at 160.
 - **Lost copies** (`trips.lost.repend_lost_copies`, owner 2026-10-30), run by
   `PUT /api/devices/{device_id}/holdings` after the holdings are replaced, in
-  the same transaction: the active trips of the caller whose `device_id` is
+  the same transaction, and **only for a report in the per-episode
+  `episodes` shape** (the client sends it once no release of its own is
+  still queued; an ids-only report never re-pends): the active trips of the caller whose `device_id` is
   **this** device are locked `FOR UPDATE`, then their `delivered`,
   unreleased rows confirmed at least `REPEND_GRACE` (5 min) ago; each one whose
   episode the report leaves out and whose user has not completed it
   (`completed_episode_ids`) is put back with `deliver.repend` —
   `available_at` now when the copy is `ready` and on disk (`file_matches`),
-  else null — after locking the episode (logged at WARNING "device lost a
+  else null — after locking the episodes in one statement in id order (logged at WARNING "device lost a
   delivered copy; re-pended"), and `compute_wants` is queued: the trip want
   returns, so a copy that is gone is fetched and made again by the ordinary
   paths. Nothing happens for a trip that records no device or another one,
-  an ended trip, a released row, or a report at `MAX_HOLDINGS` (the device
-  dropped ids to fit).
+  an ended trip, a released row, or a report with `MAX_HOLDINGS` distinct
+  episodes (the device dropped ids to fit; repeats are counted once). An
+  entry of either `variant` counts as held; a `full` entry's etag/size/hash
+  describe the full-size file and are not stored.
 - **Settle** (`trips.settle.settle_episode`, job `offline_settle {episode_id}`;
   idempotent). Under the episode's `FOR UPDATE`: an unknown or `ready`
   episode → kept (a ready episode's copy follows the idle rule, §5.7; a
@@ -3700,8 +3716,11 @@ above), so what is settled here is the **copy** — file and row — and the
   whose user has not completed the episode → kept (`rules.held_episode_ids`,
   one statement with a `NOT EXISTS` on `watch_progress`; owner 2026-10-30:
   the server keeps only the small copy, and keeps it until the episode is
-  watched or the trip ends — about 250 MB per held episode for the trip's
-  lifetime); the **latest** `delivered_at` on the episode, any user, under
+  watched or the trip ends — about 260 MB per held episode for the trip's
+  lifetime; a user whose progress lives only on MyAnimeList keeps them
+  until the trip ends; a held episode still holding a source — `downloaded`/
+  `matched`/`failed` — gets a `trip_release`, which deletes the source and
+  keeps the copy); the **latest** `delivered_at` on the episode, any user, under
   `TRIP_SETTLE_DELAY` old → deferred to `latest + 1 h` (so two users' devices
   each get their hour; "latest" is any row's `delivered_at`, whatever its
   state; a dedupe hit onto an earlier settle is corrected here); an `offline_encode` pending/running → deferred 15 min
@@ -3713,8 +3732,10 @@ above), so what is settled here is the **copy** — file and row — and the
   `matched`/`failed` (a source whose release never ran) gets a
   `trip_release`, whose own rules decide. The episode rests `not_wanted`; the
   `trip_episodes` rows are left as they are (`delivered`/`expired` are the
-  trip's history). `release_episode`'s second ending also keeps a held copy
-  (the same `held_episode_ids`) and a copy confirmed under an hour ago, so a
+  trip's history). `release_episode`'s second ending keeps a held copy (the
+  same `held_episode_ids`) **but deletes the rest** — the targets without the
+  copy, `keep_copy=True`, outcome `source_deleted` (2026-10-30: a held copy
+  never pins its source) — and keeps a copy confirmed under an hour ago, so a
   cancel cannot cut a second device short. What queues a settle since
   2026-10-30: a trip's end — `cancel_trip` (every episode of the trip, at
   once), the confirmation that finishes it, the sweep's pass (2) through
@@ -3732,8 +3753,11 @@ above), so what is settled here is the **copy** — file and row — and the
   committed while the sweep waited is re-read, not overwritten. (2) **End**:
   every active trip is locked first and each one's rows are read after
   (`end_if_nothing_pending`), so an "again" committed meanwhile keeps it
-  active; one with no `pending` row gets `finished` when any row has
-  `delivered_at`, else `expired` (`ending_state`, pure), and `ended_at`.
+  active; one with no `pending` row ends **once `deadline_at` has passed**
+  (`may_end`, pure; at once with `FINISH_ON_LAST_CONFIRM` on), `finished`
+  when every row is `delivered`, else `expired` (with the switch on, as
+  before: `finished` when any row has `delivered_at`; `ending_state`, pure),
+  and `ended_at`.
   `GET /api/trips` lists **active** trips only, so an ended trip leaves the
   list. (3) **Safety net**: a copy of an episode neither `ready`
   nor `preparing` that no trip waits on and no active trip holds unwatched
@@ -4384,11 +4408,17 @@ bounded by what one un-finished file had fetched).
   whose `coalesce(last_served_at, ready_at)` is older than `offline_idle_days`
   (default 7, floor 1), minus any with an encode in flight and any an active
   trip is still waiting on (a `pending` `trip_episodes` row — FR-A12, whose
-  own 14-day clock is longer), and
+  own 14-day clock is longer) or that an active trip's device holds unwatched
+  (`trips.rules.held_episode_ids`, 2026-10-30), and
   `delete_idle_copy` removes file and row (committed one at a time, dry-run
   honoured). The episode is untouched — it still streams, and the next Keep
   offline makes the copy again. A non-ready episode's copy (a trip's) is not
-  this rule's: the trip settle and sweep own it (§5.4e part 2).
+  this rule's: the trip settle and sweep own it (§5.4e part 2). **Held copies
+  survive retention** (2026-10-30): the grace sweep, the floor eviction and
+  the admin's `delete_episode_files` job pass `keep_copy=True` for an
+  episode whose copy an active trip's device holds unwatched
+  (`retention.jobs._held`), so its source and rendition go and the episode
+  rests `not_wanted` holding only the copy, like a trip-only one.
 - `retained_usage` gains `offline_bytes` (`SUM(offline_copies.size)` over
   `ready` rows, every episode — a trip's copy sits on the disk for an episode
   that is not retained) and `total` includes it; `GET /api/retention/disk`
@@ -4981,14 +5011,14 @@ Mutating requests must carry an allowed `Origin`.
 | `POST /api/episodes/{id}/release`, `POST /api/trips/{id}/release` | as above | FR-A13: body exactly one of `{candidate_id}` (from the caller's last list; else 422 `unknown_candidate`) or `{link}` (magnet, or an `https` nyaa.si / `NYAA_URL`-host `/view/<id>` or `/download/<id>.torrent`; else 422 `host_not_allowed`/`bad_link`; a magnet not in the pool 422 `magnet_unknown`) → **202 `ReleaseChosenOut`** = `{title, kind, info_hash, episodes[{episode_id, number, state}]}`. Replaces the running download (single cancelled via `qbit_cancel`, pack claim released via `qbit_reselect`) and takes the release through the existing add paths (a pack: `_take_batch`, only the caller's wanted files). 409 `storage_held`, `acquisition_paused`, `packs_off`, `busy`, `already_arrived`, `nothing_to_fetch`; 422 `pack_selects_nothing` (the pack is deleted while stopped), `already_tried`, `already_downloading`, `wrong_episode`; 503 `qbit_unavailable`. A refusal rolls everything back. `EpisodeOut.wanted_by_me` and `ReleaseOut.manual` feed the show page |
 | `GET /api/trips` | any | the caller's active trips as `list[TripOut]`, oldest first (`created_at`, then id), `[]` for none — any number, one per show (owner, 2026-10-28; it replaced `GET /api/trips/current`). The copy estimate rides on the show payload's `trip_limits.copy_estimate_bytes` only (`trips.estimate.copy_estimate_bytes`: the median `size` of the newest 20 `ready` `offline_copies` whose `settings_key` is the current settings' and language rules' — a copy keyed by its rendition's own languages does not count, which only narrows the sample — else `FALLBACK_COPY_BYTES` = 260 000 000; the demo account is sent the fallback without the queries). The show payload carries the caller's active trip **on that show** as `trip`, and every `EpisodeOut` carries `trip_only` (one grouped query per page, every caller). Each `TripEpisodeOut` carries `sha256` (owner 2026-10-30) beside `etag` and `size`: the copy's SHA-256 whenever `url` is set and the copy has one, else null |
 | `DELETE /api/trips/{id}` | owner only (anybody else's or an unknown id: 404 `trip not found`) | cancel (§5.4e) → 204; a cancelled trip again → 204; a finished/expired one → 409 `trip_not_active` |
-| `POST /api/trips/{id}/episodes/{eid}/delivered` | owner only (anybody else's trip, an unknown id or an episode not in the trip: 404) | M19 T4: body `{etag?, device_id?, sha256?, size?, variant?: "small" | "full"}` (absent variant = small; etag ≤ 200 chars, extra keys 422; `device_id` a v4 UUID else 422; `sha256` 64 hex either case, `size` 0..2^40, else 422) → **204**; **409 `trip_other_device`** when the trip records another device (or the caller names none); an unclaimed trip is claimed by the device named (2026-10-30). **409 `copy_mismatch`** (owner 2026-10-30) when the copy is `ready` and `size` differs from it, or `sha256` differs from its hash — nothing changes, the claim included; without them the length check stands; a `variant: "full"` confirmation (the device kept the full-size file instead) is not compared at all. The device holds the copy: a `pending` row (or an `expired` one of an active trip) goes `delivered`; a `cancelled` row or an ended trip's `expired` row only gets `delivered_at` (no fetch right back); `delivered_at` stamped first time and again after a release (`released_at` cleared); a differing ETag logged; queues `compute_wants` on a change and, once the trip is no longer active (this confirmation finished it, or it ended before), `offline_settle` for each of its episodes at +1 h; repeats are no-ops (§5.4e part 2) |
+| `POST /api/trips/{id}/episodes/{eid}/delivered` | owner only (anybody else's trip, an unknown id or an episode not in the trip: 404) | M19 T4: body `{etag?, device_id?, sha256?, size?, variant?: "small" | "full"}` (absent variant = small; a `full` confirmation's `etag`, `sha256` and `size` are ignored, so neither the ETag rule nor the hash check applies to it; a null `sha256` is "unknown", never a mismatch; etag ≤ 200 chars, extra keys 422; `device_id` a v4 UUID else 422; `sha256` 64 hex either case, `size` 0..2^40, else 422) → **204**; **409 `trip_other_device`** when the trip records another device (or the caller names none); an unclaimed trip is claimed by the device named (2026-10-30). **409 `copy_mismatch`** (owner 2026-10-30) when the copy is `ready` and `size` differs from it, or `sha256` differs from its hash — nothing changes, the claim included; without them the length check stands; a `variant: "full"` confirmation (the device kept the full-size file instead) is not compared at all. The device holds the copy: a `pending` row (or an `expired` one of an active trip) goes `delivered`; a `cancelled` row or an ended trip's `expired` row only gets `delivered_at` (no fetch right back); `delivered_at` stamped first time and again after a release (`released_at` cleared); a differing ETag logged; queues `compute_wants` on a change and, once the trip is no longer active (this confirmation finished it, or it ended before), `offline_settle` for each of its episodes at +1 h; repeats are no-ops (§5.4e part 2) |
 | `DELETE /api/trips/{id}/episodes/{eid}/delivered` | owner only (404 as above) | M19 T4, query `device_id?` (v4 UUID else 422; 409 `trip_other_device` as above, never claims) → **204**: the device deleted its copy; stamps `released_at` on a delivered row, which puts the episode back in the caller's window from the next reconciliation (M20 T4: a delivered, unreleased episode is skipped); idempotent |
 | `POST /api/trips/{id}/episodes/{eid}/again` | owner only (404 as above) | M19 T4, optional body `{device_id?}` (409 `trip_other_device` and claim as on `…/delivered`) → **200 `TripOut`**: a `delivered`/`expired` row back to `pending` (`delivered_at`/`released_at` cleared, `available_at` = now if the copy is on disk), `compute_wants` queued; a pending row unchanged; **409 `trip_not_active`** once the trip ended |
 | `GET /api/episodes/{id}/offline` | any but the demo account (403) | the same `OfflineOut`, read-only — what a device polls while `preparing`. `unavailable` when there is no copy and no source on disk; `failed` for a queued/preparing row with no live job; 404 as above. The job lookup reads only live (pending/running) `offline_encode` rows, and only for queued/preparing copies. `EpisodeOut.offline` is `null` for the demo account |
 | `GET /api/episodes/{id}/play` | any | `PlayInfo`: episode (the same `EpisodeOut` the show page renders, so `title`, `still_url` and FR-W5's `watched`/`watched_source` come with it), anime (an `AnimeSummary`, so `cover_large_url` too), playlist URL, rendition duration, `resume_position` (10 s < pos < 95 %, not completed), `resume_at` (the row's `updated_at`, null with no row; 2026-10-08), previous/next refs with `ready` and `fetchable` (M20 T4: the caller could demand it now — `coverable(user)` on real progress, so it agrees with `demand` and flips once the user passes 50 %; false for a ready neighbour; worked out only when a neighbour is not ready and never while the opened episode is pending, since the pending player polls this route), `offline_only` (false), `pending` (null), `subtitles` (`{lang}` when the rendition has a text track, else null; M20 T3, FR-S10), `next_season` (2026-10-18, FR-S5 item 3: `{anime_id, title, episode: EpisodeRef, list_state: active|dormant|absent, aired}` — set only when there is no following row, the show is finished there (number ≥ the stated count when there is one, whatever the status; `FINISHED` when there is none), and a `SEQUEL` relation resolves to a row in Arc whose format is `TV`, `TV_SHORT` or `ONA` (in that order, then earliest `season_year`; a `MOVIE`/`SPECIAL`/`OVA`/`MUSIC` or unstated format is never offered; a self-relation is ignored; `services/catalog/sequels.py`); the episode is the sequel's lowest number ≥ 1; `title` is `preferred_title`; `list_state` is `dormant` only for an untouched **watching/planned** entry — any other status is `active`, so the press never writes a completed/on-hold/dropped entry (a `PUT {}` would raise a completed entry's progress and queue a MAL write); `episode.fetchable` is `coverable` for an active entry and, for a dormant/absent one, `wants.coverable_once_active` (the window the entry will have once the press touches it: status kept, Watching for none; before the device skip and the cap) **or** `coverable` (a live sample want, FR-A8); `aired` is false for a `NOT_YET_RELEASED` sequel or an episode 1 `is_aired` rejects, so the client says "hasn't aired yet"; rule in `services/playback/next_season.py`). **Not worked out while the opened episode is pending or playing from its download** (FR-P8 — the poll would pay a plan each time), so a last episode watched as it downloads gets the offer only once it is ready. The client's press (one `useNextSeasonPress` in `PlayerView`, shared by the end overlay and the Next glyph): active + ready → navigate; otherwise `PUT /api/list/{anime_id}` (`{status: "watching"}` for absent, `{}` for dormant), then `POST /demand` for a not-ready episode and navigate with `{demanded: true}` — two calls, because the PUT commits the activation and the demand computes coverage itself, so no wait for `compute_wants`. 404 for a non-`ready` episode — except (M19 T4) a trip episode on which the caller holds a `pending`/`delivered` row: then `playlist_url: null`, `offline_only: true`, `duration` = the caller's last reported one (else 0); and (M20 T4, FR-A14) an episode the caller has a live want on: then `playlist_url: null`, `pending: {state, progress, seeders}` (the release's progress — a pack's own file — and Nyaa seeders, null before there is a release), `duration` as for `offline_only`. A **demanded** want is checked first and answers `pending` even when the caller's device holds the trip copy ("watch it on the Mac"); then the trip branch; then any other live want. **While the episode plays from its download** (M20 T6, FR-P8: a live want, and `live_serve.live_servable` accepts its `live/<id>/`): `playlist_url` is the same `/media/{id}/index.m3u8`, `live: {front_seconds, expected_duration, download_progress, seeders, ended}` (from the `remux_live` payload; `ended` once ffmpeg wrote `ENDLIST`), `pending: null`, `duration` = `expected_duration`, `subtitles: {lang}` when the live remux extracts a track |
 | `POST /api/episodes/{id}/demand` | any, demo included | M20 T4 (FR-A14): press play on a not-ready episode → **202 `{state, live, message}`** (M20 T6: for a downloading single, `qbit_sequential` + `remux_live` are queued without any matcher or catalogue call — the job gates; `live` is false with `message` "This episode will play when its download finishes." when the newest live remux of this download refused, or for a batch; true otherwise — optimistic until the job has looked; a running or finished live remux is not re-queued). **409** `{detail: {code, message}}` with `not_in_window` (not in the caller's `coverable` set), `acquisition_paused` or `storage_held` (only while the episode still needs fetching). 404 unknown episode. A `ready` episode answers 202 `{state: ready}` and writes nothing. Otherwise, under the shared wants lock, upserts the want with `demanded_at`, starts/raises the search to priority 100, `qbit_top` if downloading, queues `compute_wants`. Origin required |
-| `PUT /api/devices/{device_id}/holdings` | any but demo (403 `demo_account`) | M20 T4 (FR-A15): body `{episode_ids: [id…]}` **or** (owner 2026-10-30) `{episodes: [{episode_id, etag?, size?, sha256?, variant?: "small" | "full"}…]}` — exactly one of the two (else 422), ≤ 500, extra keys 422, `sha256` 64 hex — **replaces** that device's set → **204**; the per-episode detail is stored on `device_holdings` (lower-case hash). `device_id` must parse as a version-4 UUID (else 422) and is stored canonical, so two spellings are one device; ids naming no episode are dropped; the user's rows older than 14 days are purged and at most 10 devices kept (oldest report evicted); a change queues `compute_wants`. Then, in the same transaction, a `delivered`, unreleased row of an active trip recorded to **this** device whose episode the report leaves out is re-pended (§5.4e Lost copies; an entry of either variant counts as held; not for a watched episode, a confirmation under 5 min old or a report at the 500 cap). Origin required |
-| `POST /api/devices/{device_id}/report` | any but demo (403 `demo_account`) | owner 2026-10-30: the device's download-manager event log for the operator, body `{events: [{at (ISO 8601), kind (1..64 chars), episode_id?, detail?: object}]}` (≤ 500 events, extra keys 422) → **204**; **413 `report_too_large`** over 256 KiB of body; `device_id` a v4 UUID else 422. Stored as sent in `device_reports` (§4), pruned on insert to the newest 20 per device and 10 devices per user; never acted on; read with `arc.cli device-report`. Origin required |
+| `PUT /api/devices/{device_id}/holdings` | any but demo (403 `demo_account`) | M20 T4 (FR-A15): body `{episode_ids: [id…]}` **or** (owner 2026-10-30) `{episodes: [{episode_id, etag?, size?, sha256?, variant?: "small" | "full"}…]}` — exactly one of the two (else 422), ≤ 500, extra keys 422, `sha256` 64 hex — **replaces** that device's set → **204**; the per-episode detail is stored on `device_holdings` (lower-case hash). `device_id` must parse as a version-4 UUID (else 422) and is stored canonical, so two spellings are one device; ids naming no episode are dropped; the user's rows older than 14 days are purged and at most 10 devices kept (oldest report evicted); a change queues `compute_wants`. Then, in the same transaction and for the `episodes` shape only, a `delivered`, unreleased row of an active trip recorded to **this** device whose episode the report leaves out is re-pended (§5.4e Lost copies; an entry of either variant counts as held; not for a watched episode, a confirmation under 5 min old or a report at the 500 cap). Origin required |
+| `POST /api/devices/{device_id}/report` | any but demo (403 `demo_account`) | owner 2026-10-30: the device's download-manager event log for the operator, body `{events: [{at (ISO 8601), kind (`^[A-Za-z0-9_.:-]{1,64}$`), episode_id?, detail?: object with no NUL in any string or key}]}` (≤ 500 events, extra keys 422) → **204**; **413 `report_too_large`** over 256 KiB of body — a larger `Content-Length` is refused unread and the stream is cut off at the cap, both before anything parses it (the route reads the body itself and validates with `ReportIn.model_validate_json`); `device_id` a v4 UUID else 422. Stored as sent in `device_reports` (§4), pruned on insert to the newest 20 per device and 10 devices per user; never acted on; read with `arc.cli device-report`. Origin required |
 | `POST /api/progress` | any | upsert watch progress (also accepts `text/plain` beacons; Origin still required); ≥ 90 % → completed (sticky, `completed_at` once); **every** report stamps `activated_at` on an existing entry if it is null (FR-A9: Play is a touch, from the first report rather than the one that crosses 90 %; it never creates an entry); newly completed → list progress raised if higher (`updated_by=arc`, `mal_dirty=true`; a Watching entry is created if none, activated), the entry auto-completed when that advance reaches the episode count of a FINISHED show (FR-W5), then `compute_wants` enqueued |
 | `POST`/`DELETE /api/episodes/{id}/watched` | any | manual mark / un-mark (FR-W3, FR-W5). POST is FR-S4's own path with `force_complete`: it writes the episode's completion row, raises `list_entries.progress` to its number **if lower** (`updated_by=arc`, `mal_dirty`, one `progress` write log row with cause `watch`, never lowering), writes **no** rows for the episodes below it, and auto-completes the entry when the advance reaches the episode count of a FINISHED show, whatever status it had (a second `status` row, same push). DELETE clears the completion row and its `completed_at`, keeps the position, and — when `list_entries.progress` **equals** this episode's number — lowers it to N−1 with `updated_by=arc`, `mal_dirty`, `activated_at` stamped, a queued `compute_wants` and one `progress` write log row with cause **`manual`** carrying the previous value: the only lowering progress write Arc sends, and only because a person pressed it (owner, 2026-09-13, superseding the 2026-09-07 clarification). Above the progress it clears the row alone; below it nothing moves. The status is never rolled back. Never creates a list entry. Answers `ProgressOut` with `list_progress` set when the number moved |
 | `GET /api/progress/completed?episode_ids=…` | any (own rows) | FR-S9 item 9 (owner, 2026-10-08): `{completed: [{episode_id, completed_at}]}` — the caller's own `watch_progress` rows with `completed` among the ids (`completed_at`, or `updated_at` for a row older than that column), ordered by id; an unknown id or a list-only watched episode is simply absent. 1..200 repeated `episode_ids` (each 1..2⁶³−1), else 422. A read: no writes. The device marks its copies watched from it (§5.4d "Catching up") |
@@ -5090,7 +5120,9 @@ dump freshness; `depends_on` uses `service_healthy`):
   Caddy infers the flush interval for event streams itself — and both are
   spelled out because the failure is silent: a page that looks configured and
   updates only on reload. Validate a change to either with the `caddy
-  validate` line at the top of `deploy/Caddyfile`.
+  validate` line at the top of `deploy/Caddyfile`. `handle /api/*` carries
+  `request_body { max_size 1MB }` (2026-10-30): no API body comes near it,
+  and the device report's own 256 KiB cap is the api's.
 - `backup` — `postgres:18` running `deploy/backup.sh`: gzipped `pg_dump`
   on start and every `BACKUP_INTERVAL_SECONDS` (86400) into the separate
   `backups` volume, kept `BACKUP_KEEP_DAYS` (14, never the newest);
@@ -7533,3 +7565,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-30 (owner) — **A trip belongs to the device that started it** (§4 `trips.device_id`, §5.4d Auto-keep, §5.4e Create and Delivery, §5b; spec FR-A12, FR-S9 item 8). Several open devices each ran auto-keep on the same trip and fought over its rows (a copy settled after one device's confirmation never reached the iPad; re-made copies were fetched everywhere). Revision `3f7a1c9e5b42` (on `8b6f2d4e1a73`) adds nullable `trips.device_id` (String(36)). `POST /api/anime/{id}/trip` requires `device_id` (`parse_device_id`, 422); `TripOut.device_id`. `confirm_delivered` / `release_delivered` / `ask_again` take the caller's device and refuse another with 409 `trip_other_device` (`TRIP_OTHER_DEVICE`, `deliver.device_may_act`); a null-device trip is claimed by the first confirm or "again" naming a device (the one-way migration for production's running trip). Device id optional on those three routes so a cached client keeps confirming an unclaimed trip. Client: `DownloadManager.thisDevice()`, `tripIsHere`, `useThisDevice`, foreign trips skipped by `autoKeep` and the room reserve, shown "Kept on another device" with only Cancel; 409 `trip_other_device` ends confirmation without touching the file. No new dependency, no MAL-writing code.
 - 2026-10-30 — Task D after review (§5.4d, §5.4e Delivery, §8 CLI; spec FR-A12, FR-S9 item 8): `arc.cli trip-device --trip ID (--device UUID | --clear)` over new `trips/device.py` (`assign_device`, `canonical_device_id`; `api.devices.parse_device_id` now delegates to it) so production's trip 6 is assigned to the iPad right after the deploy; `ask_again` claims only after the `trip_not_active` check; a pg test races two devices' confirmations of an unclaimed trip (one succeeds, one gets `trip_other_device`, one device recorded). Client: tri-state `tripPlace` (`here`/`elsewhere`/`unknown`) — neutral rows while this device's id is unread; Choose pack only on this device's trip; the launch no longer awaits the id; the Downloads empty state is reworded when only another device's trips are listed. No schema change, no new dependency, no MAL-writing code.
 - 2026-10-30 (owner) — **A held copy is never destroyed, and "delivered" means verified** (M20.4 E, server; §4 `offline_copies.sha256`, `device_holdings` detail, `device_reports`; §5.3b Job; §5.4e Delivery, Lost copies, Settle, Sweep; §5b; §8 CLI; spec FR-A12, FR-A15, FR-P6, FR-S9 item 10, FR-T7). Episode 15 of trip 4 was confirmed at 03:30, its server copy settled at 04:30 as designed, the device later lost its file, and the re-download got 404. One revision `a7c2e4f9d1b3` on `3f7a1c9e5b42`. The encode hashes the copy before it goes `ready` (`TripEpisodeOut.sha256`, `OfflineOut.sha256`); a confirmation whose `sha256`/`size` is not the ready copy's is 409 `copy_mismatch`; the settle, the release's second ending and the sweep's safety net keep a delivered copy of an active trip until its user completes the episode (`rules.held_episode_ids`), a trip's end queues its settles (`names.enqueue_trip_settles`: cancel, the finishing confirmation; the sweep through its safety net), and confirmations no longer queue their own settle while the trip is active; holdings take `{episodes: [{episode_id, etag?, size?, sha256?}]}` beside the old shape and re-pend a delivered row the trip's own device left out (`trips/lost.py`, 5-minute grace, not at the 500 cap, not for a watched episode); `POST /api/devices/{id}/report` + `device_reports` + `arc.cli device-report` (new `services/devices/reports.py`, 20 per device, 10 devices per user). No new dependency, no MAL-writing code.
+- 2026-10-30 (orchestrator, under the owner's "a held copy is never lost mid-trip"; review of M20.4 E) — **A trip is held until its deadline** (§5.4e Create, Delivery, Lost copies, Settle, Sweep; §5.3b Job; §5.7 Idle copies; §5b; §8 Caddy; spec FR-A12, FR-A15, FR-T7). `names.FINISH_ON_LAST_CONFIRM` (moved from `deliver`) is now **off**: a trip with nothing pending stays active until the sweep ends it after `deadline_at` (`may_end`; `finished` only when every row is delivered), so the keep rule and the lost-copy re-pend cover its whole life; `True` restores the old behaviour in full. `create_trip` ends the show's active trip first when nothing of it is pending (settles at +1 h). Re-pend runs only on the `episodes` holdings shape, counts distinct ids against the cap, locks episodes in one sorted statement, and a `full` entry stores no detail. A `full` confirmation ignores etag/sha256/size. Retention spares held copies (idle rule, grace sweep, floor, admin delete: `keep_copy`), and a held copy never pins its source (release's second ending deletes the rest, the settle hands leftovers to it). The encode hashes the staged file under a heartbeat. The report route reads its own body under a 256 KiB cap before parsing, `kind` is a machine word, NUL is refused; Caddy caps `/api/*` bodies at 1 MB. The copy figure is ≈260 MB.
