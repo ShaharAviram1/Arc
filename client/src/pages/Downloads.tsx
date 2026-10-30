@@ -5,7 +5,7 @@ import { useMe } from '@/lib/auth'
 import { formatSize } from '@/lib/review'
 import {
   KEPT_ELSEWHERE,
-  tripIsHere,
+  tripPlace,
   useActiveTrips,
   useCancelTrip,
   useThisDevice,
@@ -60,6 +60,10 @@ const LEDE = 'Episodes kept inside Arc on this device. They play with no connect
 
 const EMPTY_MESSAGE =
   'Nothing is downloaded to this device yet. Tap the download button beside a ready episode on a show page, or in the player.'
+
+/** Nothing here, but the account's trips are kept on another device (owner, 2026-10-30). */
+const EMPTY_ELSEWHERE_MESSAGE =
+  'Nothing is downloaded to this device; the trips below are kept on another device.'
 
 const UNSUPPORTED =
   'This browser can’t keep episodes inside Arc. They still stream whenever Arc is reachable.'
@@ -526,7 +530,7 @@ export function Downloads() {
   // keeps is listed apart (owner, 2026-10-30).
   const isElsewhere = (tripId: number) => {
     const trip = activeById.get(tripId)
-    return trip !== undefined && !tripIsHere(trip, here)
+    return trip !== undefined && tripPlace(trip, here) === 'elsewhere'
   }
   const sorted = [...trips.entries()].sort(([a], [b]) => b - a)
   const groups = sorted.filter(([tripId]) => !isElsewhere(tripId))
@@ -567,6 +571,25 @@ export function Downloads() {
             renderRow={renderRow}
           />
         ))}
+        {items.length === 0 && groups.length === 0 ? (
+          <EmptyState
+            message={
+              !canDownloadInApp()
+                ? UNSUPPORTED
+                : elsewhere.length > 0
+                  ? EMPTY_ELSEWHERE_MESSAGE
+                  : EMPTY_MESSAGE
+            }
+            action={
+              <Link to="/" className={buttonClass('secondary')}>
+                Go to Watch Now
+              </Link>
+            }
+          />
+        ) : loose.length === 0 ? null : (
+          <RowGroup>{loose.map(renderRow)}</RowGroup>
+        )}
+
         {elsewhere.length === 0 ? null : (
           <section aria-labelledby="kept-elsewhere" className="flex flex-col gap-3">
             <h2
@@ -587,19 +610,6 @@ export function Downloads() {
             ))}
           </section>
         )}
-        {items.length === 0 && groups.length === 0 ? (
-          <EmptyState
-            message={canDownloadInApp() ? EMPTY_MESSAGE : UNSUPPORTED}
-            action={
-              <Link to="/" className={buttonClass('secondary')}>
-                Go to Watch Now
-              </Link>
-            }
-          />
-        ) : loose.length === 0 ? null : (
-          <RowGroup>{loose.map(renderRow)}</RowGroup>
-        )}
-
         <StorageCard used={used} />
 
         <ul className="flex list-disc flex-col gap-1.5 pl-5 text-[13px] text-[var(--arc-text-muted)]">

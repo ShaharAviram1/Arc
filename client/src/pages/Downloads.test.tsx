@@ -400,6 +400,39 @@ describe('a trip on the Downloads page (M19 T6)', () => {
     expect(within(unclaimed).getByText('Nothing on this device yet')).toBeInTheDocument()
   })
 
+  it('says nothing is on this device when the only trips are kept on another one', async () => {
+    pretendOpfs()
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      'GET /api/trips': {
+        body: [{ ...CURRENT, device_id: '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d' }],
+      },
+    })
+    install([])
+
+    renderApp()
+
+    const kept = await screen.findByRole('region', { name: 'Kept on another device' })
+    expect(
+      screen.getByText(
+        'Nothing is downloaded to this device; the trips below are kept on another device.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Nothing is downloaded to this device yet/)).not.toBeInTheDocument()
+    expect(within(kept).getByRole('button', { name: 'Cancel trip' })).toBeInTheDocument()
+  })
+
+  it('keeps the plain empty state with no trip at all', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips': { body: [] } })
+    install([])
+
+    renderApp()
+
+    expect(await screen.findByText(/Nothing is downloaded to this device yet/)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Kept on another device' })).not.toBeInTheDocument()
+  })
+
   it('tells the server when a trip episode is deleted from the device', async () => {
     pretendOpfs()
     mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/trips': { body: [] } })
