@@ -2184,6 +2184,36 @@ owner's word.
         foreign-only trips, claim only after the active check, a
         concurrent-claim test). Orchestrator 2026-10-30: merged main server
         5234 passed, client 1404, `make lint` clean, head 3f7a1c9e5b42.
+  - [ ] **E — a held copy is never destroyed, and "delivered" means verified**
+        (owner 2026-10-30, after episode 15 of trip 4 was lost mid-flight).
+        Audit of the client found no automatic path that drops a downloaded
+        file except the replace-on-new-copy; the likely chain was a record
+        marked `evicted` (the launch reconcile treats ANY storage read error
+        as "file missing") or `unreadable` (any media element error), then a
+        tap on Try again, which truncates the file to zero BEFORE the server
+        has answered — and the server had settled its copy an hour after the
+        confirmation, so 404 and the bytes were gone. **E1 client:** the
+        reconcile distinguishes "could not read" from "missing" (retry, never
+        permanent on an error); a fresh run never truncates until the server
+        has answered 206 once; replace drops the old file only after the new
+        copy is secured; a media error marks a copy unreadable only after a
+        second failure on a verified file; a trip record left "Waiting for
+        the copy" after a 404 asks again; an on-device event log of the
+        download manager's decisions (ring buffer in IndexedDB) with a
+        "Send report" button that posts it to the server; SHA-256 computed
+        incrementally while downloading and sent with the confirmation and in
+        the holdings report. **E2 server:** `offline_copies.sha256` computed
+        when a copy is made, published on `TripEpisodeOut`/`OfflineCopyOut`;
+        the confirmation carries `{etag, sha256, size, device_id}` and is
+        refused (409 `copy_mismatch`) when they do not match the copy, so the
+        device re-downloads; holdings carry `{episode_id, etag, size,
+        sha256}` per episode (old `episode_ids` still accepted); a delivered
+        row whose owning device reports the episode missing is re-pended by
+        the server; the settle KEEPS a trip's small copy until the episode is
+        watched by the trip's user or the trip ends (owner: "keep only the
+        small copy"), the full source still goes as soon as the copy is made;
+        `POST /api/devices/{id}/report` stores the device's event log for the
+        operator (`arc.cli device-report --device UUID`).
   - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
         stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC
         (8fbd3b4, head 3f7a1c9e5b42, health 200, backup first); trip 6 assigned
