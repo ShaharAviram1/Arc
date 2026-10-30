@@ -10,9 +10,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job
+from arc.models import Job, TripEpisode
 from arc.services.jobs.queue import enqueue
 from arc.services.media.names import OFFLINE_TRIP_PRIORITY, PRIORITY_PER_EPISODE
 
@@ -146,6 +147,26 @@ async def enqueue_offline_settle(
     )
 
 
+async def enqueue_trip_settles(
+    session: AsyncSession, trip_id: int, *, run_after: datetime | None = None
+) -> int:
+    """Queue a settle for every episode of one trip (its end, owner 2026-10-30).
+
+    What a trip's end does for the copies it held: each settle asks again
+    whether anything still keeps its copy. Returns how many were queued.
+    """
+    episode_ids = (
+        await session.scalars(
+            select(TripEpisode.episode_id)
+            .where(TripEpisode.trip_id == trip_id)
+            .order_by(TripEpisode.episode_id)
+        )
+    ).all()
+    for episode_id in episode_ids:
+        await enqueue_offline_settle(session, episode_id, run_after=run_after)
+    return len(episode_ids)
+
+
 async def enqueue_trip_sweep(session: AsyncSession) -> Job:
     """Queue :data:`TRIP_SWEEP`, deduplicated on the type. Flushed."""
     return await enqueue(session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP)
@@ -172,6 +193,7 @@ __all__ = [
     "copy_priority",
     "enqueue_offline_settle",
     "enqueue_trip_release",
+    "enqueue_trip_settles",
     "enqueue_trip_sweep",
     "release_dedupe_key",
     "settle_dedupe_key",

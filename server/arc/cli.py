@@ -30,6 +30,10 @@ thing they always want to know, and three repairs:
                           UUID``) or clear it (``--clear``, any device may
                           claim it again) (owner, 2026-10-30;
                           :mod:`arc.services.trips.device`).
+* ``device-report``     — print the newest event log(s) a device sent with
+                          "Send report" (``--device UUID [--last N]``)
+                          (owner, 2026-10-30;
+                          :mod:`arc.services.devices.reports`).
 
 Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
 and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
@@ -42,7 +46,7 @@ still reports the stale copies it skipped or found held, and re-makes the
 held ones once the device has stopped fetching them). ``redo-copies`` run
 twice redoes twice — it is a repair the operator asks for — but each run only
 resets rows and queues the same deduplicated work. ``trip-device`` twice
-leaves the same device.
+leaves the same device. ``device-report`` writes nothing.
 ``recs`` is the exception and says so below — a run is an event, and a second
 invocation is a second run against the daily budget (FR-R5).
 
@@ -71,6 +75,7 @@ Run it from ``server/``::
     uv run python -m arc.cli redo-copies --trip 5 --episodes 1,3,4
     uv run python -m arc.cli trip-device --trip 6 --device 6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f
     uv run python -m arc.cli trip-device --trip 6 --clear
+    uv run python -m arc.cli device-report --device 6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f --last 2
 
 In production the same commands run inside the api container, which already
 has the right ``DATABASE_URL``::
@@ -122,6 +127,7 @@ from arc.services.catalog.cache import upsert_summaries
 from arc.services.catalog.factory import catalog_for
 from arc.services.catalog.names import CATALOG_PRIORITY, REFRESH_ALL, SEASON_SWEEP
 from arc.services.catalog.offline.jobs import import_all
+from arc.services.devices.reports import format_report, latest_reports
 from arc.services.jobs import enqueue
 from arc.services.library.ingest import in_flight, prune_unfinished
 from arc.services.recs import (
@@ -754,6 +760,34 @@ async def cmd_trip_device(
     return 0
 
 
+# --- device-report ----------------------------------------------------------
+
+
+async def cmd_device_report(
+    session: AsyncSession, settings: Settings, args: argparse.Namespace
+) -> int:
+    """Print a device's newest event logs, oldest event first (owner, 2026-10-30).
+
+    Read-only. A malformed id exits 1; a device with no report says so and
+    exits 0. The events are printed as data, exactly as the device sent them.
+    """
+    try:
+        device = canonical_device_id(args.device)
+    except ValueError:
+        print(f"not a version 4 UUID: {args.device!r}", file=sys.stderr)
+        return EXIT_FAILED
+    reports = await latest_reports(session, device_id=device, last=args.last)
+    if not reports:
+        print(f"no report from device {device}")
+        return 0
+    for index, report in enumerate(reversed(reports)):
+        if index:
+            print()
+        for line in format_report(report):
+            print(line)
+    return 0
+
+
 # --- wiring -----------------------------------------------------------------
 
 type Command = Callable[[AsyncSession, Settings, argparse.Namespace], Awaitable[int]]
@@ -892,6 +926,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--clear", action="store_true", help="no device: the next to confirm a copy claims it"
     )
     trip_device.set_defaults(handler=cmd_trip_device)
+
+    report = sub.add_parser(
+        "device-report", help="print the newest event log(s) a device sent with Send report"
+    )
+    report.add_argument("--device", required=True, metavar="UUID", help="the device's own id")
+    report.add_argument(
+        "--last",
+        type=int,
+        default=1,
+        metavar="N",
+        help="how many of its newest reports to print, oldest first (default 1)",
+    )
+    report.set_defaults(handler=cmd_device_report)
 
     return parser
 

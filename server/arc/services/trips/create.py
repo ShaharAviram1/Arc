@@ -85,6 +85,10 @@ TRIP_NOT_ACTIVE = "trip_not_active"
 #: A device other than the one that started the trip tried to confirm,
 #: release or re-ask one of its copies (owner, 2026-10-30).
 TRIP_OTHER_DEVICE = "trip_other_device"
+#: A confirmation whose SHA-256 or size is not the copy's (owner,
+#: 2026-10-30): the device's bytes are not the server's copy, so it is not
+#: delivered; the device downloads it again.
+COPY_MISMATCH = "copy_mismatch"
 
 
 class TripError(Exception):
@@ -416,6 +420,7 @@ async def create_trip(
 
 
 __all__ = [
+    "COPY_MISMATCH",
     "COUNT_OUT_OF_RANGE",
     "DEMO_REFUSED",
     "NOTHING_AIRED",

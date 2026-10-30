@@ -48,6 +48,7 @@ from arc.services.jobs.registry import registered_types
 from arc.services.media.copies import may_fetch_copy
 from arc.services.media.download import stat_etag
 from arc.services.media.names import OFFLINE_ENCODE, offline_path_for
+from arc.services.retention.delete import delete_copy
 from arc.services.trips import jobs as trip_jobs  # noqa: F401  (registers the handlers)
 from arc.services.trips.create import TRIP_NOT_ACTIVE, TripConflict, TripNotFound, create_trip
 from arc.services.trips.deliver import ask_again, confirm_delivered, release_delivered
@@ -509,7 +510,11 @@ async def test_again_re_pends_and_re_acquires(db_session: AsyncSession, settings
     await confirm_delivered(
         db_session, user=user, trip_id=trip.id, episode_id=episode.id, etag=None, now=at
     )
-    await settle_episode(db_session, settings, episode.id, now=at + timedelta(hours=2))
+    # The settle keeps a held copy while the trip is active (owner,
+    # 2026-10-30), so the copy is lost by hand here.
+    kept = await settle_episode(db_session, settings, episode.id, now=at + timedelta(hours=2))
+    assert kept.outcome == "kept"
+    assert await delete_copy(db_session, settings, episode.id, reason="test: lost")
     await compute_wants(db_session)
     assert await db_session.get(OfflineCopy, episode.id, populate_existing=True) is None
 
@@ -985,6 +990,7 @@ async def test_settle_waits_for_a_download_still_running(
         db_session, user=user, trip_id=trip.id, episode_id=episode.id, etag=None, now=at
     )
     later = at + timedelta(hours=2)
+    trip.state = TripState.FINISHED  # an ended trip holds its copies no more
     copy = await db_session.get(OfflineCopy, episode.id)
     assert copy is not None
     copy.last_served_at = later - timedelta(minutes=3)  # a second device, mid-download

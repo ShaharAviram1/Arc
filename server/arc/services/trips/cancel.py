@@ -22,7 +22,11 @@ paths that already exist for each kind of thing:
   grace, by a :data:`~arc.services.trips.names.TRIP_RELEASE` job queued at
   once (the deletion can talk to qBittorrent, which a request must not wait
   on), and a copy queued but not started is not made at all;
-* a ``ready`` episode is left to ordinary retention.
+* a ``ready`` episode is left to ordinary retention;
+* the copies the device already holds are let go: a settle is queued for
+  every episode of the trip, and each deletes its copy unless something
+  else still keeps it (owner, 2026-10-30: a trip's copy is kept until the
+  episode is watched or the trip ends).
 
 An episode another user still wants — for streaming or for a trip of their
 own — is untouched by any of this (FR-A2). Nothing here touches a list entry
@@ -58,7 +62,7 @@ from arc.services.acquisition.wants import (
 )
 from arc.services.media.names import EPISODE_KEY, OFFLINE_ENCODE
 from arc.services.trips.create import TRIP_NOT_ACTIVE, TRIP_NOT_FOUND, TripConflict, TripNotFound
-from arc.services.trips.names import enqueue_trip_release
+from arc.services.trips.names import enqueue_trip_release, enqueue_trip_settles
 from arc.services.trips.rules import pending_episode_ids
 
 log = logging.getLogger(__name__)
@@ -177,6 +181,7 @@ async def cancel_trip(session: AsyncSession, *, user: User, trip_id: int, now: d
     await drop_queued_copies(session, orphaned)
     for episode_id in orphaned:
         await enqueue_trip_release(session, episode_id)
+    await enqueue_trip_settles(session, trip.id, run_after=now)
     await enqueue_compute_wants(session)
     await session.flush()
     log.info(

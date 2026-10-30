@@ -17,6 +17,13 @@ from arc.services.catalog import preferred_title
 from arc.services.trips.phase import TripPhase
 from arc.services.trips.view import TripFacts
 
+#: A SHA-256 digest in hex; either case is accepted and compared lower-case.
+SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
+
+#: The largest size a device may claim for one copy (1 TiB): far above any
+#: copy, low enough that the value is a sane ``BIGINT``.
+MAX_COPY_BYTES = 1 << 40
+
 
 class TripIn(BaseModel):
     """The body of ``POST /api/anime/{id}/trip``.
@@ -39,6 +46,10 @@ class DeliveredIn(BaseModel):
 
     ``etag`` is the copy's ETag as the device downloaded it. Optional and only
     logged when it differs: the device has already checked the length.
+    ``sha256`` and ``size`` are what the device computed over the bytes it
+    holds (owner, 2026-10-30): when the copy is ready and either differs from
+    it, the confirmation is refused with 409 ``copy_mismatch`` and nothing
+    changes. Optional, so a client from before still confirms on the length.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +59,8 @@ class DeliveredIn(BaseModel):
     #: client from before it still confirms a trip no device has claimed; a
     #: trip that records a device refuses a confirmation that names none.
     device_id: str | None = Field(default=None, min_length=32, max_length=45)
+    sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    size: int | None = Field(default=None, ge=0, le=MAX_COPY_BYTES)
 
 
 class AgainIn(BaseModel):
@@ -166,4 +179,13 @@ class TripOut(BaseModel):
         )
 
 
-__all__ = ["AgainIn", "DeliveredIn", "TripEpisodeOut", "TripIn", "TripLimits", "TripOut"]
+__all__ = [
+    "MAX_COPY_BYTES",
+    "SHA256_PATTERN",
+    "AgainIn",
+    "DeliveredIn",
+    "TripEpisodeOut",
+    "TripIn",
+    "TripLimits",
+    "TripOut",
+]

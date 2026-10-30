@@ -1,8 +1,9 @@
 """Settling a trip episode's copy once nothing is waiting for it (FR-A12, FR-T7).
 
 The body of the :data:`~arc.services.trips.names.OFFLINE_SETTLE` job, queued
-by a device's confirmation (``TRIP_SETTLE_DELAY`` later) and by the trip sweep
-when a row expires. By then the source of a trip-only episode is long gone
+when a trip ends (a cancel, the confirmation that finishes it, the hourly
+sweep) and by the trip sweep when a row expires or a held copy's episode has
+been watched. By then the source of a trip-only episode is long gone
 (owner decision 4: :mod:`arc.services.trips.release` deleted it the moment the
 copy was made), so what a settle deletes is the **copy** — file and row — and
 nothing else: no torrent, no pack file, no rendition.
@@ -16,12 +17,18 @@ the job runs an hour after whatever queued it:
 2. a ``pending`` row of any active trip on the episode — another user's trip,
    or the same one asked "again" — still needs it: **kept** (that row's own
    ending queues the next settle);
-3. a confirmation less than :data:`~arc.services.trips.names.
+3. a ``delivered`` row (released or not) of an **active** trip whose user has
+   not watched the episode: **kept** (owner, 2026-10-30,
+   :func:`~arc.services.trips.rules.held_episode_ids`). The device holds the
+   copy, and if it loses its file it gets the same one again without a
+   re-encode; about 250 MB per held episode for the trip's lifetime. The
+   watch, or the trip's end, is what lets it go;
+4. a confirmation less than :data:`~arc.services.trips.names.
    TRIP_SETTLE_DELAY` old, by anyone, is a second device's hour still
    running: **deferred** to the end of it;
-4. an ``offline_encode`` pending or running for the episode: **deferred** by
+5. an ``offline_encode`` pending or running for the episode: **deferred** by
    :data:`~arc.services.trips.names.TRIP_SETTLE_RETRY`;
-5. otherwise the copy is deleted. The ``trip_episodes`` rows are left as
+6. otherwise the copy is deleted. The ``trip_episodes`` rows are left as
    they are — ``delivered`` and ``expired`` are the history of the trip — and
    an episode still holding landed bytes (a source whose release never ran)
    is handed to :func:`~arc.services.trips.release.release_episode` by a
@@ -51,12 +58,15 @@ from arc.services.trips.names import (
     TRIP_SETTLE_RETRY,
     enqueue_trip_release,
 )
-from arc.services.trips.rules import latest_delivery, pending_episode_ids
+from arc.services.trips.rules import held_episode_ids, latest_delivery, pending_episode_ids
 
 log = logging.getLogger(__name__)
 
 #: What a settled copy's deletion is logged as.
 REASON_SETTLED = "trip copy settled; no device is waiting for it"
+
+#: Why a delivered copy is kept (owner, 2026-10-30).
+KEPT_HELD = "a trip's device holds it unwatched; kept until watched or the trip ends"
 
 #: States with landed bytes a settle hands to the release job.
 _LEFTOVER_STATES: frozenset[EpisodeState] = frozenset(
@@ -130,6 +140,8 @@ async def settle_episode(
         return Settle(episode_id, "kept", "on its way to ready; its copy becomes an ordinary one")
     if await pending_episode_ids(session, [episode_id]):
         return Settle(episode_id, "kept", "a trip is still waiting on it")
+    if await held_episode_ids(session, [episode_id]):
+        return Settle(episode_id, "kept", KEPT_HELD)
     latest = await latest_delivery(session, episode_id)
     due = settle_due(latest, now=now)
     if due is not None:
@@ -160,6 +172,7 @@ async def settle_episode(
 
 __all__ = [
     "FETCH_CEILING",
+    "KEPT_HELD",
     "FETCH_QUIET",
     "REASON_SETTLED",
     "SETTLE_WAITS_FOR_FETCH",

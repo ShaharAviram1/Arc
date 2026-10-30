@@ -35,10 +35,12 @@ guard for an offline encode, :func:`_transcode_in_flight` for a queued or
 running transcode — raises :class:`ReleaseDeferred`, so the runner's backoff
 tries again once it has finished.
 
-A copy some device confirmed less than ``TRIP_SETTLE_DELAY`` ago is kept by
-the second ending (M19 T4): a second device of the same user may still be
-fetching it, and the settle (:mod:`arc.services.trips.settle`) comes back for
-it — deleting the copy and handing any source left behind back to this job.
+A copy a device of an active trip holds and its user has not watched is kept
+by the second ending (owner, 2026-10-30; the settle's keep rule), and so is
+one some device confirmed less than ``TRIP_SETTLE_DELAY`` ago (M19 T4): a
+second device of the same user may still be fetching it, and the settle
+(:mod:`arc.services.trips.settle`) comes back for it — deleting the copy and
+handing any source left behind back to this job.
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ from arc.services.media.names import latest_transcode_jobs, offline_path_for
 from arc.services.retention.delete import delete_episode_files
 from arc.services.retention.sweep import targets_for_episode
 from arc.services.trips.hooks import stamp_available
-from arc.services.trips.rules import latest_delivery, pending_episode_ids
+from arc.services.trips.rules import held_episode_ids, latest_delivery, pending_episode_ids
 from arc.services.trips.settle import settle_due
 
 log = logging.getLogger(__name__)
@@ -187,6 +189,11 @@ async def release_episode(session: AsyncSession, settings: Settings, episode_id:
         return Release(episode_id, "kept", "somebody wants it for streaming")
     if pending:
         return Release(episode_id, "kept", "a trip is still waiting on it")
+    if copy is not None and await held_episode_ids(session, [episode_id]):
+        # The device of an active trip holds the copy unwatched (owner,
+        # 2026-10-30): it stays until the watch or the trip's end, and the
+        # settle then hands any leftover source back to this job.
+        return Release(episode_id, "kept", "a trip's device holds its copy unwatched")
     if copy is not None and settle_due(
         await latest_delivery(session, episode_id), now=datetime.now(UTC)
     ):

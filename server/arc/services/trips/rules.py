@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
@@ -35,6 +35,7 @@ from arc.models import (
     TripEpisodeState,
     TripState,
     Want,
+    WatchProgress,
 )
 from arc.services.trips.names import (
     TRIP_COPY_DAYS_KEY,
@@ -162,6 +163,40 @@ async def pending_episode_ids(
     return set((await session.scalars(statement)).all())
 
 
+async def held_episode_ids(
+    session: AsyncSession, episode_ids: Collection[int] | None = None
+) -> set[int]:
+    """Episodes whose copy an active trip's device holds and its user has not watched.
+
+    The keep rule for a trip's small copy (owner, 2026-10-30): a ``delivered``
+    row — released by the device or not — of an **active** trip whose user has
+    not completed the episode keeps the server's copy, so a device that loses
+    its file gets the same copy again without a re-encode. The copy goes once
+    the user has watched it or the trip has ended (finished, cancelled or
+    expired). Read in one statement, the watch check included.
+    """
+    watched = exists().where(
+        WatchProgress.user_id == Trip.user_id,
+        WatchProgress.episode_id == TripEpisode.episode_id,
+        WatchProgress.completed.is_(True),
+    )
+    statement = (
+        select(TripEpisode.episode_id)
+        .join(Trip, Trip.id == TripEpisode.trip_id)
+        .where(
+            Trip.state == TripState.ACTIVE,
+            TripEpisode.state == TripEpisodeState.DELIVERED,
+            ~watched,
+        )
+        .distinct()
+    )
+    if episode_ids is not None:
+        if not episode_ids:
+            return set()
+        statement = statement.where(TripEpisode.episode_id.in_(set(episode_ids)))
+    return set((await session.scalars(statement)).all())
+
+
 async def holds_trip_episode(session: AsyncSession, user_id: int, episode_id: int) -> bool:
     """Whether ``user_id`` holds a ``pending`` or ``delivered`` trip row on the episode.
 
@@ -254,6 +289,7 @@ __all__ = [
     "MAX_COPY_DAYS",
     "delivered_to",
     "ended_trip_leftover",
+    "held_episode_ids",
     "holds_trip_episode",
     "latest_delivery",
     "needs_rendition",

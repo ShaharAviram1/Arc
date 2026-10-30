@@ -20,8 +20,10 @@ Three routes, thin over :mod:`arc.services.trips`:
 What a device reports about one episode of the caller's trip (M19 T4; an
 episode not in the trip, or anybody else's trip, is a 404):
 
-* ``POST /api/trips/{id}/episodes/{eid}/delivered`` ``{etag}`` → **204**: the
-  device holds the copy. Idempotent; a stale ETag is accepted and logged.
+* ``POST /api/trips/{id}/episodes/{eid}/delivered`` ``{etag, device_id,
+  sha256, size}`` → **204**: the device holds the copy. Idempotent; a stale
+  ETag is accepted and logged; a ``sha256`` or ``size`` that is not the ready
+  copy's is **409** ``copy_mismatch`` and changes nothing (owner, 2026-10-30).
 * ``DELETE /api/trips/{id}/episodes/{eid}/delivered`` → **204**: the device
   deleted its copy, so the user's window stops skipping the episode.
 * ``POST /api/trips/{id}/episodes/{eid}/again`` → **200** :class:`~arc.api.
@@ -59,6 +61,7 @@ from arc.api.devices import parse_device_id
 from arc.api.trip_schemas import AgainIn, DeliveredIn, TripIn, TripOut
 from arc.services.trips.cancel import cancel_trip
 from arc.services.trips.create import (
+    COPY_MISMATCH,
     TRIP_OTHER_DEVICE,
     TripConflict,
     TripError,
@@ -176,7 +179,7 @@ async def cancel(trip_id: TripId, user: CurrentUser, session: SessionDep) -> Res
     summary="A device holds this trip episode's copy (FR-A12)",
     responses={
         404: {"description": "trip or episode not found"},
-        409: {"description": TRIP_OTHER_DEVICE},
+        409: {"description": f"{TRIP_OTHER_DEVICE} | {COPY_MISMATCH}"},
     },
 )
 async def delivered(
@@ -193,6 +196,8 @@ async def delivered(
             trip_id=trip_id,
             episode_id=episode_id,
             etag=body.etag,
+            sha256=body.sha256,
+            size=body.size,
             now=now(),
             device_id=_device(body.device_id),
         )

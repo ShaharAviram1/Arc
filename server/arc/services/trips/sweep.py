@@ -19,8 +19,11 @@ settle's (:mod:`arc.services.trips.settle`):
    they are, as history. The trips are locked first and each one's rows read
    after, so an "again" committed meanwhile keeps its trip active.
 3. **The safety net.** A copy of an episode that is not ``ready`` (nor
-   ``preparing``) and that no trip is waiting on gets an ``offline_settle``
-   (deduplicated). That is what a lost settle job, a cancelled trip's
+   ``preparing``), that no trip is waiting on and that no active trip's
+   device holds unwatched gets an ``offline_settle`` (deduplicated). That is
+   how a held copy goes once its user has watched the episode (within the
+   hour) and how a trip ended in pass 2 lets its copies go (owner,
+   2026-10-30). That is what a lost settle job, a cancelled trip's
    leftover, a deleted user's trip or a confirmation that never arrived comes
    down to; the settle re-checks
    everything and defers itself while a confirmation is under an hour old.
@@ -52,7 +55,7 @@ from arc.models import (
 )
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.trips.names import enqueue_offline_settle
-from arc.services.trips.rules import pending_episode_ids, trip_copy_days
+from arc.services.trips.rules import held_episode_ids, pending_episode_ids, trip_copy_days
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +172,7 @@ async def _end_trips(session: AsyncSession, sweep: TripSweep, *, now: datetime) 
 
 
 async def _orphan_copies(session: AsyncSession) -> list[int]:
-    """Copies of non-ready episodes that no trip is waiting on.
+    """Copies of non-ready episodes that no trip is waiting on or holds unwatched.
 
     Whether or not a trip row still exists: a deleted user's trips go with
     them (CASCADE) and their copies would otherwise stay on the disk for
@@ -187,6 +190,7 @@ async def _orphan_copies(session: AsyncSession) -> list[int]:
         ).all()
     )
     waiting = await pending_episode_ids(session, candidates)
+    waiting |= await held_episode_ids(session, candidates)
     return [episode_id for episode_id in candidates if episode_id not in waiting]
 
 
