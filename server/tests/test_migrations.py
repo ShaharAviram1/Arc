@@ -876,9 +876,7 @@ VERIFIED_DELIVERY = "a7c2e4f9d1b3"
 BEFORE_VERIFIED_DELIVERY = TRIPS_DEVICE_ID
 
 
-def test_verified_delivery_goes_up_and_down(
-    pg_engine: AsyncEngine, test_database_url: str
-) -> None:
+def test_verified_delivery_goes_up_and_down(pg_engine: AsyncEngine, test_database_url: str) -> None:
     """``offline_copies.sha256``, the holdings detail and ``device_reports`` (2026-10-30)."""
     config = alembic_config(test_database_url)
     text_column = ("character varying", "YES")
