@@ -65,6 +65,12 @@ export interface ManagerHarness {
   store: KeyStore
   /** File name → bytes on "disk". */
   files: Map<string, number>
+  /** File names whose size read fails (the storage did not answer), until removed. */
+  unreadable: Set<string>
+  /** File name → its SHA-256, for `hashOf`; absent answers null. */
+  hashes: Map<string, string>
+  /** Every size read, in order. */
+  reads: string[]
   removed: string[]
   covers: { kept: number[]; dropped: number[] }
   /** How many times the live blob URL was revoked. */
@@ -108,6 +114,9 @@ export function managerHarness(
   const revokes = { count: 0 }
   const store = options.store ?? memoryStore(options.initial)
   const files = new Map<string, number>()
+  const unreadable = new Set<string>()
+  const hashes = new Map<string, string>()
+  const reads: string[] = []
   const removed: string[] = []
   const covers = { kept: [] as number[], dropped: [] as number[] }
   const manager = new DownloadManager({
@@ -121,7 +130,15 @@ export function managerHarness(
     revokeUrl: () => {
       revokes.count += 1
     },
-    sizeOf: (name) => Promise.resolve(files.get(name) ?? 0),
+    sizeOf: (name) => {
+      reads.push(name)
+      if (unreadable.has(name)) return Promise.resolve('unreadable' as const)
+      return Promise.resolve(files.get(name) ?? ('missing' as const))
+    },
+    hashOf: (name) =>
+      Promise.resolve({ size: files.get(name) ?? null, sha256: hashes.get(name) ?? null }),
+    rereadMs: 0,
+    durable: () => Promise.resolve(true),
     removeFrom: (name) => {
       removed.push(name)
       files.delete(name)
@@ -163,7 +180,19 @@ export function managerHarness(
     meta: memoryStore(),
     ...options,
   })
-  return { manager, worker, workers, store, files, removed, covers, revokes }
+  return {
+    manager,
+    worker,
+    workers,
+    store,
+    files,
+    unreadable,
+    hashes,
+    reads,
+    removed,
+    covers,
+    revokes,
+  }
 }
 
 /** A finished download record, as the store would hold it. */

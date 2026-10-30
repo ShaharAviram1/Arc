@@ -504,3 +504,53 @@ describe('watched copies leave by themselves (owner, 2026-10-08)', () => {
     ).not.toBeInTheDocument()
   })
 })
+
+describe('Send report (M20.4 E)', () => {
+  it('posts the device’s event log and says how many entries went', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    const postReport = vi.fn(() => Promise.resolve(null))
+    const { manager } = install([downloadedRecord(TEST_USER.id)], { postReport })
+    manager.events.note('state', 9001, 'downloading → downloaded')
+    const user = userEvent.setup()
+
+    renderApp()
+    await user.click(await screen.findByRole('button', { name: 'Send report' }))
+
+    expect(await screen.findByText(/^Sent \d+ entr/)).toBeInTheDocument()
+    expect(postReport).toHaveBeenCalledTimes(1)
+    const [device, events] = postReport.mock.calls[0] as unknown as [
+      string,
+      { kind: string; episode_id?: number; detail?: string; at: string }[],
+    ]
+    expect(device).toBe(TEST_DEVICE_ID)
+    expect(events).toContainEqual({
+      at: expect.any(String) as unknown,
+      kind: 'state',
+      episode_id: 9001,
+      detail: 'downloading → downloaded',
+    })
+  })
+
+  it('says so when the report could not be sent', async () => {
+    pretendOpfs()
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    install([], { postReport: () => Promise.reject(new TypeError('Load failed')) })
+    const user = userEvent.setup()
+
+    renderApp()
+    await user.click(await screen.findByRole('button', { name: 'Send report' }))
+
+    expect(await screen.findByText(/Could not send it/)).toBeInTheDocument()
+  })
+
+  it('is not offered where the browser cannot keep episodes', async () => {
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
+    install([downloadedRecord(TEST_USER.id)])
+
+    renderApp()
+
+    expect(await screen.findByRole('heading', { name: 'Downloads' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send report' })).not.toBeInTheDocument()
+  })
+})

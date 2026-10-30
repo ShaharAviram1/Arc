@@ -4,8 +4,11 @@ import {
   HOLDINGS_DEBOUNCE_MS,
   HOLDINGS_REFRESH_MS,
   holdingsKey,
+  releasesKey,
   MAX_HOLDINGS,
   type DownloadRecord,
+  type HeldEpisode,
+  type HoldingsReport,
   type HoldingsNote,
 } from '@/offline/downloads'
 import { wireWatchedRemoval } from '@/offline/useDownloads'
@@ -13,6 +16,7 @@ import { reportOffline, reportOnline, resetNetwork } from '@/offline/network'
 import type { FlushOutcome, Outbox } from '@/offline/outbox'
 import { memoryStore, type KeyStore } from '@/offline/store'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
+import { jsonBodyOf, mockApi } from '@/test/apiMock'
 import {
   downloadedRecord,
   managerHarness,
@@ -37,15 +41,36 @@ interface Setup {
   put?: (deviceId: string, ids: number[]) => Promise<unknown>
   clock?: { now: number }
   demo?: boolean
+  /** Use the real request (through `fetch`) instead of the recording fake. */
+  wire?: boolean
+  release?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
 }
 
 async function launch(setup: Setup = {}) {
   const put = vi.fn(setup.put ?? (() => Promise.resolve(null)))
+  /** Every body sent, whole (M20.4 E); `put` sees only the ids. */
+  const bodies: HeldEpisode[][] = []
+  /** Every report whole, either shape. */
+  const reports: HoldingsReport[] = []
   const meta = setup.meta ?? memoryStore()
   const clock = setup.clock ?? { now: START }
   const harness = managerHarness({
     initial: setup.initial,
-    putHoldings: put,
+    ...(setup.wire === true ? { putHoldings: undefined } : {}),
+    putHoldings:
+      setup.wire === true
+        ? undefined
+        : (device, report) => {
+            reports.push(report)
+            if ('episodes' in report) bodies.push(report.episodes)
+            return put(
+              device,
+              'episodes' in report
+                ? report.episodes.map((episode) => episode.episode_id)
+                : report.episode_ids,
+            )
+          },
+    ...(setup.release === undefined ? {} : { releaseDelivered: setup.release }),
     meta,
     now: () => clock.now,
     isOnline: setup.online ?? (() => true),
@@ -57,7 +82,7 @@ async function launch(setup: Setup = {}) {
   }
   harness.manager.setOwner(ALICE, { demo: setup.demo === true })
   await harness.manager.hydrate()
-  return { ...harness, put, meta, clock }
+  return { ...harness, put, bodies, reports, meta, clock }
 }
 
 const held = (info = PLAY_INFO) => recordEntry(downloadedRecord(ALICE, info))
@@ -83,8 +108,76 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
+  })
+
+  it('sends each copy’s ETag, size and SHA-256 (M20.4 E)', async () => {
+    const record = { ...downloadedRecord(ALICE), sha256: 'ab'.repeat(32) }
+    const { bodies } = await launch({ initial: [recordEntry(record), held(PLAY_INFO_EPISODE_2)] })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    expect(bodies).toEqual([
+      [
+        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32), variant: 'full' },
+        { episode_id: 9002, etag: '"e"', size: 1000, sha256: null, variant: 'full' },
+      ],
+    ])
+  })
+
+  it('says which copy each holding is, on the wire', async () => {
+    const fetchMock = mockApi({
+      [`PUT /api/devices/${TEST_DEVICE_ID}/holdings`]: { status: 204 },
+    })
+    const small = {
+      ...downloadedRecord(ALICE),
+      name: 'episode-9001-o.mp4',
+      variant: 'small' as const,
+      sha256: 'ab'.repeat(32),
+    }
+    await launch({ initial: [recordEntry(small)], put: undefined, wire: true })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT')
+    expect(jsonBodyOf(call?.[1])).toEqual({
+      episodes: [
+        { episode_id: 9001, etag: '"e"', size: 1000, sha256: 'ab'.repeat(32), variant: 'small' },
+      ],
+    })
+  })
+
+  it('sends again when a copy changed under the same ids', async () => {
+    const meta = memoryStore()
+    const first = await launch({ initial: [held()], meta })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(first.put).toHaveBeenCalledTimes(1)
+
+    const changed = { ...downloadedRecord(ALICE), etag: '"f"' }
+    const second = await launch({ initial: [recordEntry(changed)], meta })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(second.bodies).toEqual([
+      [{ episode_id: 9001, etag: '"f"', size: 1000, sha256: null, variant: 'full' }],
+    ])
+  })
+
+  it('reports a completed download with the digest the worker computed', async () => {
+    const { manager, worker, bodies } = await launch()
+    await manager.start({ episodeId: 9001, url: '/media/9001/episode.mp4' })
+
+    worker.emit({
+      type: 'done',
+      name: 'episode-9001.mp4',
+      offset: 10,
+      total: 10,
+      etag: '"e"',
+      sha256: 'cd'.repeat(32),
+    })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+
+    expect(bodies).toEqual([
+      [{ episode_id: 9001, etag: '"e"', size: 10, sha256: 'cd'.repeat(32), variant: 'full' }],
+    ])
   })
 
   it('sends nothing at a first launch that holds nothing', async () => {
@@ -200,6 +293,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })
@@ -220,6 +314,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledTimes(2)
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })
@@ -241,6 +336,7 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenLastCalledWith(TEST_DEVICE_ID, [9001])
     expect(await meta.get<HoldingsNote>(holdingsKey(ALICE))).toEqual({
       ids: [9001],
+      sig: expect.any(String) as unknown,
       sentAt: START,
     })
   })
@@ -302,5 +398,118 @@ describe('reportHoldings', () => {
     harness.manager.reportHoldings()
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
     expect(put).not.toHaveBeenCalled()
+  })
+})
+
+describe('trip releases, durably (M20.4 E)', () => {
+  const TRIP = 77
+  const tripCopy = () =>
+    recordEntry({
+      ...downloadedRecord(ALICE),
+      name: 'episode-9001-o.mp4',
+      url: '/media/9001/offline.mp4',
+      variant: 'small',
+      tripId: TRIP,
+      confirm: 'done',
+    })
+
+  it('queues a release that found no network, reports ids only until it lands, then the full shape', async () => {
+    const release = vi
+      .fn<(tripId: number, episodeId: number, deviceId: string) => Promise<unknown>>()
+      .mockRejectedValueOnce(new TypeError('Load failed'))
+      .mockResolvedValue(null)
+    const { manager, reports, meta } = await launch({
+      initial: [tripCopy(), held(PLAY_INFO_EPISODE_2)],
+      release,
+    })
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    reports.length = 0
+
+    await manager.remove(9001)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(release).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
+    expect(await meta.get(releasesKey(ALICE))).toEqual([
+      { trip_id: TRIP, episode_id: 9001, at: expect.any(String) as unknown },
+    ])
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(reports).toEqual([{ episode_ids: [9002] }])
+
+    // Back on screen: the release goes, and the next report is the full shape.
+    manager.nudge()
+    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
+    expect(release).toHaveBeenCalledTimes(2)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+    expect(reports.at(-1)).toEqual({
+      episodes: [{ episode_id: 9002, etag: '"e"', size: 1000, sha256: null, variant: 'full' }],
+    })
+  })
+
+  it.each([403, 404, 409, 422])('drops a release the server answers %i', async (status) => {
+    const release = vi.fn(() => Promise.reject(new ApiError(status, { detail: 'x' })))
+    const { manager, meta } = await launch({ initial: [tripCopy()], release })
+
+    await manager.remove(9001)
+    await manager.flushReleases()
+
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+  })
+
+  it('keeps a release the server failed (5xx) and sends it at the next launch', async () => {
+    const meta = memoryStore()
+    const failing = vi.fn(() => Promise.reject(new ApiError(500, { detail: 'boom' })))
+    const first = await launch({ initial: [tripCopy()], release: failing, meta })
+    await first.manager.remove(9001)
+    await first.manager.flushReleases()
+    expect(await meta.get(releasesKey(ALICE))).toHaveLength(1)
+
+    const ok = vi.fn(() => Promise.resolve(null))
+    await launch({ release: ok, meta })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(ok).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, TEST_DEVICE_ID)
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
+  })
+
+  it('keeps a release answered 401 for the next session', async () => {
+    const release = vi.fn(() => Promise.reject(new ApiError(401, { detail: 'x' })))
+    const { manager, meta } = await launch({ initial: [tripCopy()], release })
+
+    await manager.remove(9001)
+    await manager.flushReleases()
+
+    expect(await meta.get(releasesKey(ALICE))).toHaveLength(1)
+  })
+
+  it('a release queued while a flush runs is sent by that flush', async () => {
+    let finish: () => void = () => undefined
+    const release = vi
+      .fn<(tripId: number, episodeId: number, deviceId: string) => Promise<unknown>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = () => {
+              resolve(null)
+            }
+          }),
+      )
+      .mockResolvedValue(null)
+    const second = recordEntry({
+      ...downloadedRecord(ALICE, PLAY_INFO_EPISODE_2),
+      name: 'episode-9002-o.mp4',
+      url: '/media/9002/offline.mp4',
+      variant: 'small',
+      tripId: TRIP,
+      confirm: 'done',
+    })
+    const { manager, meta } = await launch({ initial: [tripCopy(), second], release })
+
+    await manager.remove(9001)
+    const running = manager.flushReleases()
+    await manager.remove(9002)
+    finish()
+    await running
+
+    expect(release.mock.calls.map((call) => call[1])).toEqual([9001, 9002])
+    expect(await meta.get(releasesKey(ALICE))).toBeUndefined()
   })
 })

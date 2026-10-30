@@ -34,6 +34,15 @@ function install(records: DownloadRecord[], blobUrl?: (name: string) => Promise<
   return harness
 }
 
+/** A blob URL minter that makes a new URL each time, as the real one does. */
+function minting(): (name: string) => Promise<string | null> {
+  let count = 0
+  return () => {
+    count += 1
+    return Promise.resolve(`blob:mint-${String(count)}`)
+  }
+}
+
 function renderPlayer(at: number | string = 9001) {
   const path = typeof at === 'number' ? `/watch/${String(at)}` : at
   const router = createMemoryRouter(routes, { initialEntries: [path] })
@@ -214,16 +223,25 @@ describe('the player and a downloaded episode (FR-S9)', () => {
     )
   })
 
-  it('falls back to the stream when the file will not play and the server is there', async () => {
+  it('plays a file that checks out once more, then streams when the server is there', async () => {
     mockApi({
       'GET /api/auth/me': { body: TEST_USER },
       'GET /api/episodes/9001/play': { body: PLAY_INFO },
     })
-    install([downloadedRecord(TEST_USER.id)])
+    install([downloadedRecord(TEST_USER.id)], minting())
 
     renderPlayer()
     const video = await deviceVideo()
+    expect(video.getAttribute('src')).toBe('blob:mint-1')
     fireEvent.error(video)
+
+    // A media error is not proof (a revoked URL looks the same): the file is
+    // checked and played again from a new URL (M20.4 E).
+    await waitFor(() => {
+      expect(document.querySelector('video')?.getAttribute('src')).toBe('blob:mint-2')
+    })
+    expect(instances).toHaveLength(0)
+    fireEvent.error(document.querySelector('video') as HTMLVideoElement)
 
     await waitFor(() => {
       expect(instances).toHaveLength(1)
@@ -231,9 +249,9 @@ describe('the player and a downloaded episode (FR-S9)', () => {
     expect(instances[0]?.loadSource).toHaveBeenCalledWith(PLAY_INFO.playlist_url)
   })
 
-  it('marks a file the element will not play as failed, and says so offline', async () => {
+  it('marks a file the element will not play twice as failed, and says so offline', async () => {
     await rememberUser(TEST_USER)
-    const { manager } = install([downloadedRecord(TEST_USER.id)])
+    const { manager } = install([downloadedRecord(TEST_USER.id)], minting())
     noNetwork()
 
     renderPlayer()
@@ -242,10 +260,15 @@ describe('the player and a downloaded episode (FR-S9)', () => {
       fireEvent.loadedMetadata(video)
       await Promise.resolve()
     })
-    // Mid-playback, the file goes bad.
+    // Mid-playback, the file goes bad: once (played again), and again.
     video.currentTime = 400
     fireEvent.timeUpdate(video)
     fireEvent.error(video)
+    await waitFor(() => {
+      expect(document.querySelector('video')?.getAttribute('src')).toBe('blob:mint-2')
+    })
+    expect(manager.record(9001)).toMatchObject({ state: 'downloaded' })
+    fireEvent.error(document.querySelector('video') as HTMLVideoElement)
 
     expect(await screen.findByText(/could not be read/)).toBeInTheDocument()
     expect(manager.record(9001)).toMatchObject({ state: 'failed', reason: 'unreadable' })

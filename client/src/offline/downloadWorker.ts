@@ -22,10 +22,17 @@
  * same file gets `busy` back instead of a second writer on one file. The name
  * carries the copy (`episode-<id>.mp4` / `episode-<id>-o.mp4`), so the full
  * and the small copy of one episode never share a lock or a file.
+ *
+ * **Hashing a held file** (`hash`, M20.4 E): read through `getFile()` beside
+ * the download loop, never through it, and answered with `hashed` — the
+ * SHA-256 is computed here so an episode's bytes are never hashed on the main
+ * thread.
  */
 
 import {
+  hashFile,
   runDownload,
+  type HashCommand,
   type StartCommand,
   type SyncHandle,
   type WorkerCommand,
@@ -123,8 +130,35 @@ function start(command: StartCommand): void {
     })
 }
 
+/** Size and SHA-256 of a file on the device; `size` null when it could not be read. */
+async function hash(command: HashCommand): Promise<void> {
+  const { name, ask } = command
+  let file: File
+  try {
+    const root = await navigator.storage.getDirectory()
+    file = await (await root.getFileHandle(name)).getFile()
+  } catch (error) {
+    const missing = (error as { name?: unknown } | null)?.name === 'NotFoundError'
+    post({ type: 'hashed', name, ask, size: missing ? 0 : null, sha256: null })
+    return
+  }
+  try {
+    const sha256 = await hashFile(
+      file.size,
+      async (at, length) => new Uint8Array(await file.slice(at, at + length).arrayBuffer()),
+    )
+    post({ type: 'hashed', name, ask, size: file.size, sha256 })
+  } catch {
+    post({ type: 'hashed', name, ask, size: file.size, sha256: null })
+  }
+}
+
 self.onmessage = (event: MessageEvent<WorkerCommand>) => {
   const command = event.data
+  if (command.cmd === 'hash') {
+    void hash(command)
+    return
+  }
   if (command.cmd === 'pause') {
     if (next?.name === command.name) dropNext()
     if (current === command.name) {
@@ -133,6 +167,8 @@ self.onmessage = (event: MessageEvent<WorkerCommand>) => {
     }
     return
   }
+  // A command this build does not know (a newer page, an older worker): ignored.
+  if ((command as { cmd?: unknown }).cmd !== 'download') return
   if (current === null) {
     start(command)
     return

@@ -124,7 +124,13 @@ describe('autoKeep', () => {
 
     await autoKeep([trip([tripEpisode(9001, 1, 'preparing')])], manager)
 
-    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(TRIP, 9001, '"e"', TEST_DEVICE_ID)
+    expect(confirmDelivered).toHaveBeenCalledExactlyOnceWith(
+      TRIP,
+      9001,
+      '"e"',
+      TEST_DEVICE_ID,
+      expect.anything(),
+    )
     expect(worker.commands).toEqual([])
   })
 
@@ -143,9 +149,12 @@ describe('autoKeep', () => {
 
     await autoKeep([trip([{ ...tripEpisode(9001, 1, 'available'), etag: '"n"' }])], manager)
 
-    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', '"n"')
+    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', '"n"', {
+      phase: 'available',
+      sha256: null,
+    })
     await vi.waitFor(() => {
-      expect(worker.lastCommand()).toMatchObject({ name: 'episode-9001-o.mp4', fresh: true })
+      expect(worker.lastCommand()).toMatchObject({ name: 'episode-9001-o-b.mp4', fresh: true })
     })
   })
 
@@ -155,7 +164,10 @@ describe('autoKeep', () => {
 
     await autoKeep([trip([tripEpisode(9001, 1, 'available')])], manager)
 
-    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', null)
+    expect(adopt).toHaveBeenCalledWith(9001, TRIP, '/media/9001/offline.mp4', null, {
+      phase: 'available',
+      sha256: null,
+    })
     expect(worker.commands).toEqual([])
   })
 

@@ -360,6 +360,56 @@ function StorageCard({ used }: { used: number }) {
   )
 }
 
+/**
+ * "Send report" (M20.4 E, owner 2026-10-30): the download manager's event
+ * log on this device — what it decided about each copy, and why — goes to
+ * the server for the operator to read. No names, no titles: states, sizes,
+ * status codes and episode ids.
+ */
+function SendReport() {
+  const [state, setState] = useState<
+    { kind: 'idle' } | { kind: 'sending' } | { kind: 'sent'; count: number } | { kind: 'failed' }
+  >({ kind: 'idle' })
+  return (
+    <div className="rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] p-5">
+      <h2 className="text-[16px] font-medium text-[var(--arc-text)]">Something went wrong?</h2>
+      <p className="mt-2 text-[14px] text-[var(--arc-text-muted)]">
+        Arc keeps a short diary of what it did with the downloads on this device. Sending it lets
+        the server’s owner see what happened. Only your account’s entries are sent.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className={buttonClass('chip', 'px-4 text-[13px]')}
+          disabled={state.kind === 'sending'}
+          onClick={() => {
+            setState({ kind: 'sending' })
+            downloads()
+              .sendReport()
+              .then(
+                (count) => {
+                  setState({ kind: 'sent', count })
+                },
+                () => {
+                  setState({ kind: 'failed' })
+                },
+              )
+          }}
+        >
+          {state.kind === 'sending' ? 'Sending…' : 'Send report'}
+        </button>
+        <span role="status" className="text-[13px] text-[var(--arc-text-muted)]">
+          {state.kind === 'sent'
+            ? `Sent ${String(state.count)} ${state.count === 1 ? 'entry' : 'entries'}.`
+            : state.kind === 'failed'
+              ? 'Could not send it. Try again when Arc is reachable.'
+              : null}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 /** The bytes a record will be once whole: its total when known, else what is here. */
 function sizeOf(record: DownloadRecord): number {
   return Math.max(record.total, record.bytes)
@@ -611,6 +661,9 @@ export function Downloads() {
           </section>
         )}
         <StorageCard used={used} />
+        {canDownloadInApp() && me !== undefined && me !== null && !me.is_demo ? (
+          <SendReport />
+        ) : null}
 
         <ul className="flex list-disc flex-col gap-1.5 pl-5 text-[13px] text-[var(--arc-text-muted)]">
           {NOTES.map((note) => (

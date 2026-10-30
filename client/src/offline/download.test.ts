@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   BACKOFF_MS,
   delayFor,
+  hashFile,
   MAX_RESTARTS,
   parseContentRange,
   runDownload,
@@ -11,6 +12,7 @@ import {
   type SyncHandle,
   type WorkerMessage,
 } from '@/offline/download'
+import { sha256Hex } from '@/offline/sha256'
 
 /** A growable in-memory stand-in for an OPFS sync access handle. */
 class FakeHandle implements SyncHandle {
@@ -24,6 +26,12 @@ class FakeHandle implements SyncHandle {
 
   getSize(): number {
     return this.bytes.byteLength
+  }
+
+  read(buffer: Uint8Array, options: { at: number }): number {
+    const piece = this.bytes.subarray(options.at, options.at + buffer.byteLength)
+    buffer.set(piece)
+    return piece.byteLength
   }
 
   write(data: Uint8Array, options: { at: number }): number {
@@ -191,6 +199,7 @@ describe('runDownload', () => {
       offset: 25,
       total: 25,
       etag: '"a"',
+      sha256: sha256Hex(file),
     })
     expect(handle.closed).toBe(true)
   })
@@ -595,6 +604,12 @@ class StaleHandle implements SyncHandle {
     return this.disk.bytes.byteLength
   }
 
+  read(buffer: Uint8Array, options: { at: number }): number {
+    const piece = this.disk.bytes.subarray(options.at, options.at + buffer.byteLength)
+    buffer.set(piece)
+    return piece.byteLength
+  }
+
   write(data: Uint8Array, options: { at: number }): number {
     if (this.closed || this.disk.staleWrites > 0) {
       this.disk.staleWrites -= 1
@@ -713,7 +728,8 @@ describe('runDownload with a handle the device closed', () => {
     // The same validator on the fetch after the re-open.
     expect((fetch.mock.calls[2]?.[1].headers as Record<string, string>)['If-Range']).toBe('"a"')
     expect(disk.bytes).toEqual(file)
-    expect(last(messages)).toMatchObject({ type: 'done', offset: 25 })
+    // The digest follows the file back to its new size (M20.4 E).
+    expect(last(messages)).toMatchObject({ type: 'done', offset: 25, sha256: sha256Hex(file) })
   })
 
   it('fails a write that throws anything else, and says the file could not be written', async () => {
@@ -727,5 +743,178 @@ describe('runDownload with a handle the device closed', () => {
 
     expect(last(messages)).toMatchObject({ type: 'failed', code: 'error', write: true })
     expect(handle.closed).toBe(true)
+  })
+})
+
+/** A server that answers every request with one status and no body. */
+function statusServer(status: number) {
+  return vi.fn(() => Promise.resolve(new Response(null, { status })))
+}
+
+describe('runDownload never cuts a held file before the server answers (M20.4 E)', () => {
+  it('leaves the old bytes when a fresh run is answered 404', async () => {
+    const old = content(25, 3)
+    const { deps, handle, messages } = harness({
+      fetch: statusServer(404),
+      handle: new FakeHandle(old),
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(handle.bytes).toEqual(old)
+    expect(last(messages)).toEqual({
+      type: 'failed',
+      name: COMMAND.name,
+      offset: 25,
+      code: 'gone',
+      reason: 'the server no longer has this episode',
+      intact: true,
+    })
+    expect(messages.some((m) => m.type === 'truncated')).toBe(false)
+  })
+
+  it.each([401, 403])('leaves the old bytes on a %i', async (status) => {
+    const old = content(25, 3)
+    const { deps, handle, messages } = harness({
+      fetch: statusServer(status),
+      handle: new FakeHandle(old),
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(handle.bytes).toEqual(old)
+    expect(last(messages)).toMatchObject({ type: 'failed', code: 'auth', intact: true })
+  })
+
+  it('leaves the old bytes when the network is gone and the run is paused', async () => {
+    const old = content(25, 3)
+    let calls = 0
+    const fetch = vi.fn(() => {
+      calls += 1
+      return Promise.reject(new TypeError('Load failed'))
+    })
+    const { deps, handle, messages } = harness({
+      fetch,
+      handle: new FakeHandle(old),
+      stopped: () => calls >= 2,
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(handle.bytes).toEqual(old)
+    expect(last(messages)).toEqual({ type: 'paused', name: COMMAND.name, offset: 25, intact: true })
+  })
+
+  it('cuts the old file only when the first chunk is in hand, and says so', async () => {
+    const old = content(30, 3)
+    const file = content(25)
+    const { deps, handle, messages } = harness({
+      fetch: rangeServer(() => ({ bytes: file, etag: '"a"' })),
+      handle: new FakeHandle(old),
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(handle.bytes).toEqual(file)
+    expect(messages[0]).toEqual({ type: 'truncated', name: COMMAND.name, from: 30 })
+    expect(last(messages)).toMatchObject({ type: 'done', offset: 25, sha256: sha256Hex(file) })
+    expect(last(messages)).not.toHaveProperty('intact')
+  })
+
+  it('keeps the old bytes through a re-encode restart the server then refuses', async () => {
+    const old = content(25, 3)
+    let calls = 0
+    const fetch = vi.fn(() => {
+      calls += 1
+      return Promise.resolve(
+        calls === 1
+          ? new Response(content(25, 9), { status: 200, headers: { ETag: '"b"' } })
+          : new Response(null, { status: 404 }),
+      )
+    })
+    const { deps, handle, messages } = harness({ fetch, handle: new FakeHandle(old) })
+
+    await runDownload({ ...COMMAND, etag: '"a"', total: 25 }, deps)
+
+    expect(handle.bytes).toEqual(old)
+    expect(messages.map((m) => m.type)).toEqual(['restarted', 'failed'])
+    expect(last(messages)).toMatchObject({ code: 'gone', offset: 25, intact: true })
+  })
+
+  it('reports a write that was attempted as not intact', async () => {
+    const handle = new FakeHandle(content(5))
+    handle.quotaAt = 7
+    const { deps, messages } = harness({ handle })
+
+    await runDownload(COMMAND, deps)
+
+    expect(last(messages)).toMatchObject({ type: 'paused', reason: 'quota' })
+    expect(last(messages)).not.toHaveProperty('intact')
+  })
+})
+
+describe('runDownload hashes what it keeps (M20.4 E)', () => {
+  it('hashes a resumed file, the part on disk read back first', async () => {
+    const file = content(25)
+    const { deps, handle, messages } = harness({
+      fetch: rangeServer(() => ({ bytes: file, etag: '"a"' })),
+      handle: new FakeHandle(file.slice(0, 10)),
+    })
+
+    await runDownload({ ...COMMAND, etag: '"a"', total: 25 }, deps)
+
+    expect(handle.bytes).toEqual(file)
+    expect(last(messages)).toMatchObject({ type: 'done', sha256: sha256Hex(file) })
+  })
+
+  it('hashes a whole file confirmed with the one-byte check', async () => {
+    const file = content(25)
+    const { deps, messages } = harness({
+      fetch: rangeServer(() => ({ bytes: file, etag: '"a"' })),
+      handle: new FakeHandle(file),
+    })
+
+    await runDownload({ ...COMMAND, etag: '"a"', total: 25 }, deps)
+
+    expect(last(messages)).toMatchObject({ type: 'done', sha256: sha256Hex(file) })
+  })
+})
+
+describe('hashFile', () => {
+  it('hashes a file read in pieces', async () => {
+    const file = content(3 * 1024 * 1024 + 17)
+    const reads: number[] = []
+    const sha = await hashFile(file.byteLength, (at, length) => {
+      reads.push(length)
+      return Promise.resolve(file.slice(at, at + length))
+    })
+    expect(sha).toBe(sha256Hex(file))
+    expect(reads.length).toBe(4)
+  })
+
+  it('throws when the file ends early', async () => {
+    await expect(hashFile(10, () => Promise.resolve(new Uint8Array(0)))).rejects.toThrow()
+  })
+})
+
+describe('runDownload says when it cut a file (M20.4 E)', () => {
+  it('posts truncated even when the flush after the cut throws', async () => {
+    const handle = new FakeHandle(content(30, 3))
+    let flushes = 0
+    handle.flush = () => {
+      flushes += 1
+      if (flushes === 1) throw new DOMException('closed', 'InvalidStateError')
+    }
+    const file = content(25)
+    const { deps, messages } = harness({
+      fetch: rangeServer(() => ({ bytes: file, etag: '"a"' })),
+      handle,
+    })
+
+    await runDownload({ ...COMMAND, fresh: true }, deps)
+
+    expect(messages.filter((m) => m.type === 'truncated')).toEqual([
+      { type: 'truncated', name: COMMAND.name, from: 30 },
+    ])
   })
 })

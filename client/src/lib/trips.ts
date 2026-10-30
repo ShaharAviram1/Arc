@@ -58,6 +58,12 @@ export interface TripEpisode {
    * on the wire for an older payload.
    */
   etag?: string | null
+  /**
+   * The copy's SHA-256, hex, whenever the server has one (M20.4 E): the
+   * device checks its download against it before confirming. Optional on
+   * the wire for an older payload.
+   */
+  sha256?: string | null
 }
 
 /** `TripOut`: `POST /api/anime/{id}/trip`, each of `GET /api/trips`, the show's `trip`. */
