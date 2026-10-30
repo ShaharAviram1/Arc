@@ -10,9 +10,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job
+from arc.models import Job, TripEpisode
 from arc.services.jobs.queue import enqueue
 from arc.services.media.names import OFFLINE_TRIP_PRIORITY, PRIORITY_PER_EPISODE
 
@@ -56,10 +57,10 @@ TRIP_RELEASE_PRIORITY: Final[int] = 180
 TRIP_RELEASE_DELAY: Final[timedelta] = timedelta(seconds=15)
 
 
-#: Settle one trip episode's copy once its devices have it, or once its trip
-#: has stopped waiting for it (M19 T4, :mod:`arc.services.trips.settle`): the
-#: copy of an episode that is not ``ready`` is deleted when no trip row on it
-#: is pending any more. A job because it deletes a file and is queued for
+#: Settle one trip episode's copy once nothing keeps it (M19 T4,
+#: :mod:`arc.services.trips.settle`): the copy of an episode that is not
+#: ``ready`` is deleted when no trip row on it is pending and no active trip's
+#: device holds it unwatched (owner, 2026-10-30). A job because it deletes a file and is queued for
 #: later (:data:`TRIP_SETTLE_DELAY`).
 OFFLINE_SETTLE: Final[str] = "offline_settle"
 
@@ -73,10 +74,25 @@ TRIP_SWEEP: Final[str] = "trip_sweep"
 OFFLINE_SETTLE_PRIORITY: Final[int] = TRIP_RELEASE_PRIORITY
 TRIP_SWEEP_PRIORITY: Final[int] = 190
 
-#: How long a delivered copy stays after the device confirms it (owner's
-#: small call, 2026-10-05): long enough for a second device of the same user to
-#: finish its own download from the same copy. Measured from the **latest**
-#: confirmation on the episode, so two users' devices both get their hour.
+#: Off since 2026-10-30 (orchestrator's call under the owner's "a held copy is
+#: never lost mid-trip"; was on since 2026-10-06): end a trip ``finished``
+#: inside the confirmation that leaves nothing pending. Off, a trip stays
+#: active until its ``deadline_at`` — so the server keeps its copies (the
+#: settle's keep rule) and re-offers a lost one for the whole trip — and the
+#: hourly sweep ends it then (``finished`` when every row was delivered, else
+#: ``expired``), or the user cancels it, or starts the next trip on the show
+#: once nothing is pending (:func:`~arc.services.trips.create.create_trip`).
+#: Setting it back to ``True`` restores the old behaviour in full: the
+#: confirmation and the sweep end a trip as soon as nothing is pending,
+#: ``finished`` when anything was delivered.
+FINISH_ON_LAST_CONFIRM: bool = False
+
+#: The least time a delivered copy stays after the latest confirmation on the
+#: episode (owner's small call, 2026-10-05). Since 2026-10-30 a copy is kept
+#: while its active trip's device holds it unwatched (the settle's keep rule),
+#: so this only matters once that ends — a trip that ends on its last
+#: confirmation still leaves the copy for this long. Measured from the
+#: **latest** confirmation, so two users' devices both get their hour.
 TRIP_SETTLE_DELAY: Final[timedelta] = timedelta(hours=1)
 
 #: How long a settle waits before looking again when an encode still holds
@@ -146,6 +162,26 @@ async def enqueue_offline_settle(
     )
 
 
+async def enqueue_trip_settles(
+    session: AsyncSession, trip_id: int, *, run_after: datetime | None = None
+) -> int:
+    """Queue a settle for every episode of one trip (its end, owner 2026-10-30).
+
+    What a trip's end does for the copies it held: each settle asks again
+    whether anything still keeps its copy. Returns how many were queued.
+    """
+    episode_ids = (
+        await session.scalars(
+            select(TripEpisode.episode_id)
+            .where(TripEpisode.trip_id == trip_id)
+            .order_by(TripEpisode.episode_id)
+        )
+    ).all()
+    for episode_id in episode_ids:
+        await enqueue_offline_settle(session, episode_id, run_after=run_after)
+    return len(episode_ids)
+
+
 async def enqueue_trip_sweep(session: AsyncSession) -> Job:
     """Queue :data:`TRIP_SWEEP`, deduplicated on the type. Flushed."""
     return await enqueue(session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP)
@@ -153,6 +189,7 @@ async def enqueue_trip_sweep(session: AsyncSession) -> Job:
 
 __all__ = [
     "FALLBACK_COPY_BYTES",
+    "FINISH_ON_LAST_CONFIRM",
     "OFFLINE_SETTLE",
     "OFFLINE_SETTLE_PRIORITY",
     "TRIP_BATCH_MIN",
@@ -172,6 +209,7 @@ __all__ = [
     "copy_priority",
     "enqueue_offline_settle",
     "enqueue_trip_release",
+    "enqueue_trip_settles",
     "enqueue_trip_sweep",
     "release_dedupe_key",
     "settle_dedupe_key",

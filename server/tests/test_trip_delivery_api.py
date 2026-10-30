@@ -191,7 +191,9 @@ async def test_a_confirmation_is_204_and_idempotent(
     assert (await row_state(api_factory, trip_id, ids[1])).delivered_at == stamped
     async with api_factory() as session:
         settles = (await session.scalars(select(Job).where(Job.type == OFFLINE_SETTLE))).all()
-    assert len(settles) == 1, "one settle, however often it is confirmed"
+    # The trip is still active: its copy is held for the device (owner,
+    # 2026-10-30), so a confirmation queues no settle at all.
+    assert len(settles) == 0, "no settle while the trip holds the copy"
 
     (current,) = (await owner_client.get("/api/trips")).json()
     phases = {
@@ -208,8 +210,12 @@ async def test_the_body_is_checked(
     trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=986002)
     bad = await owner_client.post(delivered_url(trip_id, ids[1]), json={"etag": 5})
     assert bad.status_code == 422
-    extra = await owner_client.post(delivered_url(trip_id, ids[1]), json={"size": 5})
+    extra = await owner_client.post(delivered_url(trip_id, ids[1]), json={"bytes": 5})
     assert extra.status_code == 422
+    short = await owner_client.post(delivered_url(trip_id, ids[1]), json={"sha256": "abc"})
+    assert short.status_code == 422
+    negative = await owner_client.post(delivered_url(trip_id, ids[1]), json={"size": -1})
+    assert negative.status_code == 422
 
 
 async def test_someone_elses_trip_is_404(

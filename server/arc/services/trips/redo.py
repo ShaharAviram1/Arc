@@ -203,6 +203,7 @@ def reset_copy(copy: OfflineCopy, *, now: datetime) -> None:
     copy.media_file_id = None
     copy.size = None
     copy.etag = None
+    copy.sha256 = None
     copy.ready_at = None
     copy.redone_at = now
 

@@ -6,9 +6,10 @@ TripNotFound`, so a trip id is never confirmed to exist):
 
 * **delivered** — the device holds the copy, whole (it checked the size
   against the total). A ``pending`` row (or an ``expired`` one of a trip still
-  active) goes ``delivered`` with ``delivered_at`` stamped, and an
-  ``offline_settle`` is queued ``TRIP_SETTLE_DELAY`` later, long enough for a
-  second device of the same user to fetch the same copy. A ``cancelled`` row,
+  active) goes ``delivered`` with ``delivered_at`` stamped. The server's copy is
+  **kept** while the trip is active and its user has not watched the episode
+  (owner, 2026-10-30; :mod:`arc.services.trips.settle`), so a device that
+  loses its file can fetch it again without a re-encode. A ``cancelled`` row,
   or an ``expired`` one of an ended trip, only gets ``delivered_at``: no right
   to fetch the copy comes back. A repeat changes nothing. The ETag the device
   sends is compared with the copy's: on a ``pending`` row, a mismatch — or no
@@ -17,10 +18,19 @@ TripNotFound`, so a trip id is never confirmed to exist):
   stays ``pending`` and nothing else happens (logged, answered as a success
   so the device stops asking); the device replaces its copy when the new one
   is offered and confirms that. Without an ETag, or on any other row, a
-  mismatch is only logged, as before. When the
-  confirmation leaves nothing of the trip pending, the trip ends
-  ``finished`` there and then (:data:`FINISH_ON_LAST_CONFIRM`) so the next
-  one can start at once.
+  mismatch is only logged, as before. **Delivered means verified** (owner,
+  2026-10-30): the device sends the SHA-256 and the size it computed over
+  the bytes it holds, and while the copy is ``ready`` either one differing
+  from the copy's refuses the confirmation (:class:`~arc.services.trips.
+  create.TripConflict`, ``copy_mismatch``; logged with both values) and
+  changes nothing, so the device downloads it again. A confirmation without
+  them (a client from before) is taken on the length check, as before, and
+  a copy made before 2026-10-30 has no hash to compare. A confirmation
+  that leaves nothing of the trip pending no longer ends it (2026-10-30;
+  :data:`~arc.services.trips.names.FINISH_ON_LAST_CONFIRM`, off): the trip
+  stays active until its deadline, so its copies stay on the server. With
+  the switch on, the trip ends ``finished`` there and then and its copies'
+  settles are queued.
 * **released** — the device deleted its copy. ``released_at`` is stamped on a
   delivered row: trip bookkeeping (the phase, the "again" offer) and nothing
   else. A delivered episode is **not** kept out of the user's window (owner,
@@ -52,6 +62,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import TypeGuard
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,23 +82,19 @@ from arc.models import (
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.media.copies import file_matches
 from arc.services.media.names import offline_path_for
+from arc.services.trips import names
 from arc.services.trips.cancel import drop_queued_copies
 from arc.services.trips.create import (
+    COPY_MISMATCH,
     TRIP_NOT_ACTIVE,
     TRIP_NOT_FOUND,
     TRIP_OTHER_DEVICE,
     TripConflict,
     TripNotFound,
 )
-from arc.services.trips.names import TRIP_SETTLE_DELAY, enqueue_offline_settle
+from arc.services.trips.names import TRIP_SETTLE_DELAY, enqueue_trip_settles
 from arc.services.trips.rules import pending_episode_ids
 from arc.services.trips.sweep import end_if_nothing_pending
-
-#: On (owner, 2026-10-06; kept a constant so it can be turned off): end the
-#: trip ``finished`` inside the confirmation that leaves nothing pending, so
-#: the user can start the next one at once. The hourly sweep stays the safety
-#: net for every other ending.
-FINISH_ON_LAST_CONFIRM: bool = True
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +178,23 @@ def confirmed_state(state: TripEpisodeState, *, trip_active: bool) -> TripEpisod
     return state
 
 
+def copy_mismatch(
+    copy: OfflineCopy | None, *, sha256: str | None, size: int | None
+) -> TypeGuard[OfflineCopy]:
+    """Whether what a device says it holds is not this ``ready`` copy. Pure.
+
+    Only a ``ready`` copy is compared, and only on what both sides have: a
+    device that sends no hash (a client from before 2026-10-30) or a copy
+    made before hashes were kept is judged on the size alone, or not at all.
+    ``None`` for either means "unknown", never a mismatch.
+    """
+    if copy is None or copy.state is not OfflineCopyState.READY:
+        return False
+    if size is not None and copy.size is not None and size != copy.size:
+        return True
+    return sha256 is not None and copy.sha256 is not None and sha256.lower() != copy.sha256
+
+
 async def confirm_delivered(
     session: AsyncSession,
     *,
@@ -180,8 +204,14 @@ async def confirm_delivered(
     etag: str | None,
     now: datetime,
     device_id: str | None = None,
+    sha256: str | None = None,
+    size: int | None = None,
 ) -> TripEpisode:
-    """The device holds the copy. Flushed, not committed. Idempotent."""
+    """The device holds the copy. Flushed, not committed. Idempotent.
+
+    :class:`TripConflict` (``copy_mismatch``) when ``sha256`` or ``size`` is
+    not the ready copy's; the caller rolls back, so nothing changes.
+    """
     trip, row = await _row(session, user, trip_id, episode_id, device_id=device_id, claim=True)
     copy = await session.get(OfflineCopy, episode_id)
     if (
@@ -196,6 +226,20 @@ async def confirm_delivered(
         )
         await session.flush()
         return row
+    if copy_mismatch(copy, sha256=sha256, size=size):
+        log.warning(
+            "trip copy confirmation refused: the device's bytes are not the copy",
+            extra={
+                "trip_id": trip.id,
+                "episode_id": episode_id,
+                "user_id": user.id,
+                "device_sha256": sha256,
+                "device_size": size,
+                "copy_sha256": copy.sha256,
+                "copy_size": copy.size,
+            },
+        )
+        raise TripConflict(COPY_MISMATCH)
     if etag is not None and (copy is None or copy.etag != etag):
         log.info(
             "trip copy confirmed with a different ETag; accepted",
@@ -214,10 +258,14 @@ async def confirm_delivered(
         changed = True
     if changed:
         dropped = await _drop_unneeded_encode(session, episode_id)
-        await enqueue_offline_settle(session, episode_id, run_after=now + TRIP_SETTLE_DELAY)
         await enqueue_compute_wants(session)
-        if FINISH_ON_LAST_CONFIRM:
+        if names.FINISH_ON_LAST_CONFIRM:
             await end_if_nothing_pending(session, trip, now=now)
+        if trip.state is not TripState.ACTIVE:
+            # The trip has ended (here, or before this late confirmation):
+            # nothing holds its copies any more. The settle still gives the
+            # latest confirmation its hour.
+            await enqueue_trip_settles(session, trip.id, run_after=now + TRIP_SETTLE_DELAY)
         log.info(
             "trip episode delivered",
             extra={
@@ -336,10 +384,10 @@ async def ask_again(
 
 
 __all__ = [
-    "FINISH_ON_LAST_CONFIRM",
     "ask_again",
     "confirm_delivered",
     "confirmed_state",
+    "copy_mismatch",
     "device_may_act",
     "release_delivered",
     "repend",

@@ -79,7 +79,13 @@
 		}
 	}
 
+	# No API body is anywhere near 1 MB (the largest, a device's event log, is
+	# refused above 256 KiB by the api itself), so anything bigger is cut off
+	# here before it costs the api a read (2026-10-30).
 	handle /api/* {
+		request_body {
+			max_size 1MB
+		}
 		reverse_proxy api:8000
 	}
 

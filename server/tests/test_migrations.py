@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 
 from alembic import command
 from arc.models import (
+    DEVICE_REPORTS_INDEX,
     EPISODE_FILE_INDEX,
     HOLDINGS_USER_REPORTED_INDEX,
     IN_PROGRESS_INDEX,
@@ -762,6 +763,9 @@ def test_device_holdings_is_keyed_per_device_and_indexed_per_user_report(
         "device_id": ("character varying", "NO"),
         "episode_id": ("bigint", "NO"),
         "reported_at": ("timestamp with time zone", "NO"),
+        "etag": ("character varying", "YES"),
+        "size": ("bigint", "YES"),
+        "sha256": ("character varying", "YES"),
     }
     primary = _index_definition(test_database_url, "device_holdings", "pk_device_holdings")
     assert primary is not None and "(user_id, device_id, episode_id)" in primary
@@ -864,5 +868,36 @@ def test_trips_device_id_goes_up_and_down(pg_engine: AsyncEngine, test_database_
         assert _column(test_database_url, "trips", "device_id") is None
         command.upgrade(config, TRIPS_DEVICE_ID)
         assert _column(test_database_url, "trips", "device_id") == column
+    finally:
+        command.upgrade(config, "head")
+
+
+VERIFIED_DELIVERY = "a7c2e4f9d1b3"
+BEFORE_VERIFIED_DELIVERY = TRIPS_DEVICE_ID
+
+
+def test_verified_delivery_goes_up_and_down(pg_engine: AsyncEngine, test_database_url: str) -> None:
+    """``offline_copies.sha256``, the holdings detail and ``device_reports`` (2026-10-30)."""
+    config = alembic_config(test_database_url)
+    text_column = ("character varying", "YES")
+    assert _column(test_database_url, "offline_copies", "sha256") == text_column
+    assert _column(test_database_url, "device_holdings", "size") == ("bigint", "YES")
+    assert _column_types(test_database_url, "device_reports") == {
+        "id": ("bigint", "NO"),
+        "user_id": ("bigint", "NO"),
+        "device_id": ("character varying", "NO"),
+        "received_at": ("timestamp with time zone", "NO"),
+        "events": ("jsonb", "NO"),
+    }
+    lookup = _index_definition(test_database_url, "device_reports", DEVICE_REPORTS_INDEX)
+    assert lookup is not None and "(device_id, received_at)" in lookup
+    try:
+        command.downgrade(config, BEFORE_VERIFIED_DELIVERY)
+        assert _column(test_database_url, "offline_copies", "sha256") is None
+        assert _column(test_database_url, "device_holdings", "etag") is None
+        assert _column_types(test_database_url, "device_reports") == {}
+        command.upgrade(config, VERIFIED_DELIVERY)
+        assert _column(test_database_url, "offline_copies", "sha256") == text_column
+        assert _column(test_database_url, "device_holdings", "sha256") == text_column
     finally:
         command.upgrade(config, "head")

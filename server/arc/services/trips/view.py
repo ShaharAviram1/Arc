@@ -54,6 +54,8 @@ class TripEpisodeFacts:
     #: device compares with the copy it holds, to tell a copy re-made since
     #: (:mod:`arc.services.trips.remake`).
     etag: str | None = None
+    #: The copy's SHA-256 while it is :attr:`fetchable`, when it has one.
+    sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +166,7 @@ async def trip_facts(session: AsyncSession, settings: Settings, trip: Trip) -> T
                 delivered=row.delivered_at is not None,
                 fetchable=fetchable,
                 etag=copy.etag if fetchable and copy is not None else None,
+                sha256=copy.sha256 if fetchable and copy is not None else None,
             )
         )
     return TripFacts(trip=trip, anime=anime, episodes=episodes)

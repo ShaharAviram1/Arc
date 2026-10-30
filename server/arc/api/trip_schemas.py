@@ -8,6 +8,7 @@ because both :mod:`arc.api.trips` and :mod:`arc.api.anime_schemas` need it.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
@@ -16,6 +17,16 @@ from arc.models import TripState
 from arc.services.catalog import preferred_title
 from arc.services.trips.phase import TripPhase
 from arc.services.trips.view import TripFacts
+
+#: The two files a device may hold for an episode (owner, 2026-10-30).
+type HeldVariant = Literal["small", "full"]
+
+#: A SHA-256 digest in hex; either case is accepted and compared lower-case.
+SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
+
+#: The largest size a device may claim for one copy (1 TiB): far above any
+#: copy, low enough that the value is a sane ``BIGINT``.
+MAX_COPY_BYTES = 1 << 40
 
 
 class TripIn(BaseModel):
@@ -39,6 +50,10 @@ class DeliveredIn(BaseModel):
 
     ``etag`` is the copy's ETag as the device downloaded it. Optional and only
     logged when it differs: the device has already checked the length.
+    ``sha256`` and ``size`` are what the device computed over the bytes it
+    holds (owner, 2026-10-30): when the copy is ready and either differs from
+    it, the confirmation is refused with 409 ``copy_mismatch`` and nothing
+    changes. Optional, so a client from before still confirms on the length.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +63,12 @@ class DeliveredIn(BaseModel):
     #: client from before it still confirms a trip no device has claimed; a
     #: trip that records a device refuses a confirmation that names none.
     device_id: str | None = Field(default=None, min_length=32, max_length=45)
+    sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    size: int | None = Field(default=None, ge=0, le=MAX_COPY_BYTES)
+    #: Which file the device holds: the small copy (absent = small) or the
+    #: full-size source it chose instead. Only a small one is checked against
+    #: the copy's hash and size.
+    variant: HeldVariant | None = None
 
 
 class AgainIn(BaseModel):
@@ -97,6 +118,10 @@ class TripEpisodeOut(BaseModel):
       with) whenever ``url`` is set; else null. A device holding a copy of
       the episode under a different ETag holds one made before the copy was
       re-made (``remake-copies``, owner 2026-10-28) and replaces it.
+    * ``sha256`` — the copy's SHA-256 (lower-case hex) whenever ``url`` is
+      set and the server has one (null for copies made before 2026-10-30):
+      the device checks its bytes against it and sends it with the
+      confirmation (owner, 2026-10-30).
     """
 
     episode_id: int
@@ -107,6 +132,7 @@ class TripEpisodeOut(BaseModel):
     delivered: bool = False
     url: str | None = None
     etag: str | None = None
+    sha256: str | None = None
 
 
 class TripOut(BaseModel):
@@ -154,10 +180,21 @@ class TripOut(BaseModel):
                     delivered=row.delivered,
                     url=offline_url(row.episode_id) if row.fetchable else None,
                     etag=row.etag,
+                    sha256=row.sha256,
                 )
                 for row in facts.episodes
             ],
         )
 
 
-__all__ = ["AgainIn", "DeliveredIn", "TripEpisodeOut", "TripIn", "TripLimits", "TripOut"]
+__all__ = [
+    "MAX_COPY_BYTES",
+    "HeldVariant",
+    "SHA256_PATTERN",
+    "AgainIn",
+    "DeliveredIn",
+    "TripEpisodeOut",
+    "TripIn",
+    "TripLimits",
+    "TripOut",
+]

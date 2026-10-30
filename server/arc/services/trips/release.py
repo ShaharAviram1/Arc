@@ -35,10 +35,14 @@ guard for an offline encode, :func:`_transcode_in_flight` for a queued or
 running transcode — raises :class:`ReleaseDeferred`, so the runner's backoff
 tries again once it has finished.
 
-A copy some device confirmed less than ``TRIP_SETTLE_DELAY`` ago is kept by
-the second ending (M19 T4): a second device of the same user may still be
-fetching it, and the settle (:mod:`arc.services.trips.settle`) comes back for
-it — deleting the copy and handing any source left behind back to this job.
+A copy a device of an active trip holds and its user has not watched is kept
+by the second ending (owner, 2026-10-30; the settle's keep rule) while the
+rest of the episode's bytes — a source the first ending never removed — go
+(``keep_copy``); a copy some device confirmed less than
+``TRIP_SETTLE_DELAY`` ago is kept with everything else (M19 T4): a
+second device of the same user may still be fetching it, and the settle
+(:mod:`arc.services.trips.settle`) comes back for it — deleting the copy and
+handing any source left behind back to this job.
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ from arc.services.media.names import latest_transcode_jobs, offline_path_for
 from arc.services.retention.delete import delete_episode_files
 from arc.services.retention.sweep import targets_for_episode
 from arc.services.trips.hooks import stamp_available
-from arc.services.trips.rules import latest_delivery, pending_episode_ids
+from arc.services.trips.rules import held_episode_ids, latest_delivery, pending_episode_ids
 from arc.services.trips.settle import settle_due
 
 log = logging.getLogger(__name__)
@@ -75,6 +79,7 @@ log = logging.getLogger(__name__)
 #: What the two deletions are logged as.
 REASON_COPY_MADE = "trip copy made; the source is no longer needed"
 REASON_NOTHING_NEEDS_IT = "trip over; nothing needs these bytes"
+REASON_HELD_SOURCE = "trip copy held by the device; the source is no longer needed"
 
 #: States whose source a trip-only episode's copy is made from.
 _SOURCE_STATES: frozenset[EpisodeState] = frozenset({EpisodeState.MATCHED, EpisodeState.FAILED})
@@ -187,8 +192,14 @@ async def release_episode(session: AsyncSession, settings: Settings, episode_id:
         return Release(episode_id, "kept", "somebody wants it for streaming")
     if pending:
         return Release(episode_id, "kept", "a trip is still waiting on it")
-    if copy is not None and settle_due(
-        await latest_delivery(session, episode_id), now=datetime.now(UTC)
+    # The device of an active trip holds the copy unwatched (owner,
+    # 2026-10-30): the copy stays until the watch or the trip's end, but it
+    # pins nothing else — any source left goes now, the copy kept.
+    held = copy is not None and bool(await held_episode_ids(session, [episode_id]))
+    if (
+        not held
+        and copy is not None
+        and settle_due(await latest_delivery(session, episode_id), now=datetime.now(UTC))
     ):
         # A device confirmed the copy within the hour: a second device of the
         # same user may still be fetching it. The settle that confirmation
@@ -209,20 +220,25 @@ async def release_episode(session: AsyncSession, settings: Settings, episode_id:
     if was_trip is None:
         return Release(episode_id, "kept", "it was never a trip's")
     targets = await targets_for_episode(session, settings, episode_id)
+    if held:
+        targets = replace(targets, offline_file=None, offline_copy=False)
     if targets.empty:
-        return Release(episode_id, "kept", "nothing on the disk")
+        why = "only the held copy is left" if held else "nothing on the disk"
+        return Release(episode_id, "kept", why)
     if await _transcode_in_flight(session, episode_id):
         raise ReleaseDeferred(f"episode {episode_id}: a transcode still needs the source")
+    reason = REASON_HELD_SOURCE if held else REASON_NOTHING_NEEDS_IT
     removed = await delete_episode_files(
-        session, settings, episode, targets, reason=REASON_NOTHING_NEEDS_IT
+        session, settings, episode, targets, reason=reason, keep_copy=held
     )
     if not removed.acted:
         raise ReleaseDeferred(f"episode {episode_id}: the deleter declined for now")
-    return Release(episode_id, "all_deleted", REASON_NOTHING_NEEDS_IT)
+    return Release(episode_id, "source_deleted" if held else "all_deleted", reason)
 
 
 __all__ = [
     "REASON_COPY_MADE",
+    "REASON_HELD_SOURCE",
     "REASON_NOTHING_NEEDS_IT",
     "Release",
     "ReleaseDeferred",

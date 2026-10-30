@@ -16,6 +16,11 @@ deleted (they no longer count, so they are only clutter); and at most
 ago evicted first — a browser that clears its storage mints a new device id,
 and those must not pile up for ever.
 
+A report may carry, per episode, what the device holds of its copy — the ETag
+it downloaded, the bytes and the SHA-256 it computed (owner, 2026-10-30) —
+which is stored beside the row for the operator; a report in the old shape
+(ids only) leaves them null.
+
 Ids that name no episode are dropped rather than refused: a device may hold a
 copy of an episode the catalogue has since lost, and refusing the whole report
 for it would stop the rest being recorded.
@@ -25,7 +30,8 @@ from __future__ import annotations
 
 import logging
 import zlib
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -51,6 +57,15 @@ MAX_DEVICES = 10
 HOLDINGS_LOCK_KEY: int = (zlib.crc32(b"device_holdings") + (1 << 31)) % (1 << 32) - (1 << 31)
 
 
+@dataclass(frozen=True, slots=True)
+class HoldingDetail:
+    """What a device says it holds of one episode's copy; any part may be unknown."""
+
+    etag: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+
+
 async def replace_holdings(
     session: AsyncSession,
     *,
@@ -58,6 +73,7 @@ async def replace_holdings(
     device_id: str,
     episode_ids: Collection[int],
     now: datetime,
+    details: Mapping[int, HoldingDetail] | None = None,
 ) -> bool:
     """Make this device's stored set equal ``episode_ids``. ``True`` if the set changed.
 
@@ -90,8 +106,9 @@ async def replace_holdings(
             DeviceHolding.user_id == user_id, DeviceHolding.device_id == device_id
         )
     )
+    found = details or {}
     session.add_all(
-        DeviceHolding(user_id=user_id, device_id=device_id, episode_id=episode_id, reported_at=now)
+        _holding(user_id, device_id, episode_id, now, found.get(episode_id))
         for episode_id in sorted(known)
     )
     await session.flush()
@@ -111,6 +128,21 @@ async def replace_holdings(
         },
     )
     return changed
+
+
+def _holding(
+    user_id: int, device_id: str, episode_id: int, now: datetime, detail: HoldingDetail | None
+) -> DeviceHolding:
+    detail = detail or HoldingDetail()
+    return DeviceHolding(
+        user_id=user_id,
+        device_id=device_id,
+        episode_id=episode_id,
+        reported_at=now,
+        etag=detail.etag,
+        size=detail.size,
+        sha256=detail.sha256.lower() if detail.sha256 is not None else None,
+    )
 
 
 async def _purge(session: AsyncSession, *, user_id: int, now: datetime) -> int:
@@ -151,4 +183,4 @@ async def _purge(session: AsyncSession, *, user_id: int, now: datetime) -> int:
     return removed
 
 
-__all__ = ["MAX_DEVICES", "MAX_HOLDINGS", "replace_holdings"]
+__all__ = ["MAX_DEVICES", "MAX_HOLDINGS", "HoldingDetail", "replace_holdings"]

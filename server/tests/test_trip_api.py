@@ -93,6 +93,7 @@ async def test_a_trip_is_created_and_read_back(
     assert [row["number"] for row in body["episodes"]] == [1, 2, 3, 4, 5, 6]
     assert {row["phase"] for row in body["episodes"]} == {"searching"}
     assert set(body["episodes"][0]) == {
+        "sha256",
         "episode_id",
         "number",
         "phase",

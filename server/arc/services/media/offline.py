@@ -79,6 +79,7 @@ from arc.services.media.copies import (
     encoding_episode_ids,
     ensure_copy_row,
     file_matches,
+    file_sha256,
     offline_options,
     publish_copy,
     settings_key,
@@ -570,6 +571,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     copy.settings_key = settings_key(options, sub_lang=sub_lang, audio_lang=audio_lang)
     copy.size = None
     copy.etag = None
+    copy.sha256 = None
     copy.ready_at = None
     copy.error = None
     publish_copy(ctx.session, episode, copy)
@@ -598,6 +600,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     await reporter.write(stage=STAGE_ENCODE, progress=0.0, heartbeat=True)
     warm = asyncio.create_task(_keep_lock_warm(reporter))
     info: os.stat_result | None = None
+    digest: str | None = None
     refused = False
     broken: str | None = None
     try:
@@ -611,6 +614,11 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
                 timeout=settings.transcode_timeout_seconds,
                 on_progress=reporter,
             )
+        # Hashed while still staged (owner, 2026-10-30): before the episode's
+        # row lock below and before the copy is offered, with the job's
+        # heartbeat kept beating, and inside this ``try`` so a read error
+        # fails the copy like any other.
+        digest = await _hash_staged(reporter, result.path)
         # Checked again, under the episode's row lock, immediately before the
         # file is put in place: retention takes the same lock, so either it has
         # already made the episode ``not_wanted`` (and the copy is dropped
@@ -644,6 +652,7 @@ async def _make(ctx: JobContext, episode_id: int) -> None:
     copy.state = OfflineCopyState.READY
     copy.size = info.st_size
     copy.etag = stat_etag(info.st_size, info.st_mtime_ns)
+    copy.sha256 = digest
     copy.height = result.height
     copy.ready_at = datetime.now(UTC)
     copy.error = None
@@ -700,6 +709,21 @@ async def _redo_once(ctx: JobContext, episode_id: int, problem: str) -> bool:
         extra={"episode_id": episode_id, "trip_id": report.trip_id, "problem": problem},
     )
     return True
+
+
+async def _hash_staged(reporter: _Reporter, path: Path) -> str:
+    """The staged copy's SHA-256, read in a worker thread with the job kept warm.
+
+    Every copy made from 2026-10-30 has its hash before its row goes
+    ``ready``, so the device can check its bytes against it before it
+    confirms (FR-A12's verified delivery). ``os.replace`` keeps the inode, so
+    the published file is these bytes.
+    """
+    beating = asyncio.create_task(_keep_lock_warm(reporter))
+    try:
+        return await asyncio.to_thread(file_sha256, path)
+    finally:
+        await _stop(beating)
 
 
 async def _languages(session: AsyncSession, episode_id: int) -> tuple[str, str]:

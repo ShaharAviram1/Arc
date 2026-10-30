@@ -138,6 +138,7 @@ from arc.models import (
 from arc.services.media.copies import COPY_WRITER_TYPES, encoding_episode_ids, served_recently
 from arc.services.media.names import offline_path_for, output_dir_for
 from arc.services.retention.rules import grace_period, unwatched_period, watched_grace_hours
+from arc.services.trips.rules import held_episode_ids
 
 log = logging.getLogger(__name__)
 
@@ -1152,7 +1153,10 @@ async def idle_copies(
     T4). A copy whose episode has an encode in flight is left alone, like its
     source. So is the copy of a ready episode an active trip is still waiting
     on (FR-A12): the trip's own clock (``trip_copy_days``, 14) is longer than
-    the idle one (7), and the device has yet to collect it.
+    the idle one (7), and the device has yet to collect it. And so is one an
+    active trip's device holds unwatched (owner, 2026-10-30,
+    :func:`~arc.services.trips.rules.held_episode_ids`): it is kept so a
+    device that loses its file can fetch it again.
     """
     anchor = func.coalesce(OfflineCopy.last_served_at, OfflineCopy.ready_at)
     waited_on = (
@@ -1176,9 +1180,9 @@ async def idle_copies(
     ).all()
     if not rows:
         return []
-    encoding = await encoding_episode_ids(
-        session, [copy.episode_id for copy, _ in rows], types=COPY_WRITER_TYPES
-    )
+    ids = [copy.episode_id for copy, _ in rows]
+    encoding = await encoding_episode_ids(session, ids, types=COPY_WRITER_TYPES)
+    encoding |= await held_episode_ids(session, ids)
     roots = allowed_roots(settings)
     found: list[IdleCopy] = []
     for copy, moment in rows:

@@ -119,7 +119,8 @@ async def test_the_sweep_does_not_expire_a_row_being_confirmed(
         row = await session.get(TripEpisode, (trip_id, episode_id))
         assert row is not None and row.state is TripEpisodeState.DELIVERED
         trip = await session.get(Trip, trip_id)
-        assert trip is not None and trip.state is TripState.FINISHED
+        # Held until its deadline since 2026-10-30, not ended by the sweep.
+        assert trip is not None and trip.state is TripState.ACTIVE
 
 
 async def test_the_sweep_does_not_end_a_trip_being_asked_again(

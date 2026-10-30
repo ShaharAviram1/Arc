@@ -264,6 +264,24 @@ def file_matches(path: Path, copy: OfflineCopy) -> bool:
     return info.st_size == copy.size and stat_etag(info.st_size, info.st_mtime_ns) == copy.etag
 
 
+#: How much of a copy :func:`file_sha256` reads at a time.
+HASH_CHUNK_BYTES: Final[int] = 1 << 20
+
+
+def file_sha256(path: Path) -> str:
+    """The SHA-256 of one file, lower-case hex (owner, 2026-10-30).
+
+    Blocking — a 250 MB copy is about a second of reading — so the encode
+    calls it in a worker thread. What the device checks its own bytes against
+    before it confirms a trip copy, so a confirmation means "verified".
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 async def newest_source(session: AsyncSession, episode_id: int) -> MediaFile | None:
     """The file a copy is made from: the newest one linked to the episode.
 
@@ -554,6 +572,7 @@ async def copy_count(session: AsyncSession) -> int:
 __all__ = [
     "CODEC_STRINGS",
     "COPY_QUEUE_FULL",
+    "HASH_CHUNK_BYTES",
     "MAX_HOST_REQUEST_COPIES",
     "MAX_USER_REQUEST_COPIES",
     "SERVED_TOUCH_SECONDS",
@@ -573,6 +592,7 @@ __all__ = [
     "ensure_copy_row",
     "episodes_with_sources",
     "file_matches",
+    "file_sha256",
     "job_progress",
     "made_otherwise",
     "may_fetch_copy",
