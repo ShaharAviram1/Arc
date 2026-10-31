@@ -54,16 +54,17 @@ from arc.services.acquisition.names import COMPUTE_WANTS
 from arc.services.devices.reports import MAX_REPORTS_PER_DEVICE, format_report
 from arc.services.jobs.registry import JobContext
 from arc.services.media.names import offline_path_for
+from arc.services.playback.progress import record_progress
 from arc.services.retention.jobs import DELETE_EPISODE_FILES, delete_files
 from arc.services.retention.sweep import idle_copies
 from arc.services.trips.create import COPY_MISMATCH, TRIP_ACTIVE, TripConflict, create_trip
 from arc.services.trips.deliver import copy_mismatch
 from arc.services.trips.lost import REPEND_GRACE
-from arc.services.trips.names import OFFLINE_SETTLE, TRIP_RELEASE
+from arc.services.trips.names import OFFLINE_SETTLE, TRIP_RELEASE, TRIP_SWEEP
 from arc.services.trips.release import release_episode
 from arc.services.trips.rules import held_episode_ids
 from arc.services.trips.settle import KEPT_HELD, settle_episode
-from arc.services.trips.sweep import sweep_trips
+from arc.services.trips.sweep import ALL_WATCHED, sweep_trips, trip_complete
 from tests.conftest import add_user, api_transport, login
 from tests.retention_helpers import write_source_file
 from tests.test_trip_delivery_api import a_trip, delivered_url, row_state
@@ -596,6 +597,185 @@ async def test_an_expired_trip_lets_its_copies_go(
         settled = await settle_episode(session, settings, ids[1], now=later)
         await session.commit()
     assert settled.outcome == "copy_deleted"
+
+
+# --- A trip ends when all of it is watched (M20.4 F, owner 2026-10-31) -------------
+
+
+def test_a_trip_is_complete_when_every_row_is_watched() -> None:
+    assert trip_complete(rows=3, watched=3)
+    assert not trip_complete(rows=3, watched=2)
+    assert not trip_complete(rows=0, watched=0), "an empty trip waits for its deadline"
+
+
+async def trip_of(factory: SessionFactory, trip_id: int) -> Trip:
+    async with factory() as session:
+        trip = await session.get(Trip, trip_id)
+        assert trip is not None
+        return trip
+
+
+async def test_the_sweep_finishes_a_trip_once_every_episode_is_watched(
+    owner: User,
+    api_factory: SessionFactory,
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987040, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await deliver(api_factory, trip_id, ids[2], ago=timedelta(hours=3), released=True)
+    await watch(api_factory, owner.id, ids[1])
+    await watch(api_factory, owner.id, ids[2])
+    at = datetime.now(UTC)
+
+    with caplog.at_level(logging.INFO, logger="arc.services.trips.sweep"):
+        async with api_factory() as session:
+            swept = await sweep_trips(session, now=at)
+            await session.commit()
+
+    assert swept.ended == {trip_id: TripState.FINISHED}, "well before its deadline"
+    trip = await trip_of(api_factory, trip_id)
+    assert trip.state is TripState.FINISHED and trip.ended_at == at
+    assert set(ids[1:]) <= set(swept.settles)
+    ended = [r for r in caplog.records if getattr(r, "reason", None) == ALL_WATCHED]
+    assert [r.__dict__["trip_id"] for r in ended] == [trip_id]
+    assert {job.payload["episode_id"] for job in await jobs_of(api_factory, OFFLINE_SETTLE)} >= set(
+        ids[1:]
+    )
+
+
+async def test_a_delivered_trip_with_one_episode_unwatched_stays_active(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987041, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await deliver(api_factory, trip_id, ids[2], ago=timedelta(hours=3))
+    await watch(api_factory, owner.id, ids[1])
+
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+
+    assert swept.ended == {}
+    assert (await trip_of(api_factory, trip_id)).state is TripState.ACTIVE
+    assert ids[2] not in swept.settles, "the unwatched copy is still held"
+
+
+async def test_a_pending_episode_watched_online_counts_and_its_row_expires(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987042, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    # Episode 3 never reached the device; its user watched it online.
+    await watch(api_factory, owner.id, ids[1])
+    await watch(api_factory, owner.id, ids[2])
+
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+
+    assert swept.ended == {trip_id: TripState.FINISHED}
+    assert (trip_id, ids[2]) in swept.expired_rows
+    assert (await row_state(api_factory, trip_id, ids[2])).state is TripEpisodeState.EXPIRED
+    assert (await row_state(api_factory, trip_id, ids[1])).state is TripEpisodeState.DELIVERED
+    # The ended trip no longer waits on or holds either copy: both are settled.
+    assert set(ids[1:]) <= set(swept.settles)
+    async with api_factory() as session:
+        settled = await settle_episode(
+            session, settings, ids[2], now=datetime.now(UTC) + timedelta(hours=2)
+        )
+        await session.commit()
+    assert settled.outcome == "copy_deleted"
+
+
+async def test_another_users_watching_does_not_end_the_trip(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987043, device_id=IPAD)
+    other = await add_user(api_factory, "verified-other@arc.test", "verified-other-password")
+    for episode_id in ids[1:]:
+        await deliver(api_factory, trip_id, episode_id, ago=timedelta(hours=3))
+        await watch(api_factory, other.id, episode_id)
+
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+
+    assert swept.ended == {}
+
+
+async def test_the_deadline_still_ends_an_unwatched_trip_as_before(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    # Every row delivered, one episode unwatched, the deadline passed: the
+    # 2026-10-30 rule, unchanged — ``finished`` because every row was delivered.
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987044, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await deliver(api_factory, trip_id, ids[2], ago=timedelta(hours=3))
+    await watch(api_factory, owner.id, ids[1])
+    later = datetime.now(UTC) + timedelta(days=30)
+
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=later)
+        await session.commit()
+
+    assert swept.ended == {trip_id: TripState.FINISHED}
+    assert swept.expired_rows == []
+
+
+async def complete(factory: SessionFactory, user_id: int, episode_id: int) -> None:
+    async with factory() as session:
+        episode = await session.get(Episode, episode_id)
+        assert episode is not None
+        outcome = await record_progress(
+            session,
+            user_id=user_id,
+            episode=episode,
+            position_s=1400.0,
+            duration_s=1420.0,
+            force_complete=True,
+        )
+        await session.commit()
+    assert outcome.newly_completed
+
+
+async def test_a_completion_on_a_trip_episode_queues_one_sweep(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987045, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await deliver(api_factory, trip_id, ids[2], ago=timedelta(hours=3))
+
+    # Episode 1 is not on the trip: nothing queued.
+    await complete(api_factory, owner.id, ids[0])
+    assert await jobs_of(api_factory, TRIP_SWEEP) == []
+
+    await complete(api_factory, owner.id, ids[1])
+    assert len(await jobs_of(api_factory, TRIP_SWEEP)) == 1
+    await complete(api_factory, owner.id, ids[2])
+    assert len(await jobs_of(api_factory, TRIP_SWEEP)) == 1, "deduplicated"
+
+    # The queued sweep is what ends it.
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+    assert swept.ended == {trip_id: TripState.FINISHED}
+
+
+async def test_a_completion_off_any_active_trip_queues_no_sweep(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987046, device_id=IPAD)
+    other = await add_user(api_factory, "verified-other2@arc.test", "verified-other2-password")
+
+    # Another user finishing the trip's episode: not their trip.
+    await complete(api_factory, other.id, ids[1])
+    assert await jobs_of(api_factory, TRIP_SWEEP) == []
+
+    # The owner, once the trip has ended (cancelled here).
+    await set_trip_state(api_factory, trip_id, TripState.CANCELLED)
+    await complete(api_factory, owner.id, ids[2])
+    assert await jobs_of(api_factory, TRIP_SWEEP) == []
 
 
 # --- The device's report ------------------------------------------------------------

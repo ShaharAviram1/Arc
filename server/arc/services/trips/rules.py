@@ -220,6 +220,26 @@ async def holds_trip_episode(session: AsyncSession, user_id: int, episode_id: in
     return found is not None
 
 
+async def on_active_trip(session: AsyncSession, user_id: int, episode_id: int) -> bool:
+    """Whether the episode is on one of ``user_id``'s active trips, in any row state.
+
+    Asked by a watch completion (owner, 2026-10-31): finishing such an episode
+    may have finished the trip, so the trip sweep is queued to look. One
+    ``EXISTS`` on the hot progress path; the sweep decides.
+    """
+    found = await session.scalar(
+        select(
+            exists().where(
+                Trip.id == TripEpisode.trip_id,
+                Trip.user_id == user_id,
+                Trip.state == TripState.ACTIVE,
+                TripEpisode.episode_id == episode_id,
+            )
+        )
+    )
+    return bool(found)
+
+
 async def latest_delivery(session: AsyncSession, episode_id: int) -> datetime | None:
     """The most recent device confirmation on the episode, by any user (M19 T4).
 
@@ -293,6 +313,7 @@ __all__ = [
     "holds_trip_episode",
     "latest_delivery",
     "needs_rendition",
+    "on_active_trip",
     "pending_episode_ids",
     "trip_copy_days",
     "trip_copy_priority",
