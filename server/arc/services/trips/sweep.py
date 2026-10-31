@@ -53,7 +53,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
@@ -64,12 +64,16 @@ from arc.models import (
     TripEpisode,
     TripEpisodeState,
     TripState,
-    WatchProgress,
 )
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.trips import names
 from arc.services.trips.names import enqueue_offline_settle
-from arc.services.trips.rules import held_episode_ids, pending_episode_ids, trip_copy_days
+from arc.services.trips.rules import (
+    completed_by,
+    held_episode_ids,
+    pending_episode_ids,
+    trip_copy_days,
+)
 
 log = logging.getLogger(__name__)
 
@@ -225,11 +229,7 @@ async def end_if_complete(session: AsyncSession, trip: Trip, *, now: datetime) -
     """
     if trip.state is not TripState.ACTIVE:
         return None
-    watched = exists().where(
-        WatchProgress.user_id == trip.user_id,
-        WatchProgress.episode_id == TripEpisode.episode_id,
-        WatchProgress.completed.is_(True),
-    )
+    watched = completed_by(trip.user_id)
     rows, done = (
         await session.execute(
             select(func.count(), func.count().filter(watched)).where(TripEpisode.trip_id == trip.id)
