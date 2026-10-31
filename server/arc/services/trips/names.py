@@ -13,7 +13,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from arc.models import Job, TripEpisode
+from arc.models import Job, JobStatus, TripEpisode
 from arc.services.jobs.queue import enqueue
 from arc.services.media.names import OFFLINE_TRIP_PRIORITY, PRIORITY_PER_EPISODE
 
@@ -183,8 +183,25 @@ async def enqueue_trip_settles(
 
 
 async def enqueue_trip_sweep(session: AsyncSession) -> Job:
-    """Queue :data:`TRIP_SWEEP`, deduplicated on the type. Flushed."""
-    return await enqueue(session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP)
+    """Queue :data:`TRIP_SWEEP`, deduplicated on the type. Flushed.
+
+    A sweep already **pending** is reused. One already **running** may have
+    read its trips before the caller's change commits (a watch completion
+    that finishes a trip, owner 2026-10-31), so exactly one follow-up is
+    queued behind it — through the queue's ``exclude_job_id`` — and later
+    callers find that pending follow-up. Not called from the sweep itself,
+    which would otherwise queue itself on every run.
+    """
+    job = await enqueue(session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP)
+    if job.status is JobStatus.RUNNING:
+        job = await enqueue(
+            session,
+            TRIP_SWEEP,
+            priority=TRIP_SWEEP_PRIORITY,
+            dedupe_key=TRIP_SWEEP,
+            exclude_job_id=job.id,
+        )
+    return job
 
 
 __all__ = [

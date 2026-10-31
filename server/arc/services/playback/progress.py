@@ -104,6 +104,8 @@ from arc.services.catalog.airing import FINISHED
 from arc.services.mal.names import enqueue_mal_push, is_linked
 from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pending
 from arc.services.media.names import live_duration
+from arc.services.trips.names import enqueue_trip_sweep
+from arc.services.trips.rules import on_active_trip
 
 #: Watched at ninety per cent (FR-S4). Ends run about that long past the last
 #: thing anybody watches for.
@@ -388,6 +390,14 @@ async def record_progress(
     # one in the look-ahead is now wanted. Deduplicated on the job type, so a
     # binge costs one reconciliation rather than one per episode.
     await enqueue_compute_wants(session)
+    # A trip ends once its user has watched all of it (owner, 2026-10-31). The
+    # rule is the trip sweep's (:func:`~arc.services.trips.sweep.end_if_complete`);
+    # finishing an episode on one of this user's active trips is the moment it
+    # may have become true, so the sweep is queued now rather than left to the
+    # hourly tick. Deduplicated on the job type: a sweep already queued (or
+    # running) is not doubled.
+    if await on_active_trip(session, user_id, episode.id):
+        await enqueue_trip_sweep(session)
     return ProgressOutcome(
         completed=True,
         newly_completed=True,

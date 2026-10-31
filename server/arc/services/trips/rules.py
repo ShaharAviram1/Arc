@@ -23,8 +23,9 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import ColumnElement, Exists, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from arc.models import (
     DEFAULT_SETTINGS,
@@ -163,6 +164,22 @@ async def pending_episode_ids(
     return set((await session.scalars(statement)).all())
 
 
+def completed_by(user_id: ColumnElement[int] | InstrumentedAttribute[int] | int) -> Exists:
+    """``EXISTS`` a completed ``watch_progress`` row of ``user_id`` on the row's episode.
+
+    The one meaning of "watched" for a trip row (correlated on
+    ``trip_episodes.episode_id``): a completion recorded in Arc. Progress
+    that exists only on MyAnimeList does not count. Shared by the keep rule
+    (:func:`held_episode_ids`) and the end of a fully watched trip
+    (:func:`~arc.services.trips.sweep.end_if_complete`).
+    """
+    return exists().where(
+        WatchProgress.user_id == user_id,
+        WatchProgress.episode_id == TripEpisode.episode_id,
+        WatchProgress.completed.is_(True),
+    )
+
+
 async def held_episode_ids(
     session: AsyncSession, episode_ids: Collection[int] | None = None
 ) -> set[int]:
@@ -175,11 +192,7 @@ async def held_episode_ids(
     the user has watched it or the trip has ended (finished, cancelled or
     expired). Read in one statement, the watch check included.
     """
-    watched = exists().where(
-        WatchProgress.user_id == Trip.user_id,
-        WatchProgress.episode_id == TripEpisode.episode_id,
-        WatchProgress.completed.is_(True),
-    )
+    watched = completed_by(Trip.user_id)
     statement = (
         select(TripEpisode.episode_id)
         .join(Trip, Trip.id == TripEpisode.trip_id)
@@ -218,6 +231,26 @@ async def holds_trip_episode(session: AsyncSession, user_id: int, episode_id: in
         .limit(1)
     )
     return found is not None
+
+
+async def on_active_trip(session: AsyncSession, user_id: int, episode_id: int) -> bool:
+    """Whether the episode is on one of ``user_id``'s active trips, in any row state.
+
+    Asked by a watch completion (owner, 2026-10-31): finishing such an episode
+    may have finished the trip, so the trip sweep is queued to look. One
+    ``EXISTS`` on the hot progress path; the sweep decides.
+    """
+    found = await session.scalar(
+        select(
+            exists().where(
+                Trip.id == TripEpisode.trip_id,
+                Trip.user_id == user_id,
+                Trip.state == TripState.ACTIVE,
+                TripEpisode.episode_id == episode_id,
+            )
+        )
+    )
+    return bool(found)
 
 
 async def latest_delivery(session: AsyncSession, episode_id: int) -> datetime | None:
@@ -287,12 +320,14 @@ async def ended_trip_leftover(session: AsyncSession, episode_id: int) -> bool:
 
 __all__ = [
     "MAX_COPY_DAYS",
+    "completed_by",
     "delivered_to",
     "ended_trip_leftover",
     "held_episode_ids",
     "holds_trip_episode",
     "latest_delivery",
     "needs_rendition",
+    "on_active_trip",
     "pending_episode_ids",
     "trip_copy_days",
     "trip_copy_priority",

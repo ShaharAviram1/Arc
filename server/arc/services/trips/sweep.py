@@ -12,7 +12,16 @@ settle's (:mod:`arc.services.trips.settle`):
    route serves only ``pending`` and ``delivered`` rows), so there is no hour
    to wait for — a download still running at that moment ends with a 404, by
    design.
-2. **The end of a trip.** An active trip with no ``pending`` row left ends
+2. **The end of a trip.** An active trip ends ``finished`` as soon as its
+   user has watched every one of its episodes (owner, 2026-10-31,
+   :func:`end_if_complete`): ``watch_progress.completed`` on each row's
+   episode, whatever the row's state — one watched online while still
+   ``pending`` counts, and that row goes ``expired`` with the trip (a
+   ``pending`` row lives only on an active trip). A watch completion on a
+   trip episode queues this sweep at once
+   (:func:`~arc.services.playback.progress.record_progress`), so the end
+   comes within moments rather than at the next tick. Otherwise, an active
+   trip with no ``pending`` row left ends
    once its ``deadline_at`` has passed (2026-10-30: until then it holds its
    delivered copies, :data:`~arc.services.trips.names.FINISH_ON_LAST_CONFIRM`
    off): ``finished`` when every row was delivered (released or not), else
@@ -26,9 +35,9 @@ settle's (:mod:`arc.services.trips.settle`):
    device holds unwatched gets an ``offline_settle`` (deduplicated). That is
    how a held copy goes once its user has watched the episode (within the
    hour) and how a trip ended in pass 2 lets its copies go (owner,
-   2026-10-30). That is what a lost settle job, a cancelled trip's
-   leftover, a deleted user's trip or a confirmation that never arrived comes
-   down to; the settle re-checks
+   2026-10-30) — in the same sweep, since pass 2 has already run. That is
+   what a lost settle job, a cancelled trip's leftover, a deleted user's trip
+   or a confirmation that never arrived comes down to; the settle re-checks
    everything and defers itself while a confirmation is under an hour old.
 
 The idle rule for the copies of ``ready`` episodes is retention's
@@ -44,7 +53,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
@@ -59,7 +68,12 @@ from arc.models import (
 from arc.services.acquisition.names import enqueue_compute_wants
 from arc.services.trips import names
 from arc.services.trips.names import enqueue_offline_settle
-from arc.services.trips.rules import held_episode_ids, pending_episode_ids, trip_copy_days
+from arc.services.trips.rules import (
+    completed_by,
+    held_episode_ids,
+    pending_episode_ids,
+    trip_copy_days,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +114,20 @@ def may_end(*, deadline_at: datetime, now: datetime, finish_on_last_confirm: boo
     At once with the switch on; otherwise only once its deadline has passed.
     """
     return finish_on_last_confirm or deadline_at <= now
+
+
+def trip_complete(*, rows: int, watched: int) -> bool:
+    """Whether a trip's user has watched every episode of it (owner, 2026-10-31). Pure.
+
+    ``rows`` is how many episodes the trip has, ``watched`` how many of them
+    its user has completed. A trip with no rows is never complete by this
+    rule: it ends, if at all, by the deadline.
+    """
+    return rows > 0 and watched >= rows
+
+
+#: The reason logged when a trip ends because everything in it was watched.
+ALL_WATCHED = "all watched"
 
 
 @dataclass(slots=True)
@@ -187,6 +215,44 @@ async def end_if_nothing_pending(
     return trip.state
 
 
+async def end_if_complete(session: AsyncSession, trip: Trip, *, now: datetime) -> list[int] | None:
+    """End an active trip, already locked ``FOR UPDATE``, once all of it is watched.
+
+    The owner's rule of 2026-10-31: a trip ends ``finished`` when its user has
+    completed every one of its episodes, whatever each row's state and however
+    many were delivered. Asked after the lock is held, like
+    :func:`end_if_nothing_pending`. A row still ``pending`` (watched online
+    before its copy reached the device) goes ``expired`` with it: nothing
+    waits for that copy any more, and a ``pending`` row lives only on an
+    active trip. Returns those rows' episode ids (often none), or ``None``
+    when the trip stays.
+    """
+    if trip.state is not TripState.ACTIVE:
+        return None
+    watched = completed_by(trip.user_id)
+    rows, done = (
+        await session.execute(
+            select(func.count(), func.count().filter(watched)).where(TripEpisode.trip_id == trip.id)
+        )
+    ).one()
+    if not trip_complete(rows=int(rows), watched=int(done)):
+        return None
+    pending = (
+        await session.scalars(
+            select(TripEpisode)
+            .where(TripEpisode.trip_id == trip.id, TripEpisode.state == TripEpisodeState.PENDING)
+            .order_by(TripEpisode.episode_id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for row in pending:
+        row.state = TripEpisodeState.EXPIRED
+    trip.state = TripState.FINISHED
+    trip.ended_at = now
+    await session.flush()
+    return [row.episode_id for row in pending]
+
+
 async def _end_trips(session: AsyncSession, sweep: TripSweep, *, now: datetime) -> None:
     # Lock every active trip first, then look at each one's rows: a snapshot
     # "no pending rows" read alongside the lock could miss an "again" that
@@ -201,6 +267,23 @@ async def _end_trips(session: AsyncSession, sweep: TripSweep, *, now: datetime) 
         )
     ).all()
     for trip in trips:
+        # Watched through first: a trip its user has finished ends
+        # ``finished`` whatever its deadline or deliveries say.
+        expired = await end_if_complete(session, trip, now=now)
+        if expired is not None:
+            sweep.ended[trip.id] = TripState.FINISHED
+            sweep.expired_rows.extend((trip.id, episode_id) for episode_id in expired)
+            log.info(
+                "trip ended",
+                extra={
+                    "trip_id": trip.id,
+                    "user_id": trip.user_id,
+                    "state": TripState.FINISHED.value,
+                    "reason": ALL_WATCHED,
+                    "expired_rows": expired,
+                },
+            )
+            continue
         ended = await end_if_nothing_pending(session, trip, now=now)
         if ended is not None:
             sweep.ended[trip.id] = ended
@@ -256,10 +339,13 @@ async def sweep_trips(session: AsyncSession, *, now: datetime) -> TripSweep:
 
 
 __all__ = [
+    "ALL_WATCHED",
     "TripSweep",
+    "end_if_complete",
     "end_if_nothing_pending",
     "ending_state",
     "expiry_due",
     "may_end",
     "sweep_trips",
+    "trip_complete",
 ]
