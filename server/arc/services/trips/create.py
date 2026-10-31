@@ -67,6 +67,7 @@ from arc.services.trips.names import (
     TRIP_SEARCH_PRIORITY,
     TRIP_SETTLE_DELAY,
     copy_priority,
+    enqueue_offline_settle,
     enqueue_trip_settles,
 )
 from arc.services.trips.rules import (
@@ -75,7 +76,7 @@ from arc.services.trips.rules import (
     trip_max_episodes,
     trip_only_episode_ids,
 )
-from arc.services.trips.sweep import end_if_nothing_pending
+from arc.services.trips.sweep import ALL_WATCHED, end_if_complete, end_if_nothing_pending
 
 log = logging.getLogger(__name__)
 
@@ -301,8 +302,10 @@ async def _end_finished_trip(
     show's one active trip until its deadline. Asking for the next one ends
     it here — ``finished`` when every row was delivered, as the sweep would —
     and queues its copies' settles an hour on. Rolled back with the rest if
-    the new trip is refused. A trip still waiting on an episode stays, and the
-    caller gets ``trip_active`` as before.
+    the new trip is refused. A trip its user has watched all of ends first by
+    :func:`~arc.services.trips.sweep.end_if_complete` (owner, 2026-10-31),
+    whatever is still pending. A trip still waiting on an episode stays, and
+    the caller gets ``trip_active`` as before.
     """
     trip = await session.scalar(
         select(Trip)
@@ -315,6 +318,26 @@ async def _end_finished_trip(
         .limit(1)
     )
     if trip is None:
+        return
+    # All of it watched (owner, 2026-10-31) ends it whatever is pending: the
+    # sweep's rule, applied here too so the next trip need not wait for it.
+    expired = await end_if_complete(session, trip, now=now)
+    if expired is not None:
+        # Rows nothing waits for any more lose their copies at once (no
+        # confirmation to give an hour to); the rest an hour on, as below.
+        for episode_id in expired:
+            await enqueue_offline_settle(session, episode_id)
+        await enqueue_trip_settles(session, trip.id, run_after=now + TRIP_SETTLE_DELAY)
+        log.info(
+            "trip ended for the next one on the show",
+            extra={
+                "trip_id": trip.id,
+                "user_id": user_id,
+                "state": trip.state.value,
+                "reason": ALL_WATCHED,
+                "expired_rows": expired,
+            },
+        )
         return
     ended = await end_if_nothing_pending(session, trip, now=now, any_time=True)
     if ended is not None:
