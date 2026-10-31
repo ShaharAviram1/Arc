@@ -52,15 +52,21 @@ from arc.models import (
 from arc.services.acquisition.holdings import MAX_HOLDINGS
 from arc.services.acquisition.names import COMPUTE_WANTS
 from arc.services.devices.reports import MAX_REPORTS_PER_DEVICE, format_report
+from arc.services.jobs.queue import enqueue
 from arc.services.jobs.registry import JobContext
 from arc.services.media.names import offline_path_for
-from arc.services.playback.progress import record_progress
+from arc.services.playback.progress import record_progress, unmark_watched
 from arc.services.retention.jobs import DELETE_EPISODE_FILES, delete_files
 from arc.services.retention.sweep import idle_copies
 from arc.services.trips.create import COPY_MISMATCH, TRIP_ACTIVE, TripConflict, create_trip
 from arc.services.trips.deliver import copy_mismatch
 from arc.services.trips.lost import REPEND_GRACE
-from arc.services.trips.names import OFFLINE_SETTLE, TRIP_RELEASE, TRIP_SWEEP
+from arc.services.trips.names import (
+    OFFLINE_SETTLE,
+    TRIP_RELEASE,
+    TRIP_SWEEP,
+    TRIP_SWEEP_PRIORITY,
+)
 from arc.services.trips.release import release_episode
 from arc.services.trips.rules import held_episode_ids
 from arc.services.trips.settle import KEPT_HELD, settle_episode
@@ -776,6 +782,134 @@ async def test_a_completion_off_any_active_trip_queues_no_sweep(
     await set_trip_state(api_factory, trip_id, TripState.CANCELLED)
     await complete(api_factory, owner.id, ids[2])
     assert await jobs_of(api_factory, TRIP_SWEEP) == []
+
+
+async def test_the_next_trip_ends_a_fully_watched_trip_with_a_row_pending(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(
+        api_factory, settings, owner, anilist_id=987047, episodes=4, device_id=IPAD
+    )
+    # The trip is episodes 2 and 3; episode 4 is left for the next one.
+    async with api_factory() as session:
+        row = await session.get(TripEpisode, (trip_id, ids[3]))
+        assert row is not None
+        await session.delete(row)
+        await session.commit()
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await watch(api_factory, owner.id, ids[1])
+    await watch(api_factory, owner.id, ids[2])  # online; its row is still pending
+
+    async with api_factory() as session:
+        user = await session.get(User, owner.id)
+        old = await session.get(Trip, trip_id)
+        assert user is not None and old is not None
+        made = await create_trip(
+            session,
+            settings,
+            user=user,
+            anime_id=old.anime_id,
+            count=1,
+            now=datetime.now(UTC),
+            device_id=IPAD,
+        )
+        await session.commit()
+        new_id = made.trip.id
+
+    old = await trip_of(api_factory, trip_id)
+    assert old.state is TripState.FINISHED and old.ended_at is not None
+    assert (await row_state(api_factory, trip_id, ids[2])).state is TripEpisodeState.EXPIRED
+    assert (await trip_of(api_factory, new_id)).state is TripState.ACTIVE
+    settles = {job.payload["episode_id"] for job in await jobs_of(api_factory, OFFLINE_SETTLE)}
+    assert set(ids[1:3]) <= settles
+
+
+async def sweep_jobs(factory: SessionFactory) -> list[Job]:
+    async with factory() as session:
+        return list(
+            (
+                await session.scalars(select(Job).where(Job.type == TRIP_SWEEP).order_by(Job.id))
+            ).all()
+        )
+
+
+async def test_a_completion_during_a_running_sweep_queues_one_follow_up(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987048, device_id=IPAD)
+    async with api_factory() as session:
+        running = await enqueue(
+            session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP
+        )
+        running.status = JobStatus.RUNNING
+        await session.commit()
+        running_id = running.id
+
+    await complete(api_factory, owner.id, ids[1])
+    jobs = await sweep_jobs(api_factory)
+    assert [(job.id == running_id, job.status) for job in jobs] == [
+        (True, JobStatus.RUNNING),
+        (False, JobStatus.PENDING),
+    ]
+
+    await complete(api_factory, owner.id, ids[2])
+    assert len(await sweep_jobs(api_factory)) == 2, "the pending follow-up is reused"
+
+
+async def test_a_completion_with_a_sweep_pending_adds_none(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987049, device_id=IPAD)
+    async with api_factory() as session:
+        await enqueue(session, TRIP_SWEEP, priority=TRIP_SWEEP_PRIORITY, dedupe_key=TRIP_SWEEP)
+        await session.commit()
+
+    await complete(api_factory, owner.id, ids[1])
+    assert [job.status for job in await sweep_jobs(api_factory)] == [JobStatus.PENDING]
+
+
+async def test_an_un_mark_before_the_sweep_keeps_the_trip(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987050, device_id=IPAD)
+    await deliver(api_factory, trip_id, ids[1], ago=timedelta(hours=3))
+    await deliver(api_factory, trip_id, ids[2], ago=timedelta(hours=3))
+    await complete(api_factory, owner.id, ids[1])
+    await complete(api_factory, owner.id, ids[2])  # a mistaken mark of the last one
+    async with api_factory() as session:
+        episode = await session.get(Episode, ids[2])
+        assert episode is not None
+        await unmark_watched(session, user_id=owner.id, episode=episode)
+        await session.commit()
+
+    async with api_factory() as session:
+        swept = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+
+    assert swept.ended == {}
+    assert (await trip_of(api_factory, trip_id)).state is TripState.ACTIVE
+
+
+async def test_a_second_sweep_leaves_a_finished_trip_alone(
+    owner: User, api_factory: SessionFactory, settings: Settings
+) -> None:
+    trip_id, ids = await a_trip(api_factory, settings, owner, anilist_id=987051, device_id=IPAD)
+    for episode_id in ids[1:]:
+        await deliver(api_factory, trip_id, episode_id, ago=timedelta(hours=3))
+        await watch(api_factory, owner.id, episode_id)
+    async with api_factory() as session:
+        first = await sweep_trips(session, now=datetime.now(UTC))
+        await session.commit()
+    ended_at = (await trip_of(api_factory, trip_id)).ended_at
+
+    async with api_factory() as session:
+        second = await sweep_trips(session, now=datetime.now(UTC) + timedelta(hours=1))
+        await session.commit()
+
+    assert first.ended == {trip_id: TripState.FINISHED}
+    assert second.ended == {} and second.expired_rows == []
+    trip = await trip_of(api_factory, trip_id)
+    assert trip.state is TripState.FINISHED and trip.ended_at == ended_at
 
 
 # --- The device's report ------------------------------------------------------------
