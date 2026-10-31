@@ -2235,7 +2235,7 @@ owner's word.
         passed, client 1497/1498 (the one failure is the pre-existing
         timing-sensitive live-player seek test, green on re-run), lint
         clean, head a7c2e4f9d1b3.
-  - [ ] **F — a trip ends when its last episode has been watched** (owner
+  - [x] **F — a trip ends when its last episode has been watched** (owner
         2026-10-31: "the trip should end when the last episode has been
         watched"). An active trip ends `finished` (`ended_at` stamped) as
         soon as its user has `watch_progress.completed` on every one of its
@@ -2262,6 +2262,14 @@ owner's word.
         fully watched one with a row pending; an un-mark before the sweep
         keeps the trip; a second sweep leaves a finished trip alone; full server suite green, `make lint` clean; Writer → Validator
         → orchestrator verification; deployed.
+        Verified by the orchestrator 2026-10-31: Validator PASS (227 + 186
+        existing trip/playback tests, 8 of its own incl. three two-session
+        lock races and the 404 after the end), Reviewer no blockers (two
+        should-fixes landed: next-trip path applies the rule, one follow-up
+        sweep behind a running one); merged main server 5303 passed, client
+        1498/1498, lint clean. Deployed 2026-10-31 17:06 UTC at 9766736
+        (backup arc-20261031T170542Z, alembic a7c2e4f9d1b3 head, health 200,
+        all four sites 200, no errors).
   - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
         stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC
         (8fbd3b4, head 3f7a1c9e5b42, health 200, backup first); trip 6 assigned
