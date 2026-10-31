@@ -3534,7 +3534,10 @@ worker).
   this order: demo account 403 `demo_account`; unknown anime 404; an active trip of the
   caller's **on this show** 409 `trip_active` (`active_trip(session, user_id,
   anime_id)`; since 2026-10-30 an active trip on the show with **nothing
-  pending** is first ended — `_end_finished_trip` locks it `FOR UPDATE`,
+  pending** is first ended — `_end_finished_trip` locks it `FOR UPDATE`;
+  since 2026-10-31 `sweep.end_if_complete` ends it first when its user has
+  watched all of it, pending rows or not (`finished`; its expired rows get
+  `offline_settle` at once, the rest at +1 h); otherwise
   `sweep.end_if_nothing_pending(any_time=True)` ends it (`finished` when every
   row is delivered, else `expired`) and `enqueue_trip_settles` queues its
   settles at +1 h, all rolled back with the rest if the new trip is refused —
@@ -3823,7 +3826,11 @@ above), so what is settled here is the **copy** — file and row — and the
   (owner, 2026-10-31; `end_if_complete`): a trip whose user has
   `watch_progress.completed` on every row's episode — whatever the row's
   state; `trip_complete(rows, watched)`, pure, false for a trip with no
-  rows — ends `finished` at once, whatever its deadline or deliveries; its
+  rows; "watched" is `rules.completed_by`, the same `EXISTS` the keep rule
+  `held_episode_ids` uses, so a completion recorded in Arc and nothing
+  else: progress that exists only on MyAnimeList (imported, or advanced
+  there) does not count, and such a trip falls back to its deadline, as in
+  `held_episode_ids` and `lost.py` — ends `finished` at once, whatever its deadline or deliveries; its
   still-`pending` rows (watched online) go `expired` with it and join (1)'s
   settles, and the end is logged `trip ended` with `reason: "all watched"`.
   A watch completion queues this sweep at once (see the progress hook
@@ -3850,8 +3857,15 @@ above), so what is settled here is the **copy** — file and row — and the
   over the user's active trips' rows on the episode, any row state — and if
   so queues `trip_sweep` (`names.enqueue_trip_sweep`, deduplicated on the
   type) in the same transaction as the progress and `compute_wants`. A
-  sweep already pending is reused; one already running when the completion
-  commits may miss it, and the next hourly tick ends the trip.
+  sweep already pending is reused; when the one found is **running** (it
+  may have read its trips before this completion commits),
+  `enqueue_trip_sweep` queues exactly one pending follow-up behind it
+  through the queue's `exclude_job_id`, and later completions reuse that.
+  Only this hook calls `enqueue_trip_sweep`; the scheduler queues the
+  hourly tick itself and the sweep never re-queues itself. The end is final:
+  an un-mark (`unmark_watched`) after it does not reopen the trip; one
+  before the sweep runs keeps the trip, since the sweep re-reads
+  `completed`.
 - **Remake** (owner, 2026-10-28: copies went 720p H.264 CRF 26 → 1080p HEVC
   CRF 28, §5.3b, and the trip under way was to follow). `trips.remake.
   remake_stale(session, settings, *, trip, now) → RemakeReport{stale,
@@ -7652,4 +7666,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-30 (owner) — **A held copy is never destroyed, and "delivered" means verified** (M20.4 E, server; §4 `offline_copies.sha256`, `device_holdings` detail, `device_reports`; §5.3b Job; §5.4e Delivery, Lost copies, Settle, Sweep; §5b; §8 CLI; spec FR-A12, FR-A15, FR-P6, FR-S9 item 10, FR-T7). Episode 15 of trip 4 was confirmed at 03:30, its server copy settled at 04:30 as designed, the device later lost its file, and the re-download got 404. One revision `a7c2e4f9d1b3` on `3f7a1c9e5b42`. The encode hashes the copy before it goes `ready` (`TripEpisodeOut.sha256`, `OfflineOut.sha256`); a confirmation whose `sha256`/`size` is not the ready copy's is 409 `copy_mismatch`; the settle, the release's second ending and the sweep's safety net keep a delivered copy of an active trip until its user completes the episode (`rules.held_episode_ids`), a trip's end queues its settles (`names.enqueue_trip_settles`: cancel, the finishing confirmation; the sweep through its safety net), and confirmations no longer queue their own settle while the trip is active; holdings take `{episodes: [{episode_id, etag?, size?, sha256?}]}` beside the old shape and re-pend a delivered row the trip's own device left out (`trips/lost.py`, 5-minute grace, not at the 500 cap, not for a watched episode); `POST /api/devices/{id}/report` + `device_reports` + `arc.cli device-report` (new `services/devices/reports.py`, 20 per device, 10 devices per user). No new dependency, no MAL-writing code.
 - 2026-10-30 (orchestrator, under the owner's "a held copy is never lost mid-trip"; review of M20.4 E) — **A trip is held until its deadline** (§5.4e Create, Delivery, Lost copies, Settle, Sweep; §5.3b Job; §5.7 Idle copies; §5b; §8 Caddy; spec FR-A12, FR-A15, FR-T7). `names.FINISH_ON_LAST_CONFIRM` (moved from `deliver`) is now **off**: a trip with nothing pending stays active until the sweep ends it after `deadline_at` (`may_end`; `finished` only when every row is delivered), so the keep rule and the lost-copy re-pend cover its whole life; `True` restores the old behaviour in full. `create_trip` ends the show's active trip first when nothing of it is pending (settles at +1 h). Re-pend runs only on the `episodes` holdings shape, counts distinct ids against the cap, locks episodes in one sorted statement, and a `full` entry stores no detail. A `full` confirmation ignores etag/sha256/size. Retention spares held copies (idle rule, grace sweep, floor, admin delete: `keep_copy`), and a held copy never pins its source (release's second ending deletes the rest, the settle hands leftovers to it). The encode hashes the staged file under a heartbeat. The report route reads its own body under a 256 KiB cap before parsing, `kind` is a machine word, NUL is refused; Caddy caps `/api/*` bodies at 1 MB. The copy figure is ≈260 MB.
 - 2026-10-31 (owner) — The held-trip policy is **confirmed**: trips stay active until complete or deadline, the small copy stays until a watch confirmation or the deadline. `names.FINISH_ON_LAST_CONFIRM` stays off; the "revertible pending the owner" note no longer applies.
-- 2026-10-31 (owner) — **A trip ends when its last episode has been watched** (M20.4 F; §5.4e Sweep and the progress hook; spec FR-A12, FR-T7). "The trip should end when the last episode has been watched": the sweep's pass (2) first asks `end_if_complete` (under the trip's `FOR UPDATE` lock; `trip_complete`, pure) — every row's episode completed by the trip's user, any row state — and ends the trip `finished` with `ended_at`, expiring its still-`pending` rows (a `pending` row lives only on an active trip, which `holds_trip_episode` relies on); pass (3) in the same sweep then settles its copies. `record_progress` queues the deduplicated `trip_sweep` when a newly completed episode is on one of the user's active trips (`rules.on_active_trip`). This narrows the 2026-10-30 entry's "a trip with nothing pending stays active until the sweep ends it after `deadline_at`": that still holds for a trip not yet fully watched; `may_end`, `ending_state`, cancel and the next-trip end are unchanged, and `FINISH_ON_LAST_CONFIRM` stays off. No schema change, no client change (`GET /api/trips` lists active trips only, so a finished trip leaves the panel and auto-keep, and its watched files go by `removeWatched` as before), no new dependency, no MAL-writing code.
+- 2026-10-31 (owner) — **A trip ends when its last episode has been watched** (M20.4 F; §5.4e Sweep and the progress hook; spec FR-A12, FR-T7). "The trip should end when the last episode has been watched": the sweep's pass (2) first asks `end_if_complete` (under the trip's `FOR UPDATE` lock; `trip_complete`, pure) — every row's episode completed by the trip's user, any row state — and ends the trip `finished` with `ended_at`, expiring its still-`pending` rows (a `pending` row lives only on an active trip, which `holds_trip_episode` relies on); pass (3) in the same sweep then settles its copies. `record_progress` queues the deduplicated `trip_sweep` when a newly completed episode is on one of the user's active trips (`rules.on_active_trip`). `create_trip`'s `_end_finished_trip` applies `end_if_complete` first too, so a fully watched trip with a row still pending no longer blocks the next one with `trip_active`. `enqueue_trip_sweep` queues one follow-up behind a running sweep (`exclude_job_id`). "Watched" is one shared predicate, `rules.completed_by` (Arc completions only; MAL-only progress falls back to the deadline). This narrows the 2026-10-30 entry's "a trip with nothing pending stays active until the sweep ends it after `deadline_at`": that still holds for a trip not yet fully watched; `may_end`, `ending_state` and cancel are unchanged, and `FINISH_ON_LAST_CONFIRM` stays off. No schema change, no client change (`GET /api/trips` lists active trips only, so a finished trip leaves the panel and auto-keep, and its watched files go by `removeWatched` as before), no new dependency, no MAL-writing code.

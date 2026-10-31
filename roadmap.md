@@ -2247,15 +2247,20 @@ owner's word.
         logged with reason "all watched"; a watch completion on an episode of
         one of the user's active trips queues the deduplicated `trip_sweep`
         (`progress.record_progress` → `rules.on_active_trip`). The same
-        sweep's safety net settles the ended trip's copies. Deadline,
-        cancel and next-trip ends unchanged; `FINISH_ON_LAST_CONFIRM` stays
+        sweep's safety net settles the ended trip's copies. Starting the
+        next trip on the show applies the same rule first; a completion
+        during a running sweep queues one follow-up sweep; "watched" is one
+        shared predicate (`rules.completed_by`, Arc completions only).
+        Deadline and cancel ends unchanged; `FINISH_ON_LAST_CONFIRM` stays
         off; no schema or client change.
         DoD: pg tests — ends `finished` when all watched (before the
         deadline); stays active with one unwatched even if all delivered;
         pending-but-watched counts and its copy is settled; another user's
         watching does not count; deadline path unchanged; a completion
         queues `trip_sweep` only for an active trip's episode of that user,
-        once; full server suite green, `make lint` clean; Writer → Validator
+        once, and one follow-up behind a running sweep; the next trip ends a
+        fully watched one with a row pending; an un-mark before the sweep
+        keeps the trip; a second sweep leaves a finished trip alone; full server suite green, `make lint` clean; Writer → Validator
         → orchestrator verification; deployed.
   - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
         stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC

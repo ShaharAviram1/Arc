@@ -622,10 +622,15 @@ that the course professor can log in at any time, and the owner uses it daily.
   2026-10-31): once its user has watched every episode of it — on the
   device or online, delivered or still waiting — it ends **finished** within
   moments of that last completion, whatever its deadline, and an episode it
-  was still waiting for stops being waited for.
+  was still waiting for stops being waited for. "Watched" means watched in
+  Arc: progress that exists only on MyAnimeList does not count, and such a
+  trip ends at its deadline. The end is final: a mistaken "mark watched" of
+  the last episode ends the trip (what it was still waiting for is no longer
+  fetched, its copies go) and un-marking it afterwards does not reopen it,
+  though an un-mark before the server has looked keeps the trip.
   **Starting the next trip on the show ends one with nothing left waiting**
-  (finished, its copies let go an hour later); one still waiting for an
-  episode is refused as before. **The server keeps a trip's
+  — or one its user has watched all of — (finished, its copies let go an
+  hour later); one still waiting for an episode is refused as before. **The server keeps a trip's
   small copy until the episode is watched or the trip ends** (owner,
   2026-10-30, after a confirmed copy was lost on the iPad and the server had
   already deleted its own an hour after the confirmation): the full-size
@@ -1384,8 +1389,8 @@ that the course professor can log in at any time, and the owner uses it daily.
      episode or one no longer on this device, **Cancel trip** behind an
      in-page confirmation, and a line saying downloads run while Arc is open
      and that the server keeps each copy until this device has it (at most
-     until the trip's deadline, or until every episode of it has been
-     watched). A trip started on another device (owner,
+     until the trip's deadline; the server also ends the trip, and the
+     panel goes, once every episode of it has been watched — FR-A12). A trip started on another device (owner,
      2026-10-30; FR-A12) shows each row as "Kept on another device" and
      offers neither Ask again, a keep button nor Choose pack; Cancel trip
      stays, and the room check counts only this device's trips. In the
@@ -3253,4 +3258,7 @@ through the same edge, without the grace period.
   watched online while still waiting counts, and stops being waited for) and
   whatever its deadline; the completion that makes it so has the server look
   at once rather than at the next hourly check. Its copies then go as on any
-  other end. The deadline, cancel and next-trip ends are unchanged.
+  other end. Starting the next trip on the show ends a fully watched one
+  too, even with an episode still waiting. The deadline and cancel ends are
+  unchanged. Only completions recorded in Arc count, and the end is final (an
+  un-mark after it does not reopen the trip).
