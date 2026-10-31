@@ -2235,6 +2235,28 @@ owner's word.
         passed, client 1497/1498 (the one failure is the pre-existing
         timing-sensitive live-player seek test, green on re-run), lint
         clean, head a7c2e4f9d1b3.
+  - [ ] **F — a trip ends when its last episode has been watched** (owner
+        2026-10-31: "the trip should end when the last episode has been
+        watched"). An active trip ends `finished` (`ended_at` stamped) as
+        soon as its user has `watch_progress.completed` on every one of its
+        episodes, whatever each row's state (a `pending` row watched online
+        counts and goes `expired` with the trip) and however many were
+        delivered; a trip with no rows is left to its deadline. The check is
+        the trip sweep's (`sweep.end_if_complete`, `trip_complete` pure,
+        after the trip's `FOR UPDATE` lock, before `end_if_nothing_pending`),
+        logged with reason "all watched"; a watch completion on an episode of
+        one of the user's active trips queues the deduplicated `trip_sweep`
+        (`progress.record_progress` → `rules.on_active_trip`). The same
+        sweep's safety net settles the ended trip's copies. Deadline,
+        cancel and next-trip ends unchanged; `FINISH_ON_LAST_CONFIRM` stays
+        off; no schema or client change.
+        DoD: pg tests — ends `finished` when all watched (before the
+        deadline); stays active with one unwatched even if all delivered;
+        pending-but-watched counts and its copy is settled; another user's
+        watching does not count; deadline path unchanged; a completion
+        queues `trip_sweep` only for an active trip's episode of that user,
+        once; full server suite green, `make lint` clean; Writer → Validator
+        → orchestrator verification; deployed.
   - [x] **C — production**: A and B deployed 2026-10-29 11:34 UTC; the
         stopped-pack restart (f73ea7f) and D deployed 2026-10-30 06:40 UTC
         (8fbd3b4, head 3f7a1c9e5b42, health 200, backup first); trip 6 assigned

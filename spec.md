@@ -618,6 +618,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   the device may ask for any of them again, and the server keeps their copies
   — and the hourly check ends it after its deadline, **finished** when every
   episode was delivered, else **expired**; the user may cancel it any time.
+  **A trip ends as soon as its last episode has been watched** (owner,
+  2026-10-31): once its user has watched every episode of it — on the
+  device or online, delivered or still waiting — it ends **finished** within
+  moments of that last completion, whatever its deadline, and an episode it
+  was still waiting for stops being waited for.
   **Starting the next trip on the show ends one with nothing left waiting**
   (finished, its copies let go an hour later); one still waiting for an
   episode is refused as before. **The server keeps a trip's
@@ -1379,7 +1384,8 @@ that the course professor can log in at any time, and the owner uses it daily.
      episode or one no longer on this device, **Cancel trip** behind an
      in-page confirmation, and a line saying downloads run while Arc is open
      and that the server keeps each copy until this device has it (at most
-     until the trip's deadline). A trip started on another device (owner,
+     until the trip's deadline, or until every episode of it has been
+     watched). A trip started on another device (owner,
      2026-10-30; FR-A12) shows each row as "Kept on another device" and
      offers neither Ask again, a keep button nor Choose pack; Cancel trip
      stays, and the room check counts only this device's trips. In the
@@ -1744,10 +1750,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   that is not `ready`** (M19 T4) — its source already deleted when the copy
   was made — is **kept while an active trip's device holds it and its user
   has not watched it** (owner, 2026-10-30; about 260 MB per held episode for
-  the trip's lifetime, the trip held to its deadline), and deleted, file and record, once nothing waits for
+  the trip's lifetime, the trip held to its deadline or until every episode
+  of it has been watched), and deleted, file and record, once nothing waits for
   it or holds it any more: after its user has **watched** the episode (within
-  the hour), when the trip **ends** (at its deadline, on cancel, or when the
-  next trip on the show starts; at least an hour after the last device
+  the hour), when the trip **ends** (at its deadline, once every episode of
+  it has been watched, on cancel, or when the next trip on the show starts; at least an hour after the last device
   confirmed it); at **expiry** (`trip_copy_days`, 14, counted
   from when the copy was made); at **cancellation** (FR-A12); and once
   its user's account is deleted. A `ready`
@@ -3240,3 +3247,10 @@ through the same edge, without the grace period.
   is confirmed: a trip stays active until it is complete or its deadline hits,
   and the small copy stays on the server until a watch confirmation or the
   deadline. `FINISH_ON_LAST_CONFIRM` stays off; no longer a pending call.
+- 2026-10-31 (owner) — FR-A12, FR-T7: "the trip should end when the last
+  episode has been watched". An active trip ends **finished** once its user
+  has watched every episode of it, whatever each episode's delivery state (one
+  watched online while still waiting counts, and stops being waited for) and
+  whatever its deadline; the completion that makes it so has the server look
+  at once rather than at the next hourly check. Its copies then go as on any
+  other end. The deadline, cancel and next-trip ends are unchanged.
