@@ -2226,10 +2226,12 @@ owner's word.
         ETag, retention spares held copies, a held copy never pins its
         source, report body capped before parsing + Caddy 1 MB limit, hash
         the staged file under the job heartbeat). Policy (orchestrator's
-        call, owner asked twice without answer, revertible by
-        `names.FINISH_ON_LAST_CONFIRM`): a trip stays active until its
-        deadline or cancel; a new trip on the same show ends one with
-        nothing pending. Orchestrator 2026-10-30: merged main server 5290
+        call 2026-10-30, **confirmed by the owner 2026-10-31**: "trips stay
+        active until they are complete or the deadline hits; the small copy
+        stays on the server until we get a watch confirmation, or the
+        deadline"; `names.FINISH_ON_LAST_CONFIRM` stays off): a trip stays
+        active until its deadline or cancel; a new trip on the same show
+        ends one with nothing pending. Orchestrator 2026-10-30: merged main server 5290
         passed, client 1497/1498 (the one failure is the pre-existing
         timing-sensitive live-player seek test, green on re-run), lint
         clean, head a7c2e4f9d1b3.

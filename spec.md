@@ -3236,3 +3236,7 @@ through the same edge, without the grace period.
   server constant (`FINISH_ON_LAST_CONFIRM`). A held copy is spared by
   retention, never keeps its source, and is re-offered only on a per-episode
   holdings report. The copy is ≈260 MB.
+- 2026-10-31 (owner) — FR-A12, FR-A15, FR-T7: the trip-lifetime policy above
+  is confirmed: a trip stays active until it is complete or its deadline hits,
+  and the small copy stays on the server until a watch confirmation or the
+  deadline. `FINISH_ON_LAST_CONFIRM` stays off; no longer a pending call.
