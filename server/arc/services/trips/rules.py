@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Exists, exists, func, select
+from sqlalchemy import ColumnElement, Exists, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -165,18 +165,21 @@ async def pending_episode_ids(
 
 
 def completed_by(user_id: ColumnElement[int] | InstrumentedAttribute[int] | int) -> Exists:
-    """``EXISTS`` a completed ``watch_progress`` row of ``user_id`` on the row's episode.
+    """``EXISTS`` a watched ``watch_progress`` row of ``user_id`` on the row's episode.
 
     The one meaning of "watched" for a trip row (correlated on
-    ``trip_episodes.episode_id``): a completion recorded in Arc. Progress
-    that exists only on MyAnimeList does not count. Shared by the keep rule
+    ``trip_episodes.episode_id``): a completion recorded in Arc — the
+    ``completed`` flag, or a latest finish (``finished_at``), which is what a
+    rewatch pass records (FR-W7, M21): finishing a trip's episode in a pass is
+    a watch confirmation like any other. Progress that exists only on
+    MyAnimeList does not count. Shared by the keep rule
     (:func:`held_episode_ids`) and the end of a fully watched trip
     (:func:`~arc.services.trips.sweep.end_if_complete`).
     """
     return exists().where(
         WatchProgress.user_id == user_id,
         WatchProgress.episode_id == TripEpisode.episode_id,
-        WatchProgress.completed.is_(True),
+        or_(WatchProgress.completed.is_(True), WatchProgress.finished_at.is_not(None)),
     )
 
 
