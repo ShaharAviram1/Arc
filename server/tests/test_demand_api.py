@@ -488,20 +488,29 @@ async def test_play_on_a_wanted_downloading_episode_is_pending(
     body = response.json()
     assert body["playlist_url"] is None
     assert body["offline_only"] is False
-    assert body["pending"] == {"state": "downloading", "progress": 0.43, "seeders": 12}
+    assert body["pending"] == {
+        "state": "downloading",
+        "progress": 0.43,
+        "seeders": 12,
+        "demanded": True,
+        "note": None,
+        "awaiting_pick": False,
+    }
     # Not worked out while this one is pending (the poll would pay for it).
     assert body["next"]["id"] == ids[5]
     assert body["next"]["fetchable"] is False
 
 
-async def test_play_on_an_unwanted_episode_that_is_not_ready_is_still_a_404(
+async def test_play_on_an_unwanted_aired_episode_is_pending_and_not_demanded(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
+    """M21 (FR-A14): any aired episode opens the waiting player."""
     ids = await followed_show(api_factory, user.id, anilist_id=975021)
 
     response = await client.get(f"/api/episodes/{ids[8]}/play")
 
-    assert response.status_code == 404
+    assert response.status_code == 200, response.text
+    assert response.json()["pending"]["demanded"] is False
 
 
 async def test_play_on_a_ready_episode_carries_no_pending(
@@ -531,16 +540,16 @@ async def test_play_on_a_ready_episode_carries_no_pending(
     body = response.json()
     assert body["pending"] is None
     assert body["playlist_url"] == f"/media/{ids[4]}/index.m3u8"
-    # Before half-way the next one is not covered (``fetchable`` is T4's to
-    # change); the demand itself takes any aired episode since M21 (FR-A14).
-    assert body["next"]["fetchable"] is False
+    # Any aired, not-ready episode is fetchable since M21 (FR-A14), and the
+    # demand agrees.
+    assert body["next"]["fetchable"] is True
     assert (await client.post(f"/api/episodes/{ids[5]}/demand")).status_code == 202
 
 
 async def test_next_becomes_fetchable_once_the_user_is_half_way(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
-    """``fetchable`` and ``demand`` agree, on real progress (no simulated halfway)."""
+    """``fetchable`` and ``demand`` agree past the halfway mark too."""
     ids = await followed_show(api_factory, user.id, anilist_id=975023)
     async with api_factory() as session:
         episode = await session.get(Episode, ids[4])

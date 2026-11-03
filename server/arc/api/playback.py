@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -55,7 +54,7 @@ from sqlalchemy import func, or_, select
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
 from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, EpisodeId, SessionDep, SettingsDep
-from arc.api.episode_extras import episode_extras, renditions_for
+from arc.api.episode_extras import EpisodeRelease, episode_extras, renditions_for
 from arc.api.media_stream import playlist_url
 from arc.api.playback_schemas import (
     MAX_COMPLETED_IDS,
@@ -75,12 +74,13 @@ from arc.models import (
     Episode,
     EpisodeState,
     Job,
-    ListEntry,
+    JobStatus,
     Rendition,
     Want,
     WatchProgress,
 )
-from arc.services.acquisition.wants import coverable
+from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
+from arc.services.acquisition.demand_gate import DemandGate, demand_gate
 from arc.services.catalog import episodes_for
 from arc.services.catalog.airing import aired_through, out_of_order
 from arc.services.media.live_serve import LiveServed, live_servable
@@ -88,16 +88,19 @@ from arc.services.media.names import (
     KEY_DOWNLOAD_PROGRESS,
     KEY_EXPECTED_DURATION,
     KEY_SEEDERS,
+    STAGE_LIVE_REFUSED,
+    latest_live_job,
     latest_live_with,
     payload_float,
 )
-from arc.services.playback.next_season import next_season
+from arc.services.playback.next_season import has_aired, next_season
 from arc.services.playback.progress import (
     ProgressOutcome,
     record_progress,
     resume_position,
     unmark_watched,
 )
+from arc.services.playback.rewatch import watch_view
 from arc.services.trips.rules import holds_trip_episode
 
 log = logging.getLogger(__name__)
@@ -124,30 +127,54 @@ async def _episode(session: SessionDep, episode_id: int) -> Episode:
     return episode
 
 
-def _neighbours(
-    episodes: list[Episode], episode: Episode, *, fetchable: Collection[int] = frozenset()
-) -> tuple[EpisodeRef | None, EpisodeRef | None]:
+def _neighbours(episodes: list[Episode], episode: Episode) -> tuple[Episode | None, Episode | None]:
     """The rows either side of ``episode`` in number order (FR-S5).
 
     By position in the list rather than by ``number ± 1``: episode numbering
     has gaps — recaps, a 5.5, a season that starts at 13 — and "the next row"
-    is what a person means by the next episode. ``fetchable`` is the caller's
-    on-demand set (FR-A14), for :attr:`EpisodeRef.fetchable`.
+    is what a person means by the next episode.
     """
     numbers = [row.number for row in episodes]
     try:
         index = numbers.index(episode.number)
     except ValueError:  # pragma: no cover - the episode came from this list
         return None, None
-
-    def ref(row: Episode) -> EpisodeRef:
-        return EpisodeRef.from_episode(
-            row, fetchable=row.state is not EpisodeState.READY and row.id in fetchable
-        )
-
-    previous = ref(episodes[index - 1]) if index > 0 else None
-    following = ref(episodes[index + 1]) if index + 1 < len(episodes) else None
+    previous = episodes[index - 1] if index > 0 else None
+    following = episodes[index + 1] if index + 1 < len(episodes) else None
     return previous, following
+
+
+def pending_note(release: EpisodeRelease | None, *, live_refused: bool) -> str | None:
+    """``PendingOut.note``: why a downloading episode will not play before it is whole.
+
+    :data:`~arc.services.acquisition.demand.PLAYS_WHEN_DOWNLOADED_MESSAGE`
+    when the episode comes from a season pack (FR-A11: only a single plays
+    from its download, FR-P8), when the live remux refused this download (an
+    MP4 whose index may sit at its end, pad files, no stated duration …), or
+    when the release is named as an MP4 — the live remux reads Matroska only,
+    so it would refuse it once it looked. Null otherwise. Pure.
+    """
+    if release is None:
+        return None
+    title = (release.torrent.title or "").strip().lower()
+    if release.batch or live_refused or title.endswith(".mp4"):
+        return PLAYS_WHEN_DOWNLOADED_MESSAGE
+    return None
+
+
+async def _live_refused(session: SessionDep, episode_id: int, release: EpisodeRelease) -> bool:
+    """Whether the newest live remux of this episode refused the current download.
+
+    The demand's own reading (:func:`~arc.services.acquisition.demand._start_live`):
+    a refusal made before this torrent was added is about an older download.
+    """
+    latest = await latest_live_job(session, episode_id)
+    return (
+        latest is not None
+        and latest.status is JobStatus.DONE
+        and str((latest.payload or {}).get("stage") or "") == STAGE_LIVE_REFUSED
+        and latest.created_at >= release.torrent.added_at
+    )
 
 
 async def _live_want(session: SessionDep, user_id: int, episode_id: int) -> Want | None:
@@ -169,49 +196,60 @@ async def _live_want(session: SessionDep, user_id: int, episode_id: int) -> Want
 async def play(
     episode_id: EpisodeId, user: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> PlayInfo:
-    """404 unless the episode is ``ready``, the caller's trip episode, or wanted by the caller.
+    """Open a player on any aired episode; 404 only for an unknown or un-aired one.
 
-    "Not ready" and "no such episode" are one answer on purpose: an episode
-    that nobody asked for has nothing to play, and the show page is where a
-    user learns why — this endpoint's job is to open a player or not.
+    A ``ready`` episode answers its playlist. A not-ready one is answered in
+    this order (M21, FR-A14):
 
-    The first exception is a trip episode (FR-A12, M19 T4): an episode that is
-    not ready but on which the caller holds a ``pending`` or ``delivered``
-    trip row lives on their device. It is answered with ``offline_only`` and
-    no ``playlist_url``, the resume position and the neighbours as usual, so
-    the player can open the device's copy.
+    1. the caller has an **open demand** on it → ``pending`` with
+       ``demanded: true`` — even when a device of theirs holds its trip copy
+       (the "watch it on the Mac" case);
+    2. the caller holds its **trip copy** (FR-A12, M19 T4: a ``pending`` or
+       ``delivered`` trip row) → ``offline_only``, no ``playlist_url``, so the
+       player opens the device's copy;
+    3. any **other live want** of the caller's (a window, a walk, a demand
+       finished since its press) → ``pending``;
+    4. **new in M21:** any other episode that **has aired** → ``pending`` with
+       ``demanded: false``, on which the player posts the demand once
+       (pressing play is the demand). An un-aired episode is the 404, like an
+       unknown one.
 
-    The second is play on demand (FR-A14, M20): an episode that is not ready
-    but on which the caller has a live want — the window's, or one they made
-    by pressing play (``POST /api/episodes/{id}/demand``) — is answered 200
-    with ``pending`` (state, download progress, seeders) and no
-    ``playlist_url``. The player polls until the URL arrives. Everyone else
-    keeps the 404.
+    ``pending`` is the state, download percentage and seeders, plus ``note``
+    (:func:`pending_note`) and ``awaiting_pick`` (M21 T7; false until then).
+    With a live want and a live remux serving its download (FR-P8) the answer
+    is the playlist and ``live`` instead.
 
-    A demanded want outranks the trip branch: an episode the caller pressed
-    play on is answered ``pending`` even when a device of theirs holds its trip
-    copy (the "watch it on the Mac" case).
-
-    ``next.fetchable`` says whether the caller could demand the next episode
-    **now**, on their real progress — exactly what ``demand`` would accept, so
-    the client never offers a fetch it would be refused. Before the halfway
-    mark the next one is usually not yet covered; the player re-reads this
-    route, so it flips once the user passes 50 %. It is false for a ready
-    neighbour (nothing to fetch) and is not worked out while this episode is
-    itself pending.
+    ``next.fetchable`` (and ``previous``'s) says whether the caller could
+    demand that episode **now**: aired ∧ not ready ∧ nothing would refuse the
+    press (:class:`~arc.services.acquisition.demand_gate.DemandGate`) — exactly
+    what ``demand`` would accept, so the client never offers a fetch it would
+    be refused. It is false for a ready neighbour (nothing to fetch) and is
+    not worked out while this episode is itself pending: the waiting player
+    polls this route.
 
     ``next_season`` (FR-S5 item 3, owner 2026-10-18) is the sequel's first
     episode when the season ends here — no following row and the show finished
-    — and the sequel is a show Arc has; with the viewer's list state for it and
-    a ``fetchable`` that holds once the press has touched that entry. The rule
-    is :mod:`arc.services.playback.next_season`.
+    — and the sequel is a show Arc has; with the viewer's list state for it,
+    the same ``fetchable`` rule, and ``rewatch_carry`` in an open pass (FR-W7
+    item 5). The rule is :mod:`arc.services.playback.next_season`.
+
+    The episode's ``watched``/``watched_source`` are read through
+    :func:`~arc.services.playback.rewatch.watch_view`, so in an open rewatch
+    pass they are the pass's (FR-W5, FR-W7).
     """
     episode = await session.get(Episode, episode_id)
     if episode is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
+    anime = await session.get(Anime, episode.anime_id)
+    if anime is None:  # pragma: no cover - a foreign key guarantees this
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
+    siblings = await episodes_for(session, episode.anime_id)
+    at = now()
+
     not_ready = episode.state is not EpisodeState.READY
     offline_only = False
     waiting = False
+    want: Want | None = None
     if not_ready:
         want = await _live_want(session, user.id, episode.id)
         if want is not None and want.demanded_at is not None:
@@ -221,16 +259,13 @@ async def play(
             waiting = True
         elif await holds_trip_episode(session, user.id, episode.id):
             offline_only = True
-        elif want is not None:
+        elif want is not None or has_aired(anime, siblings, episode, now=at):
+            # A window's or a walk's want, or (M21) nobody's yet: any aired
+            # episode opens the waiting player, which demands it once.
             waiting = True
         else:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
 
-    anime = await session.get(Anime, episode.anime_id)
-    if anime is None:  # pragma: no cover - a foreign key guarantees this
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_PLAYABLE)
-
-    siblings = await episodes_for(session, episode.anime_id)
     extras = await episode_extras(
         session,
         [episode.id],
@@ -240,33 +275,42 @@ async def play(
     )
     rendition = extras.renditions.get(episode.id)
     progress = await session.get(WatchProgress, (user.id, episode.id))
-    # FR-W5's other half: an episode at or below the caller's list progress is
-    # watched whether or not Arc has a completion row for it. One primary-key
-    # read, on a route that already does four.
-    entry = await session.get(ListEntry, (user.id, episode.anime_id))
+    # FR-W5, pass-aware (FR-W7): Arc's finish for this episode and the list's
+    # progress — or, in an open rewatch pass, the pass's finish and 0.
+    view = await watch_view(
+        session, user_id=user.id, anime_id=episode.anime_id, episode_ids=[episode.id]
+    )
     duration = rendition.duration if rendition is not None and rendition.duration else 0.0
     if not_ready and progress is not None and progress.duration_s:
         # No rendition to measure: the length a player last reported.
         duration = progress.duration_s
 
-    at = now()
     previous, following = _neighbours(siblings, episode)
-    # ``fetchable`` costs a one-user plan, and the pending player polls this
-    # route every few seconds: so it is worked out only when a neighbour exists
-    # that is not ready, and not while this episode is itself still pending.
-    # Asked for at most once, by the neighbours or by the next season.
-    covered: frozenset[int] | None = None
+    # The gate costs a few reads (open demands, the cap, the pause and the
+    # disk), and the pending player polls this route every few seconds: so it
+    # is read only when a neighbour exists that is not ready, and never while
+    # this episode is itself pending. Asked for at most once, by the
+    # neighbours or by the next season.
+    gate: DemandGate | None = None
 
-    async def covered_now() -> frozenset[int]:
-        nonlocal covered
-        if waiting:
-            return frozenset()
-        if covered is None:
-            covered = await coverable(session, user.id, now=at)
-        return covered
+    async def fetchable(row: Episode) -> bool:
+        nonlocal gate
+        if waiting or row.state is EpisodeState.READY:
+            return False
+        if gate is None:
+            gate = await demand_gate(session, user.id, settings=settings)
+        return gate.fetchable(row, aired=has_aired(anime, siblings, row, now=at))
 
-    if not waiting and any(ref is not None and not ref.ready for ref in (previous, following)):
-        previous, following = _neighbours(siblings, episode, fetchable=await covered_now())
+    previous_ref = (
+        EpisodeRef.from_episode(previous, fetchable=await fetchable(previous))
+        if previous is not None
+        else None
+    )
+    following_ref = (
+        EpisodeRef.from_episode(following, fetchable=await fetchable(following))
+        if following is not None
+        else None
+    )
     # The sequel's first episode, at a finished season's end (FR-S5 item 3).
     # Not while this episode is pending or playing from its download (FR-P8):
     # that player polls this route, so a last episode watched while it still
@@ -280,16 +324,19 @@ async def play(
             anime=anime,
             episode=episode,
             has_following=following is not None,
-            covered=covered_now,
+            fetchable=fetchable,
+            rewatching=view.rewatch is not None,
             now=at,
         )
     )
     pending: PendingOut | None = None
     live: LiveOut | None = None
     subtitles = None if not_ready else SubtitlesOut.from_rendition(rendition)
-    if waiting:
+    if waiting and want is not None:
         # Playing while downloading (FR-P8, M20 T6): the same playlist URL,
-        # served from the live directory, in place of the pending wait.
+        # served from the live directory, in place of the pending wait. Only
+        # on a want of the caller's: an episode nobody of theirs asked for
+        # waits for the player's demand first.
         found = await live_servable(session, settings, episode)
         if found is not None:
             # During an idle restart the newest job has not probed yet: the
@@ -303,10 +350,22 @@ async def play(
                 subtitles = SubtitlesOut(lang=language)
     if waiting and live is None:
         release = extras.torrents.get(episode.id)
+        downloading = release is not None and episode.state is EpisodeState.DOWNLOADING
         pending = PendingOut(
             state=episode.state,
             progress=release.progress if release is not None else None,
             seeders=release.torrent.seeders if release is not None else None,
+            demanded=_open_demand(want, progress),
+            note=(
+                pending_note(
+                    release,
+                    live_refused=not release.batch
+                    and await _live_refused(session, episode.id, release),
+                )
+                if downloading and release is not None
+                else None
+            ),
+            awaiting_pick=False,
         )
     return PlayInfo(
         episode=EpisodeOut.from_episode(
@@ -317,8 +376,8 @@ async def play(
                 siblings, now=at, anime_status=anime.status, next_airing=anime.next_airing
             ),
             out_of_order=episode.number in out_of_order(siblings),
-            completed=progress is not None and progress.completed,
-            list_progress=entry.progress if entry is not None else 0,
+            completed=episode.id in view.completed_ids,
+            list_progress=view.list_progress,
             release=extras.torrents.get(episode.id),
             rendition=rendition,
             transcode_job=extras.transcode_jobs.get(episode.id),
@@ -335,11 +394,19 @@ async def play(
         duration=duration,
         resume_position=resume_position(progress, duration or None),
         resume_at=progress.updated_at if progress is not None else None,
-        previous=previous,
-        next=following,
+        previous=previous_ref,
+        next=following_ref,
         next_season=NextSeasonRef.build(sequel) if sequel is not None else None,
         subtitles=subtitles,
     )
+
+
+def _open_demand(want: Want | None, progress: WatchProgress | None) -> bool:
+    """An open demand (FR-A14, M21): live, pressed, and not finished since the press."""
+    if want is None or want.dropped_at is not None or want.demanded_at is None:
+        return False
+    finished = progress.finished_at if progress is not None else None
+    return finished is None or finished < want.demanded_at
 
 
 def _live_out(served: LiveServed, probed: Job | None) -> LiveOut:

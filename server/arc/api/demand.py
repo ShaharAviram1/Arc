@@ -35,8 +35,9 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
+from arc.api.anime_schemas import OpenDemandOut
 from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep
 from arc.models import Episode, EpisodeState
 from arc.services.acquisition.demand import DemandRefused, demand, withdraw
@@ -51,18 +52,6 @@ EPISODE_NOT_FOUND = "episode not found"
 def now() -> datetime:
     """The clock a demand is stamped with; a function so a test can pin it."""
     return datetime.now(UTC)
-
-
-class OpenDemandOut(BaseModel):
-    """One open demand, as the ``demand_cap`` refusal lists it (M21)."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    episode_id: int
-    anime_id: int
-    #: The show's title.
-    title: str
-    number: int
 
 
 class DemandOut(BaseModel):

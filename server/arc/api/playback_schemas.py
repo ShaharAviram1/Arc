@@ -13,7 +13,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from arc.api.anime_schemas import AnimeSummary, EpisodeOut
+from arc.api.anime_schemas import AnimeSummary, EpisodeOut, RewatchOut
 from arc.api.deps import MAX_ID, MIN_ID
 from arc.models import Episode, EpisodeState, Rendition
 from arc.services.playback.next_season import ListState, NextSeason
@@ -34,13 +34,15 @@ class EpisodeRef(BaseModel):
     ``ready`` is derived from ``state`` and sent anyway, so the client can
     decide whether to offer "next episode" without repeating the rule.
 
-    ``fetchable`` is play on demand's half (FR-A14, M20): the caller may
-    press play on this episode and have Arc fetch it, because their window
-    covers it **now**, on their real progress (the halfway prefetch counts
-    once they are actually past 50 %; the player re-reads ``/play``, so the
-    flag flips then). It is what ``demand`` accepts. Always false for a ready
-    episode (it needs no fetch) and while the episode being played is itself
-    pending: the client offers Next when the episode is ready **or** fetchable.
+    ``fetchable`` is play on demand's half (FR-A14, M21): the caller may
+    press play on this episode and have Arc fetch it — it has aired, is not
+    ready, and nothing would refuse the press now (the cap for an episode not
+    already demanded, a pause or a storage hold for one still to be fetched;
+    :class:`~arc.services.acquisition.demand_gate.DemandGate`). It is what
+    ``demand`` accepts. Always false for a ready episode (it needs no fetch)
+    and while the episode being played is itself pending: the client offers
+    Next when the episode is ready **or** fetchable. (M20 judged it on the
+    caller's window; that rule is retired.)
     """
 
     id: int
@@ -65,15 +67,21 @@ class NextSeasonRef(BaseModel):
 
     Set only when the episode being played has no following row, its show is
     finished there, and a ``SEQUEL`` relation resolves to a show Arc has.
-    ``episode`` is the same :class:`EpisodeRef` as ``next``. Its ``fetchable``
-    is what a demand will accept **once the press has touched the entry**:
-    for an ``active`` entry that is today's window, for a ``dormant`` or
-    ``absent`` one the window the entry will have after the touch (activated,
-    or added as Watching). ``list_state`` tells the client which touch to make
-    first: none, re-send the entry (FR-A9), or add it as Watching; ``dormant``
-    is only ever a watching or planned entry, so that re-send never moves a
-    completed one. ``aired`` is false for a sequel that is only announced or
-    whose episode has not aired, so the player can say "hasn't aired yet".
+    ``episode`` is the same :class:`EpisodeRef` as ``next``, and its
+    ``fetchable`` the same rule (aired ∧ not ready ∧ nothing would refuse the
+    press), whatever the entry (M21). ``list_state`` tells the client which
+    touch to make first: none, re-send the entry (FR-A9), or add it as
+    Watching; ``dormant`` is only ever a watching or planned entry, so that
+    re-send never moves a completed one. ``aired`` is false for a sequel that
+    is only announced or whose episode has not aired, so the player can say
+    "hasn't aired yet".
+
+    ``rewatch_carry`` (FR-W7 item 5, M21): the season being finished is in an
+    open rewatch pass and the sequel's entry has progress above 0 or is
+    completed, so the press **carries the rewatch on** — the client opens the
+    sequel's pass (``PUT /api/anime/{anime_id}/rewatch``) and makes **no list
+    write**, whatever ``list_state`` says; then demands a not-ready episode as
+    usual. False otherwise: the ordinary press, in normal mode.
     """
 
     anime_id: int
@@ -81,6 +89,7 @@ class NextSeasonRef(BaseModel):
     episode: EpisodeRef
     list_state: ListState
     aired: bool = True
+    rewatch_carry: bool = False
 
     @classmethod
     def build(cls, found: NextSeason) -> NextSeasonRef:
@@ -90,11 +99,12 @@ class NextSeasonRef(BaseModel):
             episode=EpisodeRef.from_episode(found.episode, fetchable=found.fetchable),
             list_state=found.list_state,
             aired=found.aired,
+            rewatch_carry=found.rewatch_carry,
         )
 
 
 class PendingOut(BaseModel):
-    """An episode the caller wants that is not ready yet (FR-A14, M20).
+    """An aired episode that is not ready yet (FR-A14, M20; any aired episode since M21).
 
     What the player shows while it waits: "Searching", "Downloading 43 % · 12
     seeders", "Preparing". ``progress`` is 0..1 from the download (the file's
@@ -105,6 +115,18 @@ class PendingOut(BaseModel):
     state: EpisodeState
     progress: float | None = None
     seeders: int | None = None
+    #: The caller has an open demand on it (M21). False on an episode nobody
+    #: of theirs asked for yet, or wanted only by a window or a walk: the
+    #: player then posts the demand once (pressing play is the demand).
+    demanded: bool = False
+    #: "This episode will play when its download finishes." while it cannot be
+    #: played from its download (FR-P8): it comes from a season pack, its live
+    #: remux refused this download (an MP4, pad files, no stated duration …),
+    #: or the release is named as an MP4. Null otherwise.
+    note: str | None = None
+    #: Its season pack is waiting for a person's file pick (M21 T7, §5.2 step
+    #: 4): the player links to Review. Always false until T7 fills it.
+    awaiting_pick: bool = False
 
 
 class LiveOut(BaseModel):
@@ -169,8 +191,10 @@ class PlayInfo(BaseModel):
     #: device's copy, or says to keep it offline first.
     offline_only: bool = False
     #: Set when the episode is not ready but the caller wants it (FR-A14,
-    #: M20): it is being searched for, downloaded or prepared, and the player
-    #: polls this route until ``playlist_url`` arrives. Null otherwise.
+    #: M20) — or, since M21, has aired and nobody of theirs asked for it yet
+    #: (``pending.demanded`` false: the player demands it once). It is being
+    #: searched for, downloaded or prepared, and the player polls this route
+    #: until ``playlist_url`` arrives. Null otherwise.
     pending: PendingOut | None = None
     #: Set while the episode plays from its download in progress (FR-P8, M20
     #: T6); ``pending`` is null then and ``duration`` is ``expected_duration``.
@@ -240,23 +264,6 @@ class ProgressOut(BaseModel):
     #: This report finished the pass's last episode and so ended the pass; the
     #: player says "Rewatch finished. Your list was left as it was."
     rewatch_ended: bool = False
-
-
-class RewatchOut(BaseModel):
-    """An open rewatch pass (FR-W7): ``PUT /api/anime/{id}/rewatch``'s answer.
-
-    What the show page's badge reads — "Rewatching · ep ``position`` /
-    ``total``".
-    """
-
-    started_at: datetime
-    #: The highest episode number finished in the pass; 0 at the start.
-    position: int
-    #: How many episodes have been finished in the pass.
-    finished_in_pass: int
-    #: The number whose finish ends the pass: the show's count once it has
-    #: finished airing and the count is known, else the newest aired episode.
-    total: int
 
 
 #: The most episode ids one ``GET /api/progress/completed`` may ask about.
