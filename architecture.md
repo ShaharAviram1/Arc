@@ -3950,8 +3950,9 @@ above), so what is settled here is the **copy** — file and row — and the
   `watch_progress.completed` on every row's episode — whatever the row's
   state; `trip_complete(rows, watched)`, pure, false for a trip with no
   rows; "watched" is `rules.completed_by`, the same `EXISTS` the keep rule
-  `held_episode_ids` uses, so a completion recorded in Arc and nothing
-  else: progress that exists only on MyAnimeList (imported, or advanced
+  `held_episode_ids` uses, so a completion recorded in Arc (since M21 T2
+  also a latest finish, `finished_at`, which is what a rewatch pass records)
+  and nothing else: progress that exists only on MyAnimeList (imported, or advanced
   there) does not count, and such a trip falls back to its deadline, as in
   `held_episode_ids` and `lost.py` — ends `finished` at once, whatever its deadline or deliveries; its
   still-`pending` rows (watched online) go `expired` with it and join (1)'s
@@ -4200,6 +4201,21 @@ above), so what is settled here is the **copy** — file and row — and the
    progress > 0 or is completed (otherwise normal mode: an absent sequel
    added as Watching, a dormant one activated). In normal mode a re-crossing re-stamps `finished_at`
    without a second MAL write (the list progress does not move).
+   **The tail of a finished pass** (`rewatch.finished_pass_tail`): a
+   non-manual report recorded after the user's latest pass on the show ended
+   `finished` is still judged in that pass when the episode was finished in
+   it (`finished_at >= started_at`) and the row was already at or past the
+   mark before this report — the credits of the last episode, reported after
+   the pass ended on it, never advance the list or write to MAL; scrubbing
+   under the mark or opening the episode afresh returns to normal mode, and a
+   manual mark never takes this path. A completion inside a pass, a pass
+   ending (off or finished) and an un-mark that clears a pass finish each
+   queue `compute_wants` (the pass's window moved). **The manual mark
+   (`force_complete`) moves no walk**: FR-A1 counts a walk from the episode
+   being played. Trips count a pass finish as watched: `rules.completed_by`
+   is `completed OR finished_at IS NOT NULL`. The offline un-mark replay in
+   normal mode is stale against the later of `completed_at` and
+   `finished_at`.
 
 ### 5.5a MAL sync as built (M9)
 - Link: PKCE `plain`; the `state` is Fernet-encrypted `{user_id, verifier,
@@ -7855,3 +7871,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-31 (owner) — The held-trip policy is **confirmed**: trips stay active until complete or deadline, the small copy stays until a watch confirmation or the deadline. `names.FINISH_ON_LAST_CONFIRM` stays off; the "revertible pending the owner" note no longer applies.
 - 2026-10-31 (owner) — **A trip ends when its last episode has been watched** (M20.4 F; §5.4e Sweep and the progress hook; spec FR-A12, FR-T7). "The trip should end when the last episode has been watched": the sweep's pass (2) first asks `end_if_complete` (under the trip's `FOR UPDATE` lock; `trip_complete`, pure) — every row's episode completed by the trip's user, any row state — and ends the trip `finished` with `ended_at`, expiring its still-`pending` rows (a `pending` row lives only on an active trip, which `holds_trip_episode` relies on); pass (3) in the same sweep then settles its copies. `record_progress` queues the deduplicated `trip_sweep` when a newly completed episode is on one of the user's active trips (`rules.on_active_trip`). `create_trip`'s `_end_finished_trip` applies `end_if_complete` first too, so a fully watched trip with a row still pending no longer blocks the next one with `trip_active`. `enqueue_trip_sweep` queues one follow-up behind a running sweep (`exclude_job_id`). "Watched" is one shared predicate, `rules.completed_by` (Arc completions only; MAL-only progress falls back to the deadline). This narrows the 2026-10-30 entry's "a trip with nothing pending stays active until the sweep ends it after `deadline_at`": that still holds for a trip not yet fully watched; `may_end`, `ending_state` and cancel are unchanged, and `FINISH_ON_LAST_CONFIRM` stays off. No schema change, no client change (`GET /api/trips` lists active trips only, so a finished trip leaves the panel and auto-keep, and its watched files go by `removeWatched` as before), no new dependency, no MAL-writing code.
 - 2026-11-03 (owner) — **M21: any episode on click, walking a show, rewatch mode, demo removal, pack hygiene** (§4 `watch_progress.finished_at`, `rewatches`, `walks`, `pack_picks`, `awaiting_pick`, settings `demand_max_open` and `batch_sweep_dry_run`, `users.is_demo` dropped; §5.1 and §5.1a "M21" window and demand rules; §5.2 step 4 pack pick; §5.4 and §5.4a click, rewatch control and `/play` for any aired episode; §5.5 step 6 the latest finish, walks and the rewatch branch; §5.7 latest-finish anchor and the leftover sweep; §5b; spec FR-A1, FR-A4, FR-A8, FR-A14, FR-W7, FR-T1, FR-D5). Owner: "we should make it so that every episode on every show is playable when clicked on, the episode goes into download and the video starts playing. also we will introduce a rewatch path, that will follow the same logic of normal shows, but not changing the mal entry." The five remaining calls accepted on recommendation ("go"): "Try episode 1" folded into the click; a demand can be withdrawn; Next season in a pass carries the rewatch only to a sequel with progress or completed; a pass on an airing show ends at the newest aired; How Arc works removed. Built in M21 (T1–T10, roadmap): this text is the target, and the "M21" markers say what is not live until then. Five schema revisions (R1 `finished_at` with backfill, R2 `rewatches`, R3 `walks`, R5 drop `users.is_demo`, R6 `pack_picks`) and two seeds (R4 `demand_max_open` = 3, R7 `batch_sweep_dry_run` = true), one Alembic revision each; `wants` unchanged (`demanded_at` is the last click). No new dependency. Rejected: a `pass` column or `rewatch_progress` table (a row per pass, where one timestamp against the pass start suffices); deriving walks from `watch_progress` (pre-deploy rows would start walks on long-dropped shows). Small calls (orchestrator): `demand_max_open` 0 = no cap; a pack pick pending D days auto-dismissed; the leftover sweep starts dry with a 1-hour mtime floor; `UserOut.is_demo` kept as constant `false` for one release.
+- 2026-11-03 (orchestrator's call, reported to the owner) — **The tail of a finished rewatch pass stays in the pass** (M21 T2; §5.5 step 6; spec FR-W7, FR-M7). A pass ends the moment its last episode crosses the mark, and the player keeps reporting through the credits; judged in normal mode, the next report would newly complete the episode (a pass sets no `completed`), raise the list to the end, FR-W5-auto-complete it and write both to MyAnimeList. So a non-manual report after the user's latest pass ended `finished` is still judged in that pass when the episode was finished in it and the row was already at or past the mark before the report (`rewatch.finished_pass_tail`); scrubbing under the mark or opening afresh returns to normal mode, and a manual mark never takes it. The rule only ever removes list and MAL writes. With it: a completion in a pass, a pass ending and an un-mark clearing a pass finish queue `compute_wants`; a manual mark moves no walk (FR-A1 (b): a walk counts from the episode being played); `trips.rules.completed_by` accepts `finished_at` (a pass finish is a watch confirmation for a trip, owner 2026-10-31's rule); a normal-mode offline un-mark is stale against the later of `completed_at` and `finished_at`. No schema change, no new dependency.
