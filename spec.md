@@ -817,8 +817,8 @@ is its only user, and uses it daily.
   un-aired episode (`not_aired`), beyond the cap (`demand_cap`), while
   acquisition is paused (`acquisition_paused`) and while it is held for disk
   space (`storage_held`, FR-T6) — the last two only for an episode that still
-  has to be fetched. M20's `not_in_window` refusal (a demand was allowed only
-  inside the user's window) is retired with M21. While the episode is on its
+  has to be fetched. M20's refusal of a demand outside the user's window is
+  retired with M21. While the episode is on its
   way, opening it in the player answers *pending* with its state, download
   percentage and seeders instead of "not found" — for **any** aired episode,
   demanded yet or not (the player then makes the demand once), and also when
