@@ -34,7 +34,6 @@ from arc.models import (
 from arc.services.acquisition import rules
 from arc.services.acquisition.demand import (
     ACQUISITION_PAUSED,
-    NOT_IN_WINDOW,
     STORAGE_HELD,
     DemandRefused,
     demand,
@@ -373,17 +372,17 @@ async def test_demanding_a_held_episode_wants_it_at_the_top_of_the_queue(
 
 
 @pg
-async def test_demanding_outside_the_window_is_refused(db_session: AsyncSession) -> None:
+async def test_demanding_outside_the_window_is_accepted(db_session: AsyncSession) -> None:
+    """M21 (FR-A14): any aired episode may be demanded; M20's window refusal is gone."""
     anime, rows = await a_show(db_session, 970011)
     user = await make_user(db_session, "m20-far@arc.test")
     await make_entry(db_session, user, anime, progress=4)
     await compute_wants(db_session)
 
-    with pytest.raises(DemandRefused) as refused:
-        await demand(db_session, user_id=user.id, episode=rows[8], now=datetime.now(UTC))
+    await demand(db_session, user_id=user.id, episode=rows[8], now=datetime.now(UTC))
+    await compute_wants(db_session)
 
-    assert refused.value.code == NOT_IN_WINDOW
-    assert await db_session.get(Want, (user.id, rows[8].id)) is None
+    assert await wanted(db_session, user) == {rows[4].id, rows[8].id}
 
 
 @pg
@@ -501,15 +500,31 @@ async def test_a_demanded_episode_of_a_waiting_show_is_wanted_anyway(
 
 
 @pg
-async def test_a_demanded_want_ends_when_the_user_watches_past_it(
+async def test_a_demanded_want_ends_when_the_user_finishes_it_not_when_progress_passes_it(
     db_session: AsyncSession,
 ) -> None:
+    """M21 (FR-A14): list progress moving past a demand ends nothing; a finish does."""
     anime, rows = await a_show(db_session, 970022)
     user = await make_user(db_session, "m20-past@arc.test")
     entry = await make_entry(db_session, user, anime, progress=4)
-    await demand(db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC))
+    pressed = datetime.now(UTC)
+    await demand(db_session, user_id=user.id, episode=rows[4], now=pressed)
 
     entry.progress = 5
+    await db_session.flush()
+    await compute_wants(db_session)
+    assert await wanted(db_session, user) == {rows[4].id, rows[5].id}, "still demanded"
+
+    db_session.add(
+        WatchProgress(
+            user_id=user.id,
+            episode_id=rows[4].id,
+            position_s=LENGTH,
+            duration_s=LENGTH,
+            completed=True,
+            finished_at=pressed + timedelta(minutes=30),
+        )
+    )
     await db_session.flush()
     await compute_wants(db_session)
 
@@ -524,8 +539,9 @@ async def test_the_stale_drop_still_applies_to_a_demanded_want(
     anime, rows = await a_show(db_session, 970023)
     user = await make_user(db_session, "m20-stale@arc.test")
     await make_entry(db_session, user, anime, progress=4)
-    await demand(db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC))
     long_ago = datetime.now(UTC) - timedelta(days=60)
+    # M21: a demand's own clock is the press (and plays), not the list.
+    await demand(db_session, user_id=user.id, episode=rows[4], now=long_ago)
     rows[4].state = EpisodeState.READY
     rows[4].state_changed_at = long_ago
     entry = await db_session.get(ListEntry, (user.id, anime.id))
@@ -542,9 +558,10 @@ async def test_the_stale_drop_still_applies_to_a_demanded_want(
 
 
 @pg
-async def test_a_demand_on_a_show_that_stops_being_watched_is_shelved(
+async def test_a_demand_on_a_show_that_stops_being_watched_stays_wanted(
     db_session: AsyncSession,
 ) -> None:
+    """M21 (FR-A14): never shelved for list status."""
     anime, rows = await a_show(db_session, 970024)
     user = await make_user(db_session, "m20-shelve@arc.test")
     entry = await make_entry(db_session, user, anime, progress=4)
@@ -555,7 +572,7 @@ async def test_a_demand_on_a_show_that_stops_being_watched_is_shelved(
     await compute_wants(db_session)
 
     want = await db_session.get(Want, (user.id, rows[4].id))
-    assert want is not None and want.dropped_at is not None
+    assert want is not None and want.dropped_at is None
 
 
 # --- the progress paths -----------------------------------------------------------

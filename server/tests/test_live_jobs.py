@@ -328,7 +328,6 @@ async def test_a_pre_match_refusal_means_no_live_remux_and_demand_says_so(
 
         user = await make_user(session, "live-demander@arc.test")
         await session.commit()
-        monkeypatch.setattr(demand_module, "coverable", _covering(episode.id))
         # The request path never asks the catalogue (it holds the want lock).
         lookups: list[object] = []
         real_catalog_for = prematch_module.catalog_for
@@ -377,13 +376,6 @@ async def test_a_pre_match_refusal_means_no_live_remux_and_demand_says_so(
     assert not live_dir_for(settings, download.episode.id).exists()
 
 
-def _covering(*episode_ids: int):  # type: ignore[no-untyped-def]
-    async def coverable(session: object, user_id: int, *, now: datetime) -> set[int]:
-        return set(episode_ids)
-
-    return coverable
-
-
 async def test_a_demand_on_a_downloading_single_queues_sequential_and_live(
     api_factory: SessionFactory, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -392,7 +384,6 @@ async def test_a_demand_on_a_downloading_single_queues_sequential_and_live(
         download = await a_download(session, settings, monkeypatch, anilist_id=976013)
         user = await make_user(session, "live-demander-2@arc.test")
         await session.commit()
-        monkeypatch.setattr(demand_module, "coverable", _covering(download.episode.id))
         episode = await session.get(Episode, download.episode.id)
         assert episode is not None
         outcome = await demand_module.demand(

@@ -794,8 +794,8 @@ is its only user, and uses it daily.
   live and the user has not finished the episode since last pressing play on
   it. Pressing play again on an episode already demanded restamps it and
   never counts twice; a click on a new episode beyond the cap is refused
-  (`demand_cap`) with "You already have 3 episodes fetching on request.
-  Finish or cancel one first." and the list of the open demands, each
+  (`demand_cap`) with "You already have 3 episodes on request. Finish or
+  cancel one first." and the list of the open demands, each
   linking to its episode. The count is taken under the same lock as the
   write, so two clicks at once cannot both take the last place.
   **Lifetime** (M21): a demanded episode is wanted unconditionally — never
@@ -1864,10 +1864,12 @@ is its only user, and uses it daily.
   remain for any reason (watched past, show set to on hold / dropped /
   completed, removed from the list, or dropped as stale), FR-T1's grace
   applies from that moment; a want never disappears without leaving a
-  grace anchor behind. A demand (FR-A14) goes stale D days after the later
-  of its last press and the user's last play of the episode, in any episode
-  state; the clock also restarts on a walk's last move and a rewatch pass's
-  start (M21).
+  grace anchor behind. For a want from a window (FR-A1: the list's, a
+  walk's or a rewatch pass's) the user's last action on the show also
+  includes the walk's last move and the open pass's start (M21). A demand
+  (FR-A14) keeps its own clock: it goes stale D days after the later of its
+  last press and the user's last play of that episode, in any episode state
+  — a walk or a pass does not restart it (M21).
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired. The small offline copy
   (FR-P6) is deleted with the rest, row and file. **A single is re-acquired
@@ -3494,6 +3496,13 @@ through the same edge, without the grace period.
   never touches a file changed within the last hour (FR-T1); `/api/auth/me`
   keeps `is_demo: false` for one release so a cached installed app does not
   reject it (FR-D5).
+- 2026-11-03 (orchestrator's small call, reported to the owner) — the cap
+  refusal (FR-A14) says "You already have 3 episodes on request." rather than
+  "fetching on request", because the count includes ready-but-unwatched and
+  unavailable episodes.
+- 2026-11-03 (orchestrator's call, reported to the owner) — FR-T2 reworded
+  (M21 T3 review): a walk's last move and a rewatch pass's start restart the
+  stale clock of window wants only; a demand's clock is its own press or play.
 - 2026-11-03 (orchestrator's call, reported to the owner) — A rewatch pass
   keeps its tail (FR-W7 item 4): the player keeps reporting through the
   credits after a pass ends, and those reports would otherwise newly complete

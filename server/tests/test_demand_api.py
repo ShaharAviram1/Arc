@@ -35,9 +35,14 @@ from arc.models import (
     Want,
 )
 from arc.services.acquisition import rules
-from arc.services.acquisition.demand import NOT_IN_WINDOW, NOT_IN_WINDOW_MESSAGE
-from arc.services.acquisition.names import DEMAND_PRIORITY, SEARCH_RELEASE
-from arc.services.acquisition.rules import PAUSED_KEY
+from arc.services.acquisition.demand import (
+    DEMAND_CAP,
+    NOT_AIRED,
+    NOT_AIRED_MESSAGE,
+    demand_cap_message,
+)
+from arc.services.acquisition.names import COMPUTE_WANTS, DEMAND_PRIORITY, SEARCH_RELEASE
+from arc.services.acquisition.rules import DEMAND_MAX_OPEN_KEY, PAUSED_KEY
 from arc.services.catalog.airing import FINISHED
 from tests.acquisition_helpers import (
     fake_free_space,
@@ -130,17 +135,18 @@ async def test_demanding_the_window_episode_answers_202(
         assert search is not None and search.priority == DEMAND_PRIORITY
 
 
-async def test_demanding_outside_the_window_is_a_409_with_a_sentence(
+async def test_demanding_outside_the_window_answers_202(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
+    """M21 (FR-A14): any aired episode; the window refusal is retired."""
     ids = await followed_show(api_factory, user.id, anilist_id=975002)
 
     response = await client.post(f"/api/episodes/{ids[8]}/demand")
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == {"code": NOT_IN_WINDOW, "message": NOT_IN_WINDOW_MESSAGE}
+    assert response.status_code == 202, response.text
     async with api_factory() as session:
-        assert await session.get(Want, (user.id, ids[8])) is None
+        want = await session.get(Want, (user.id, ids[8]))
+        assert want is not None and want.demanded_at is not None
 
 
 async def test_demanding_an_episode_held_on_a_device_answers_202(
@@ -214,6 +220,87 @@ async def test_demand_needs_an_allowed_origin(
     assert response.status_code == 403
 
 
+# --- M21: the cap, not aired, and withdrawing (FR-A14) ---------------------------------
+
+
+async def test_the_fourth_demand_is_a_409_listing_the_open_three(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    ids = await followed_show(api_factory, user.id, anilist_id=975070)
+    async with api_factory() as session:
+        await set_setting(session, DEMAND_MAX_OPEN_KEY, 3)
+        await session.commit()
+    for episode_id in ids[6:9]:
+        assert (await client.post(f"/api/episodes/{episode_id}/demand")).status_code == 202
+
+    refused = await client.post(f"/api/episodes/{ids[9]}/demand")
+    again = await client.post(f"/api/episodes/{ids[7]}/demand")
+
+    assert refused.status_code == 409
+    detail = refused.json()["detail"]
+    assert detail["code"] == DEMAND_CAP and detail["message"] == demand_cap_message(3)
+    assert [(row["episode_id"], row["number"]) for row in detail["open"]] == [
+        (ids[6], 7),
+        (ids[7], 8),
+        (ids[8], 9),
+    ]
+    assert all(row["title"] and row["anime_id"] for row in detail["open"])
+    assert again.status_code == 202, "an open demand pressed again never counts twice"
+
+
+async def test_an_unaired_episode_is_a_409(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=975071, status="RELEASING", episodes=12)
+        rows = await make_episodes(session, anime, 12, aired_through=4)
+        await session.commit()
+
+    response = await client.post(f"/api/episodes/{rows[6].id}/demand")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"code": NOT_AIRED, "message": NOT_AIRED_MESSAGE}
+
+
+async def test_withdrawing_answers_204_and_is_idempotent(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    ids = await followed_show(api_factory, user.id, anilist_id=975072)
+    assert (await client.post(f"/api/episodes/{ids[8]}/demand")).status_code == 202
+    async with api_factory() as session:
+        for job in (await session.scalars(select(Job).where(Job.type == COMPUTE_WANTS))).all():
+            await session.delete(job)
+        await session.commit()
+
+    first = await client.delete(f"/api/episodes/{ids[8]}/demand")
+    second = await client.delete(f"/api/episodes/{ids[8]}/demand")
+    never = await client.delete(f"/api/episodes/{ids[9]}/demand")
+    unknown = await client.delete("/api/episodes/999999999/demand")
+
+    assert first.status_code == second.status_code == never.status_code == 204
+    assert unknown.status_code == 404
+    async with api_factory() as session:
+        want = await session.get(Want, (user.id, ids[8]))
+        assert want is not None and want.demanded_at is None
+        assert want.dropped_at is not None, "shelved by the withdrawal"
+        queued = (await session.scalars(select(Job).where(Job.type == COMPUTE_WANTS))).all()
+        assert len(queued) == 1
+
+
+async def test_withdrawing_needs_a_session_and_an_allowed_origin(
+    api_app: FastAPI, api_client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    ids = await followed_show(api_factory, user.id, anilist_id=975073)
+    assert (await api_client.delete(f"/api/episodes/{ids[4]}/demand")).status_code == 401
+    async with api_transport(api_app) as http:
+        await login(http, USER_EMAIL, USER_PASSWORD)
+        response = await http.delete(
+            f"/api/episodes/{ids[4]}/demand", headers={"Origin": "https://evil.example"}
+        )
+
+    assert response.status_code == 403
+
+
 # --- Next season: the touch, then the demand (FR-S5 item 3, FR-A9, 2026-10-18) -------
 
 
@@ -241,23 +328,17 @@ async def sequel_show(
     ("entry", "touch"),
     [("absent", {"status": "watching"}), ("dormant", {})],
 )
-async def test_after_the_touch_episode_one_is_covered_in_the_same_flow(
+async def test_the_touch_then_the_demand_in_the_same_flow(
     client: AsyncClient, user: User, api_factory: SessionFactory, entry: str, touch: dict[str, str]
 ) -> None:
-    """No wait for the scheduled ``compute_wants``: the demand computes coverage itself.
+    """The player's press is the list write and then the demand, no wait between.
 
-    Before the press the sequel's episode 1 is outside every window (not on the
-    list, or an untouched import), so a bare demand is refused. The player's
-    press is the list write and then the demand, and the demand right after
-    the write is accepted.
+    Since M21 (FR-A14) the demand would be accepted without the touch too: any
+    aired episode may be demanded.
     """
     anime_id, *ids = await sequel_show(
         api_factory, user.id, anilist_id=975050 + int(entry == "dormant"), entry=entry
     )
-
-    refused = await client.post(f"/api/episodes/{ids[0]}/demand")
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["code"] == NOT_IN_WINDOW
 
     written = await client.put(f"/api/list/{anime_id}", json=touch)
     assert written.status_code == 200, written.text
@@ -450,9 +531,10 @@ async def test_play_on_a_ready_episode_carries_no_pending(
     body = response.json()
     assert body["pending"] is None
     assert body["playlist_url"] == f"/media/{ids[4]}/index.m3u8"
-    # Before half-way the next one is not covered, and demand would refuse it.
+    # Before half-way the next one is not covered (``fetchable`` is T4's to
+    # change); the demand itself takes any aired episode since M21 (FR-A14).
     assert body["next"]["fetchable"] is False
-    assert (await client.post(f"/api/episodes/{ids[5]}/demand")).status_code == 409
+    assert (await client.post(f"/api/episodes/{ids[5]}/demand")).status_code == 202
 
 
 async def test_next_becomes_fetchable_once_the_user_is_half_way(

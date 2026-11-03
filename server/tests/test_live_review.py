@@ -52,7 +52,6 @@ from tests.acquisition_helpers import acquisition_settings, make_user
 from tests.live_helpers import KIB, MIB, a_download, install_live_ffmpeg, write_served
 from tests.media_helpers import REMUX_SOURCE_PROBE
 from tests.test_live_jobs import (  # noqa: F401  (the fixtures are used by name)
-    _covering,
     _fast,
     a_live_job,
     a_remux_job,
@@ -279,7 +278,6 @@ async def test_a_demand_does_not_restart_a_running_or_finished_live_remux(
         await session.commit()
         user = await make_user(session, f"live-again-{status.value}@arc.test")
         await session.commit()
-        monkeypatch.setattr(demand_module, "coverable", _covering(download.episode.id))
         episode = await session.get(Episode, download.episode.id)
         assert episode is not None
         outcome = await demand_module.demand(

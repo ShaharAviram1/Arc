@@ -58,6 +58,7 @@ from arc.models import (
 )
 from arc.models.tracking import OPEN_REWATCH_PREDICATE
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.acquisition.walks import end_walk
 from arc.services.catalog.airing import FINISHED, aired_episodes
 
 
@@ -375,8 +376,9 @@ async def stop(
 ) -> bool:
     """End the open pass, if there is one (idempotent). Whether one was ended.
 
-    The list window comes back, so a reconciliation is queued when a pass
-    actually ended. Flushed, not committed.
+    The list window comes back and the pass's walk (one touched since it
+    began) is deleted, so a reconciliation is queued when a pass actually
+    ended. Flushed, not committed.
     """
     ended = await session.scalar(
         update(Rewatch)
@@ -386,10 +388,13 @@ async def stop(
             Rewatch.ended_at.is_(None),
         )
         .values(ended_at=now, end_reason=reason)
-        .returning(Rewatch.id)
+        .returning(Rewatch.started_at)
     )
     if ended is None:
         return False
+    # The pass's own walk goes with it (FR-A1, M21): switching the pass off
+    # stops the fetching it drove. A walk older than the pass is not its.
+    await end_walk(session, user_id=user_id, anime_id=anime_id, since=ended)
     await enqueue_compute_wants(session)
     return True
 
@@ -410,6 +415,9 @@ async def finish(session: AsyncSession, rewatch: Rewatch, *, at: datetime) -> bo
     if ended is None:
         return False
     await session.refresh(rewatch)
+    await end_walk(
+        session, user_id=rewatch.user_id, anime_id=rewatch.anime_id, since=rewatch.started_at
+    )
     await enqueue_compute_wants(session)
     return True
 

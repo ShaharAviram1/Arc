@@ -517,7 +517,7 @@ service worker at build time; the options live in `client/src/lib/pwa.ts`
 | `list_entries` | user_id, anime_id (PK pair), status, progress, score, updated_at, updated_by (arc/mal), mal_synced_at, mal_dirty, activated_at (when the user first touched this show **in Arc** — FR-A9's dormancy stamp; null on a row a MyAnimeList import created and nobody has acted on since, write-once and never cleared, written only by `PUT /api/list/{id}`, the watch-completion path and `request_sample`, and never by any MAL path; since M21 never by a report made in rewatch mode either, FR-W7) |
 | `watch_progress` | user_id, episode_id (PK pair), position_s, duration_s, completed, completed_at (set once: the first watch), unmarked_at (nullable; when the user last un-marked, never moving backwards — what an offline completion replayed later is judged against, FR-S8, owner 2026-10-05), updated_at, finished_at (TIMESTAMPTZ NULL, **M21** T1 revision `b1e5f2a8c4d0` (`watch_progress_finished_at`), spec FR-S4: the latest moment this user crossed the 90 % mark or marked the episode by hand, in **any** mode — stamped on every crossing that passes the live-duration guard, with a `greatest()` guard so a late replay never moves it back, and cleared by an un-mark (in a rewatch pass only when it is `>= rewatches.started_at`); backfilled `finished_at = completed_at WHERE completed`. It ends a demand (`finished_at >= wants.demanded_at`, §5.1a), counts a rewatch pass (`finished_at >= rewatches.started_at`, §5.5), is retention's watched anchor (§5.7) and is the time `GET /api/progress/completed` reports. A `pass` column or a `rewatch_progress` table was rejected: both need a row per pass, where one timestamp compared with the pass start answers the same question with no key change) |
 | `rewatches` | **M21** T1 revision `c3a9d7e1f526` (`rewatches`; `models/tracking.py::Rewatch`, spec FR-W7): id, user_id (FK CASCADE), anime_id (FK CASCADE), started_at (NOT NULL), ended_at (NULL while open), end_reason (VARCHAR(16) NULL: `off` \| `finished`). Partial unique index `uq_rewatches_open (user_id, anime_id) WHERE ended_at IS NULL` — one open pass per user and show; `ix_rewatches_user_id_anime_id_started_at` serves "the pass open at time t for (user, show)" and, by its prefix, a user's passes; the reasons are `REWATCH_END_OFF` / `REWATCH_END_FINISHED` in `models/tracking.py`. Ended rows are **kept**, so an offline report is judged against the pass that was open when the device recorded it (FR-S8). No cursor column: the pass position is derived as the highest episode number with `finished_at >= started_at`. Written only by `services/playback/rewatch.py` |
-| `walks` | **M21** T1 revision `d4f8b2c6e937` (`walks`; `Walk`, spec FR-A1): user_id + anime_id (PK pair, FK CASCADE), after_number (INT NOT NULL: where the look-ahead starts after a play — k−1 while episode k plays, k once it is finished), touched_at (TIMESTAMPTZ NOT NULL). Written only by `record_progress`, and only when the report's time is `>= touched_at` (an older replay does not move it). Stored, not derived from `watch_progress`, so the progress rows from before the deploy cannot start walks on long-dropped shows (walks start empty) |
+| `walks` | **M21** T1 revision `d4f8b2c6e937` (`walks`; `Walk`, spec FR-A1): user_id + anime_id (PK pair, FK CASCADE), after_number (INT NOT NULL: where the look-ahead starts after a play — k−1 while episode k plays, k once it is finished), touched_at (TIMESTAMPTZ NOT NULL). Written only by `record_progress`, and only when the report's time is `>= touched_at` (an older replay does not move it). **Deleted** (`acquisition/walks.end_walk`, M21 T3) by the user's Arc-side status write to dropped, on hold or completed (`catalog.lists.set_list_entry`, only when the request changes the status; a MyAnimeList-side change deletes nothing), by FR-W5's auto-complete (`playback.progress._advance_list`), and by `rewatch.stop`/`finish` when it was touched at or after the pass's start; otherwise it lapses after D days. Stored, not derived from `watch_progress`, so the progress rows from before the deploy cannot start walks on long-dropped shows (walks start empty) |
 | `show_pins` | user_id (FK CASCADE) + anime_id (FK CASCADE) (PK pair), created_at. A user's "Keep files" on a show (FR-T8, M20 T8, revision `911eca1dfc62`): delete after watching skips every episode of a show with **any** row here; only the floor eviction (§5.7) may still remove them. Written only by `services/pins.py` (`INSERT … ON CONFLICT DO NOTHING` / `DELETE`, both idempotent). No index beyond the key: a few rows per user, read whole once an hour |
 | `mal_links` | user_id (PK), mal_username, access_token_enc, refresh_token_enc, expires_at, last_import_at |
 | `mal_write_log` | id, user_id (CASCADE), anime_id (RESTRICT: audit rows must never be deleted by cache pruning), field, old_value, new_value (JSONB), cause (watch/manual/revert, plus `conflict` which is never a write), status (pending/ok/failed/skipped), error, created_at |
@@ -630,16 +630,32 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
     aired yet."); (3) the caller already has an open demand on it → restamp
     `demanded_at`, skip the cap; (4) `open_demands(user) >= demand_max_open`
     (cap ≠ 0) → refuse `demand_cap` with `open: [{episode_id, anime_id,
-    title, number}]` and "You already have 3 episodes fetching on request.
-    Finish or cancel one first." — an open demand is a live want
+    title, number}]` and "You already have 3 episodes on request. Finish or
+    cancel one first." — an open demand is a live want
     (`dropped_at IS NULL`, `demanded_at IS NOT NULL`) with no
     `finished_at >= demanded_at`, counted under the lock so two clicks
     cannot both take the last place; (5) paused / storage-held and the
     episode needs fetching → refuse as before; (6) upsert,
     `start_search(retry_now, DEMAND_PRIORITY)`, raise a queued search,
     `qbit_top`, `_start_live` — unchanged. `withdraw()` (`DELETE
-    /api/episodes/{id}/demand`) sets `demanded_at = NULL` and queues
-    `compute_wants`; the row then lives or ends as an ordinary want.
+    /api/episodes/{id}/demand`) first asks — while the row is still a
+    demand, which never occupies a slot, so it cannot admit its own show —
+    the caller's own plan (`wants.user_plan`, one user's lists, as
+    `slot_view`) plus an active trip of theirs pending on the episode
+    whether anything they follow still wants it, then sets `demanded_at =
+    NULL`. If so the row stays live as an ordinary want
+    and nothing is cancelled (a download the admitted window wants runs
+    on). If not — an unfollowed show, outside every window, a show the slot
+    cap holds — it **shelves** the row at once (`REASON_WITHDRAWN`,
+    "withdrawn on request"; the reconciler relabels it `REASON_NOT_WANTING`
+    on a show nobody follows, leaves it on a held one, and on a followed,
+    admitted show deletes it by the ordinary left-the-window rule) and releases the
+    episode or cancels its download through `release_if_unwanted` /
+    `cancel_if_unwanted` (which keep it while another user or a trip still
+    wants it) — even while acquisition is paused, since the user asked and
+    it frees space. `compute_wants` is queued either way. On a held show the
+    row stays shelved until the show gets a slot and its window revives it
+    (the M20 rule), so a withdrawn demand never occupies a slot.
   - *Demand lifetime* (`_demanded_wants(session, now, stale)`): every open
     demand is in `desired` **unconditionally** — any list status, progress,
     dormancy, slot cap, device holding, N = 0. It ends when finished
@@ -648,19 +664,41 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
     `finished_at` gives the 6-hour watched grace), when stale
     (`greatest(demanded_at, watch_progress.updated_at) < now − D` in any
     episode state → `_drop_stale` with `STALE_DROP_REASON`; only a new click
-    revives it), or when withdrawn. A demanded trip episode always enters
-    `desired` (it is no longer trip-only, so it gets an HLS rendition).
-    `plan.covers`, M20's coverage helpers and its window-only refusal are
+    revives it — or, when the episode is not `ready`, the row is
+    **deleted**: there is nothing for retention to anchor, and a dropped row
+    would keep a later window from fetching the episode), or when
+    withdrawn. A finished or stale demand that a
+    window, walk, pass, sample or trip still asks for — a held show's
+    pre-cap window included (`_Plan.held_windows`) — is not deleted or
+    dropped: `_reconcile` clears its `demanded_at` and it lives on as an
+    ordinary want under that source's own rules (FR-T2's own `quiet_since`,
+    the trip's lifetime) — it stops counting toward `demand_max_open` and
+    loses `DEMAND_PRIORITY`; only a stale demand nothing else wants is
+    dropped and its download cancelled. A dropped demand revived by a
+    window or trip also loses `demanded_at`: only a click makes a demand
+    again. A demand's row is never trip-only and never a sample — the
+    upsert clears `trip` and `sample`, so a trip's cancel and release and a
+    sample's cancel (which skip such rows as their own) count it as the live
+    want it is. A demanded trip episode always enters `desired` (so it gets
+    an HLS rendition). `plan.covers` and M20's coverage helpers go in T4
+    with their last callers (`fetchable`); the window-only refusal is
     deleted.
   - *Windows per (user, show)* in `_plan_wants`. Base position `p_base`: an
     open rewatch → `p_rw` (the highest number with `finished_at >=
     started_at`, else 0) and the list window is **suspended**; else a
     watching/planned non-dormant entry → `watched_through(list progress,
     highest completed)`; else none. Walk position `p_walk`:
-    `walks.after_number` when `touched_at >= now − D` and (with a rewatch
-    open, `touched_at >= started_at`; without one, no Arc-side status
-    change to dropped/on-hold/completed later than `touched_at` — an FR-W5
-    auto-complete included). The window is `window(p_base) ∪
+    `walks.after_number` when `touched_at >= now − D` and, with a rewatch
+    open, `touched_at >= started_at` (`walk_counts`; nothing about the list
+    entry is read). A walk otherwise ends by being **deleted** where the
+    ending happens (`acquisition/walks.end_walk`): the user setting the show
+    dropped, on hold or completed in Arc (`set_list_entry`, only when the
+    request changes the status — a score edit or a re-sent status ends
+    nothing, a MyAnimeList-side change ends nothing), FR-W5's auto-complete,
+    and a rewatch pass ending by the switch or on its last episode when the
+    walk moved during the pass (the pass's fetching stops with it). Reading
+    the entry instead fails: FR-S4's own list advance stamps it in the very
+    instant a finishing report moves the walk. The window is `window(p_base) ∪
     window(p_walk)`, each with `show_look_ahead`, its own `_halfway`
     prefetch on its own first episode and the `_device_held` skip;
     `plan.progress[pair]` is the lower of the positions present.
@@ -7885,3 +7923,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-10-31 (owner) — **A trip ends when its last episode has been watched** (M20.4 F; §5.4e Sweep and the progress hook; spec FR-A12, FR-T7). "The trip should end when the last episode has been watched": the sweep's pass (2) first asks `end_if_complete` (under the trip's `FOR UPDATE` lock; `trip_complete`, pure) — every row's episode completed by the trip's user, any row state — and ends the trip `finished` with `ended_at`, expiring its still-`pending` rows (a `pending` row lives only on an active trip, which `holds_trip_episode` relies on); pass (3) in the same sweep then settles its copies. `record_progress` queues the deduplicated `trip_sweep` when a newly completed episode is on one of the user's active trips (`rules.on_active_trip`). `create_trip`'s `_end_finished_trip` applies `end_if_complete` first too, so a fully watched trip with a row still pending no longer blocks the next one with `trip_active`. `enqueue_trip_sweep` queues one follow-up behind a running sweep (`exclude_job_id`). "Watched" is one shared predicate, `rules.completed_by` (Arc completions only; MAL-only progress falls back to the deadline). This narrows the 2026-10-30 entry's "a trip with nothing pending stays active until the sweep ends it after `deadline_at`": that still holds for a trip not yet fully watched; `may_end`, `ending_state` and cancel are unchanged, and `FINISH_ON_LAST_CONFIRM` stays off. No schema change, no client change (`GET /api/trips` lists active trips only, so a finished trip leaves the panel and auto-keep, and its watched files go by `removeWatched` as before), no new dependency, no MAL-writing code.
 - 2026-11-03 (owner) — **M21: any episode on click, walking a show, rewatch mode, demo removal, pack hygiene** (§4 `watch_progress.finished_at`, `rewatches`, `walks`, `pack_picks`, `awaiting_pick`, settings `demand_max_open` and `batch_sweep_dry_run`, `users.is_demo` dropped; §5.1 and §5.1a "M21" window and demand rules; §5.2 step 4 pack pick; §5.4 and §5.4a click, rewatch control and `/play` for any aired episode; §5.5 step 6 the latest finish, walks and the rewatch branch; §5.7 latest-finish anchor and the leftover sweep; §5b; spec FR-A1, FR-A4, FR-A8, FR-A14, FR-W7, FR-T1, FR-D5). Owner: "we should make it so that every episode on every show is playable when clicked on, the episode goes into download and the video starts playing. also we will introduce a rewatch path, that will follow the same logic of normal shows, but not changing the mal entry." The five remaining calls accepted on recommendation ("go"): "Try episode 1" folded into the click; a demand can be withdrawn; Next season in a pass carries the rewatch only to a sequel with progress or completed; a pass on an airing show ends at the newest aired; How Arc works removed. Built in M21 (T1–T10, roadmap): this text is the target, and the "M21" markers say what is not live until then. Five schema revisions (R1 `finished_at` with backfill, R2 `rewatches`, R3 `walks`, R5 drop `users.is_demo`, R6 `pack_picks`) and two seeds (R4 `demand_max_open` = 3, R7 `batch_sweep_dry_run` = true), one Alembic revision each; `wants` unchanged (`demanded_at` is the last click). No new dependency. Rejected: a `pass` column or `rewatch_progress` table (a row per pass, where one timestamp against the pass start suffices); deriving walks from `watch_progress` (pre-deploy rows would start walks on long-dropped shows). Small calls (orchestrator): `demand_max_open` 0 = no cap; a pack pick pending D days auto-dismissed; the leftover sweep starts dry with a 1-hour mtime floor; `UserOut.is_demo` kept as constant `false` for one release.
 - 2026-11-03 (orchestrator's call, reported to the owner) — **A rewatch pass keeps its tail, ends at the server's time, and replays fail closed** (M21 T2; §5.5 step 6; spec FR-W7 item 4, FR-M7, FR-S8). The player keeps reporting through the credits after a pass ends, and a pass sets no `completed`, so those reports would newly complete the episode in normal mode and write the list and MyAnimeList. A non-manual report after the user's latest pass ended (off or finished) is judged in that pass when the episode was finished in it, the row was already at or past the mark, and either it is the episode on which the pass ended (ended `finished`, number at or past the pass's last number as it stood at `ended_at`; for good) or the report is within `TAIL_GRACE` = 1 h of the end (`rewatch.tail_applies`, pure). A pass ends at the server's `now`, never a replayed stamp (an end in the past pushed later queued records of the same pass into normal mode). A replay whose time the 30-day sync clamp moved is judged by its unclamped time, and failing that by any pass overlapping the span (`rewatch_judged`). With it: a completion in a pass, a pass ending and an un-mark clearing a pass finish queue `compute_wants`; a manual mark moves no walk (FR-A1 (b): a walk counts from the episode being played); `trips.rules.completed_by(user, since=trips.created_at)` accepts `finished_at >= since` (a pass finish during the trip is a watch confirmation, owner 2026-10-31's rule; an older pass's is not); a normal-mode offline un-mark is stale against the later of `completed_at` and `finished_at`. Every rule here only ever removes list and MAL writes. No schema change, no new dependency.
+- 2026-11-03 (orchestrator's call, reported to the owner) — **A demand ends into an ordinary want when something else still wants it; a demand's row is neither trip-only nor a sample; a walk ends by being deleted where the user ends it** (M21 T3 and its review; §4 `walks`, §5.1a "M21 window and demand rules"; spec FR-A1, FR-A10, FR-A14, FR-T2, FR-W7). A finished or stale demand that a window (a held show's pre-cap window included), walk, pass, sample or trip still asks for loses `demanded_at` and lives on under that source's rules; only a stale demand nothing else wants ends — dropped when its episode is ready, deleted otherwise — and its download is cancelled; only a click makes a demand again. The demand upsert clears `trip` and `sample` so trip cancel/release and the sample cancel never stop an open demand. A walk is deleted (`acquisition/walks.end_walk`) by the user's Arc-side status change to dropped/on hold/completed, by FR-W5's auto-complete and by a rewatch pass ending (when the walk moved during it); the earlier reading of the entry as it stands is withdrawn, because FR-S4's list advance on finishing an episode of a dropped or on-hold show stamped the entry in the instant the walk moved and ended every walk on its own completion (review). Withdrawing a demand asks the user's plan while the row is still a demand (so it cannot make its own show an occupant), then keeps the row live as an ordinary want when the user's own plan (admitted window, walk, pass, prefetch) or a pending trip of theirs still wants the episode; otherwise it shelves the row at once (`REASON_WITHDRAWN`, kept on a held show, relabelled on an unfollowed one, deleted on a followed admitted show by the ordinary left-the-window rule) and releases or cancels the episode through the existing cancel path, which keeps it for another user or a trip — paused or not. On a held show it stays shelved until admitted, so a withdrawn demand never holds a slot. An undo from the write log that restores dropped/on hold/completed ends the walk like the list write (`api.mal.revert`); a progress report recorded before a walk ended and replayed after it can recreate the walk until it lapses (accepted). The slot occupancy rule and the 2026-10-20 in-flight rule are unchanged, held shows included. No schema change, no new dependency.
