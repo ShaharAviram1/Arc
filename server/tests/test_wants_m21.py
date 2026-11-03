@@ -51,16 +51,20 @@ from arc.services.acquisition.holdings import replace_holdings
 from arc.services.acquisition.names import COMPUTE_WANTS, QBIT_CANCEL
 from arc.services.acquisition.qbit import QBIT_CANCELLED
 from arc.services.acquisition.reject import reject_download
-from arc.services.acquisition.rules import DEMAND_MAX_OPEN_KEY, SLOT_CAP_KEY
+from arc.services.acquisition.rules import DEMAND_MAX_OPEN_KEY, PAUSED_KEY, SLOT_CAP_KEY
 from arc.services.acquisition.wants import (
     REASON_NOT_WANTING,
     STALE_DROP_REASON,
+    _current_plan,
     compute_wants,
+    slot_view,
     walk_counts,
 )
 from arc.services.catalog.airing import FINISHED, RELEASING
+from arc.services.catalog.lists import set_list_entry
 from arc.services.playback.progress import record_progress
 from arc.services.playback.rewatch import start as start_rewatch
+from arc.services.playback.rewatch import stop as stop_rewatch
 from arc.services.trips.cancel import cancel_trip
 from arc.services.trips.create import create_trip
 from arc.services.trips.release import release_episode
@@ -81,40 +85,19 @@ T0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 # --- walk_counts, pure ----------------------------------------------------------------
 
 
-def an_entry(status: ListStatus, *, by: UpdatedBy, at: datetime) -> ListEntry:
-    return ListEntry(user_id=1, anime_id=1, status=status, progress=0, updated_by=by, updated_at=at)
-
-
 @pytest.mark.parametrize(
-    ("pass_started", "entry", "expected"),
+    ("pass_started", "expected"),
     [
-        # No list entry: the walk counts.
-        (None, None, True),
-        # Watching, changed after the walk: still counts.
-        (None, an_entry(ListStatus.WATCHING, by=UpdatedBy.ARC, at=T0 + timedelta(hours=1)), True),
-        # Dropped in Arc before the walk moved: the walk is newer, it counts.
-        (None, an_entry(ListStatus.DROPPED, by=UpdatedBy.ARC, at=T0 - timedelta(days=1)), True),
-        # Dropped / on hold / completed in Arc after it moved: ended.
-        (None, an_entry(ListStatus.DROPPED, by=UpdatedBy.ARC, at=T0 + timedelta(hours=1)), False),
-        (None, an_entry(ListStatus.ON_HOLD, by=UpdatedBy.ARC, at=T0 + timedelta(hours=1)), False),
-        # FR-W5's auto-complete stamps the entry with the walk's own moment.
-        (None, an_entry(ListStatus.COMPLETED, by=UpdatedBy.ARC, at=T0), False),
-        # A MyAnimeList-side change is not the user acting in Arc.
-        (None, an_entry(ListStatus.DROPPED, by=UpdatedBy.MAL, at=T0 + timedelta(hours=1)), True),
-        # A pass open: only a walk that moved since it began counts, status aside.
-        (T0 - timedelta(hours=1), None, True),
-        (T0 + timedelta(hours=1), None, False),
-        (
-            T0 - timedelta(hours=1),
-            an_entry(ListStatus.DROPPED, by=UpdatedBy.ARC, at=T0 + timedelta(hours=2)),
-            True,
-        ),
+        # No pass: a walk touched within D counts; nothing about the entry is read.
+        (None, True),
+        # A pass open: only a walk that moved since it began counts.
+        (T0 - timedelta(hours=1), True),
+        (T0, True),
+        (T0 + timedelta(hours=1), False),
     ],
 )
-def test_walk_counts(
-    pass_started: datetime | None, entry: ListEntry | None, expected: bool
-) -> None:
-    assert walk_counts(T0, pass_started_at=pass_started, entry=entry) is expected
+def test_walk_counts(pass_started: datetime | None, expected: bool) -> None:
+    assert walk_counts(T0, pass_started_at=pass_started) is expected
 
 
 # --- the reconciler --------------------------------------------------------------------
@@ -293,20 +276,28 @@ async def test_a_stale_demand_is_dropped_and_its_download_cancelled(
         )
     )
     torrent = await downloading(db_session, rows[2], "d" * 40)
+    # Episode 7 is ready: its stale demand is dropped (retention's anchor).
+    await demand(db_session, user_id=user.id, episode=rows[6], now=long_ago)
+    rows[6].state = EpisodeState.READY
+    await db_session.flush()
 
     first = await compute_wants(db_session)
-    want = await db_session.get(Want, (user.id, rows[2].id))
-    assert want is not None and want.dropped_at is not None
-    assert want.drop_reason == STALE_DROP_REASON
+    ready = await db_session.get(Want, (user.id, rows[6].id))
+    assert ready is not None and ready.dropped_at is not None
+    assert ready.drop_reason == STALE_DROP_REASON
     second = await compute_wants(db_session)
 
-    assert want.dropped_at is not None and want.demanded_at is not None, "not revived"
+    # Not ready: deleted, not dropped (nothing to anchor; a dropped row would
+    # keep a later window from fetching it).
+    assert await db_session.get(Want, (user.id, rows[2].id)) is None
+    assert ready.dropped_at is not None and ready.demanded_at is not None, "not revived"
     assert rows[2].state is EpisodeState.NOT_WANTED
     assert torrent.qbit_state == QBIT_CANCELLED
     assert [job.payload["episode_id"] for job in await jobs(db_session, QBIT_CANCEL)] == [
         rows[2].id
     ]
     assert first.dropped == 1 and second.dropped == 0, "and it stays dropped"
+    assert first.removed >= 1
     assert await wanted(db_session, user) == {rows[3].id}
 
 
@@ -353,7 +344,9 @@ async def test_the_fourth_demand_is_refused_with_the_three_open_ones(
 
     assert refused.value.code == DEMAND_CAP
     assert refused.value.message == demand_cap_message(3)
-    assert refused.value.message.startswith("You already have 3 episodes fetching on request.")
+    assert refused.value.message == (
+        "You already have 3 episodes on request. Finish or cancel one first."
+    )
     assert [(found.episode_id, found.number) for found in refused.value.open] == [
         (rows[0].id, 1),
         (rows[1].id, 2),
@@ -477,26 +470,121 @@ async def test_a_play_on_an_unlisted_show_wants_the_next_at_halfway(
     assert await db_session.get(ListEntry, (user.id, anime.id)) is None, "no list entry"
 
 
-@pg
-async def test_setting_the_show_dropped_after_the_walk_stops_it(
-    db_session: AsyncSession,
+class _FreshCatalog:
+    """A catalogue stub for ``set_list_entry`` on a row that is fresh enough."""
+
+    def healthy(self, source: str) -> bool:
+        return True
+
+    async def media(self, anime_id: int) -> None:  # pragma: no cover
+        raise AssertionError("the cached row is fresh enough")
+
+
+async def set_status(
+    session: AsyncSession, user: User, anime: Anime, status: ListStatus, **fields: object
 ) -> None:
+    """The real Arc-side status write behind ``PUT /api/list/{id}``."""
+    anime.detail_source = "anilist"
+    anime.refreshed_at = datetime.now(UTC)
+    await session.flush()
+    await set_list_entry(
+        session,
+        _FreshCatalog(),  # type: ignore[arg-type]
+        user_id=user.id,
+        anime_id=anime.id,
+        status=status,
+        **fields,  # type: ignore[arg-type]
+    )
+
+
+@pg
+@pytest.mark.parametrize("status", [ListStatus.DROPPED, ListStatus.ON_HOLD])
+async def test_a_walk_survives_finishing_an_episode_on_a_dropped_or_on_hold_show(
+    db_session: AsyncSession, status: ListStatus
+) -> None:
+    """FR-S4's list advance is not the user setting the status (review P7)."""
+    anime, rows = await a_show(db_session, 972027 + (status is ListStatus.ON_HOLD))
+    user = await make_user(db_session, f"m21-walk-{status.value}@arc.test")
+    entry = await make_entry(db_session, user, anime, status=status, progress=3)
+    entry.updated_by = UpdatedBy.ARC
+    entry.updated_at = datetime.now(UTC) - timedelta(days=3)
+    await db_session.flush()
+
+    await record_progress(
+        db_session, user_id=user.id, episode=rows[3], position_s=0.6 * LENGTH, duration_s=LENGTH
+    )
+    await compute_wants(db_session)
+    assert rows[4].id in await wanted(db_session, user), "ep 5 at halfway through ep 4"
+    torrent = await downloading(db_session, rows[4], "1" * 40)
+
+    await record_progress(
+        db_session, user_id=user.id, episode=rows[3], position_s=LENGTH, duration_s=LENGTH
+    )
+    await compute_wants(db_session)
+
+    assert entry.status is status and entry.progress == 4, "FR-S4 advanced the list"
+    walk_row = await db_session.get(Walk, (user.id, anime.id))
+    assert walk_row is not None and walk_row.after_number == 4
+    assert rows[4].id in await wanted(db_session, user)
+    assert rows[4].state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state != QBIT_CANCELLED
+
+
+@pg
+async def test_setting_the_show_dropped_in_arc_ends_the_walk(db_session: AsyncSession) -> None:
     anime, rows = await a_show(db_session, 972021)
     user = await make_user(db_session, "m21-walk-drop@arc.test")
-    moved = datetime.now(UTC) - timedelta(hours=2)
-    await walk(db_session, user, anime, 4, moved)
+    await make_entry(db_session, user, anime, progress=2)
+    await walk(db_session, user, anime, 4, datetime.now(UTC) - timedelta(hours=2))
     await compute_wants(db_session)
-    assert await wanted(db_session, user) == {rows[4].id}
+    assert rows[4].id in await wanted(db_session, user)
 
-    entry = await make_entry(db_session, user, anime, status=ListStatus.DROPPED, progress=4)
-    entry.updated_by = UpdatedBy.ARC
-    entry.updated_at = moved + timedelta(hours=1)
-    await db_session.flush()
+    await set_status(db_session, user, anime, ListStatus.DROPPED)
     await compute_wants(db_session)
 
+    assert await db_session.get(Walk, (user.id, anime.id)) is None
     want = await db_session.get(Want, (user.id, rows[4].id))
     assert want is not None and want.dropped_at is not None
     assert want.drop_reason == REASON_NOT_WANTING
+
+
+@pg
+async def test_the_fr_w5_auto_complete_ends_the_walk(db_session: AsyncSession) -> None:
+    anime, rows = await a_show(db_session, 972029)
+    user = await make_user(db_session, "m21-walk-complete@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=11)
+
+    await record_progress(
+        db_session, user_id=user.id, episode=rows[11], position_s=LENGTH, duration_s=LENGTH
+    )
+
+    assert entry.status is ListStatus.COMPLETED
+    assert await db_session.get(Walk, (user.id, anime.id)) is None
+
+
+@pg
+async def test_a_mal_side_status_change_or_a_score_edit_leaves_the_walk(
+    db_session: AsyncSession,
+) -> None:
+    anime, rows = await a_show(db_session, 972031)
+    user = await make_user(db_session, "m21-walk-keep@arc.test")
+    await make_entry(db_session, user, anime, status=ListStatus.COMPLETED, progress=12)
+    await walk(db_session, user, anime, 4, datetime.now(UTC) - timedelta(hours=2))
+
+    # A score edit in Arc that re-sends the status the show already has.
+    await set_status(db_session, user, anime, ListStatus.COMPLETED, score=7, score_given=True)
+    assert await db_session.get(Walk, (user.id, anime.id)) is not None
+    # A MyAnimeList-side change to dropped (the sync writes the row; no end_walk).
+    entry = await db_session.get(ListEntry, (user.id, anime.id))
+    assert entry is not None
+    entry.status = ListStatus.DROPPED
+    entry.updated_by = UpdatedBy.MAL
+    entry.updated_at = datetime.now(UTC)
+    await db_session.flush()
+    await compute_wants(db_session)
+
+    assert await db_session.get(Walk, (user.id, anime.id)) is not None
+    assert await wanted(db_session, user) == {rows[4].id}
 
 
 @pg
@@ -652,9 +740,9 @@ async def test_a_trip_cancel_leaves_a_demanded_download_running(
 
     assert rows[5].state is EpisodeState.DOWNLOADING
     assert torrent.qbit_state != QBIT_CANCELLED
-    assert [job.payload["episode_id"] for job in await jobs(db_session, QBIT_CANCEL)] != [
-        rows[5].id
-    ]
+    assert all(
+        job.payload["episode_id"] != rows[5].id for job in await jobs(db_session, QBIT_CANCEL)
+    )
     assert rows[5].id in await wanted(db_session, user)
 
 
@@ -711,3 +799,213 @@ def test_the_window_refusal_is_gone() -> None:
     hits = [str(path) for path in root.rglob("*.py") if pattern.search(path.read_text())]
     assert hits == []
     assert "coverable" not in (root / "services" / "acquisition" / "demand.py").read_text()
+
+
+# --- fix round 2: rewatch off, the slot cap, stale demands, quiet_since, pause ---------
+
+
+@pg
+async def test_turning_a_rewatch_off_stops_its_fetching(db_session: AsyncSession) -> None:
+    """The pass's walk goes with the pass (owner decision 6: it "ends on off")."""
+    anime, rows = await a_show(db_session, 972050)
+    user = await make_user(db_session, "m21-rw-off@arc.test")
+    await make_entry(db_session, user, anime, status=ListStatus.COMPLETED, progress=12)
+    await start_rewatch(
+        db_session, user_id=user.id, anime_id=anime.id, now=datetime.now(UTC) - timedelta(hours=1)
+    )
+    await record_progress(
+        db_session, user_id=user.id, episode=rows[0], position_s=LENGTH, duration_s=LENGTH
+    )
+    await compute_wants(db_session)
+    assert await wanted(db_session, user) == {rows[1].id}
+    torrent = await downloading(db_session, rows[1], "2" * 40)
+
+    await stop_rewatch(db_session, user_id=user.id, anime_id=anime.id, now=datetime.now(UTC))
+    await compute_wants(db_session)
+
+    assert await db_session.get(Walk, (user.id, anime.id)) is None
+    assert await wanted(db_session, user) == set()
+    assert rows[1].state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+
+
+async def held_show(
+    session: AsyncSession, user: User, anilist_id: int
+) -> tuple[Anime, list[Episode]]:
+    """A watching show at progress 4 that K = 1 holds back behind an airing one."""
+    await set_setting(session, SLOT_CAP_KEY, 1)
+    busy, _ = await a_show(session, anilist_id + 1, status=RELEASING)
+    await make_entry(session, user, busy, progress=0)
+    anime, rows = await a_show(session, anilist_id)
+    await make_entry(session, user, anime, progress=4)
+    return anime, rows
+
+
+@pg
+async def test_a_withdrawn_demand_on_a_held_show_is_shelved_and_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    user = await make_user(db_session, "m21-held-withdraw@arc.test")
+    anime, rows = await held_show(db_session, user, 972052)
+    await demand(db_session, user_id=user.id, episode=rows[8], now=datetime.now(UTC))
+    torrent = await downloading(db_session, rows[8], "3" * 40)
+    await compute_wants(db_session)
+    assert (await slot_view(db_session, user.id)).waiting == frozenset({anime.id})
+
+    await withdraw(db_session, user_id=user.id, episode_id=rows[8].id)
+    await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[8].id))
+    assert want is not None and want.dropped_at is not None
+    assert want.drop_reason == REASON_NOT_WANTING
+    assert rows[8].state is EpisodeState.NOT_WANTED
+    assert torrent.qbit_state == QBIT_CANCELLED
+
+
+@pg
+async def test_a_stale_demand_on_a_held_shows_window_episode_is_kept_as_a_window_want(
+    db_session: AsyncSession,
+) -> None:
+    user = await make_user(db_session, "m21-held-stale@arc.test")
+    _, rows = await held_show(db_session, user, 972054)
+    await demand(
+        db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC) - timedelta(days=60)
+    )
+    torrent = await downloading(db_session, rows[4], "4" * 40)
+
+    await compute_wants(db_session)
+    await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is None and want.demanded_at is None
+    assert rows[4].state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state != QBIT_CANCELLED
+
+
+@pg
+async def test_walk_only_and_rewatch_shows_compete_for_one_slot(db_session: AsyncSession) -> None:
+    """K = 1: the pass started later than the walk last moved, so it takes the slot."""
+    await set_setting(db_session, SLOT_CAP_KEY, 1)
+    walked, walked_rows = await a_show(db_session, 972056)
+    rewatched, rewatched_rows = await a_show(db_session, 972057)
+    user = await make_user(db_session, "m21-slots@arc.test")
+    await walk(db_session, user, walked, 4, datetime.now(UTC) - timedelta(hours=3))
+    await make_entry(db_session, user, rewatched, status=ListStatus.COMPLETED, progress=12)
+    await start_rewatch(
+        db_session,
+        user_id=user.id,
+        anime_id=rewatched.id,
+        now=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    await compute_wants(db_session)
+
+    assert await wanted(db_session, user) == {rewatched_rows[0].id}
+    assert (await slot_view(db_session, user.id)).waiting == frozenset({walked.id})
+    assert walked_rows[4].id not in await wanted(db_session, user)
+
+
+async def ready_long_ago(session: AsyncSession, episode: Episode) -> None:
+    episode.state = EpisodeState.READY
+    episode.state_changed_at = datetime.now(UTC) - timedelta(days=60)
+    await session.flush()
+
+
+@pg
+@pytest.mark.parametrize("walked", [False, True])
+async def test_a_walks_move_restarts_the_stale_clock_of_window_wants(
+    db_session: AsyncSession, walked: bool
+) -> None:
+    anime, rows = await a_show(db_session, 972058 + int(walked))
+    user = await make_user(db_session, f"m21-quiet-walk-{walked}@arc.test")
+    entry = await make_entry(db_session, user, anime, progress=4)
+    await compute_wants(db_session)
+    await ready_long_ago(db_session, rows[4])
+    entry.updated_at = datetime.now(UTC) - timedelta(days=60)
+    if walked:
+        # Re-playing episode 2 yesterday: the user is plainly still at the show.
+        await walk(db_session, user, anime, 1, datetime.now(UTC) - timedelta(days=1))
+    await db_session.flush()
+
+    result = await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None
+    assert (want.dropped_at is None) is walked
+    assert result.dropped == (0 if walked else 1)
+
+
+@pg
+async def test_a_pass_start_restarts_the_stale_clock_of_its_window(
+    db_session: AsyncSession,
+) -> None:
+    anime, rows = await a_show(db_session, 972060)
+    user = await make_user(db_session, "m21-quiet-pass@arc.test")
+    await make_entry(db_session, user, anime, status=ListStatus.COMPLETED, progress=12)
+    entry = await db_session.get(ListEntry, (user.id, anime.id))
+    assert entry is not None
+    entry.updated_at = datetime.now(UTC) - timedelta(days=60)
+    began = datetime.now(UTC) - timedelta(days=1)
+    await start_rewatch(db_session, user_id=user.id, anime_id=anime.id, now=began)
+    for row in rows[:4]:
+        await finished(db_session, user, row, began + timedelta(hours=1))
+    await compute_wants(db_session)
+    assert await wanted(db_session, user) == {rows[4].id}
+    await ready_long_ago(db_session, rows[4])
+
+    result = await compute_wants(db_session)
+
+    assert result.dropped == 0
+    assert await wanted(db_session, user) == {rows[4].id}
+
+
+@pg
+async def test_a_dormant_entry_with_a_walk_has_a_window_and_is_not_dormant(
+    db_session: AsyncSession,
+) -> None:
+    anime, rows = await a_show(db_session, 972061)
+    user = await make_user(db_session, "m21-dormant-walk@arc.test")
+    await make_entry(db_session, user, anime, status=ListStatus.PLANNED, activated=False)
+    await walk(db_session, user, anime, 2, datetime.now(UTC))
+
+    plan = await _current_plan(db_session)
+    await compute_wants(db_session)
+
+    assert (user.id, anime.id) not in plan.dormant
+    assert (user.id, anime.id) in plan.following
+    assert await wanted(db_session, user) == {rows[2].id}
+
+
+@pg
+async def test_the_pause_leaves_walks_and_passes_untouched(db_session: AsyncSession) -> None:
+    anime, _ = await a_show(db_session, 972062)
+    other, _ = await a_show(db_session, 972063)
+    user = await make_user(db_session, "m21-paused@arc.test")
+    moved = datetime.now(UTC) - timedelta(days=30)
+    await walk(db_session, user, anime, 4, moved)
+    rewatch = await start_rewatch(
+        db_session, user_id=user.id, anime_id=other.id, now=datetime.now(UTC)
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    result = await compute_wants(db_session)
+
+    assert result.wanted == 0 and await wanted(db_session, user) == set()
+    walk_row = await db_session.get(Walk, (user.id, anime.id))
+    assert walk_row is not None and walk_row.touched_at == moved
+    assert rewatch.ended_at is None
+
+
+@pg
+async def test_a_walk_older_than_the_pass_is_ignored(db_session: AsyncSession) -> None:
+    anime, rows = await a_show(db_session, 972064)
+    user = await make_user(db_session, "m21-old-walk@arc.test")
+    await make_entry(db_session, user, anime, status=ListStatus.COMPLETED, progress=12)
+    await walk(db_session, user, anime, 6, datetime.now(UTC) - timedelta(hours=2))
+    await start_rewatch(
+        db_session, user_id=user.id, anime_id=anime.id, now=datetime.now(UTC) - timedelta(hours=1)
+    )
+
+    await compute_wants(db_session)
+
+    assert await wanted(db_session, user) == {rows[0].id}, "the pass's window only"
