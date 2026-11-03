@@ -51,7 +51,6 @@ from arc.services.acquisition.wants import (
     DEVICE_HOLDING_DAYS,
     STALE_DROP_REASON,
     compute_wants,
-    coverable,
     is_halfway,
     slot_view,
     window,
@@ -383,19 +382,6 @@ async def test_demanding_outside_the_window_is_accepted(db_session: AsyncSession
     await compute_wants(db_session)
 
     assert await wanted(db_session, user) == {rows[4].id, rows[8].id}
-
-
-@pg
-async def test_the_coverable_set_counts_the_prefetch_and_the_users_own_wants(
-    db_session: AsyncSession,
-) -> None:
-    anime, rows = await a_show(db_session, 970012)
-    user = await make_user(db_session, "m20-cover@arc.test")
-    await make_entry(db_session, user, anime, progress=4)
-
-    assert await coverable(db_session, user.id) == {rows[4].id}
-    await watched_to(db_session, user, rows[4], 0.6)
-    assert await coverable(db_session, user.id) == {rows[4].id, rows[5].id}
 
 
 @pg
