@@ -48,7 +48,10 @@ episode after the press (``finished_at >= demanded_at`` — the row is
 **deleted**, so FR-T1's watched grace runs from the fresh finish), when it has
 been untouched for D days (``greatest(demanded_at, watch_progress.updated_at)``,
 dropped with :data:`STALE_DROP_REASON` in any episode state, its download
-cancelled; only a new click revives it), or when the user withdraws it. An open
+cancelled; only a new click revives it), or when the user withdraws it. A
+finished or stale demand that a window, walk, pass or trip still asks for is
+not ended that way: it loses ``demanded_at`` and lives on as an ordinary want
+under that source's own rules. An open
 demand is always a live want, so nothing that cancels on "nobody wants this"
 (:func:`cancel_if_unwanted`, :func:`release_if_unwanted`, a trip's cancel or
 release, a sample's cancel) ever stops one.
@@ -1378,6 +1381,8 @@ async def compute_wants(
     # added to the plan rather than worked out inside it (FR-A8).
     desired = dict(plan.desired)
     desired.update(await _sample_wants(session, plan.following))
+    # What a window, a walk, a pass or a sample asks for, before the demands.
+    elsewhere = set(desired)
     # And the demanded ones (FR-A14, M21): an open demand is wanted whatever
     # the list, the windows, the device skip and the slot cap say, so it is
     # added after all of them have had their say.
@@ -1387,6 +1392,12 @@ async def compute_wants(
     # beside ``desired`` rather than merged into it, because a trip key that
     # nothing else asked for is a *trip-only* row and has to be marked so.
     trips = await _trip_wants(session)
+    # A stale demand something else still asks for is not dropped (orchestrator
+    # 2026-11-03): it loses ``demanded_at``, exactly like a finished one, and
+    # lives on as an ordinary want under that source's own rules. Only a stale
+    # demand nobody else wants is dropped and its download cancelled.
+    elsewhere.update(trips)
+    stale_kept = demands.stale & elsewhere
 
     result = await _reconcile(
         session,
@@ -1399,7 +1410,7 @@ async def compute_wants(
         now=moment,
         planned_at=planned_at,
         keep_in_flight=plan.look_ahead > 0,
-        finished=demands.finished,
+        finished=demands.finished | stale_kept,
     )
     result = replace(result, waiting=plan.held_back)
     result = await _drop_stale(
@@ -1408,7 +1419,7 @@ async def compute_wants(
         now=moment,
         period=stale,
         exclude=trips.keys(),
-        stale_demands=demands.stale,
+        stale_demands=demands.stale - stale_kept,
     )
     return await _start_searches(session, result, now=moment, held=held, settings=settings)
 
@@ -1509,7 +1520,10 @@ class _Demands:
     #: still wants the episode, in which case it lives on as an ordinary want.
     finished: frozenset[tuple[int, int]]
     #: Open and untouched for D days: ``greatest(demanded_at,
-    #: watch_progress.updated_at) < now − D``, in any episode state.
+    #: watch_progress.updated_at) < now − D``, in any episode state. Dropped by
+    #: :func:`_drop_stale` only when nothing else asks for the episode; one a
+    #: window, walk, pass, sample or trip still wants is handed to
+    #: :func:`_reconcile` with the finished ones and loses ``demanded_at``.
     stale: frozenset[tuple[int, int]]
 
 
@@ -1594,8 +1608,9 @@ async def _reconcile(
     that left its window is deleted, a row of any other show is shelved, so a
     lapsed walk's leftovers are shelved :data:`REASON_NOT_WANTING`.
 
-    ``finished`` (M21, FR-A14) is the demands the user has finished since
-    pressing play (:attr:`_Demands.finished`). The demand is over: a row
+    ``finished`` (M21, FR-A14) is the demands that are over: finished since
+    the press (:attr:`_Demands.finished`), plus stale ones something else
+    still asks for (:func:`compute_wants`). A row
     nothing else asks for is **deleted** — whatever the show's status, held or
     not — so retention's watched grace runs from the fresh ``finished_at``
     rather than a drop anchor keeping the file G days; one something else

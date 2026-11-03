@@ -310,6 +310,31 @@ async def test_a_stale_demand_is_dropped_and_its_download_cancelled(
     assert await wanted(db_session, user) == {rows[3].id}
 
 
+@pg
+async def test_a_stale_demand_a_window_still_wants_keeps_downloading_as_a_window_want(
+    db_session: AsyncSession,
+) -> None:
+    """Orchestrator 2026-11-03: stale, but the window's next episode — not cancelled."""
+    anime, rows = await a_show(db_session, 972007)
+    user = await make_user(db_session, "m21-stale-window@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    await demand(
+        db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC) - timedelta(days=60)
+    )
+    torrent = await downloading(db_session, rows[4], "b" * 40)
+
+    result = await compute_wants(db_session)
+    await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is None
+    assert want.demanded_at is None, "an ordinary window want now"
+    assert result.dropped == 0
+    assert rows[4].state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state != QBIT_CANCELLED
+    assert await jobs(db_session, QBIT_CANCEL) == []
+
+
 # --- the cap -------------------------------------------------------------------------
 
 
