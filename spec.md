@@ -1744,7 +1744,12 @@ is its only user, and uses it daily.
      (FR-S8) is judged by the pass that was open when the device recorded it:
      a replay that arrives after the pass ended is still free of list and MAL
      writes and does not reopen it, and one recorded before the pass began is
-     normal mode.
+     normal mode. A pass ends at the server's moment, never at a replayed
+     recording time. **The pass keeps its tail**: the episode whose finish
+     ended it, while still at or past the mark, and — for an hour after any
+     end, by finishing or by the switch — any episode finished in it and still
+     at or past the mark, so the credits playing on after the end are still
+     the pass's and write nothing (2026-11-03).
   5. *Next season* pressed during a pass (FR-S5 item 3) carries the rewatch on
      to the sequel when the sequel's list entry has progress above 0 or is
      completed; otherwise it is the ordinary press, in normal mode (an absent
@@ -3489,3 +3494,13 @@ through the same edge, without the grace period.
   never touches a file changed within the last hour (FR-T1); `/api/auth/me`
   keeps `is_demo: false` for one release so a cached installed app does not
   reject it (FR-D5).
+- 2026-11-03 (orchestrator's call, reported to the owner) — A rewatch pass
+  keeps its tail (FR-W7 item 4): the player keeps reporting through the
+  credits after a pass ends, and those reports would otherwise newly complete
+  the episode in normal mode and write to the list and MyAnimeList. The
+  episode whose finish ended the pass keeps its tail for good while it stays
+  at or past the mark; any other episode finished in the pass and still at
+  or past the mark keeps it for one hour after the end (by finishing or by the
+  switch). A resume days later, a scrub under the mark or an open from the
+  start is normal mode. A pass ends at the server's moment, so a replayed
+  finish never ends it before other records of the same pass.
