@@ -2365,7 +2365,7 @@ Reviewer where marked.
       `finished_at` re-stamped in normal mode without a second MAL write; a
       truncated live duration does not stamp; walks upsert and ignore stale
       replays; concurrent completions → one `newly_completed`.
-- [ ] **T3 — Wants + demand rewrite** (L, **Reviewer: acquisition**).
+- [x] **T3 — Wants + demand rewrite** (L, **Reviewer: acquisition**; verified by the orchestrator 2026-11-03: five Writer rounds — the Validator and Reviewer both caught the walk ending on its own completion, then rewatch-off fetching, withdrawn and stale demands on held shows, an occupancy change that crossed the 2026-10-20 in-flight rule (reverted), and a withdraw that admitted its own show past K (reordered); all re-confirmed by probe; my own runs: branch full suite 5440 passed, merged main 0f121f6 targeted 193, client 1500, lint clean; the admission path, planner and walk helper read personally).
       `wants.py`, `demand.py`, `api/demand.py`, `rules.py` (FR-A1, FR-A10,
       FR-A14). Tests: a click on ep 3 of a completed show is never shelved or
       cancelled while downloading (N = 0, K full); a finished demand is
