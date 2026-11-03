@@ -190,6 +190,7 @@ def tail_applies(
     old_duration_s: float | None,
     at: datetime,
     completion_fraction: float,
+    ended_on_this_episode: bool,
 ) -> bool:
     """Whether a report at ``at`` is the tail of the ended pass ``[started_at, ended_at)`` (pure).
 
@@ -199,9 +200,15 @@ def tail_applies(
     2. the row was at or past the mark before this report — the player has not
        gone back under it since (a scrub under the mark, or a fresh open from
        0, ends the tail);
-    3. **either** the episode's finish is at or after the pass's end — the
-       episode whose finish ended it, whose credits stay in the pass for good —
-       **or** the report is within :data:`TAIL_GRACE` of the end.
+    3. **either** this is the episode on which the pass ended
+       (``ended_on_this_episode``: the pass ended ``finished`` and the episode's
+       number is at or past the pass's last number as it stood at the end),
+       whose credits stay in the pass for good — **or** the report is within
+       :data:`TAIL_GRACE` of the end.
+
+    The episode is identified by its number rather than by comparing its
+    finish with ``ended_at``: a pass ended by an offline replay ends at the
+    server's time while the episode's finish is the device's earlier moment.
     """
     if not in_pass(old_finished_at, started_at) or old_finished_at is None:
         return False
@@ -209,7 +216,7 @@ def tail_applies(
         return False
     if old_position_s / old_duration_s < completion_fraction:
         return False
-    return old_finished_at >= ended_at or at - ended_at <= TAIL_GRACE
+    return ended_on_this_episode or at - ended_at <= TAIL_GRACE
 
 
 async def finished_pass_tail(
@@ -235,8 +242,10 @@ async def finished_pass_tail(
     So a non-manual report recorded after the user's latest pass on the show
     ended (for either reason) is judged in that pass when :func:`tail_applies`
     says so: the episode was finished in the pass, the row was still at or past
-    the mark, and either it is the episode whose finish ended the pass or the
-    report is within :data:`TAIL_GRACE` of the end. A non-final episode resumed
+    the mark, and either it is the episode on which the pass ended (the pass
+    ended ``finished`` and the episode's number is at or past
+    :func:`end_number` as it stood at ``ended_at``) or the report is within
+    :data:`TAIL_GRACE` of the end. A non-final episode resumed
     days later is a new watch, in normal mode. The manual mark never reaches
     here.
     """
@@ -255,6 +264,12 @@ async def finished_pass_tail(
     )
     if found is None or found.ended_at is None:
         return None
+    ended_on_this_episode = False
+    if found.end_reason == REWATCH_END_FINISHED:
+        anime = await session.get(Anime, episode.anime_id)
+        ended_on_this_episode = anime is not None and episode.number >= await end_number(
+            session, anime, now=found.ended_at
+        )
     applies = tail_applies(
         started_at=found.started_at,
         ended_at=found.ended_at,
@@ -263,6 +278,7 @@ async def finished_pass_tail(
         old_duration_s=old_duration_s,
         at=at,
         completion_fraction=completion_fraction,
+        ended_on_this_episode=ended_on_this_episode,
     )
     return found if applies else None
 

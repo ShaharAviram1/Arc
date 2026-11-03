@@ -1085,6 +1085,7 @@ def tail(
     position: float = 0.95,
     at: datetime,
     ended_at: datetime = END,
+    ending: bool = False,
 ) -> bool:
     return tail_applies(
         started_at=T0,
@@ -1094,12 +1095,16 @@ def tail(
         old_duration_s=DURATION,
         at=at,
         completion_fraction=0.90,
+        ended_on_this_episode=ending,
     )
 
 
 def test_the_tail_keeps_the_episode_that_ended_the_pass_for_good() -> None:
-    assert tail(finished=END, at=END + timedelta(days=3))
-    assert tail(finished=END + timedelta(minutes=5), at=END + timedelta(days=3))
+    assert tail(finished=END, at=END + timedelta(days=3), ending=True)
+    # Ended by a replay: the finish is the device's earlier moment.
+    assert tail(finished=END - timedelta(minutes=20), at=END + timedelta(days=3), ending=True)
+    # The timestamp alone says nothing: not the ending episode, past the grace.
+    assert not tail(finished=END, at=END + timedelta(days=3))
 
 
 def test_the_tail_of_any_other_episode_lasts_the_grace() -> None:
@@ -1115,7 +1120,7 @@ def test_the_tail_needs_the_row_still_past_the_mark() -> None:
     finished = T0 + timedelta(minutes=30)
     assert not tail(finished=finished, position=0.89, at=END + timedelta(minutes=1))
     assert not tail(finished=finished, position=0.0, at=END + timedelta(minutes=1))
-    assert not tail(finished=END, position=0.5, at=END + timedelta(days=1))
+    assert not tail(finished=END, position=0.5, at=END + timedelta(days=1), ending=True)
     assert not tail_applies(
         started_at=T0,
         ended_at=END,
@@ -1124,12 +1129,13 @@ def test_the_tail_needs_the_row_still_past_the_mark() -> None:
         old_duration_s=None,
         at=END,
         completion_fraction=0.90,
+        ended_on_this_episode=True,
     )
 
 
 def test_the_tail_needs_a_finish_in_the_pass() -> None:
-    assert not tail(finished=None, at=END)
-    assert not tail(finished=T0 - timedelta(microseconds=1), at=END)
+    assert not tail(finished=None, at=END, ending=True)
+    assert not tail(finished=T0 - timedelta(microseconds=1), at=END, ending=True)
     assert tail(finished=T0, at=END)
     assert in_pass(T0, T0)
     assert not in_pass(T0 - timedelta(microseconds=1), T0)
@@ -1277,3 +1283,35 @@ async def test_a_clamped_replay_from_inside_a_long_ended_pass_is_mal_free(
         row = await row_of(db_session, user, eps[number])
         assert row is not None and row.completed is False
         assert row.finished_at == NOW - 30 * day
+
+
+async def test_the_episode_a_replay_ended_the_pass_on_keeps_its_tail(
+    db_session: AsyncSession,
+) -> None:
+    """Ended by an offline replay: ``ended_at`` is the server's time, the finish the device's."""
+    user = await make_user(db_session, "rw-tail-replay@arc.test")
+    await link(db_session, user)
+    anime, eps = await show(db_session, anilist_id=990061)
+    await make_entry(db_session, user, anime, progress=5)
+    before = await entry_snapshot(db_session, user, anime)
+    rewatch = await start(db_session, user_id=user.id, anime_id=anime.id, now=minutes(0))
+    result = await apply_item(
+        db_session,
+        user_id=user.id,
+        item=SyncItem("c", SyncKind.POSITION, eps[12].id, minutes(10), 0.92 * DURATION, DURATION),
+        now=minutes(30),
+    )
+    assert result.status is SyncStatus.APPLIED
+    ended = await pass_of(db_session, rewatch)
+    assert ended.ended_at == minutes(30) and ended.end_reason == REWATCH_END_FINISHED
+    row = await row_of(db_session, user, eps[12])
+    assert row is not None and row.finished_at == minutes(10)
+
+    days = minutes(30) + timedelta(days=3)
+    reopened = await report(db_session, user, eps[12], 0.92, at=days)
+    credits = await report(db_session, user, eps[12], 0.98, at=days + timedelta(minutes=2))
+
+    assert reopened.rewatching and credits.rewatching
+    assert not credits.newly_completed
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
