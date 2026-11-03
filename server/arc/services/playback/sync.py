@@ -52,6 +52,15 @@ retention's grace window or the continue-watching order.
   completion, or a list the user raised later, is the user's newer word.
   Otherwise FR-S4's un-mark rule, unchanged.
 
+**Rewatch mode** (FR-W7, M21) needs nothing of its own here: the replay
+hands ``record_progress`` and ``unmark_watched`` the device's ``at``, and they
+judge the record by the pass that was open *then*. A report recorded inside a
+pass that has since ended is still free of list and MyAnimeList writes and
+does not reopen the pass; one recorded before the pass began is normal mode.
+The one rule that changes is the un-mark's staleness inside a pass, which is
+measured against the episode's latest finish (``finished_at > at``) rather
+than the first completion and the list.
+
 **A failure is not a verdict.** An item that raises inside its savepoint (a
 deadlock, a dropped connection) is answered ``retry``: the client keeps it
 pending and sends it again. ``rejected`` is only for what will never work —
@@ -72,6 +81,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Episode, ListEntry, WatchProgress
 from arc.services.playback.progress import record_progress, unmark_watched
+from arc.services.playback.rewatch import rewatch_at
 
 log = logging.getLogger(__name__)
 
@@ -275,6 +285,15 @@ async def apply_item(
         return SyncResult(item.client_id, SyncStatus.APPLIED)
 
     # SyncKind.UNMARK
+    if await rewatch_at(session, user_id=user_id, anime_id=episode.anime_id, at=at) is not None:
+        # Inside a rewatch pass (FR-W7) the un-mark takes back the pass's
+        # finish and never touches the list, so a later finish is the newer
+        # word and the list's own changes are beside the point.
+        finished_at = row.finished_at if row is not None else None
+        if unmark_is_stale(finished_at, None, at):
+            return SyncResult(item.client_id, SyncStatus.STALE)
+        await unmark_watched(session, user_id=user_id, episode=episode, now=now, reported_at=at)
+        return SyncResult(item.client_id, SyncStatus.APPLIED)
     completed_at = row.completed_at if row is not None and row.completed else None
     if unmark_is_stale(completed_at, list_changed_at, at):
         return SyncResult(item.client_id, SyncStatus.STALE)
