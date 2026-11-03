@@ -231,8 +231,32 @@ class ProgressOut(BaseModel):
     completed: bool
     newly_completed: bool
     #: The show's episode count on the caller's list after the change, or null
-    #: when nothing touched the list (every report but the completing one).
+    #: when nothing touched the list (every report but the completing one, and
+    #: every report in a rewatch pass).
     list_progress: int | None = None
+    #: The report was judged in a rewatch pass (FR-W7, M21): ``completed`` and
+    #: ``newly_completed`` are about the pass, and the list was not touched.
+    rewatching: bool = False
+    #: This report finished the pass's last episode and so ended the pass; the
+    #: player says "Rewatch finished. Your list was left as it was."
+    rewatch_ended: bool = False
+
+
+class RewatchOut(BaseModel):
+    """An open rewatch pass (FR-W7): ``PUT /api/anime/{id}/rewatch``'s answer.
+
+    What the show page's badge reads — "Rewatching · ep ``position`` /
+    ``total``".
+    """
+
+    started_at: datetime
+    #: The highest episode number finished in the pass; 0 at the start.
+    position: int
+    #: How many episodes have been finished in the pass.
+    finished_in_pass: int
+    #: The number whose finish ends the pass: the show's count once it has
+    #: finished airing and the count is known, else the newest aired episode.
+    total: int
 
 
 #: The most episode ids one ``GET /api/progress/completed`` may ask about.
@@ -243,15 +267,17 @@ class CompletedEpisode(BaseModel):
     """One of the caller's completed episodes, and when it was completed."""
 
     episode_id: int
-    #: ``watch_progress.completed_at`` (set once, cleared by an un-mark), or
-    #: the row's ``updated_at`` for a completion older than that column.
+    #: The later of ``watch_progress.completed_at`` (the first watch) and
+    #: ``finished_at`` (the latest, rewatch passes included; M21), or the
+    #: row's ``updated_at`` for a completion older than both columns.
     completed_at: datetime
 
 
 class CompletedOut(BaseModel):
     """``GET /api/progress/completed`` — which of the asked episodes the caller has completed.
 
-    Only the caller's own completion rows: an episode watched on the list's
+    The caller's own completion rows, and rows with a latest finish (a
+    rewatch pass's completion, M21): an episode watched on the list's
     word alone (FR-W5's ``progress`` source) has no row and is not here. The
     device uses it to mark its copies of episodes completed elsewhere, or
     before it learnt to listen (FR-S9 item 9, owner 2026-10-08).
@@ -270,4 +296,5 @@ __all__ = [
     "PlayInfo",
     "ProgressIn",
     "ProgressOut",
+    "RewatchOut",
 ]

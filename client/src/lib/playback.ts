@@ -211,6 +211,13 @@ export interface ProgressResult {
    */
   list_progress: number | null
   /**
+   * The write was judged in a rewatch pass (FR-W7, M21): `completed` and
+   * `newly_completed` are about the pass, and the list was not touched.
+   */
+  rewatching: boolean
+  /** This write finished the pass's last episode and so ended the pass (FR-W7). */
+  rewatch_ended: boolean
+  /**
    * Client-side only: the write could not reach the server and is kept in the
    * on-device outbox for replay (FR-S8). The other fields then describe what
    * the viewer did, not what the server said.
@@ -667,7 +674,14 @@ export async function sendProgress(
     const owner = box.recordingAs
     if (owner === null || !shouldQueue(error)) throw error
     await box.recordPosition(owner, body.episode_id, body.position_s, body.duration_s)
-    return { completed: false, newly_completed: false, list_progress: null, queued: true }
+    return {
+      completed: false,
+      newly_completed: false,
+      list_progress: null,
+      rewatching: false,
+      rewatch_ended: false,
+      queued: true,
+    }
   }
   // Remembered so the exit beacon past the mark queues nothing: the server
   // has already said this episode is done (B1, 2026-10-05).
@@ -704,7 +718,14 @@ export async function sendWatched(
     if (owner === null || !shouldQueue(error)) throw error
     if (watched) await box.recordCompletion(owner, episodeId)
     else await box.recordUnmark(owner, episodeId)
-    return { completed: watched, newly_completed: false, list_progress: null, queued: true }
+    return {
+      completed: watched,
+      newly_completed: false,
+      list_progress: null,
+      rewatching: false,
+      rewatch_ended: false,
+      queued: true,
+    }
   }
   const owner = box.recordingAs
   if (owner !== null) {
