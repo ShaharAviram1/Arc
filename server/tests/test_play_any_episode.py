@@ -45,7 +45,7 @@ from arc.models import (
     WatchProgress,
 )
 from arc.services.acquisition import rules
-from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
+from arc.services.acquisition.demand import NOT_AIRED, PLAYS_WHEN_DOWNLOADED_MESSAGE
 from arc.services.acquisition.rules import DEMAND_MAX_OPEN_KEY, PAUSED_KEY
 from arc.services.catalog.airing import FINISHED
 from arc.services.media.live import REFUSED_NOT_MKV
@@ -574,3 +574,33 @@ async def test_in_a_pass_the_players_episode_reads_the_pass(
 
     during = (await play(client, ids[2]))["episode"]
     assert (during["watched"], during["watched_source"]) == (False, None)
+
+
+# --- one "aired" rule for an announced show (T4 fix round 1) ----------------------
+
+
+async def test_an_announced_show_with_a_past_dated_row_has_aired_nothing_anywhere(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A cached NOT_YET_RELEASED status with episode 1 dated two hours ago.
+
+    The show page, ``/play`` and the demand read one rule
+    (``catalog.airing.is_aired``): not aired, not fetchable, 404, ``not_aired``.
+    """
+    async with api_factory() as session:
+        anime = await make_anime(session, anilist_id=977060, status="NOT_YET_RELEASED", episodes=12)
+        rows = await make_episodes(session, anime, 12, aired_through=1)
+        rows[0].air_at = datetime.now(UTC) - timedelta(hours=2)
+        await session.commit()
+        anime_id, first = anime.id, rows[0].id
+
+    page = await client.get(f"/api/anime/{anime_id}")
+    assert page.status_code == 200, page.text
+    row = next(row for row in page.json()["episodes"] if row["id"] == first)
+    assert row["aired"] is False
+    assert row["fetchable"] is False
+
+    assert (await client.get(f"/api/episodes/{first}/play")).status_code == 404
+    refused = await client.post(f"/api/episodes/{first}/demand")
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == NOT_AIRED

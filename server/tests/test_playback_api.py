@@ -1909,3 +1909,103 @@ async def test_completed_needs_a_session(api_app: FastAPI) -> None:
     async with api_transport(api_app) as anon:
         response = await anon.get("/api/progress/completed", params={"episode_ids": 1})
         assert response.status_code == 401
+
+
+# --- the sequel's "aired" is the sequel's (T4 fix round 1) ------------------------
+
+
+async def undated_pair(
+    factory: SessionFactory,
+    *,
+    base: int,
+    prequel_count: int,
+    sequel_numbers: tuple[int, ...],
+) -> tuple[int, int]:
+    """A RELEASING prequel at its stated count, rows undated; a FINISHED sequel, undated.
+
+    ``(the prequel's last episode id, the sequel's first episode id)``.
+    """
+    async with factory() as session:
+        prequel = Anime(
+            anilist_id=base,
+            summary_source="anilist",
+            detail_source="anilist",
+            title_romaji="Prequel",
+            format="TV",
+            status="RELEASING",
+            episodes=prequel_count,
+            relations=[
+                {
+                    "anilist_id": base + 1,
+                    "mal_id": None,
+                    "relation_type": "SEQUEL",
+                    "title": {"romaji": "Sequel"},
+                    "format": "TV",
+                }
+            ],
+        )
+        sequel = Anime(
+            anilist_id=base + 1,
+            summary_source="anilist",
+            detail_source="anilist",
+            title_romaji="Sequel",
+            format="TV",
+            status="FINISHED",
+            episodes=len(sequel_numbers),
+        )
+        session.add_all([prequel, sequel])
+        await session.flush()
+        last: Episode | None = None
+        for number in range(1, prequel_count + 1):
+            last = Episode(anime_id=prequel.id, number=number, state=EpisodeState.READY)
+            session.add(last)
+        firsts = [
+            Episode(anime_id=sequel.id, number=number, state=EpisodeState.NOT_WANTED)
+            for number in sequel_numbers
+        ]
+        session.add_all(firsts)
+        await session.flush()
+        assert last is not None
+        session.add(
+            Rendition(
+                episode_id=last.id,
+                dir=f"/data/renditions/{last.id}",
+                playlist_path=f"/data/renditions/{last.id}/index.m3u8",
+                duration=DURATION,
+                ready_at=NOW,
+            )
+        )
+        await session.commit()
+        return last.id, firsts[0].id
+
+
+@pytest.mark.parametrize(
+    ("base", "prequel_count", "sequel_numbers"),
+    [(950900, 2, (1, 2)), (950910, 12, tuple(range(13, 25)))],
+    ids=["undated-episode-1", "continued-numbering-13"],
+)
+async def test_the_sequels_episode_is_judged_aired_on_the_sequels_own_rows(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    base: int,
+    prequel_count: int,
+    sequel_numbers: tuple[int, ...],
+) -> None:
+    """A FINISHED sequel has aired whatever its dates; the prequel's rows say nothing.
+
+    Before the fix the offer judged the sequel's episode against the prequel's
+    rows and status (RELEASING, undated) and said "not fetchable" for an
+    episode the demand then accepted.
+    """
+    last_id, first_id = await undated_pair(
+        api_factory, base=base, prequel_count=prequel_count, sequel_numbers=sequel_numbers
+    )
+
+    offer = (await client.get(f"/api/episodes/{last_id}/play")).json()["next_season"]
+
+    assert offer is not None
+    assert offer["episode"]["id"] == first_id
+    assert offer["episode"]["number"] == sequel_numbers[0]
+    assert offer["aired"] is True
+    assert offer["episode"]["fetchable"] is True
+    assert (await client.post(f"/api/episodes/{first_id}/demand")).status_code == 202

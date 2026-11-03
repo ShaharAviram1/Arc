@@ -82,7 +82,7 @@ from arc.models import (
 from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
 from arc.services.acquisition.demand_gate import DemandGate, demand_gate
 from arc.services.catalog import episodes_for
-from arc.services.catalog.airing import aired_through, out_of_order
+from arc.services.catalog.airing import aired_through, has_aired, out_of_order
 from arc.services.media.live_serve import LiveServed, live_servable
 from arc.services.media.names import (
     KEY_DOWNLOAD_PROGRESS,
@@ -93,7 +93,7 @@ from arc.services.media.names import (
     latest_live_with,
     payload_float,
 )
-from arc.services.playback.next_season import has_aired, next_season
+from arc.services.playback.next_season import next_season
 from arc.services.playback.progress import (
     ProgressOutcome,
     record_progress,
@@ -293,21 +293,27 @@ async def play(
     # neighbours or by the next season.
     gate: DemandGate | None = None
 
-    async def fetchable(row: Episode) -> bool:
+    async def fetchable(row: Episode, aired: bool) -> bool:
+        """The gate's answer for ``row``, whose ``aired`` its own show decided."""
         nonlocal gate
-        if waiting or row.state is EpisodeState.READY:
+        if waiting or not aired or row.state is EpisodeState.READY:
             return False
         if gate is None:
             gate = await demand_gate(session, user.id, settings=settings)
-        return gate.fetchable(row, aired=has_aired(anime, siblings, row, now=at))
+        return gate.fetchable(row, aired=aired)
+
+    def aired_here(row: Episode) -> bool:
+        return has_aired(anime, siblings, row, now=at)
 
     previous_ref = (
-        EpisodeRef.from_episode(previous, fetchable=await fetchable(previous))
+        EpisodeRef.from_episode(previous, fetchable=await fetchable(previous, aired_here(previous)))
         if previous is not None
         else None
     )
     following_ref = (
-        EpisodeRef.from_episode(following, fetchable=await fetchable(following))
+        EpisodeRef.from_episode(
+            following, fetchable=await fetchable(following, aired_here(following))
+        )
         if following is not None
         else None
     )

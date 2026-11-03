@@ -21,7 +21,11 @@ both sources publish dates that cannot be true (architecture.md §5, cache rule
    own summary of the whole run; an episode of it dated next month is a typo,
    not a broadcast, and "will air 27 Sep" between two episodes that aired in
    August is the bug this rule exists for.
-2. **Air times do not go backwards.** An episode dated *after* a
+2. **An announced show has aired nothing** (``NOT_YET_RELEASED``). The status
+   is the source's word that the run has not started; a row dated two hours
+   ago under it is a cached status not yet refreshed, and the show page, the
+   player and the demand must agree that it has not aired (M21 T4).
+3. **Air times do not go backwards.** An episode dated *after* a
    higher-numbered one is non-monotonic, and the later sibling is the better
    evidence: the episode is treated as having aired by the earlier of the two
    dates and is flagged estimated, so the client badges it "est.".
@@ -37,11 +41,14 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from arc.models import Episode
+from arc.models import Anime, Episode
 
 #: A show that has finished airing but has no schedule rows still has aired
 #: episodes; this is the status that says so.
 FINISHED = "FINISHED"
+
+#: The status of a show that has been announced and has not started.
+NOT_YET_RELEASED = "NOT_YET_RELEASED"
 
 #: A show that is still airing. Its ``nextAiringEpisode`` is the sharpest
 #: statement either source makes about where the aired/unaired line is.
@@ -188,13 +195,29 @@ def is_aired(
     boundary already covers has aired too — the boundary is the highest
     *dated* episode in the past, so a row below it with a future date is
     exactly the non-monotonic case, and taking the sibling's date is what rule
-    2 asks for. Only then does a published time speak for itself.
+    3 asks for. Only then does a published time speak for itself. An announced
+    show (rule 2) has aired nothing, whatever its rows say.
     """
+    if anime_status == NOT_YET_RELEASED:
+        return False
     if anime_status == FINISHED or episode.number <= boundary:
         return True
     if episode.air_at is not None:
         return episode.air_at <= now
     return False
+
+
+def has_aired(anime: Anime, episodes: list[Episode], episode: Episode, *, now: datetime) -> bool:
+    """Whether ``episode`` of ``anime`` has aired, judged against its own rows.
+
+    ``episodes`` is that show's rows (the boundary is worked out from them).
+    The one rule the show page, the player, the Next-season offer and the
+    demand share (M21 T4): :func:`is_aired` over :func:`aired_through`.
+    """
+    boundary = aired_through(
+        episodes, now=now, anime_status=anime.status, next_airing=anime.next_airing
+    )
+    return is_aired(episode, now=now, anime_status=anime.status, boundary=boundary)
 
 
 def aired_episodes(
@@ -215,10 +238,12 @@ def aired_episodes(
 
 __all__ = [
     "FINISHED",
+    "NOT_YET_RELEASED",
     "RELEASING",
     "aired_episodes",
     "aired_through",
     "effective_air_at",
+    "has_aired",
     "is_aired",
     "next_airing_at",
     "next_airing_episode",

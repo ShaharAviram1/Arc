@@ -47,8 +47,8 @@ from arc.api.deps import CurrentUser, SessionDep
 from arc.api.schedule_schemas import SchedulePage, SeasonName
 from arc.models import Anime, Episode
 from arc.services.catalog import list_progress_for, list_status_for
+from arc.services.catalog.airing import NOT_YET_RELEASED
 from arc.services.catalog.schedule import (
-    NOT_YET_RELEASED,
     DatedEpisode,
     ScheduleRow,
     WeekPlacement,

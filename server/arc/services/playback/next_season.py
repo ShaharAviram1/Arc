@@ -44,9 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from arc.models import Anime, Episode, EpisodeState, ListEntry, ListStatus
 from arc.services.acquisition.dormancy import is_dormant
 from arc.services.acquisition.wants import WANTING_STATUSES
-from arc.services.catalog.airing import RELEASING, aired_through, is_aired
+from arc.services.catalog.airing import RELEASING, has_aired
 from arc.services.catalog.cache import episodes_for, preferred_title
-from arc.services.catalog.schedule import NOT_YET_RELEASED
 from arc.services.catalog.sequels import find_sequel, first_regular_episode, season_ends_here
 
 #: The viewer's list entry for the sequel: there and needing no touch
@@ -97,16 +96,6 @@ def carries_rewatch(entry: ListEntry | None, *, rewatching: bool) -> bool:
     return entry.progress > 0 or entry.status is ListStatus.COMPLETED
 
 
-def has_aired(sequel: Anime, episodes: list[Episode], episode: Episode, *, now: datetime) -> bool:
-    """Whether ``episode`` of ``sequel`` has aired: never for an announced-only show."""
-    if sequel.status == NOT_YET_RELEASED:
-        return False
-    boundary = aired_through(
-        episodes, now=now, anime_status=sequel.status, next_airing=sequel.next_airing
-    )
-    return is_aired(episode, now=now, anime_status=sequel.status, boundary=boundary)
-
-
 async def next_season(
     session: AsyncSession,
     *,
@@ -114,7 +103,7 @@ async def next_season(
     anime: Anime,
     episode: Episode,
     has_following: bool,
-    fetchable: Callable[[Episode], Awaitable[bool]],
+    fetchable: Callable[[Episode, bool], Awaitable[bool]],
     rewatching: bool = False,
     now: datetime,
 ) -> NextSeason | None:
@@ -122,10 +111,12 @@ async def next_season(
 
     ``None`` unless the season ends at ``episode``
     (:func:`~arc.services.catalog.sequels.season_ends_here`), a sequel has a
-    row in Arc, and that row has a regular episode. ``fetchable`` is the
-    caller's :meth:`~arc.services.acquisition.demand_gate.DemandGate.fetchable`
-    for an aired episode — asked only when the sequel's episode has aired and
-    is not ready. ``rewatching`` is whether ``anime`` is in an open pass of
+    row in Arc, and that row has a regular episode. ``fetchable(episode,
+    aired)`` is the caller's
+    :meth:`~arc.services.acquisition.demand_gate.DemandGate.fetchable`, handed
+    the sequel's own aired answer (judged against the **sequel's** rows and
+    status, never the season being finished) — asked only when that episode
+    has aired and is not ready. ``rewatching`` is whether ``anime`` is in an open pass of
     the viewer's (:func:`carries_rewatch`).
 
     The caller does not ask at all while the opened episode is itself pending
@@ -149,7 +140,7 @@ async def next_season(
         anime=sequel,
         title=preferred_title(sequel),
         episode=first,
-        fetchable=aired and first.state is not EpisodeState.READY and await fetchable(first),
+        fetchable=aired and first.state is not EpisodeState.READY and await fetchable(first, aired),
         list_state=list_state(entry, airing=sequel.status == RELEASING),
         aired=aired,
         rewatch_carry=carries_rewatch(entry, rewatching=rewatching),
@@ -160,7 +151,6 @@ __all__ = [
     "ListState",
     "NextSeason",
     "carries_rewatch",
-    "has_aired",
     "list_state",
     "next_season",
 ]
