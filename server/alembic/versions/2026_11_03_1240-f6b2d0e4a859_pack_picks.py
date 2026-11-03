@@ -11,8 +11,9 @@ episode, resolved rows kept. ``ix_pack_picks_episode_id`` serves the
 per-episode lookup and the episode's cascade delete.
 
 The downgrade drops the table. No ``torrents`` row is touched either way: a
-torrent left in ``awaiting_pick`` by a downgrade is a decided state the older
-code has no name for and leaves alone.
+torrent left in ``awaiting_pick`` by a downgrade is a state the older code has
+no name for, so its poll treats the pack as live again and overwrites the
+state with the client's own on the next pass.
 
 Revision ID: f6b2d0e4a859
 Revises: e5a1c9d3f748
