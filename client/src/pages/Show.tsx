@@ -1775,12 +1775,23 @@ function RewatchControl({ anime }: { anime: AnimeDetail }) {
 
 /**
  * The hero's primary action (M21): play the first unwatched aired episode —
- * straight to the player when it is ready, with the demand flag when it is
- * not, and the page's refusal said in place of the navigation.
+ * straight to the player when it is ready or its copy is on this device (the
+ * same rule as the row), with the demand flag otherwise, and the page's
+ * refusal said in place of the navigation.
  */
-function HeroPlay({ anime, episode }: { anime: AnimeDetail; episode: EpisodeOut }) {
+function HeroPlay({
+  anime,
+  episode,
+  canDownload,
+}: {
+  anime: AnimeDetail
+  episode: EpisodeOut
+  canDownload: boolean
+}) {
   const [refused, setRefused] = useState<DemandRefusalInfo | null>(null)
-  const ready = episode.state === 'ready'
+  const record = useDownload(episode.id)
+  const onDevice = canDownload && record?.state === 'downloaded'
+  const ready = episode.state === 'ready' || onDevice
   const refusal = ready ? null : refusalFor(anime, episode)
   const state: WatchState | undefined = ready ? undefined : { demand: true }
   return (
@@ -1845,7 +1856,7 @@ function Hero({
         {playable === null ? (
           <Button disabled>{NOTHING_READY}</Button>
         ) : (
-          <HeroPlay anime={anime} episode={playable} />
+          <HeroPlay anime={anime} episode={playable} canDownload={canTrip} />
         )}
         <ListStatusControl
           animeId={anime.id}

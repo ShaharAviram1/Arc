@@ -8,7 +8,7 @@ import { wantsDemand } from '@/lib/playback'
 import { createQueryClient } from '@/lib/queryClient'
 import { Show } from '@/pages/Show'
 import { FRIEREN, FRIEREN_DETAIL } from '@/test/animeFixtures'
-import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_USER, type MockRoutes } from '@/test/apiMock'
 
 /**
  * Play on any episode from the show page (FR-A14, M21 T6), and the rewatch
@@ -264,20 +264,31 @@ describe('Hero — play and rewatch (M21)', () => {
   }
 
   it('RewatchControl starts a pass', async () => {
-    const fetchMock = mockApi({
+    const opened: Rewatch = { ...PASS, position: 0, finished_in_pass: 0 }
+    const routes: MockRoutes = {
       'GET /api/auth/me': { body: TEST_USER },
       [DETAIL]: { body: detail() },
-      [`PUT ${REWATCH}`]: { body: { ...PASS, position: 0, finished_in_pass: 0 } },
-    })
+      [`PUT ${REWATCH}`]: { body: opened },
+    }
+    const fetchMock = mockApi(routes)
 
     renderShow()
     const toggle = await screen.findByRole('button', { name: 'Rewatch' })
     expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    // The refetch after the PUT finds the pass open on the server.
+    routes[DETAIL] = { body: detail({ rewatch: opened }) }
     await userEvent.setup().click(toggle)
 
     await waitFor(() => {
       expect(requestsMade(fetchMock)).toContain(`PUT ${REWATCH}`)
     })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Rewatch' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+    })
+    expect(await screen.findByText('Rewatching · ep 0 / 28')).toBeInTheDocument()
   })
 
   it('RewatchControl stops a pass', async () => {
