@@ -1857,7 +1857,10 @@ is its only user, and uses it daily.
   remain for any reason (watched past, show set to on hold / dropped /
   completed, removed from the list, or dropped as stale), FR-T1's grace
   applies from that moment; a want never disappears without leaving a
-  grace anchor behind.
+  grace anchor behind. A demand (FR-A14) goes stale D days after the later
+  of its last press and the user's last play of the episode, in any episode
+  state; the clock also restarts on a walk's last move and a rewatch pass's
+  start (M21).
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired. The small offline copy
   (FR-P6) is deleted with the rest, row and file. **A single is re-acquired
