@@ -121,6 +121,7 @@ from arc.models._columns import TZDateTime
 from arc.models.enums import MalWriteCause
 from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.acquisition.walks import end_walk
 from arc.services.catalog.airing import FINISHED
 from arc.services.mal.names import enqueue_mal_push, is_linked
 from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pending
@@ -752,6 +753,9 @@ async def _advance_list(
             entry.status = ListStatus.COMPLETED
 
     await session.flush()
+    if finished:
+        # FR-W5's auto-complete ends the walk on the show (FR-A1, M21).
+        await end_walk(session, user_id=user_id, anime_id=episode.anime_id)
     if advanced and await is_linked(session, user_id):
         # The one *automatic* event allowed to write to MyAnimeList (FR-M4,
         # FR-M7), and it is recorded only when the number actually moved — a

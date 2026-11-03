@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from arc.models import Anime, ListEntry, ListStatus, MalWriteCause, UpdatedBy
 from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
+from arc.services.acquisition.walks import WALK_ENDING_STATUSES, end_walk
 from arc.services.catalog.cache import ensure_anime
 from arc.services.catalog.service import CatalogService
 from arc.services.mal.names import enqueue_mal_push, is_linked
@@ -146,6 +147,11 @@ async def set_list_entry(
     activate(entry, now=now)
 
     await session.flush()
+    # The user setting the show dropped, on hold or completed ends their walk
+    # on it (FR-A1, M21). Only a status this request *changed*: re-sending one,
+    # or editing the score of a completed show, is not setting it.
+    if status is not None and status in WALK_ENDING_STATUSES and before.status != status.value:
+        await end_walk(session, user_id=user_id, anime_id=anime_id)
     # The acquisition window is a function of this row (FR-A1, FR-W4), so
     # every change to it queues a recompute — deduplicated, so a burst of list
     # edits costs one job. Enqueued rather than computed inline: reconciling
