@@ -2283,6 +2283,160 @@ owner's word.
     → orchestrator verification; full suites green; lint clean; single
     Alembic head; deployed; S4 trip's six missing copies made.
 
+### M21 — Any episode, rewatch, demo removal, pack hygiene (owner 2026-11-03)
+Arc is used only by the owner (the demo ended). Owner: "we should make it so
+that every episode on every show is playable when clicked on, the episode goes
+into download and the video starts playing. also we will introduce a rewatch
+path, that will follow the same logic of normal shows, but not changing the mal
+entry." Plus the two M17 items (pack match review, `downloads/batch` leftover
+sweep) and the demo removal. Plan: `notes/design/m21-plan.md` (gitignored).
+
+The owner's decisions (2026-11-03, final):
+1. Any episode on click: every episode of every show, list status irrelevant;
+   one click = one demand + player (live for singles; "Downloading n %, plays
+   when the file is complete" for packs). — spec FR-A14
+2. Demand lifetime: until finished in the current pass or untouched for D days
+   (FR-T2); never shelved/cancelled for list status or progress. — FR-A14
+3. Walking: after a clicked episode plays, the normal N look-ahead applies from
+   that position (halfway prefetch, slow-swarm N, device-held skip), without
+   touching the list. — FR-A1
+4. Cap `demand_max_open` (default 3, admin setting); demands stay outside K.
+   — FR-A14, FR-A10, FR-D2
+5. Normal-mode list effects stay (FR-S4: finishing adds as Watching, advances
+   MAL). — FR-S4
+6. Rewatch = per-show switch, server-stored; ends on off or last episode of the
+   pass; no MAL write, no list change, separate pass completion drives marks,
+   continue watching, ready to watch, hero pick; same look-ahead from the pass
+   position; MAL rewatch fields untouched. — FR-W7, FR-W5, FR-W1, FR-M7
+7. Retention unchanged; a rewatch completion stamps a fresh anchor. — FR-T1
+8. Docs rewritten (CLAUDE.md acquisition non-negotiable, FR-A1/A10/A14, §8,
+   FR-S4/W5, FR-M7 clause; architecture; roadmap M21). — T0
+9. Demo account and demo-only code removed. — FR-D5 retired
+
+The five remaining decisions, all accepted on the recommendation 2026-11-03
+("go"):
+1. Fold "Try episode 1" (FR-A8) into the click — yes (remove the button now,
+   delete the code later). — FR-A8 retired
+2. Withdrawing a demand (✕ on "Fetching on request", cap refusal lists open
+   demands) — yes. — FR-A14
+3. Next season pressed during a rewatch — the rewatch carries to the sequel
+   when its list entry has progress > 0 or is completed; otherwise normal mode
+   (entry created as Watching). — FR-W7 item 5, FR-A9, FR-S5 item 3
+4. End of a pass on an airing show — at the newest aired episode. — FR-W7
+   item 4
+5. "How Arc works" page — remove. — FR-D5, spec §5
+
+Small calls (reported, not asked): `demand_max_open` 0 = no cap; a stale pack
+pick auto-dismissed after D days; the batch sweep starts in dry run with a
+1-hour mtime floor; `UserOut.is_demo` kept as a constant `false` for one
+release.
+
+Order T0 → T1 → … → T10, one Writer at a time; a Validator on every task, a
+Reviewer where marked.
+- [ ] **T0 — Docs first** (S, Validator). Plan section 8 minus the
+      `mal/sync.py` docstring: CLAUDE.md acquisition and MAL-write rules;
+      spec FR-A1, FR-A4, FR-A8 (retired), FR-A9, FR-A10, FR-A11, FR-A14,
+      FR-S4, FR-S5 item 3, FR-W1, FR-W4, FR-W5, FR-W6, new FR-W7, FR-M7,
+      FR-T1, FR-D2, FR-D4, FR-D5 (retired), §3, §5, §8, decision log;
+      architecture §4, §5.1, §5.1a, §5.2, §5.4, §5.4a, §5.5, §5.7, §5b,
+      decision log; this milestone; README demo mentions.
+      DoD: every owner decision traceable to a numbered FR or section; no
+      "only window-covered" wording left (`grep -i
+      "coverable\|not_in_window\|window covers"` in the docs returns only
+      decision-log history); demo mentions only in dated history or
+      retirement lines.
+- [ ] **T1 — Model + migrations** (S–M). R1 `watch_progress.finished_at`
+      (backfill from `completed_at`), R2 `rewatches` (partial unique open
+      pass), R3 `walks`, R4 seed `demand_max_open` = 3 (+ `DEFAULT_SETTINGS`,
+      `_bounded_int` 0..20, `rules.demand_max_open()`), R6 `pack_picks` +
+      `QBIT_AWAITING_PICK`, R7 seed `batch_sweep_dry_run` = true; models and
+      settings plumbing. Tests: up/down, backfill, partial unique index,
+      validator bounds. DoD: one Alembic head, lint.
+- [ ] **T2 — Progress core + rewatch service** (L, **Reviewer: MAL
+      writes**). `playback/progress.py`, new `playback/rewatch.py`,
+      `playback/sync.py`, `api/playback.py`, `api/playback_schemas.py`,
+      rewatch routes, the `mal/sync.py` docstring (FR-S4, FR-S8, FR-W3,
+      FR-W5, FR-W7, FR-M4, FR-M7, FR-A9). Tests: zero `mal_writes` and
+      unchanged `list_entries` through a full rewatch including the last
+      episode with list 5/12, no auto-complete, no entry creation; manual
+      mark/unmark move only `finished_at`; an offline replay inside an ended
+      pass is MAL-free, one before the pass advances; the pass ends on the
+      last (finished) / newest aired (airing) with `rewatch_ended`;
+      `finished_at` re-stamped in normal mode without a second MAL write; a
+      truncated live duration does not stamp; walks upsert and ignore stale
+      replays; concurrent completions → one `newly_completed`.
+- [ ] **T3 — Wants + demand rewrite** (L, **Reviewer: acquisition**).
+      `wants.py`, `demand.py`, `api/demand.py`, `rules.py` (FR-A1, FR-A10,
+      FR-A14). Tests: a click on ep 3 of a completed show is never shelved or
+      cancelled while downloading (N = 0, K full); a finished demand is
+      deleted, not shelved; a stale demand dropped and its download
+      cancelled; the cap (a 4th refused with `open[]`; a race → one wins);
+      walks (ep 4 unlisted → ep 5 at halfway with N = 1; dropped after the
+      walk stops it; a lapse shelves); the rewatch window from the pass
+      position with the list window suspended; `following` deletes finished
+      walk rows; a listed show plus a backwards walk wants both windows;
+      device skip on walks; withdraw ends a demand; the coverage helpers
+      gone.
+- [ ] **T4 — Read API** (M, **Reviewer: playback/acquisition surface**).
+      `api/playback.py` (`/play`, next, next_season),
+      `playback/next_season.py`, `api/anime.py`, `anime_schemas.py`,
+      `api/home.py`, `catalog/progress.py`, `api/episode_extras.py`. Tests:
+      waiting for any aired episode, 404 un-aired; the pack note;
+      `fetchable` + `demand.refusal`; rewatch marks, `watched_source` and
+      hero order; Ready to watch branches; `/api/progress/completed` pass
+      completions.
+- [ ] **T5 — Retention anchor** (S, **Reviewer: retention**).
+      `retention/sweep.py` (FR-T1). Tests: a rewatch completion at T →
+      deletable at T + 6 h; demand lifecycle; a walk want keeps the playing
+      episode; floor eviction order. Can follow T2 directly.
+- [ ] **T6 — Client** (L, Validator; Reviewer optional). Plan section 7 +
+      Vitest (EpisodeRow clickability and toast, RewatchControl, Player
+      demand on `demanded: false`, pack note, cap refusal, rewatch-ended
+      toast, withdraw, `downloads.watched` for a pass completion). DoD:
+      lint, suite, Chrome check, the owner's iPad check on a pack and on a
+      single.
+- [ ] **T7 — Pack match review** (M–L, **Reviewer: acquisition +
+      matching**; moved from M17). A pack refused permanently for
+      identification is kept stopped with nothing selected
+      (`awaiting_pick`, `pack_picks`), the episode `unavailable` "the pack's
+      files need a person's pick (Review)"; `POST /api/review/packs/{id}/pick`
+      claims, re-selects and starts it; `…/dismiss` tombstones it; `GET
+      /api/review/packs` + summary count; a "Season packs" section on
+      Review, linked from the Show row and the waiting player; no auto-link,
+      no LLM apply; a stale pick auto-dismissed after D days (FR-A4, FR-A11,
+      FR-D4). Tests: pure eligibility; a pg refusal → pending pick; pick →
+      claim/reselect/downloading; dismiss → tombstone; pick on a withdrawn
+      want → 409; second pick → 409; landing → linked confirmed; Vitest.
+      Depends on T3; runs after T6.
+- [ ] **T8 — `downloads/batch` leftover sweep** (M, **Reviewer: retention +
+      file deletion**; moved from M17). `retention/batch_sweep.py`
+      `leftover_files(session, settings, qbit)` (FR-T1, spec rule list),
+      a step of the hourly retention job, `batch_sweep_dry_run` (default on),
+      `leftover_files`/`leftover_bytes` in `GET /api/retention/preview` and
+      the admin Retention tab. Tests: sparse files
+      (claimed/unclaimed/in-flight/recent), qBittorrent priority mock,
+      symlink refused, dry run deletes nothing, a downloading pack untouched.
+      Depends on T3 and the M20.4 B guards.
+- [ ] **T9 — Demo removal** (M, **Reviewer: auth + media-serving guards**).
+      Plan section 6 + R5 (drop `users.is_demo`; `UserOut.is_demo` a
+      constant `false` for one release); server guards, CLI `--demo`,
+      client nav/strip/page/fixtures, `README.md`/`deploy/README.md` (FR-D5
+      retired). DoD: `rg -i "is_demo|isDemo|demo_account|HowArcWorks|how-arc-works"
+      server/arc client/src` returns only the deprecated `UserOut` constant.
+      Last, to avoid conflicts in `anime.py`, `playback.py`, `home.py`,
+      `Show.tsx`, `Player.tsx`.
+- [ ] **T10 — Integration + DoD** (M, orchestrator + Validator).
+      `tests/slow/test_m21_flow.py`: click ep 3 of a completed show → demand
+      → live play → finish → want deleted → zero MAL writes → deletion after
+      6 h; rewatch on → ep-1 window → pass through the last episode →
+      auto-end → zero MAL writes; the cap race. Suites green, lint, one
+      Alembic head, docs reconciled, deployed with acquisition paused and
+      resumed on the owner's word.
+- **DoD:** T0–T10 ticked after the orchestrator's own verification; full
+  suites green; `make lint` clean; a single Alembic head; spec, architecture
+  and CLAUDE.md match the code; deployed on production (backup first,
+  `alembic current` checked); the owner's iPad check on a pack and a single.
+
 ### M17 — After the submission
 Approved by the owner on 2026-09-18, contents picked by the orchestrator
 from the "possible later" list (the owner may strike any). Starts after
@@ -2290,15 +2444,8 @@ M16's DoD is met and the professor's review is done.
 - [ ] Email for **account events only**: invite delivery and password
       reset/change. Explicitly **no** episode-ready or failure notifications
       (owner, 2026-09-18) — those stay in-app (FR-W6).
-- [ ] Match review for batch files: a batch whose wanted file cannot be
-      identified is skipped today (FR-A4/FR-A11); let a person resolve the
-      file → episode mapping from the review queue instead.
-- [ ] Sweep `downloads/batch/` for files with no torrent_files claim (partial
-      bytes of cancelled batch members). A want withdrawn mid-download leaves
-      whatever had arrived inside the pack's directory with no `media_files`
-      row naming it, so retention — which measures per episode, off the rows —
-      cannot see it; those bytes go when the pack itself reaches DELETE, which
-      may be never for a show somebody keeps on their list (FR-A11, FR-T1).
+- 2026-11-03 (owner): match review for batch files and the
+  `downloads/batch/` leftover sweep moved to M21 (T7, T8).
 - [ ] Selectable subtitle and audio tracks at play time (multiple renditions
       or on-the-fly selection) instead of one burned-in choice.
 - [ ] Per-show language overrides (audio/subtitle), on the pattern of the
