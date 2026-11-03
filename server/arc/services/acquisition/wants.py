@@ -623,9 +623,8 @@ class _Plan:
     #: between deleting a row that left the window and shelving it.
     following: frozenset[tuple[int, int]] = frozenset()
     #: (user, episode) for every episode a held pair's window would want if the
-    #: cap admitted it (its pre-cap window, prefetch included). What tells a
-    #: held show's window rows from rows nothing asks for any more (a withdrawn
-    #: demand), and what a stale demand on a held show counts as still wanted.
+    #: cap admitted it (its pre-cap window, prefetch included): what a stale
+    #: demand on a held show counts as still wanted (:func:`compute_wants`).
     held_windows: frozenset[tuple[int, int]] = frozenset()
 
     @property
@@ -1015,9 +1014,6 @@ async def _plan_wants(
         picked: dict[int, Episode] = {}
         regular: set[int] = set()
         extra_ids: set[int] = set()
-        # The regular window before the device skip: what an occupant has to
-        # be fetching for the show to hold a slot (below).
-        reach: set[int] = set()
         for position in positions[key]:
             first_id = firsts.get((user_id, anime_id, position))
             prefetch = first_id is not None and (user_id, first_id) in halfway
@@ -1031,7 +1027,6 @@ async def _plan_wants(
                 prefetch=prefetch,
             )
             covers[user_id].update(episode.id for episode in unskipped)
-            reach.update(episode.id for episode in unskipped if episode.number <= position + n_show)
             # The same window with the device skip applied (FR-A15): what is
             # actually fetched.
             for episode in window(
@@ -1067,10 +1062,7 @@ async def _plan_wants(
                 anime_id=anime_id,
                 airing=anime.status == RELEASING,
                 updated_at=max(recency),
-                # An occupant only for its window's episodes (M21): a download
-                # nothing asks for any more — a withdrawn demand — must not
-                # hold the show a slot, or the held-show rule could never see it.
-                fetching=bool((occupied.get(key, set()) & reach) - extra_ids),
+                fetching=bool(occupied.get(key, set()) - extra_ids),
                 hungry=any(
                     (user_id, episode.id) not in live
                     for episode in chosen
@@ -1400,7 +1392,6 @@ async def compute_wants(
         keep_in_flight=plan.look_ahead > 0,
         finished=demands.finished,
         released=stale_kept,
-        held_windows=plan.held_windows,
     )
     result = replace(result, waiting=plan.held_back)
     result = await _drop_stale(
@@ -1594,7 +1585,6 @@ async def _reconcile(
     keep_in_flight: bool = False,
     finished: Collection[tuple[int, int]] = (),
     released: Collection[tuple[int, int]] = (),
-    held_windows: Collection[tuple[int, int]] = (),
 ) -> WantsResult:
     """Make ``wants`` equal ``desired``: insert, revive, drop, delete.
 
@@ -1603,12 +1593,6 @@ async def _reconcile(
     is what the paragraphs below mean by "wanting": a row of a followed show
     that left its window is deleted, a row of any other show is shelved, so a
     lapsed walk's leftovers are shelved :data:`REASON_NOT_WANTING`.
-
-    ``held_windows`` (M21) is the pre-cap windows of the held pairs
-    (:attr:`_Plan.held_windows`). On a held pair a live, non-sample row with
-    no demand that not even that window asks for — a withdrawn demand — is
-    shelved :data:`REASON_NOT_WANTING`, so its download is cancelled rather
-    than left holding the show a slot; every other held row is left as found.
 
     ``released`` is the stale demands something else still asks for
     (:func:`compute_wants`): they lose ``demanded_at`` wherever they are, held
@@ -1660,8 +1644,8 @@ async def _reconcile(
     running as it always did. A live want on a followed show whose episode is
     :data:`IN_FLIGHT` (``downloading``) and **above** the user's progress is
     kept when the window no longer reaches it — the show stopped counting as
-    thinly seeded, N was turned down, a device now holds it, a demand was
-    withdrawn — because deleting it would cancel the download with its
+    thinly seeded, N was turned down, a device now holds it — because
+    deleting it would cancel the download with its
     files, and a thin-swarm figure that moves with every tracker scrape would
     cancel and restart the same fetch. The first run after the episode is no
     longer ``downloading`` (``downloaded``/``matching``, before it is ready)
@@ -1729,7 +1713,6 @@ async def _reconcile(
     wanting = following
     over = set(finished)
     lapsed = set(released)
-    waiting_for = set(held_windows)
     # Trip-only: a trip asked for it and nothing else did (FR-A12).
     trip_only = {key for key in trip_touches if key not in desired}
     wanted_now: dict[tuple[int, int], _Touch] = dict(desired)
@@ -1840,19 +1823,6 @@ async def _reconcile(
             # takes nothing away (the docstring has the argument).
             if _watched_past(want, number, watched_through.get(pair, 0)):
                 removed.append(key)
-            elif (
-                want.dropped_at is None
-                and want.demanded_at is None
-                and not want.sample
-                and key not in waiting_for
-            ):
-                # Nothing asks for it, not even the window the show waits to
-                # be admitted with — a withdrawn demand, say (M21). Shelved,
-                # so its download stops rather than running on and holding
-                # the show a slot.
-                want.dropped_at = now
-                want.drop_reason = REASON_NOT_WANTING
-                shelved += 1
             continue
         if pair in wanting:
             if (
