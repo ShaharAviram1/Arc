@@ -70,8 +70,8 @@ async def test_the_window_episode_is_fetchable_and_one_beyond_is_not(
     assert flags[ids[4]] is True
     assert flags[ids[8]] is False
     assert flags[ids[0]] is False
-    # The flag and the route agree.
-    assert (await client.post(f"/api/episodes/{ids[8]}/demand")).status_code == 409
+    # M21 (FR-A14): the route takes any aired episode; the flag follows in T4.
+    assert (await client.post(f"/api/episodes/{ids[8]}/demand")).status_code == 202
 
 
 async def test_a_ready_episode_is_never_fetchable(

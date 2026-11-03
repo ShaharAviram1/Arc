@@ -73,7 +73,8 @@ async def wants_of(session: AsyncSession, user: User) -> dict[int, Want]:
 # --- 1. a demand is re-checked against the window ------------------------------
 
 
-async def test_a_demand_beyond_a_shrunk_window_goes(db_session: AsyncSession) -> None:
+async def test_a_demand_beyond_a_shrunk_window_stays(db_session: AsyncSession) -> None:
+    """M21 (FR-A14): a demand is wanted unconditionally; the window shrinking ends nothing."""
     anime, rows = await a_show(db_session, 971001)
     user = await make_user(db_session, "rv-shrink@arc.test")
     await make_entry(db_session, user, anime, progress=4)
@@ -85,12 +86,13 @@ async def test_a_demand_beyond_a_shrunk_window_goes(db_session: AsyncSession) ->
     await set_setting(db_session, "look_ahead_n", 1)
     await compute_wants(db_session)
 
-    assert set(await wants_of(db_session, user)) == {rows[4].id}, "left the window: gone"
+    assert set(await wants_of(db_session, user)) == {rows[4].id, rows[6].id}, "still demanded"
 
 
-async def test_a_demanded_trip_episode_stays_a_trip_want_and_goes_with_the_trip(
+async def test_a_demanded_trip_episode_is_wanted_for_streaming_and_outlives_the_trip(
     db_session: AsyncSession, settings: Settings
 ) -> None:
+    """M21 (FR-A14): a demanded trip episode is no longer trip-only and stays demanded."""
     anime, rows = await a_show(db_session, 971002)
     user = await make_user(db_session, "rv-trip@arc.test")
     await make_entry(db_session, user, anime, progress=4)
@@ -105,12 +107,12 @@ async def test_a_demanded_trip_episode_stays_a_trip_want_and_goes_with_the_trip(
     await demand(db_session, user_id=user.id, episode=rows[6], now=datetime.now(UTC))
     await compute_wants(db_session)
     want = (await wants_of(db_session, user))[rows[6].id]
-    assert want.trip is True and want.demanded_at is not None, "still the trip's"
+    assert want.trip is False and want.demanded_at is not None, "a demand, not trip-only"
 
     await cancel_trip(db_session, user=user, trip_id=trip.id, now=datetime.now(UTC))
     await compute_wants(db_session)
 
-    assert rows[6].id not in await wants_of(db_session, user), "went with the trip"
+    assert rows[6].id in await wants_of(db_session, user), "the demand outlives the trip"
 
 
 async def test_an_earlier_demand_does_not_licence_another_outside_the_window(

@@ -1,28 +1,39 @@
-"""Play on demand: pressing play on an episode that is not ready yet (FR-A14, M20).
+"""Play on demand: pressing play on an episode that is not ready yet (FR-A14, M20, M21).
 
-M20 makes Arc a cache in front of the indexer rather than a collection (owner,
+M20 made Arc a cache in front of the indexer rather than a collection (owner,
 2026-10-13): one episode ready per watcher, one more at the halfway mark, and
-nothing fetched that a device of the user already holds. The price is that an
-episode the user wants *now* may not be on the server — they are on the Mac and
-the copy is on the iPad, or they skipped the next one and want the one after.
-Pressing play is then a request to fetch it, at the top of the queue.
+nothing fetched that a device of the user already holds. Pressing play on an
+episode that is not on the server is a request to fetch it, at the top of the
+queue.
 
-**Only what the user's window covers** (owner Q5, 2026-10-13). An episode may
-be demanded when it is in the user's window *before* the device skip and the
-slot cap — window ∪ halfway prefetch ∪ device-held — or when they already have
-a live want on it (a sample, a trip episode, an earlier demand). That is
-:func:`~arc.services.acquisition.wants.coverable`, the reconciler's own
-computation narrowed to one user, so the button and the rule cannot disagree.
-Anything further ahead is refused with a sentence: a fetch outside the window
-would be a new kind of acquisition, and CLAUDE.md's non-negotiable allows none.
+**Any aired episode of any show** (M21, owner 2026-11-03: "every episode on
+every show is playable when clicked on"). M20's "only what the window covers"
+is retired. :func:`demand` takes the want lock and then, in this order:
 
-What a demand does, in one transaction:
+1. a ``ready`` episode writes nothing and counts for nothing (before the lock);
+2. an episode that has not aired is refused :data:`NOT_AIRED`;
+3. an episode the caller already has an **open** demand on is restamped and
+   skips the cap;
+4. a new demand beyond ``demand_max_open`` open ones (0 = no cap) is refused
+   :data:`DEMAND_CAP`, with the open ones listed (:func:`open_demands`) — the
+   count is read under the lock, so two clicks cannot both take the last place;
+5. while paused or held for disk space, an episode that still needs fetching is
+   refused (:data:`ACQUISITION_PAUSED`, :data:`STORAGE_HELD`).
+
+A demand is **open** while its row is live and the user has not finished the
+episode since pressing play (``watch_progress.finished_at >= demanded_at``).
+The reconciler wants an open demand unconditionally and ends it when it is
+finished, stale (D days untouched) or withdrawn
+(:func:`~arc.services.acquisition.wants._demanded_wants`); :func:`withdraw` is
+the last of those.
+
+What an accepted demand does, in one transaction:
 
 1. Upserts the (user, episode) want with ``demanded_at = now`` and clears any
-   drop. The reconciler then keeps it wanted even though a device holds it and
-   even though the show is waiting for a slot, and it never occupies a slot
-   (FR-A10: "a demanded episode never counts and is never refused, like a
-   sample").
+   drop. A row that was a trip's or a sample's becomes a plain demand
+   (``trip``/``sample`` cleared), so the trip's and the sample's own cancels —
+   which skip such rows as theirs — count it as the live want it is (FR-A14:
+   an open demand is never cancelled). It never occupies a slot (FR-A10).
 2. Starts the search through the reconciler's own
    :func:`~arc.services.acquisition.wants.start_search`, at
    :data:`DEMAND_PRIORITY` and with ``retry_now`` (a person asking is entitled
@@ -60,7 +71,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
-from arc.models import Episode, EpisodeState, JobStatus, Torrent, TorrentKind, Want
+from arc.models import (
+    Anime,
+    Episode,
+    EpisodeState,
+    JobStatus,
+    Torrent,
+    TorrentKind,
+    Want,
+    WatchProgress,
+)
 from arc.services.acquisition.names import (
     DEMAND_PRIORITY,
     QBIT_SEQUENTIAL,
@@ -74,8 +94,9 @@ from arc.services.acquisition.names import (
     top_dedupe_key,
 )
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_MISSING
-from arc.services.acquisition.rules import is_paused, is_storage_held
-from arc.services.acquisition.wants import STARTABLE, coverable, lock_wants, start_search
+from arc.services.acquisition.rules import demand_max_open, is_paused, is_storage_held
+from arc.services.acquisition.wants import STARTABLE, lock_wants, start_search
+from arc.services.catalog.cache import preferred_title
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.media.names import (
     STAGE_LIVE_DONE,
@@ -83,6 +104,7 @@ from arc.services.media.names import (
     enqueue_remux_live,
     latest_live_job,
 )
+from arc.services.playback.next_season import has_aired
 
 log = logging.getLogger(__name__)
 
@@ -92,11 +114,9 @@ NEEDS_FETCH: frozenset[EpisodeState] = STARTABLE | frozenset(
     {EpisodeState.WANTED, EpisodeState.SEARCHING}
 )
 
-NOT_IN_WINDOW = "not_in_window"
-NOT_IN_WINDOW_MESSAGE = (
-    "Arc fetches only the next episode of a show you are watching or have planned, "
-    "so this one cannot be fetched on demand."
-)
+NOT_AIRED = "not_aired"
+NOT_AIRED_MESSAGE = "This episode hasn't aired yet."
+DEMAND_CAP = "demand_cap"
 ACQUISITION_PAUSED = "acquisition_paused"
 ACQUISITION_PAUSED_MESSAGE = (
     "Fetching is paused on this server, so this episode cannot be fetched right now."
@@ -108,13 +128,84 @@ STORAGE_HELD_MESSAGE = "The server is low on disk space, so it is not fetching a
 PLAYS_WHEN_DOWNLOADED_MESSAGE = "This episode will play when its download finishes."
 
 
-class DemandRefused(Exception):
-    """A demand Arc will not act on, with a code and a sentence for a person."""
+def demand_cap_message(cap: int) -> str:
+    """The cap refusal's sentence (FR-A14): "You already have 3 episodes fetching …"."""
+    episodes = "episode" if cap == 1 else "episodes"
+    return f"You already have {cap} {episodes} fetching on request. Finish or cancel one first."
 
-    def __init__(self, code: str, message: str) -> None:
+
+@dataclass(frozen=True, slots=True)
+class OpenDemand:
+    """One of the caller's open demands, as the cap refusal lists it."""
+
+    episode_id: int
+    anime_id: int
+    #: The show's title (``preferred_title``), for the link's text.
+    title: str
+    number: int
+
+
+class DemandRefused(Exception):
+    """A demand Arc will not act on, with a code and a sentence for a person.
+
+    ``open`` is the caller's open demands, set only on :data:`DEMAND_CAP`.
+    """
+
+    def __init__(self, code: str, message: str, open: tuple[OpenDemand, ...] = ()) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.open = open
+
+
+async def open_demands(session: AsyncSession, user_id: int) -> list[OpenDemand]:
+    """The user's open demands, oldest press first (FR-A14, M21). Read-only.
+
+    Open: a live want (``dropped_at`` null) with ``demanded_at`` set and no
+    ``watch_progress.finished_at`` at or after it. Read under the want lock by
+    :func:`demand`, so the count the cap is checked against is the one the
+    write lands on.
+    """
+    rows = await session.execute(
+        select(Want.episode_id, Episode.anime_id, Episode.number, Anime)
+        .join(Episode, Episode.id == Want.episode_id)
+        .join(Anime, Anime.id == Episode.anime_id)
+        .outerjoin(
+            WatchProgress,
+            (WatchProgress.user_id == Want.user_id) & (WatchProgress.episode_id == Want.episode_id),
+        )
+        .where(
+            Want.user_id == user_id,
+            Want.dropped_at.is_(None),
+            Want.demanded_at.is_not(None),
+            or_(
+                WatchProgress.finished_at.is_(None),
+                WatchProgress.finished_at < Want.demanded_at,
+            ),
+        )
+        .order_by(Want.demanded_at, Want.episode_id)
+    )
+    return [
+        OpenDemand(
+            episode_id=episode_id, anime_id=anime_id, title=preferred_title(anime), number=number
+        )
+        for episode_id, anime_id, number, anime in rows.all()
+    ]
+
+
+async def _aired(session: AsyncSession, episode: Episode, *, now: datetime) -> bool:
+    """Whether ``episode`` has aired, by the catalogue's rule (an announced show never has)."""
+    anime = await session.get(Anime, episode.anime_id)
+    if anime is None:
+        return False
+    rows = list(
+        (
+            await session.scalars(
+                select(Episode).where(Episode.anime_id == anime.id).order_by(Episode.number)
+            )
+        ).all()
+    )
+    return has_aired(anime, rows, episode, now=now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,11 +240,13 @@ async def demand(
 ) -> DemandOutcome:
     """Want this episode now, at the top of the queue (FR-A14). Flushes; the caller commits.
 
-    Raises :class:`DemandRefused` with :data:`NOT_IN_WINDOW` when the episode is
-    not one the user's window covers, and with :data:`ACQUISITION_PAUSED` or
+    Raises :class:`DemandRefused` with :data:`NOT_AIRED` for an episode that
+    has not aired, :data:`DEMAND_CAP` (with ``open``) for a new demand beyond
+    ``demand_max_open``, and :data:`ACQUISITION_PAUSED` or
     :data:`STORAGE_HELD` when it still needs fetching and acquisition cannot
-    fetch. ``settings`` is what makes the disk measurable; without one there
-    is no measurement, which is never held (the reconciler's rule).
+    fetch — in that order (the module docstring). ``settings`` is what makes
+    the disk measurable; without one there is no measurement, which is never
+    held (the reconciler's rule).
     """
     if episode.state is EpisodeState.READY:
         # Nothing to fetch: the player can open it. No stamp, no reconciliation.
@@ -161,8 +254,15 @@ async def demand(
     # One at a time with the reconciler (and with another demand): see
     # :func:`~arc.services.acquisition.wants.lock_wants`.
     await lock_wants(session)
-    if episode.id not in await coverable(session, user_id, now=now):
-        raise DemandRefused(NOT_IN_WINDOW, NOT_IN_WINDOW_MESSAGE)
+    if not await _aired(session, episode, now=now):
+        raise DemandRefused(NOT_AIRED, NOT_AIRED_MESSAGE)
+    opened = await open_demands(session, user_id)
+    if all(found.episode_id != episode.id for found in opened):
+        # A new demand: the cap applies. Pressing play again on an open one
+        # only restamps it and never counts twice.
+        cap = await demand_max_open(session)
+        if cap and len(opened) >= cap:
+            raise DemandRefused(DEMAND_CAP, demand_cap_message(cap), tuple(opened))
     if episode.state in NEEDS_FETCH:
         if await is_paused(session):
             raise DemandRefused(ACQUISITION_PAUSED, ACQUISITION_PAUSED_MESSAGE)
@@ -174,7 +274,14 @@ async def demand(
     await session.execute(
         statement.on_conflict_do_update(
             index_elements=[Want.user_id, Want.episode_id],
-            set_={"demanded_at": now, "dropped_at": None, "drop_reason": None},
+            set_={
+                "demanded_at": now,
+                "dropped_at": None,
+                "drop_reason": None,
+                # A demand, whatever the row was before (the module docstring).
+                "trip": False,
+                "sample": False,
+            },
         )
     )
     want = await session.get(Want, (user_id, episode.id), populate_existing=True)
@@ -221,6 +328,27 @@ async def demand(
         live=live,
         live_note=live_note,
     )
+
+
+async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int) -> bool:
+    """Withdraw the caller's demand on an episode (FR-A14, M21). Flushes; the caller commits.
+
+    ``demanded_at`` goes back to null and a reconciliation is queued; the row
+    then lives or ends as an ordinary want — kept if a window, a walk or a trip
+    still asks for the episode, otherwise deleted or shelved, and the download
+    cancelled when nobody else wants it. ``True`` when there was a demand to
+    withdraw; a second call changes nothing and queues nothing. Taken under
+    the want lock like a demand, so a reconciliation never sees half of it.
+    """
+    await lock_wants(session)
+    want = await session.get(Want, (user_id, episode_id), populate_existing=True)
+    if want is None or want.demanded_at is None:
+        return False
+    want.demanded_at = None
+    await enqueue_compute_wants(session)
+    await session.flush()
+    log.info("demand withdrawn", extra={"user_id": user_id, "episode_id": episode_id})
+    return True
 
 
 async def _start_live(
@@ -287,11 +415,17 @@ async def _raise_queued_search(session: AsyncSession, episode_id: int) -> None:
 
 __all__ = [
     "ACQUISITION_PAUSED",
+    "DEMAND_CAP",
     "DEMAND_PRIORITY",
-    "NOT_IN_WINDOW",
+    "NOT_AIRED",
+    "NOT_AIRED_MESSAGE",
     "PLAYS_WHEN_DOWNLOADED_MESSAGE",
     "STORAGE_HELD",
     "DemandOutcome",
     "DemandRefused",
+    "OpenDemand",
     "demand",
+    "demand_cap_message",
+    "open_demands",
+    "withdraw",
 ]
