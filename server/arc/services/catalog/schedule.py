@@ -82,6 +82,7 @@ from sqlalchemy import ColumnElement, Integer, Select, and_, exists, or_, select
 from arc.models import Anime, Episode, ListStatus
 from arc.services.catalog.airing import (
     FINISHED,
+    NOT_YET_RELEASED,
     RELEASING,
     next_airing_at,
     next_airing_episode,
@@ -142,9 +143,6 @@ DAYS_AHEAD = 6
 
 #: A weekly slot's period, for the one inference :func:`place_dated` makes.
 WEEK = timedelta(days=7)
-
-#: The status of a show that has been announced and has not started.
-NOT_YET_RELEASED = "NOT_YET_RELEASED"
 
 
 def user_timezone(name: str | None) -> ZoneInfo:

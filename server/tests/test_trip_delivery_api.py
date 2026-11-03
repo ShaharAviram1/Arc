@@ -352,7 +352,12 @@ async def test_play_answers_a_trip_episode_offline_only(
     assert body["episode"]["id"] == ids[1]
     assert body["previous"]["id"] == ids[0] and body["next"]["id"] == ids[2]
 
-    assert (await other_client.get(f"/api/episodes/{ids[1]}/play")).status_code == 404
+    # Someone else, with no trip row: since M21 (FR-A14) any aired episode opens
+    # the waiting player for them — pending, not demanded, not offline-only.
+    theirs = await other_client.get(f"/api/episodes/{ids[1]}/play")
+    assert theirs.status_code == 200, theirs.text
+    assert theirs.json()["offline_only"] is False
+    assert theirs.json()["pending"]["demanded"] is False
 
     await owner_client.post(delivered_url(trip_id, ids[1]), json={})
     assert (await owner_client.get(f"/api/episodes/{ids[1]}/play")).json()["offline_only"]
@@ -362,7 +367,9 @@ async def test_play_answers_a_trip_episode_offline_only(
         assert row is not None
         row.state = TripEpisodeState.EXPIRED
         await session.commit()
-    assert (await owner_client.get(f"/api/episodes/{ids[1]}/play")).status_code == 404
+    expired = (await owner_client.get(f"/api/episodes/{ids[1]}/play")).json()
+    assert expired["offline_only"] is False, "no trip copy any more: the waiting player (M21)"
+    assert expired["pending"] is not None
 
 
 async def test_play_of_a_ready_episode_is_unchanged(

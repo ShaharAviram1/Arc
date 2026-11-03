@@ -45,13 +45,10 @@ from arc.services.acquisition.rules import (
 from arc.services.acquisition.wants import (
     _thin_shows,
     compute_wants,
-    coverable,
-    coverable_once_active,
     show_look_ahead,
     slot_view,
 )
 from arc.services.catalog.airing import FINISHED
-from arc.services.catalog.cache import episodes_for
 from arc.services.trips.cancel import cancel_trip
 from arc.services.trips.create import create_trip
 from tests.acquisition_helpers import (
@@ -415,40 +412,6 @@ async def test_a_slow_n_below_n_changes_nothing(db_session: AsyncSession) -> Non
     await compute_wants(db_session)
 
     assert await wanted(db_session, user) == ids(rows, 5, 6)
-
-
-@pg
-async def test_coverable_includes_p_plus_3_on_a_thin_show(db_session: AsyncSession) -> None:
-    await rules(db_session)
-    anime, rows = await a_show(db_session, 976518)
-    await single(db_session, rows[0], 5)
-    user = await make_user(db_session, "thin-demand@arc.test")
-    await make_entry(db_session, user, anime, progress=4)
-
-    covered = await coverable(db_session, user.id)
-
-    assert ids(rows, 5, 6, 7) <= covered
-    assert rows[7].id not in covered
-
-
-@pg
-async def test_coverable_once_active_follows_the_same_rule(db_session: AsyncSession) -> None:
-    await rules(db_session)
-    thin, thin_rows = await a_show(db_session, 976519)
-    await single(db_session, thin_rows[5], 5)
-    fat, fat_rows = await a_show(db_session, 976520)
-    await single(db_session, fat_rows[5], 50, tag="m")
-    user = await make_user(db_session, "thin-next@arc.test")
-
-    thin_cover = await coverable_once_active(
-        db_session, user.id, thin, await episodes_for(db_session, thin.id), None
-    )
-    fat_cover = await coverable_once_active(
-        db_session, user.id, fat, await episodes_for(db_session, fat.id), None
-    )
-
-    assert thin_cover == ids(thin_rows, 1, 2, 3)
-    assert fat_cover == ids(fat_rows, 1)
 
 
 async def cancel_jobs(session: AsyncSession) -> list[Job]:

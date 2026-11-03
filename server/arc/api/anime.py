@@ -69,7 +69,6 @@ from arc.api.anime_schemas import (
     MalSyncOut,
     RelatedAnime,
     RelationOut,
-    SampleOut,
     SearchPage,
 )
 from arc.api.deps import AdminUser, AnimeId, CatalogDep, CurrentUser, SessionDep, SettingsDep
@@ -77,12 +76,10 @@ from arc.api.episode_extras import episode_extras
 from arc.api.jobs import JobOut
 from arc.api.schemas import OverrideOut
 from arc.api.trip_schemas import TripLimits, TripOut
-from arc.models import Anime, EpisodeState, Job, ListEntry, UserRole, Want
-from arc.services.acquisition.samples import (
-    cancel_sample,
-    sample_for,
-)
-from arc.services.acquisition.wants import WANTING_STATUSES, coverable, slot_view
+from arc.models import Anime, Job, ListEntry, UserRole, Want
+from arc.services.acquisition.demand_gate import demand_gate
+from arc.services.acquisition.samples import cancel_sample
+from arc.services.acquisition.wants import WANTING_STATUSES, slot_view
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceNotFound,
@@ -102,7 +99,7 @@ from arc.services.jobs import enqueue
 from arc.services.mal.names import is_linked
 from arc.services.mal.writelog import SyncState, sync_state
 from arc.services.pins import is_pinned
-from arc.services.playback.progress import completed_episode_ids
+from arc.services.playback.rewatch import summary, watch_view
 from arc.services.settings import read_override
 from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
 from arc.services.trips.create import active_trip
@@ -348,10 +345,6 @@ async def detail(
         offline_demo=user.is_demo,
         live_settings=settings,
     )
-    # The caller's own "try episode 1" want, if they have one (FR-A8). The
-    # episode number comes from the list already loaded rather than from a
-    # second query — the sample is always one of these rows.
-    want = await sample_for(session, user_id=user.id, anime_id=anime.id)
     # The caller's active trip on this show (FR-A12; a user may have one per
     # show, owner 2026-10-28): one indexed lookup, and the trip's own few
     # queries only when there is one. The copy estimate is on the page either
@@ -392,18 +385,17 @@ async def detail(
         if episode_ids
         else frozenset[int]()
     )
-    # Which not-ready rows the caller may press play on (FR-A14, M20): the
-    # rule ``POST /demand`` applies, so the page never offers a play it would
-    # be refused. ``coverable`` plans the caller's windows, so it runs only
-    # when this show can be in one — a watching/planned entry, or a live want
-    # of theirs here (a sample, a trip) — and some row is not ready.
-    fetchable = (
-        await coverable(session, user.id, now=now())
-        if any(episode.state is not EpisodeState.READY for episode in episodes)
-        and ((entry is not None and entry.status in WANTING_STATUSES) or bool(wanted_by_me))
-        else frozenset[int]()
-    )
-    by_id = {episode.id: episode for episode in episodes}
+    # Where the caller stands with play on demand (FR-A14, M21): their open
+    # demands (``demanded`` on the rows, and the list a cap refusal links to),
+    # the cap, and the refusal a click on this page would get now. Every aired
+    # not-ready row is fetchable; this says when a press would be refused.
+    gate = await demand_gate(session, user.id, settings=settings)
+    # FR-W5, pass-aware (FR-W7): which of these the caller has finished in Arc
+    # and the list's progress — or, in an open rewatch pass, the pass's
+    # finishes and 0, so the marks start again from episode 1. One query for
+    # the completions, whichever it is.
+    view = await watch_view(session, user_id=user.id, anime_id=anime.id, episode_ids=episode_ids)
+    rewatch = await summary(session, view.rewatch, now=now()) if view.rewatch is not None else None
     return AnimeDetail.build(
         anime,
         episodes=episodes,
@@ -420,12 +412,10 @@ async def detail(
                 linked=await is_linked(session, user.id),
             )
         ),
-        # One query for the whole list: which of these the caller has finished
-        # in Arc (FR-S4). The tick on a show page is per user, so it cannot
-        # come from the episode row — and it is only half of FR-W5's rule: the
-        # other half is ``entry.progress``, which ``build`` reads off the entry
-        # above rather than asking for again.
-        completed=await completed_episode_ids(session, user_id=user.id, episode_ids=episode_ids),
+        # The tick on a show page is per user, so it cannot come from the
+        # episode row: FR-W5's two halves, as ``watch_view`` read them above.
+        completed=view.completed_ids,
+        list_progress=view.list_progress,
         related=await _related_anime(session, anime),
         releases=extras.torrents,
         renditions=extras.renditions,
@@ -441,12 +431,8 @@ async def detail(
         ),
         trip_only=extras.trip_only,
         wanted_by_me=wanted_by_me,
-        fetchable=fetchable,
-        sample=(
-            SampleOut.build(want, by_id[want.episode_id])
-            if want is not None and want.episode_id in by_id
-            else None
-        ),
+        demand=gate,
+        rewatch=rewatch,
         slots=slots,
         tmdb_mapped=tmdb_mapped,
         override=None if override is None else OverrideOut.build(override),

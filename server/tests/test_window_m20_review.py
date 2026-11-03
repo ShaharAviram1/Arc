@@ -31,7 +31,6 @@ from arc.services.acquisition.wants import (
     DEVICE_HOLDING_DAYS,
     _reconcile,
     compute_wants,
-    coverable,
     slot_view,
 )
 from arc.services.catalog.airing import FINISHED
@@ -113,18 +112,6 @@ async def test_a_demanded_trip_episode_is_wanted_for_streaming_and_outlives_the_
     await compute_wants(db_session)
 
     assert rows[6].id in await wants_of(db_session, user), "the demand outlives the trip"
-
-
-async def test_an_earlier_demand_does_not_licence_another_outside_the_window(
-    db_session: AsyncSession,
-) -> None:
-    anime, rows = await a_show(db_session, 971003)
-    user = await make_user(db_session, "rv-licence@arc.test")
-    await make_entry(db_session, user, anime, progress=4)
-    db_session.add(Want(user_id=user.id, episode_id=rows[9].id, demanded_at=datetime.now(UTC)))
-    await db_session.flush()
-
-    assert rows[9].id not in await coverable(db_session, user.id)
 
 
 # --- 2. the reconciler never deletes a demand it did not see ----------------------

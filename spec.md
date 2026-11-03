@@ -1640,7 +1640,10 @@ is its only user, and uses it daily.
   2026-09-13). **Rewatch** (FR-W7, M21): for a show in an open pass the
   shelves read the pass — watched means finished in the pass, and Ready to
   watch offers that show's ready episodes not finished or started since the
-  pass began, whatever the list status. Ready to watch also offers a ready
+  pass began, whatever the list status; Continue watching lists, for that
+  show, only positions written since the pass began (a partial from before
+  the pass is on Ready to watch instead, so the two shelves still never
+  offer one episode twice). Ready to watch also offers a ready
   episode the viewer has a live want on (a demand or a walk, FR-A14, FR-A1)
   and has not watched, whatever the list status.
 - FR-W2 Users can set a show to watching / planned / on hold / dropped /
@@ -3513,3 +3516,8 @@ through the same edge, without the grace period.
   switch). A resume days later, a scrub under the mark or an open from the
   start is normal mode. A pass ends at the server's moment, so a replayed
   finish never ends it before other records of the same pass.
+- 2026-11-03 (orchestrator's call, reported to the owner) — FR-W1 / FR-W7
+  item 2: during an open rewatch pass Continue watching lists only positions
+  written since the pass began; a partial from before the pass belongs to
+  Ready to watch, so no episode is on both shelves (M21 T4). The resume
+  position itself is unchanged.

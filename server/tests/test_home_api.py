@@ -32,12 +32,14 @@ from arc.models import (
     ListStatus,
     OfflineId,
     Rendition,
+    Rewatch,
     Torrent,
     Trip,
     TripEpisode,
     TripEpisodeState,
     TripState,
     User,
+    Want,
     WatchProgress,
 )
 from arc.services.catalog.progress import NEW_LIMIT, READY_LIMIT
@@ -1221,6 +1223,7 @@ async def test_an_on_hold_shows_ready_episode_is_offered(
 async def test_a_ready_episode_of_a_show_not_on_the_list_is_not_offered(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
+    """Unless the viewer holds a live want on it (M21; tested below)."""
     anime_id = await old_show(api_factory, title="Stranger", anilist_id=910068)
     await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
 
@@ -1317,6 +1320,357 @@ async def test_another_users_ready_episode_is_not_on_this_shelf(
     await make_ready(api_factory, await episode_number(api_factory, anime_id, 1))
 
     assert (await home(client))["ready_to_watch"] == []
+
+
+# --- Ready to watch: rewatch passes and the viewer's own wants (M21 T4) ------
+
+
+async def open_pass(factory: SessionFactory, user: User, anime_id: int, started: datetime) -> None:
+    async with factory() as session:
+        session.add(Rewatch(user_id=user.id, anime_id=anime_id, started_at=started))
+        await session.commit()
+
+
+async def watch_row(
+    factory: SessionFactory,
+    user: User,
+    episode: Episode,
+    *,
+    position_s: float,
+    updated_at: datetime,
+    completed: bool = False,
+    finished_at: datetime | None = None,
+) -> None:
+    """A ``watch_progress`` row with the M21 latest finish."""
+    async with factory() as session:
+        session.add(
+            WatchProgress(
+                user_id=user.id,
+                episode_id=episode.id,
+                position_s=position_s,
+                duration_s=1420.0,
+                completed=completed,
+                completed_at=finished_at if completed else None,
+                finished_at=finished_at,
+                updated_at=updated_at,
+            )
+        )
+        await session.commit()
+
+
+async def want_row(
+    factory: SessionFactory,
+    user: User,
+    episode: Episode,
+    *,
+    demanded: bool = True,
+    dropped: bool = False,
+) -> None:
+    async with factory() as session:
+        session.add(
+            Want(
+                user_id=user.id,
+                episode_id=episode.id,
+                demanded_at=NOW - timedelta(hours=2) if demanded else None,
+                dropped_at=NOW - timedelta(hours=1) if dropped else None,
+                drop_reason="test" if dropped else None,
+            )
+        )
+        await session.commit()
+
+
+async def test_a_rewatch_pass_offers_its_ready_episodes_whatever_the_list(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-W7 item 2: the pass's own "finished" and "started", not the list's.
+
+    A completed show, list at 4. Episode 1 was finished in the pass, episode 3
+    started since it began (it is on Continue watching, unwatched in the pass);
+    episodes 2 and 4 were watched or started before the pass and are offered
+    again, newest file first — and not watched by the list's word.
+    """
+    anime_id = await old_show(api_factory, title="Again", anilist_id=910080)
+    await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=4)
+    started = NOW - timedelta(days=2)
+    await open_pass(api_factory, user, anime_id, started)
+    episodes = [await episode_number(api_factory, anime_id, n) for n in (1, 2, 3, 4)]
+    for hours, episode in zip((4, 3, 2, 1), episodes, strict=True):
+        await make_ready(api_factory, episode, ready_at=NOW - timedelta(hours=hours))
+    await watch_row(
+        api_factory,
+        user,
+        episodes[0],
+        position_s=1420.0,
+        updated_at=NOW - timedelta(days=1),
+        completed=True,
+        finished_at=NOW - timedelta(days=1),
+    )
+    await watch_row(
+        api_factory,
+        user,
+        episodes[1],
+        position_s=1420.0,
+        updated_at=NOW - timedelta(days=30),
+        completed=True,
+        finished_at=NOW - timedelta(days=30),
+    )
+    await watch_row(
+        api_factory,
+        user,
+        episodes[2],
+        position_s=300.0,
+        updated_at=NOW - timedelta(hours=1),
+        completed=True,
+        finished_at=NOW - timedelta(days=30),
+    )
+    await watch_row(
+        api_factory, user, episodes[3], position_s=300.0, updated_at=NOW - timedelta(days=30)
+    )
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [4, 2]
+    for row in body["ready_to_watch"]:
+        assert row["episode"]["watched"] is False
+        assert row["episode"]["watched_source"] is None
+    resumed = {row["episode"]["number"]: row["episode"] for row in body["continue_watching"]}
+    assert resumed[3]["watched"] is False, "completed before the pass: not watched in it"
+
+
+async def test_an_open_pass_takes_the_show_out_of_the_normal_branch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Watching at 0: the list would offer 2 (1 completed); the pass offers 1, not 2."""
+    anime_id = await old_show(api_factory, title="Pass only", anilist_id=910081)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    second = await episode_number(api_factory, anime_id, 2)
+    await make_ready(api_factory, first)
+    await make_ready(api_factory, second)
+    await watch_row(
+        api_factory,
+        user,
+        first,
+        position_s=0.0,
+        updated_at=NOW - timedelta(days=9),
+        completed=True,
+        finished_at=NOW - timedelta(days=9),
+    )
+    assert ready_numbers(await home(client)) == [2]
+
+    await open_pass(api_factory, user, anime_id, NOW - timedelta(days=2))
+    await watch_row(
+        api_factory,
+        user,
+        second,
+        position_s=1420.0,
+        updated_at=NOW - timedelta(days=1),
+        completed=True,
+        finished_at=NOW - timedelta(days=1),
+    )
+
+    assert ready_numbers(await home(client)) == [1]
+
+
+async def test_a_demanded_episode_of_an_unlisted_show_is_offered(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """FR-W1 (M21): a ready episode the viewer pressed play on, off their list."""
+    anime_id = await old_show(api_factory, title="Clicked", anilist_id=910082)
+    first = await episode_number(api_factory, anime_id, 1)
+    second = await episode_number(api_factory, anime_id, 2)
+    third = await episode_number(api_factory, anime_id, 3)
+    for episode in (first, second, third):
+        await make_ready(api_factory, episode)
+    await want_row(api_factory, user, second)
+    await want_row(api_factory, user, third, dropped=True)
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [2]
+    assert body["ready_to_watch"][0]["anime"]["list_status"] is None
+    assert body["ready_to_watch"][0]["episode"]["watched"] is False
+
+
+async def test_a_wanted_episode_of_a_dropped_show_is_offered_unless_watched(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A walk's or a demand's want, whatever the list status; FR-W5 still applies."""
+    anime_id = await old_show(api_factory, title="Walked", anilist_id=910083)
+    await follow(api_factory, user, anime_id, ListStatus.DROPPED, progress=2)
+    for number in (1, 3, 4):
+        episode = await episode_number(api_factory, anime_id, number)
+        await make_ready(api_factory, episode)
+        await want_row(api_factory, user, episode, demanded=number != 3)
+    await watch_row(
+        api_factory,
+        user,
+        await episode_number(api_factory, anime_id, 4),
+        position_s=600.0,
+        updated_at=NOW - timedelta(hours=1),
+    )
+
+    # 1 is at or below the list's progress; 4 is started; 3 is a plain want.
+    assert ready_numbers(await home(client)) == [3]
+
+
+async def test_the_three_branches_share_one_newest_file_first_order(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    listed = await old_show(api_factory, title="Listed", anilist_id=910084)
+    await follow(api_factory, user, listed, ListStatus.WATCHING, progress=0)
+    rewatched = await old_show(api_factory, title="Rewatched", anilist_id=910085)
+    await follow(api_factory, user, rewatched, ListStatus.COMPLETED, progress=4)
+    await open_pass(api_factory, user, rewatched, NOW - timedelta(days=1))
+    clicked = await old_show(api_factory, title="Clicked too", anilist_id=910086)
+    for hours, (anime_id, number, wanted) in enumerate(
+        ((rewatched, 3, False), (listed, 1, False), (clicked, 2, True)), start=1
+    ):
+        episode = await episode_number(api_factory, anime_id, number)
+        await make_ready(api_factory, episode, ready_at=NOW - timedelta(hours=hours))
+        if wanted:
+            await want_row(api_factory, user, episode)
+
+    rows = (await home(client))["ready_to_watch"]
+
+    assert [(row["anime"]["title"]["preferred"], row["episode"]["number"]) for row in rows] == [
+        ("Rewatched", 3),
+        ("Listed", 1),
+        ("Clicked too", 2),
+    ]
+
+
+# --- Continue watching reads the pass (T4 fix round 1, orchestrator's call) --
+
+
+def continue_numbers(body: dict[str, list[dict[str, object]]]) -> list[int]:
+    return [row["episode"]["number"] for row in body["continue_watching"]]
+
+
+async def ten_minutes_in(
+    factory: SessionFactory, user: User, episode: Episode, *, at: datetime
+) -> None:
+    await watch_row(factory, user, episode, position_s=600.0, updated_at=at)
+
+
+async def test_a_pre_pass_partial_is_on_ready_to_watch_not_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await old_show(api_factory, title="Before the pass", anilist_id=910090)
+    await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=4)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(days=5))
+    await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [1]
+    assert continue_numbers(body) == []
+
+
+async def test_a_partial_written_in_the_pass_is_on_continue_watching_not_ready(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await old_show(api_factory, title="In the pass", anilist_id=910091)
+    await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=4)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(hours=1))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [1]
+    assert ready_numbers(body) == []
+
+
+async def test_outside_a_pass_a_partial_is_on_continue_watching_only(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """As on main: an old position is still something to continue."""
+    anime_id = await old_show(api_factory, title="No pass", anilist_id=910092)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(days=5))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [1]
+    assert ready_numbers(body) == []
+
+
+async def test_another_users_pass_changes_nothing_for_this_user(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Their pass on the same show: this viewer's shelves and marks are the list's."""
+    other = await add_user(api_factory, "pass.other@arc.test", "other-password")
+    anime_id = await old_show(api_factory, title="Shared show", anilist_id=910093)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    first = await episode_number(api_factory, anime_id, 1)
+    second = await episode_number(api_factory, anime_id, 2)
+    third = await episode_number(api_factory, anime_id, 3)
+    for episode in (first, second, third):
+        await make_ready(api_factory, episode)
+    await ten_minutes_in(api_factory, user, second, at=NOW - timedelta(days=5))
+    await open_pass(api_factory, other, anime_id, NOW - timedelta(days=1))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [2]
+    assert ready_numbers(body) == [3]
+    assert body["ready_to_watch"][0]["episode"]["watched"] is False
+    assert body["continue_watching"][0]["episode"]["watched"] is False
+
+
+async def count_home_statements(client: AsyncClient, factory: SessionFactory) -> int:
+    counted: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *_rest: object) -> None:
+        counted.append(statement)
+
+    engine = factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = await client.get("/api/home")
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert response.status_code == 200, response.text
+    return len(counted)
+
+
+async def test_the_home_page_costs_the_same_with_more_rows_in_three_passes(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """One query per open pass, never one per row (no N+1 on the pass marks)."""
+    shows: list[int] = []
+    for index in range(3):
+        anime_id = await add_anime(
+            api_factory,
+            title=f"Pass {index}",
+            anilist_id=910094 + index,
+            status="FINISHED",
+            episodes=8,
+        )
+        await add_episodes(api_factory, anime_id, count=8, first_at=NOW - timedelta(weeks=10))
+        await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=8)
+        await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+        for number in (1, 2):
+            await make_ready(api_factory, await episode_number(api_factory, anime_id, number))
+        shows.append(anime_id)
+    await count_home_statements(client, api_factory)  # warm-up: art jobs queued once
+    small = await count_home_statements(client, api_factory)
+    assert len((await home(client))["ready_to_watch"]) == 6
+
+    for anime_id in shows:
+        for number in (3, 4, 5, 6):
+            await make_ready(api_factory, await episode_number(api_factory, anime_id, number))
+    await count_home_statements(client, api_factory)
+    big = await count_home_statements(client, api_factory)
+
+    assert len((await home(client))["ready_to_watch"]) == 18
+    assert big == small, (small, big)
 
 
 # --- What a card carries about the show (M15) ---------------------------------

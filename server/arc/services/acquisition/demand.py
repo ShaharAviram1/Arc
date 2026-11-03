@@ -109,6 +109,7 @@ from arc.services.acquisition.wants import (
     start_search,
     user_plan,
 )
+from arc.services.catalog.airing import has_aired
 from arc.services.catalog.cache import preferred_title
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.media.names import (
@@ -117,7 +118,6 @@ from arc.services.media.names import (
     enqueue_remux_live,
     latest_live_job,
 )
-from arc.services.playback.next_season import has_aired
 
 log = logging.getLogger(__name__)
 

@@ -123,7 +123,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, delete, func, or_, select, tuple_, union_all
@@ -616,10 +616,6 @@ class _Plan:
     fetching: dict[int, int]
     #: K as it stands; 0 is no cap.
     cap: int
-    #: user → the episodes their windows cover **before** the device skip and
-    #: the slot cap. Read only by :func:`coverable` for the API's
-    #: ``fetchable`` until M21 T4 retires both; never used to create a want.
-    covers: Mapping[int, frozenset[int]] = field(default_factory=dict)
     #: The shows whose window this run was deepened to ``look_ahead_slow``
     #: because they are thinly seeded (:func:`_thin_shows`, FR-A1).
     thin: frozenset[int] = frozenset()
@@ -1008,7 +1004,6 @@ async def _plan_wants(
     touches: dict[tuple[int, int], _Touch] = {}
     windows: dict[tuple[int, int], list[Episode]] = {}
     extras: dict[tuple[int, int], list[Episode]] = {}
-    covers: dict[int, set[int]] = defaultdict(set)
     shows: dict[int, list[SlotShow]] = defaultdict(list)
     for key in sorted(following):
         user_id, anime_id = key
@@ -1025,17 +1020,7 @@ async def _plan_wants(
         for position in positions[key]:
             first_id = firsts.get((user_id, anime_id, position))
             prefetch = first_id is not None and (user_id, first_id) in halfway
-            unskipped = window(
-                rows,
-                progress=position,
-                look_ahead=n_show,
-                now=now,
-                anime_status=anime.status,
-                next_airing=anime.next_airing,
-                prefetch=prefetch,
-            )
-            covers[user_id].update(episode.id for episode in unskipped)
-            # The same window with the device skip applied (FR-A15): what is
+            # The window with the device skip applied (FR-A15): what is
             # actually fetched.
             for episode in window(
                 rows,
@@ -1118,7 +1103,6 @@ async def _plan_wants(
         progress=progress_of,
         fetching=fetching,
         cap=cap,
-        covers={user_id: frozenset(ids) for user_id, ids in covers.items()},
         thin=thin,
         look_ahead=look_ahead,
         following=following,
@@ -1165,96 +1149,6 @@ async def user_plan(session: AsyncSession, user_id: int, *, now: datetime | None
     :func:`~arc.services.acquisition.demand.withdraw` asks before shelving.
     """
     return await _current_plan(session, now=now, user_ids=[user_id])
-
-
-async def coverable(
-    session: AsyncSession,
-    user_id: int,
-    *,
-    now: datetime | None = None,
-) -> frozenset[int]:
-    """Episode ids the M20 rule let this user fetch on demand (FR-A14). Read-only.
-
-    **M21:** a demand no longer consults this — any aired episode may be
-    demanded (:mod:`arc.services.acquisition.demand`). It stays only because
-    the API's ``fetchable`` flags still read it; M21 T4 replaces them with
-    "aired and not ready" and deletes this, :func:`coverable_once_active` and
-    :attr:`_Plan.covers`. Since M21 the windows it reads include walks and
-    rewatch passes.
-
-    Their windows before the device skip and the slot cap — window ∪ halfway
-    prefetch ∪ device-held, on every non-dormant watching/planned show — plus
-    every episode they have a live want on **for another reason** (a sample, a
-    trip episode, a window row). A demanded row does not justify itself: an
-    earlier demand outside today's window is not a licence to demand it again.
-    Nothing further ahead: a fetch outside the window would be a new kind of
-    acquisition, and the non-negotiable allows none. Measured on the user's
-    real progress: the halfway prefetch counts only once they are half-way.
-    """
-    plan = await _current_plan(session, now=now, user_ids=[user_id])
-    wanted = (
-        await session.scalars(
-            select(Want.episode_id).where(
-                Want.user_id == user_id,
-                Want.dropped_at.is_(None),
-                or_(Want.demanded_at.is_(None), Want.sample.is_(True), Want.trip.is_(True)),
-            )
-        )
-    ).all()
-    return plan.covers.get(user_id, frozenset()) | frozenset(wanted)
-
-
-async def coverable_once_active(
-    session: AsyncSession,
-    user_id: int,
-    anime: Anime,
-    episodes: list[Episode],
-    entry: ListEntry | None,
-    *,
-    now: datetime | None = None,
-) -> frozenset[int]:
-    """What :func:`coverable` will say about ``anime`` once the user touches it. Read-only.
-
-    **M21:** kept only for ``next_season``'s ``fetchable`` until M21 T4
-    deletes it with :func:`coverable` (see there).
-
-    For the player's "Next season" (FR-S5 item 3): pressing it on a sequel
-    whose entry is dormant (FR-A9) activates it, and on one that is not on the
-    list adds it as Watching — and then demands its first episode (FR-A14). So
-    the offer needs the answer the demand will get **after** that touch: this
-    show's window, on the entry as the press leaves it (the status it has, or
-    Watching for none), before the device skip and the slot cap, exactly as
-    :func:`_plan_wants` builds ``covers`` — a thinly seeded show's deeper N
-    included. The halfway prefetch is left out: it
-    only ever reaches one further, and a season nobody has started is not half
-    watched. A status that is neither watching nor planned covers nothing — a
-    touch does not change it.
-
-    ``episodes`` is the show's rows in number order (:func:`episodes_for`).
-    Nothing is written and no window is acted on: this predicts a demand, it
-    does not make one.
-    """
-    status = entry.status if entry is not None else ListStatus.WATCHING
-    if status not in WANTING_STATUSES:
-        return frozenset()
-    rules = await window_rules(session)
-    thin = await _thin_shows(
-        session, {anime.id}, below=_thin_threshold(rules.n, rules.slow_n, rules.slow_seeders)
-    )
-    look_ahead = show_look_ahead(rules.n, rules.slow_n, thin=anime.id in thin)
-    furthest = await _completed_through(session, {(user_id, anime.id)})
-    progress = watched_through(
-        entry.progress if entry is not None else 0, furthest.get((user_id, anime.id), 0)
-    )
-    covered = window(
-        episodes,
-        progress=progress,
-        look_ahead=look_ahead,
-        now=now or datetime.now(UTC),
-        anime_status=anime.status,
-        next_airing=anime.next_airing,
-    )
-    return frozenset(episode.id for episode in covered)
 
 
 async def lock_wants(session: AsyncSession) -> None:
@@ -2605,8 +2499,6 @@ __all__ = [
     "WantsResult",
     "cancel_if_unwanted",
     "compute_wants",
-    "coverable",
-    "coverable_once_active",
     "enqueue_cancel",
     "enqueue_compute_wants",
     "is_halfway",

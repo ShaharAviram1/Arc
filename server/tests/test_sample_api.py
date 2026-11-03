@@ -93,17 +93,19 @@ async def test_sampling_is_gone(user_client: AsyncClient, api_factory: SessionFa
         assert list((await session.scalars(select(Job))).all()) == []
 
 
-async def test_the_show_page_still_carries_a_leftover_sample(
+async def test_the_show_page_no_longer_reports_a_leftover_sample(
     user_client: AsyncClient, api_factory: SessionFactory
 ) -> None:
+    """M21 T4: ``sample`` stays in the schema and is always null (FR-A8 retired)."""
     anime_id = await a_show(api_factory, anilist_id=965005)
     user_id = await user_id_of(api_factory, USER_EMAIL)
     episode_id = await leftover_sample(api_factory, user_id, anime_id, state=EpisodeState.WANTED)
 
     body = (await user_client.get(f"/api/anime/{anime_id}")).json()
 
-    assert body["sample"]["episode_id"] == episode_id
-    assert body["sample"]["state"] == EpisodeState.WANTED.value
+    assert body["sample"] is None
+    row = next(row for row in body["episodes"] if row["id"] == episode_id)
+    assert row["wanted_by_me"] is True, "the leftover want itself is still live"
 
 
 async def test_cancelling_a_leftover_answers_204_and_drops_the_want(

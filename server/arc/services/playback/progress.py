@@ -1161,6 +1161,14 @@ async def continue_watching(
     Nothing else changes with it: this function only reads, so completion still
     means what it meant to MyAnimeList, to the once-only advance, and to the
     show page's watched marks.
+
+    **In an open rewatch pass** (FR-W7 item 2, M21 T4; orchestrator's call,
+    reported to the owner) only a position written **since the pass began**
+    (``updated_at >= rewatches.started_at``) is on this shelf: a pre-pass
+    partial is an episode the pass has not started, which Ready to watch
+    offers (:func:`arc.services.catalog.progress.ready_to_watch`), so the two
+    shelves still never both offer one episode. Only the viewer's own open
+    passes count; the resume position itself is untouched.
     """
     duration = WatchProgress.duration_s
     # A correlated EXISTS rather than a join: one episode can sit in several of
@@ -1180,8 +1188,19 @@ async def continue_watching(
         select(Anime, Episode, WatchProgress, delivered.label("delivered"))
         .join(Episode, Episode.id == WatchProgress.episode_id)
         .join(Anime, Anime.id == Episode.anime_id)
+        # The viewer's open pass on the show, if any: at most one
+        # (``uq_rewatches_open``), so the join never repeats a row.
+        .outerjoin(
+            Rewatch,
+            and_(
+                Rewatch.user_id == user_id,
+                Rewatch.anime_id == Anime.id,
+                Rewatch.ended_at.is_(None),
+            ),
+        )
         .where(
             WatchProgress.user_id == user_id,
+            or_(Rewatch.id.is_(None), WatchProgress.updated_at >= Rewatch.started_at),
             WatchProgress.position_s >= CONTINUE_MIN_POSITION_S,
             or_(
                 # No duration to measure against — a row from a player that

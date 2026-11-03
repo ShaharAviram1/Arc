@@ -13,7 +13,9 @@ of them of a catalogue source:
   2026-09-17). Deliberately *not* a slice of "new this week": the shelf is
   about the file, not the broadcast, and deriving it from the seven-day window
   hid every ready episode of an older show — One-Room TA, aired 2026-08-27,
-  two episodes ready and neither of them on the page.
+  two episodes ready and neither of them on the page. Since M21 it also reads
+  rewatch passes (FR-W7) and the viewer's own wants on shows off their list
+  (a demand, a walk — FR-A14, FR-A1).
 
 "Aired" means the same thing here as it does on the show page: the rule lives
 in :mod:`arc.services.catalog.airing` and is read from there rather than
@@ -29,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import (
@@ -39,7 +41,9 @@ from arc.models import (
     ListEntry,
     ListStatus,
     Rendition,
+    Rewatch,
     User,
+    Want,
     WatchProgress,
 )
 from arc.services.catalog.airing import aired_episodes, effective_air_at
@@ -205,7 +209,7 @@ async def new_this_week(session: AsyncSession, user: User, *, now: datetime) -> 
 
 
 async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRow]:
-    """Ready episodes the viewer has neither started nor watched (FR-W1).
+    """Ready episodes the viewer has neither started nor watched (FR-W1, FR-W7).
 
     **Whenever they aired.** This shelf used to be the ready, unstarted half of
     "new this week", which meant an episode had to have been broadcast in the
@@ -215,19 +219,36 @@ async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRo
     from production). The file is what the shelf is about, so the file is what
     it is ordered by: the rendition's ``ready_at``, newest first.
 
-    Three conditions, each the exact rule a shelf that says "press play" needs:
+    Arc holds a playable file — ``EpisodeState.READY`` and nothing looser: an
+    episode still preparing is not something to press play on — and one of
+    three branches offers it (one query; a show is in exactly one of the first
+    two, so no episode is listed twice):
 
-    * the show is on the viewer's list in a following state
-      (:data:`READY_STATUSES`) — dropped and completed shows offer nothing;
-    * Arc holds a playable file, which is ``EpisodeState.READY`` and nothing
-      looser: an episode still preparing is not something to press play on;
-    * the viewer has neither **started** it — a ``watch_progress`` row past
-      :data:`~arc.services.playback.progress.RESUME_MIN_S`, which is the same
-      floor the player resumes from and is strictly below continue watching's
-      own :data:`~arc.services.playback.progress.CONTINUE_MIN_POSITION_S`, so
-      the two shelves can never both offer one episode — nor **watched** it,
-      which is FR-W5 read backwards: a completion row of Arc's own, or a
-      number at or below the list's progress.
+    * **A rewatch pass** (FR-W7, M21): the viewer has an open pass on the show,
+      whatever its list status or whether it is listed at all. Offered unless
+      it was **finished in the pass** (``finished_at >= started_at``) or
+      **started since the pass began** (a ``watch_progress`` row past
+      :data:`~arc.services.playback.progress.RESUME_MIN_S` written at or
+      after ``started_at``) — the pass's own reading of "watched" and
+      "started"; the list's progress and an old completion count for nothing.
+    * **The list** (no open pass): the show is on the viewer's list in a
+      following state (:data:`READY_STATUSES`) — dropped and completed shows
+      offer nothing of their own;
+    * **The viewer's own wants** (no open pass, M21): any ready episode they
+      hold a live want on — a demand (FR-A14), a walk (FR-A1) — whatever the
+      list status, listed or not, so the episode a user pressed play on off
+      their list is offered once its file is in.
+
+    The last two share the rule "neither **started** nor **watched**": no
+    ``watch_progress`` row past ``RESUME_MIN_S`` — the same floor the player
+    resumes from and strictly below continue watching's own
+    :data:`~arc.services.playback.progress.CONTINUE_MIN_POSITION_S`, so the
+    two shelves can never both offer one episode — no completion row, and a
+    number above the list's progress when there is a list entry (FR-W5 read
+    backwards). The pass branch keeps the same invariant on the pass's clock:
+    continue watching lists, for a show in an open pass, only positions
+    written since the pass began, and this branch offers exactly the
+    episodes with none (a pre-pass partial is here, not there).
 
     The started rule is also why an episode that falls off continue watching by
     its tail rule (past 90 %, or under three minutes left — owner 2026-09-17,
@@ -249,19 +270,51 @@ async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRo
         WatchProgress.episode_id == Episode.id,
         or_(WatchProgress.position_s > RESUME_MIN_S, WatchProgress.completed.is_(True)),
     )
+    # The pass's own two: finished in it, or started since it began.
+    seen_in_pass = exists().where(
+        WatchProgress.user_id == user.id,
+        WatchProgress.episode_id == Episode.id,
+        or_(
+            WatchProgress.finished_at >= Rewatch.started_at,
+            and_(
+                WatchProgress.position_s > RESUME_MIN_S,
+                WatchProgress.updated_at >= Rewatch.started_at,
+            ),
+        ),
+    )
+    wanted = exists().where(
+        Want.user_id == user.id,
+        Want.episode_id == Episode.id,
+        Want.dropped_at.is_(None),
+    )
     rows = await session.execute(
         select(Anime, Episode)
         .join(Episode, Episode.anime_id == Anime.id)
-        .join(
+        .outerjoin(
             ListEntry,
             and_(ListEntry.anime_id == Anime.id, ListEntry.user_id == user.id),
         )
+        # At most one open pass per (user, show): ``uq_rewatches_open``.
+        .outerjoin(
+            Rewatch,
+            and_(
+                Rewatch.anime_id == Anime.id,
+                Rewatch.user_id == user.id,
+                Rewatch.ended_at.is_(None),
+            ),
+        )
         .join(Rendition, Rendition.episode_id == Episode.id, isouter=True)
         .where(
-            ListEntry.status.in_(READY_STATUSES),
             Episode.state == EpisodeState.READY,
-            Episode.number > ListEntry.progress,
-            ~seen,
+            or_(
+                and_(Rewatch.id.is_not(None), not_(seen_in_pass)),
+                and_(
+                    Rewatch.id.is_(None),
+                    or_(ListEntry.status.in_(READY_STATUSES), wanted),
+                    Episode.number > func.coalesce(ListEntry.progress, 0),
+                    ~seen,
+                ),
+            ),
         )
         .order_by(Rendition.ready_at.desc().nullslast(), Episode.id.desc())
         .limit(READY_LIMIT)

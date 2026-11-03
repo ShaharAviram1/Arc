@@ -39,6 +39,8 @@ from arc.models import (
     Rendition,
     Want,
 )
+from arc.services.acquisition.demand import OpenDemand
+from arc.services.acquisition.demand_gate import DemandGate
 from arc.services.acquisition.dormancy import is_dormant
 from arc.services.acquisition.wants import SlotView
 from arc.services.catalog import preferred_title
@@ -51,6 +53,7 @@ from arc.services.catalog.airing import (
     next_airing_episode,
     out_of_order,
 )
+from arc.services.playback.rewatch import RewatchSummary
 from arc.services.playback.watched import WatchedSource, watched_source
 from arc.services.trips.names import FALLBACK_COPY_BYTES, TRIP_MAX_EPISODES_KEY
 
@@ -670,13 +673,18 @@ class EpisodeOut(BaseModel):
     #: Whether the caller has a live want on this episode (window, sample or
     #: trip): the show page offers "Change release…" only then (FR-A13).
     wanted_by_me: bool = False
-    #: Whether the caller may press play on this not-ready episode and have
-    #: Arc fetch it now (FR-A14, M20): their window covers it — the same
-    #: :func:`~arc.services.acquisition.wants.coverable` rule ``POST
-    #: /api/episodes/{id}/demand`` accepts, so the show page never offers a
-    #: play it would be refused for "not in window". Always false on a
-    #: ``ready`` episode (it streams) and outside the show page.
+    #: Whether pressing play on this episode fetches it (FR-A14, M21): it has
+    #: aired and is not ready — any show, any list status. Always false on a
+    #: ``ready`` episode (it streams), on an un-aired one (the demand refuses
+    #: it) and outside the show page. Whether the press would be refused *now*
+    #: — the cap, a pause, a hold — is the page's
+    #: :attr:`AnimeDetail.demand` ``.refusal``, not this flag (M20 judged it
+    #: on the caller's window; that rule is retired).
     fetchable: bool = False
+    #: The caller has an **open** demand on this episode (FR-A14, M21): live,
+    #: and not finished since the last press. The row reads "Fetching on
+    #: request" with a ✕ that withdraws it. Show page only.
+    demanded: bool = False
     #: The live torrent has fewer seeders than ``min_seeders_warn`` (FR-A16):
     #: the row says "Few seeders (2)" and offers the show pin (FR-T8), because
     #: a thin swarm is the one that will not be there for a re-fetch. Only the
@@ -710,6 +718,7 @@ class EpisodeOut(BaseModel):
         wanted_by_me: bool = False,
         min_seeders_warn: int = 0,
         fetchable: bool = False,
+        demanded: bool = False,
         live_playable: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
@@ -735,6 +744,7 @@ class EpisodeOut(BaseModel):
             else None
         )
         source = watched_source(episode.number, completed=completed, list_progress=list_progress)
+        aired = is_aired(episode, now=now, anime_status=anime_status, boundary=boundary)
         return cls(
             id=episode.id,
             number=episode.number,
@@ -742,7 +752,7 @@ class EpisodeOut(BaseModel):
             still_url=episode.still_url,
             air_at=episode.air_at,
             air_at_estimated=episode.air_at_estimated or out_of_order,
-            aired=is_aired(episode, now=now, anime_status=anime_status, boundary=boundary),
+            aired=aired,
             state=episode.state,
             watched=source is not None,
             watched_source=source,
@@ -771,7 +781,8 @@ class EpisodeOut(BaseModel):
             # also covers it.
             trip_only=trip_only and episode.state is not EpisodeState.READY,
             wanted_by_me=wanted_by_me,
-            fetchable=fetchable and episode.state is not EpisodeState.READY,
+            fetchable=fetchable and aired and episode.state is not EpisodeState.READY,
+            demanded=demanded,
             few_seeders=few_seeders(release, min_seeders_warn),
             seeders=release.live_seeders if release is not None else None,
             live_playable=live_playable and episode.state is not EpisodeState.READY,
@@ -820,6 +831,101 @@ class SampleOut(BaseModel):
             episode_number=episode.number,
             requested_at=want.created_at,
             state=episode.state,
+        )
+
+
+class OpenDemandOut(BaseModel):
+    """One of the caller's open demands (FR-A14, M21).
+
+    The ``demand_cap`` refusal lists these (``POST …/demand``'s 409), and so
+    does the show page's :class:`ShowDemandOut`, each linking to its episode.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    episode_id: int
+    anime_id: int
+    #: The show's title.
+    title: str
+    number: int
+
+    @classmethod
+    def build(cls, found: OpenDemand) -> OpenDemandOut:
+        return cls(
+            episode_id=found.episode_id,
+            anime_id=found.anime_id,
+            title=found.title,
+            number=found.number,
+        )
+
+
+class DemandRefusalOut(BaseModel):
+    """A refusal a press of play would get now: the demand's own code and sentence."""
+
+    #: ``demand_cap``, ``acquisition_paused`` or ``storage_held``.
+    code: str
+    message: str
+
+
+class ShowDemandOut(BaseModel):
+    """``AnimeDetail.demand``: where the caller stands with play on demand (FR-A14, M21).
+
+    ``open`` is every open demand of the caller's (any show, oldest press
+    first) and ``max`` is ``demand_max_open`` (0 = no cap). ``refusal`` is
+    what a click on this page would be refused with right now — **one**
+    refusal, in the demand's own order: ``demand_cap`` (applies to a row not
+    already ``demanded``), ``acquisition_paused``, ``storage_held`` (each only
+    for a row that still has to be fetched — ``not_wanted``, ``wanted``,
+    ``searching``, ``unavailable``, ``failed``); null when a press would be
+    accepted. The client shows the sentence in place and does not navigate.
+    Because only the first applies, with the cap reached *and* acquisition
+    paused the page says ``demand_cap``, and an already-demanded row that
+    still needs fetching reads as pressable while its press gets 409
+    ``acquisition_paused``: the client must handle the demand's 409 whatever
+    this field says (M21 T6).
+    """
+
+    open: list[OpenDemandOut] = Field(default_factory=list)
+    max: int = 0
+    refusal: DemandRefusalOut | None = None
+
+    @classmethod
+    def build(cls, gate: DemandGate) -> ShowDemandOut:
+        refused = gate.refusal()
+        return cls(
+            open=[OpenDemandOut.build(found) for found in gate.open],
+            max=gate.max_open,
+            refusal=(
+                DemandRefusalOut(code=refused.code, message=refused.message)
+                if refused is not None
+                else None
+            ),
+        )
+
+
+class RewatchOut(BaseModel):
+    """An open rewatch pass (FR-W7, M21).
+
+    ``PUT /api/anime/{id}/rewatch``'s answer and ``AnimeDetail.rewatch``: what
+    the show page's badge reads — "Rewatching · ep ``position`` / ``total``".
+    """
+
+    started_at: datetime
+    #: The highest episode number finished in the pass; 0 at the start.
+    position: int
+    #: How many episodes have been finished in the pass.
+    finished_in_pass: int
+    #: The number whose finish ends the pass: the show's count once it has
+    #: finished airing and the count is known, else the newest aired episode.
+    total: int
+
+    @classmethod
+    def build(cls, found: RewatchSummary) -> RewatchOut:
+        return cls(
+            started_at=found.started_at,
+            position=found.position,
+            finished_in_pass=found.finished_in_pass,
+            total=found.total,
         )
 
 
@@ -998,9 +1104,19 @@ class AnimeDetail(AnimeCore):
     next_airing: NextAiringOut | None = None
     relations: list[RelationOut] = Field(default_factory=list)
     list_entry: ListEntryOut | None = None
-    #: The caller's live sample want, or null (FR-A8). Null is the ordinary
-    #: case: a sample is something a user asked for on this one show.
+    #: **Always null since M21** (FR-A8 retired 2026-11-03: a sample is a
+    #: click on episode 1, FR-A14). Kept in the schema so a cached client
+    #: that still reads it keeps working; the field goes in a later release,
+    #: with the sample code.
     sample: SampleOut | None = None
+    #: The caller's open demands, ``demand_max_open`` and the refusal a click
+    #: on this page would get now (FR-A14, M21; :class:`ShowDemandOut`).
+    demand: ShowDemandOut = Field(default_factory=ShowDemandOut)
+    #: The caller's open rewatch pass on this show, or null (FR-W7, M21).
+    #: While it is set the episodes' ``watched``/``watched_source`` are the
+    #: pass's: finished since ``started_at``, and the list's progress counts
+    #: for nothing (FR-W5).
+    rewatch: RewatchOut | None = None
     #: The caller's active trip on this show, or null (FR-A12).
     trip: TripOut | None = None
     #: What a trip may ask for (FR-A12): ``{max_episodes, copy_estimate_bytes}``
@@ -1027,13 +1143,13 @@ class AnimeDetail(AnimeCore):
         list_entry: ListEntry | None = None,
         mal_sync: MalSyncOut | None = None,
         completed: frozenset[int] = frozenset(),
+        list_progress: int | None = None,
         related: dict[tuple[str, int], RelatedAnime] | None = None,
         releases: dict[int, EpisodeRelease] | None = None,
         renditions: dict[int, Rendition] | None = None,
         transcode_jobs: dict[int, Job] | None = None,
         next_searches: dict[int, datetime] | None = None,
         offline: OfflineFacts | None = None,
-        sample: SampleOut | None = None,
         trip: TripOut | None = None,
         trip_limits: TripLimits | None = None,
         trip_only: frozenset[int] = frozenset(),
@@ -1043,9 +1159,21 @@ class AnimeDetail(AnimeCore):
         override: OverrideOut | None = None,
         pinned: bool = False,
         min_seeders_warn: int = 0,
-        fetchable: frozenset[int] = frozenset(),
+        demand: DemandGate | None = None,
+        rewatch: RewatchSummary | None = None,
         live_playable: frozenset[int] = frozenset(),
     ) -> AnimeDetail:
+        """``completed`` and ``list_progress`` are FR-W5's two halves as the
+        caller's :func:`~arc.services.playback.rewatch.watch_view` read them
+        — in an open pass the pass's finishes and 0. ``list_progress`` defaults
+        to the entry's own progress.
+        """
+        watched_progress = (
+            list_progress
+            if list_progress is not None
+            else (list_entry.progress if list_entry is not None else 0)
+        )
+        demanded = demand.open_ids if demand is not None else frozenset[int]()
         raw_relations = [raw for raw in (anime.relations or []) if isinstance(raw, dict)]
         boundary = aired_through(
             episodes,
@@ -1090,7 +1218,9 @@ class AnimeDetail(AnimeCore):
             next_airing=NextAiringOut.from_blob(anime.next_airing),
             relations=relations,
             list_entry=_entry_out(list_entry, mal_sync, anime_status=anime.status, slots=slots),
-            sample=sample,
+            sample=None,
+            demand=ShowDemandOut.build(demand) if demand is not None else ShowDemandOut(),
+            rewatch=RewatchOut.build(rewatch) if rewatch is not None else None,
             trip=trip,
             trip_limits=trip_limits
             or TripLimits(
@@ -1107,10 +1237,10 @@ class AnimeDetail(AnimeCore):
                     boundary=boundary,
                     out_of_order=episode.number in unordered,
                     # FR-W5's two halves: Arc's own completions, and the
-                    # progress the list carries — which this method already
-                    # holds, so the watched marks cost no query of their own.
+                    # progress the list carries (both the pass's in an open
+                    # rewatch, FR-W7).
                     completed=episode.id in completed,
-                    list_progress=list_entry.progress if list_entry is not None else 0,
+                    list_progress=watched_progress,
                     release=(releases or {}).get(episode.id),
                     rendition=(renditions or {}).get(episode.id),
                     transcode_job=(transcode_jobs or {}).get(episode.id),
@@ -1119,7 +1249,9 @@ class AnimeDetail(AnimeCore):
                     trip_only=episode.id in trip_only,
                     wanted_by_me=episode.id in wanted_by_me,
                     min_seeders_warn=min_seeders_warn,
-                    fetchable=episode.id in fetchable,
+                    # Aired ∧ not ready, which ``from_episode`` decides (M21).
+                    fetchable=True,
+                    demanded=episode.id in demanded,
                     live_playable=episode.id in live_playable,
                 )
                 for episode in episodes
@@ -1139,6 +1271,7 @@ __all__ = [
     "AnimeDetail",
     "AnimeSummary",
     "CreditOut",
+    "DemandRefusalOut",
     "EpisodeOut",
     "ListEntryOut",
     "ListEntryPatch",
@@ -1147,14 +1280,17 @@ __all__ = [
     "MalSyncOut",
     "PROGRESS_STATES",
     "NextAiringOut",
+    "OpenDemandOut",
     "PrepareState",
     "SearchOut",
     "RelatedAnime",
     "RelationOut",
     "ReleaseOut",
     "RenditionOut",
+    "RewatchOut",
     "SampleOut",
     "SearchPage",
+    "ShowDemandOut",
     "TitleOut",
     "WaitingReason",
     "aired_through",

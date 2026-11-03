@@ -357,12 +357,16 @@ class ContinueWatchingEntry(BaseModel):
         now: datetime,
         list_status: ListStatus | None = None,
         list_progress: int = 0,
+        completed: bool | None = None,
         release: EpisodeRelease | None = None,
         rendition: Rendition | None = None,
         transcode_job: Job | None = None,
         offline: OfflineOut | None = None,
         trip_only: bool = False,
     ) -> ContinueWatchingEntry:
+        """``completed`` overrides the row's own flag: in an open rewatch pass
+        (FR-W7) the caller passes the pass's finish, with ``list_progress`` 0.
+        """
         return cls(
             anime=AnimeSummary.from_anime(row.anime, list_status),
             episode=EpisodeOut.from_episode(
@@ -376,7 +380,7 @@ class ContinueWatchingEntry(BaseModel):
                 # what "watched" means. ``list_progress`` is FR-W5's other
                 # half, and it is why an episode somebody watched elsewhere
                 # and then reopened here still carries its tick.
-                completed=row.completed,
+                completed=row.completed if completed is None else completed,
                 list_progress=list_progress,
                 release=release,
                 rendition=rendition,

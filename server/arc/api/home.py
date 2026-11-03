@@ -58,6 +58,7 @@ from arc.services.catalog import list_progress_for, list_status_for
 from arc.services.catalog.failures import failures_for_user
 from arc.services.catalog.progress import behind_for_user, new_this_week, ready_to_watch
 from arc.services.playback.progress import completed_episode_ids, continue_watching
+from arc.services.playback.rewatch import open_rewatches, pass_finished
 from arc.services.tmdb.jobs import enqueue_episode_stills, enqueue_hero_art
 
 router = APIRouter(prefix="/api/home", tags=["home"])
@@ -95,9 +96,10 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     anime_ids = [row.anime.id for shelf in shelves for row in shelf]
     anime_ids += [row.anime.id for row in failures]
     episode_ids = [row.episode.id for shelf in shelves for row in shelf]
-    # One lookup for the list badges on the cards: those rows are all on the
-    # caller's list by construction, but which state they are in is what the
-    # badge says.
+    # One lookup for the list badges on the cards. Most rows are on the
+    # caller's list, but not all: since M21 a rewatch pass, a demand or a walk
+    # can put a show that is not on it on Continue watching or Ready to watch
+    # (no badge then), and a failure row can be a sample's.
     statuses = await list_status_for(session, user_id=user.id, anime_ids=anime_ids)
     # And one for FR-W5's other half: an episode at or below the viewer's list
     # progress is watched, which on a list imported from MyAnimeList is most
@@ -118,6 +120,22 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     completed = await completed_episode_ids(
         session, user_id=user.id, episode_ids=[row.episode.id for row in fresh]
     )
+    # FR-W7: a show in an open rewatch pass reads the pass (FR-W5 as
+    # ``rewatch.watch_view`` reads it) — watched means finished in the pass,
+    # and the list's progress counts for nothing. One query per open pass
+    # with a row on this page; a user has a handful at most.
+    passes = {found.anime_id: found for found in await open_rewatches(session, user_id=user.id)}
+    in_pass: set[int] = set()
+    for anime_id, found in passes.items():
+        on_page = [row.episode.id for shelf in shelves for row in shelf if row.anime.id == anime_id]
+        if on_page:
+            in_pass |= await pass_finished(session, found, episode_ids=on_page)
+
+    def list_progress_of(anime_id: int) -> int:
+        return 0 if anime_id in passes else progress.get(anime_id, 0)
+
+    def completed_of(anime_id: int, episode_id: int, otherwise: bool) -> bool:
+        return episode_id in in_pass if anime_id in passes else otherwise
 
     # Nothing on this response waits on either of these: the queue rows are
     # written here, a worker fetches the pictures, and the next visit to the
@@ -157,7 +175,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 row,
                 now=at,
                 list_status=statuses.get(row.anime.id),
-                list_progress=progress.get(row.anime.id, 0),
+                list_progress=list_progress_of(row.anime.id),
+                completed=completed_of(row.anime.id, row.episode.id, row.completed),
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
@@ -172,11 +191,12 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 now=at,
                 list_status=statuses.get(row.anime.id),
                 # Never completed and never at or below the progress: the query
-                # excludes both (FR-W5 read backwards), so the flag is false by
-                # construction and asking the database again would be a third
-                # round trip for an answer the ``WHERE`` clause already gave.
+                # excludes both (FR-W5 read backwards; in a pass, finished in
+                # it), so the flag is false by construction and asking the
+                # database again would be a third round trip for an answer the
+                # ``WHERE`` clause already gave.
                 completed=False,
-                list_progress=progress.get(row.anime.id, 0),
+                list_progress=list_progress_of(row.anime.id),
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
@@ -197,8 +217,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 row,
                 now=at,
                 list_status=statuses.get(row.anime.id),
-                completed=row.episode.id in completed,
-                list_progress=progress.get(row.anime.id, 0),
+                completed=completed_of(row.anime.id, row.episode.id, row.episode.id in completed),
+                list_progress=list_progress_of(row.anime.id),
                 release=extras.torrents.get(row.episode.id),
                 rendition=extras.renditions.get(row.episode.id),
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
