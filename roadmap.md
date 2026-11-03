@@ -2385,7 +2385,7 @@ Reviewer where marked.
       `fetchable` + `demand.refusal`; rewatch marks, `watched_source` and
       hero order; Ready to watch branches; `/api/progress/completed` pass
       completions.
-- [ ] **T5 — Retention anchor** (S, **Reviewer: retention**).
+- [x] **T5 — Retention anchor** (S, **Reviewer: retention**; verified by the orchestrator 2026-11-04: Validator PASS (six probes), Reviewer merge-after-fixes — the anchor switched to `greatest(completed_at, finished_at)` to match `GET /api/progress/completed`, two-user, in-pass un-mark, late-replay, microsecond-edge and manual-mark tests added; the hold (b) "not finished since" rule is the orchestrator's call, reported to the owner; my own runs: branch full suite 5512 passed, merged main ecb6dd0 targeted 116, client 1500, lint clean; the sweep diff read personally).
       `retention/sweep.py` (FR-T1). Tests: a rewatch completion at T →
       deletable at T + 6 h; demand lifecycle; a walk want keeps the playing
       episode; floor eviction order. Can follow T2 directly.
