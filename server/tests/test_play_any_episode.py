@@ -604,3 +604,100 @@ async def test_an_announced_show_with_a_past_dated_row_has_aired_nothing_anywher
     refused = await client.post(f"/api/episodes/{first}/demand")
     assert refused.status_code == 409
     assert refused.json()["detail"]["code"] == NOT_AIRED
+
+
+# --- fix round 1: the verifiers' cases ----------------------------------------------
+
+
+async def test_at_the_cap_neighbours_already_demanded_stay_fetchable(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Both neighbours are the caller's own open demands: pressing them restamps."""
+    ids = await opened_on_ready(api_factory, user.id, 977070)
+    async with api_factory() as session:
+        await set_setting(session, DEMAND_MAX_OPEN_KEY, 2)
+        await session.commit()
+    await add_demands(api_factory, user.id, ids[3], ids[5])
+
+    body = await play(client, ids[4])
+
+    assert body["previous"]["fetchable"] is True
+    assert body["next"]["fetchable"] is True
+
+
+@pytest.mark.parametrize("pending", [True, False], ids=["pending", "ready"])
+async def test_an_unaired_neighbour_never_reads_the_gate(
+    client: AsyncClient,
+    user: User,
+    api_factory: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    pending: bool,
+) -> None:
+    """Episode 10 opened (pending, or ready), 9 ready, 11 not aired: no gate read."""
+
+    async def no_gate(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the demand gate must not be read here")
+
+    monkeypatch.setattr("arc.api.playback.demand_gate", no_gate)
+    ids = await show(api_factory, user.id, anilist_id=977071 + int(pending), status=None)
+    await make_ready(api_factory, ids[8])
+    if pending:
+        await add_demands(api_factory, user.id, ids[9])
+    else:
+        await make_ready(api_factory, ids[9])
+
+    body = await play(client, ids[9])
+
+    assert (body["pending"] is not None) is pending
+    assert body["next"]["id"] == ids[10]
+    assert body["next"]["fetchable"] is False
+
+
+async def test_a_live_refusal_of_an_older_download_gives_no_note(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """The refusal was about a download before the current torrent was added."""
+    ids = await show(api_factory, user.id, anilist_id=977073, status=None)
+    async with api_factory() as session:
+        session.add(
+            Job(
+                type=REMUX_LIVE,
+                payload={
+                    "episode_id": ids[4],
+                    "stage": STAGE_LIVE_REFUSED,
+                    "reason": REFUSED_NOT_MKV,
+                },
+                status=JobStatus.DONE,
+                created_at=datetime.now(UTC) - timedelta(days=2),
+            )
+        )
+        await session.commit()
+    await downloading_single(
+        api_factory, ids[4], title="[Group] Show - 05 [1080p]", info_hash="a5" * 20
+    )
+    await add_demands(api_factory, user.id, ids[4])
+
+    pending = (await play(client, ids[4]))["pending"]
+
+    assert pending["state"] == "downloading"
+    assert pending["note"] is None
+
+
+async def test_an_unaired_episode_the_caller_wants_is_pending(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """A live want of the caller's opens the waiting player whether or not it aired.
+
+    The want branch comes before the aired check (as on main for a window
+    want); only an episode nobody of the caller's asked for needs to have
+    aired.
+    """
+    ids = await show(api_factory, user.id, anilist_id=977074, status=None)
+    async with api_factory() as session:
+        session.add(Want(user_id=user.id, episode_id=ids[11]))
+        await session.commit()
+
+    body = await play(client, ids[11])
+
+    assert body["pending"] is not None
+    assert body["pending"]["demanded"] is False

@@ -183,23 +183,45 @@ async def test_every_aired_not_ready_row_is_fetchable_whatever_the_list(
     assert flags[ids[11]] is False, "not aired"
 
 
-async def test_the_show_page_plans_no_window(
+async def test_the_show_page_plans_wants_only_for_the_slot_note(
     client: AsyncClient,
     user: User,
     api_factory: SessionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The coverage helpers are gone: an unlisted show's page never plans wants."""
+    """The coverage helpers are gone: ``fetchable`` never plans the caller's wants.
 
-    async def no_plan(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the show page must not plan wants")
+    A dropped show the caller holds a live want on (M20 planned there, for
+    ``coverable``) plans nothing; a watching show plans exactly once — FR-A10's
+    slot note (``slot_view``), which is the only planner left on this page.
+    """
+    from arc.services.acquisition import wants
 
-    monkeypatch.setattr("arc.services.acquisition.wants._plan_wants", no_plan)
-    anime_id, _ids = await show(api_factory, user.id, anilist_id=976170, status=None)
+    calls: list[object] = []
+    original = wants._plan_wants
 
-    body = await detail(client, anime_id)
+    async def counted(*args: object, **kwargs: object) -> object:
+        calls.append(kwargs.get("user_ids"))
+        return await original(*args, **kwargs)
 
+    monkeypatch.setattr(wants, "_plan_wants", counted)
+    dropped_id, dropped = await show(
+        api_factory, user.id, anilist_id=976170, status=ListStatus.DROPPED
+    )
+    async with api_factory() as session:
+        session.add(Want(user_id=user.id, episode_id=dropped[6]))
+        await session.commit()
+
+    body = await detail(client, dropped_id)
+
+    assert column(body, "wanted_by_me")[dropped[6]] is True
     assert any(column(body, "fetchable").values())
+    assert calls == []
+
+    watching_id, _watching = await show(api_factory, user.id, anilist_id=976169)
+    await detail(client, watching_id)
+
+    assert len(calls) == 1
 
 
 # --- demanded and AnimeDetail.demand ----------------------------------------------
@@ -415,4 +437,26 @@ async def test_outside_a_pass_the_marks_are_the_lists(
         "arc",
         None,
     ]
+    assert body["rewatch"] is None
+
+
+async def test_another_users_pass_leaves_this_users_marks_alone(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    other = await add_user(api_factory, "show-pass-other@arc.test", "other-password")
+    anime_id, ids = await show(api_factory, user.id, anilist_id=976182, progress=4)
+    async with api_factory() as session:
+        session.add(
+            Rewatch(
+                user_id=other.id,
+                anime_id=anime_id,
+                started_at=datetime.now(UTC) - timedelta(days=1),
+            )
+        )
+        await session.commit()
+
+    body = await detail(client, anime_id)
+
+    sources = column(body, "watched_source")
+    assert [sources[ids[n]] for n in range(5)] == ["progress", "progress", "progress", "arc", None]
     assert body["rewatch"] is None
