@@ -3523,7 +3523,7 @@ through the same edge, without the grace period.
   written since the pass began; a partial from before the pass belongs to
   Ready to watch, so no episode is on both shelves (M21 T4). The resume
   position itself is unchanged.
-- 2026-11-04 — M21 T5: FR-T1 hold (b) clarified: a partial watch is one not
+- 2026-11-04 (orchestrator's call, reported to the owner) — M21 T5: FR-T1 hold (b) clarified: a partial watch is one not
   finished since its last report, so a rewatch pass finish (left not
   completed by FR-W7) is a watched anchor with the 6-hour grace, not a
   partial that holds the file D days. A later report below the mark still
