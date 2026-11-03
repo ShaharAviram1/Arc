@@ -2352,8 +2352,8 @@ Reviewer where marked.
       `QBIT_AWAITING_PICK`, R7 seed `batch_sweep_dry_run` = true; models and
       settings plumbing. Tests: up/down, backfill, partial unique index,
       validator bounds. DoD: one Alembic head, lint.
-- [ ] **T2 — Progress core + rewatch service** (L, **Reviewer: MAL
-      writes**). `playback/progress.py`, new `playback/rewatch.py`,
+- [x] **T2 — Progress core + rewatch service** (L, **Reviewer: MAL
+      writes**; verified by the orchestrator 2026-11-03: Validator PASS with eight probes of its own, Reviewer found two must-fix defects — a replayed pass end closing the pass in the past, an old pass finish ending a new trip — fixed with the bounded tail and fail-closed clamped replays and re-confirmed by probe; my own runs: branch full suite 5389 passed, merged main bc728cb targeted 142, client 1500, lint clean; the progress and rewatch diffs read personally). `playback/progress.py`, new `playback/rewatch.py`,
       `playback/sync.py`, `api/playback.py`, `api/playback_schemas.py`,
       rewatch routes, the `mal/sync.py` docstring (FR-S4, FR-S8, FR-W3,
       FR-W5, FR-W7, FR-M4, FR-M7, FR-A9). Tests: zero `mal_writes` and
