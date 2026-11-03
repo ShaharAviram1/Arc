@@ -350,8 +350,9 @@ async def demand(
 async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now: datetime) -> bool:
     """Withdraw the caller's demand on an episode (FR-A14, M21). Flushes; the caller commits.
 
-    ``demanded_at`` goes back to null. Then one question, asked of the caller's
-    own reconciliation (their plan, narrowed to them as :func:`slot_view` does
+    ``demanded_at`` goes back to null — after one question, asked while the
+    row is still a demand (so it cannot make its own show an occupant) of the
+    caller's own reconciliation (their plan, narrowed to them as :func:`slot_view` does
     it, plus an active trip of theirs waiting on the episode): **does anything
     the user follows still want this episode now?**
 
@@ -379,8 +380,11 @@ async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now:
     want = await session.get(Want, (user_id, episode_id), populate_existing=True)
     if want is None or want.demanded_at is None:
         return False
-    want.demanded_at = None
-    await session.flush()
+    # Asked while the row is still a demand: a demand never occupies a slot,
+    # so the plan sees the show exactly as it stood before the press — a held
+    # show stays held and contributes only its prefetch. Cleared first, the
+    # row would be an ordinary live want on a downloading episode, an
+    # occupant, and would admit its own show.
     on_trip = await session.scalar(
         select(TripEpisode.episode_id)
         .join(Trip, Trip.id == TripEpisode.trip_id)
@@ -395,6 +399,7 @@ async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now:
     followed = on_trip is not None or (
         (user_id, episode_id) in (await user_plan(session, user_id, now=now)).desired
     )
+    want.demanded_at = None
     cancelled = False
     if not followed and want.dropped_at is None:
         want.dropped_at = now

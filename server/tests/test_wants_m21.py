@@ -1090,3 +1090,42 @@ async def test_finishing_a_pass_deletes_its_walk(db_session: AsyncSession) -> No
     await db_session.refresh(rewatch)
     assert rewatch.ended_at is not None
     assert await db_session.get(Walk, (user.id, anime.id)) is None
+
+
+@pg
+async def test_withdrawing_on_a_held_show_does_not_let_the_row_admit_its_own_show(
+    db_session: AsyncSession,
+) -> None:
+    """Review: the plan is asked while the row is still a demand (never an occupant).
+
+    K = 1, N = 2: show A downloads and holds the slot, show B at progress 4
+    waits. A demand on B's episode 5, downloading, then withdrawn.
+    """
+    await set_setting(db_session, SLOT_CAP_KEY, 1)
+    await set_setting(db_session, "look_ahead_n", 2)
+    user = await make_user(db_session, "m21-withdraw-k1@arc.test")
+    show_a, rows_a = await a_show(db_session, 972068)
+    await make_entry(db_session, user, show_a, progress=0)
+    show_b, rows_b = await a_show(db_session, 972069)
+    await make_entry(db_session, user, show_b, progress=4)
+    await compute_wants(db_session)
+    await downloading(db_session, rows_a[0], "7" * 40)
+    await compute_wants(db_session)
+    assert (await slot_view(db_session, user.id)).waiting == frozenset({show_b.id})
+    await demand(db_session, user_id=user.id, episode=rows_b[4], now=datetime.now(UTC))
+    torrent = await downloading(db_session, rows_b[4], "8" * 40)
+
+    await withdraw(db_session, user_id=user.id, episode_id=rows_b[4].id, now=datetime.now(UTC))
+
+    want = await db_session.get(Want, (user.id, rows_b[4].id))
+    assert want is not None and want.dropped_at is not None
+    assert want.drop_reason == REASON_WITHDRAWN and want.demanded_at is None
+    assert torrent.qbit_state == QBIT_CANCELLED
+    assert [job.payload["episode_id"] for job in await jobs(db_session, QBIT_CANCEL)] == [
+        rows_b[4].id
+    ]
+    await compute_wants(db_session)
+
+    view = await slot_view(db_session, user.id)
+    assert view.waiting == frozenset({show_b.id}) and view.fetching == 1
+    assert {row.id for row in rows_b} & await wanted(db_session, user) == set(), "nothing new on B"
