@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-10-13. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-11-03. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -22,12 +22,14 @@ seasonal schedule, a show page, an in-browser player, search/add, and (phase
 product decision, 2026-10-13, M20). It keeps one episode ready per watcher —
 the next one, plus the one after once they are half-way through it — fetches
 just in time, skips what a user's device already holds, and fetches on demand
-when somebody presses play on an episode their window covers. Two users a few
+when somebody presses play on any aired episode (M21; until then only on an
+episode their window covered). Two users a few
 episodes apart on one show may cause the episodes between them to be fetched,
 deleted and fetched again; that cost is accepted.
 
-The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9), so
-that the course professor can log in at any time, and the owner uses it daily.
+The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9). It
+was first built for a course, which ended on 2026-10-15; since then the owner
+is its only user, and uses it daily.
 
 ## 2. Users and roles
 
@@ -65,12 +67,20 @@ that the course professor can log in at any time, and the owner uses it daily.
 - **ListEntry** — (user, anime) → status, progress (episodes watched), score,
   source of last change (arc / mal), MAL sync state.
 - **WatchProgress** — (user, episode) → position seconds, duration, completed
-  flag, updated at.
+  flag, first completion, latest finish (M21), updated at.
+- **Rewatch** — (user, anime) pass: when it started, when and why it ended
+  (turned off, or finished). At most one open pass per user and show (FR-W7,
+  M21).
+- **Walk** — (user, anime) → the episode the look-ahead starts after, from
+  the user's latest play, and when it last moved (FR-A1, M21).
+- **PackPick** — a season pack waiting for a person to say which of its
+  files is the wanted episode, and how it was resolved (FR-A4, M21).
 - **MalLink** — per user: OAuth tokens, MAL username, last import/sync time.
 - **MalWriteLog** — every write Arc made to MAL: what, when, why, previous
   value, result. Append-only.
 - **AcquisitionWant** — (user, episode) derived interest; drives what to
-  fetch. Computed from the user's list status and progress (see FR-A1).
+  fetch. Computed from the user's list status and progress, walks and
+  rewatch passes (FR-A1, FR-W7), plus demands (FR-A14) and trips (FR-A12).
 - **Torrent** — a Nyaa release chosen for an Episode: magnet/info hash,
   group, resolution, seeders at pick time, qBittorrent state.
 - **Job** — background unit of work (scan, match, transcode, mal-sync, fetch,
@@ -157,7 +167,8 @@ that the course professor can log in at any time, and the owner uses it daily.
   seeder figure — single or season pack, a re-fetch whose figure was cleared
   skipped — recorded fewer than `slow_swarm_seeders` seeders keeps
   `look_ahead_slow` episodes ahead instead (default 3; never fewer than N, and
-  N = 0 still fetches nothing and stops what is running). It is derived at every reconciliation and
+  N = 0 empties the window and stops what it was fetching — a demand is
+  still honoured). It is derived at every reconciliation and
   stored nowhere, like the halfway prefetch below, and everything else here
   (prefetch, device skip, FR-A9, FR-A10) applies to that show's N unchanged. A
   want whose episode is already **downloading** is **not cancelled** because
@@ -175,7 +186,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   aired. It is computed from list and watch progress and stored nowhere, so it
   is still "the next unwatched episodes"; crossing 50 % triggers the
   recompute (FR-S4). The prefetched episode is outside FR-A10's cap, like a
-  sample: it is fetched even while the show waits for a slot and never makes
+  demand: it is fetched even while the show waits for a slot and never makes
   the show take one. **Device skip** (M20, owner 2026-10-13, reversing the
   2026-10-06 rule that such an episode was "not left out"): an episode a device
   of the user holds unwatched — a delivered, unreleased trip copy (FR-A12) or a
@@ -184,8 +195,33 @@ that the course professor can log in at any time, and the owner uses it daily.
   episode; the halfway prefetch skips the same way. Watching such an episode on
   another device is play on demand (FR-A14). Nothing outside this window is
   fetched, and no more of it at once than FR-A10's per-user cap allows — the
-  exceptions being a sample (FR-A8), a trip (FR-A12) and a demanded episode
-  (FR-A14), each something a user asked for explicitly.
+  exceptions being a trip (FR-A12) and a demanded episode (FR-A14), each
+  something a user asked for explicitly (a sample, FR-A8, was a third until
+  M21 folded it into the demand).
+  **Walking a show** (M21, owner 2026-11-03: "after a clicked episode plays,
+  the normal N look-ahead applies from that position"). Once a user plays
+  episode k of **any** show — on the list or not, in any status — the same
+  window runs from that position as well: from k−1 while k plays, from k once
+  it is finished, with the show's own N (thin-swarm N included), its own
+  halfway prefetch and its own device skip. The walk is the user's latest
+  play on the show, kept by the server; a report older than the walk's last
+  move (an offline replay, FR-S8) does not move it. It lapses once the user
+  has not played the show for **D** days, when the user sets the show
+  dropped, on hold or completed in Arc after the walk last moved, or when
+  FR-W5 auto-completes it; while a rewatch pass is open, only a walk that
+  moved since the pass began counts. A lapsed walk's leftover wants are
+  shelved (FR-T1's G-day grace). A walk touches no list entry and writes nothing to
+  MyAnimeList. **A rewatch pass** (FR-W7) does the same from its own
+  position — the highest episode finished in the pass, 0 before the first —
+  and while a pass is open the show's list window is suspended. A show's
+  window is the **union** of the windows it has (list or rewatch, and walk),
+  each with its own prefetch and skip, so a walk behind the list position (a
+  user re-playing an old episode of a listed show) adds its own few episodes.
+  When a wanted episode has been watched past, the want is **deleted** (its
+  completion is retention's anchor) while the user still follows the show —
+  watching/planned and not dormant, walking it, or rewatching it — and
+  shelved otherwise. N = 0 empties every window; a demand (FR-A14) is still
+  honoured, and pausing acquisition remains the hard stop.
 - FR-A2 Wants from all users are merged: an episode is fetched once even if
   several users want it.
 - FR-A3 Release selection uses ranked, admin-editable rules:
@@ -306,7 +342,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   is not fetched and read again every six hours, and the episode keeps FR-A6's
   ordinary retry and ends "unavailable · only batch releases, and their files
   could not be identified" — because a missing file is visible and fixable and
-  the wrong episode plays as though it were right. One batch serves several
+  the wrong episode plays as though it were right. **A person may pick the
+  file instead** (M21, owner 2026-11-03, moved from M17): when a search
+  chooses nothing and at least one pack was refused for this reason — no
+  file claims the wanted episode, or several do; a pack refused for holding
+  too many files never qualifies — the best such pack is kept in the torrent client
+  **stopped, with nothing selected** (not one byte fetched), and the episode
+  reads "unavailable · the pack's files need a person's pick (Review)". The
+  Review page lists the pack's video files with the parser's reading of each
+  (no LLM suggestion is shown or applied); **This is episode N** selects that
+  one file for the wanted episode, the pack downloads it like any pack file,
+  and the landed file is linked as confirmed — never by a guess. **Dismiss**
+  forgets the pack as unreadable, exactly as without a pick, and FR-A6's
+  daily retry goes on. A pick on an episode nobody wants any more, or a second
+  pick, is refused; a pick left waiting **D** days is dismissed on its own.
+  Every other refused pack is forgotten as before. One batch serves several
   wants: the other episodes somebody is waiting for that the release's own name
   says it holds are selected in the same breath, a later episode of the same
   show enables another file in the *same* torrent with no new search, and a
@@ -457,34 +507,47 @@ that the course professor can log in at any time, and the owner uses it daily.
   says so on the row, with a Pin action (FR-A16). A downloading episode that
   can already be played from its download (FR-P8) reads **"downloading 43 % ·
   playable"** (M20 T6).
-- FR-A8 A user can ask for the first episode of any show as a sample from the
-  show page, without changing their list or MAL. Only that one episode is
-  fetched; it follows the same states, D-day drop (FR-T2) and retention
-  (FR-T1) as any want. Watching it to completion adds a show that is not on
-  the list as Watching (FR-S4) and the ordinary window takes over; an existing
-  list entry keeps its status.
+- FR-A8 **Retired 2026-11-03 (owner), folded into FR-A14 in M21.** A sample
+  of episode 1 is a click on episode 1: any aired episode is now demandable
+  from the show page (FR-A14), so the "Try episode 1" button goes and
+  `POST /api/anime/{id}/sample` answers 410. Sample wants already live end as
+  any want does (FR-T2, FR-W4); the column and the code that reads them are
+  deleted once none remain. Until M21: a user could ask for the first
+  episode of any show as a sample from the show page, without changing their
+  list or MAL; only that one episode was fetched, it followed the same
+  states, D-day drop and retention as any want, and watching it to
+  completion added a show not on the list as Watching (FR-S4).
 - FR-A9 A list entry created by a MyAnimeList import generates no acquisition
   wants until the user has touched the show in Arc (status, progress, score,
   Play, or a MAL-log revert); a show that is currently airing is the
-  exception and keeps fetching. Activation never expires. "Try episode 1"
-  (FR-A8) is allowed on a dormant entry and fetches that one episode without
-  activating it — one episode is the point of a sample; activation means the
-  window. **A trip (FR-A12) is not a touch either**: it fetches its own
+  exception and keeps fetching. Activation never expires. **Pressing play on
+  a not-ready episode** (a demand, FR-A14) does not by itself activate a
+  dormant entry — it fetches that one episode, as "Try episode 1" (FR-A8)
+  did until M21; playing the episode is a touch like any play, **except in
+  rewatch mode** (FR-W7), which never activates an entry. **A trip (FR-A12)
+  is not a touch either**: it fetches its own
   episodes and leaves the entry dormant. **Pressing Next season** on the
   end-of-episode overlay (FR-S5 item 3) is a touch that activates a
   watching or planned entry (and adds an absent sequel to the list as
-  Watching); an entry in any other status is not written to at all.
+  Watching); an entry in any other status is not written to at all. **During
+  a rewatch pass** (FR-W7, M21) the press carries the rewatch on to the
+  sequel when the sequel's entry has progress above 0 or is completed, and
+  then writes nothing; otherwise it is the ordinary press above (normal mode,
+  an absent sequel added as Watching).
 - FR-A10 At most K shows per user fetch at once (default 5; 0 = unlimited):
   shows already fetching keep their slot, free slots go to currently airing
   shows first and then to the most recently updated entries, and the rest wait
   visibly on their show page. A show holds no slot once its wanted episodes
-  have arrived, or once Arc has given up on finding them (FR-A6). A sample
-  (FR-A8) never counts: it may add one episode beyond the cap, and is never
-  refused by it. **A trip (FR-A12) never counts either** (owner, 2026-10-05):
+  have arrived, or once Arc has given up on finding them (FR-A6). A show
+  wanted only through a walk or a rewatch pass (FR-A1, FR-W7; M21) takes a
+  slot exactly like a listed one, its recency being the later of the walk's
+  last move and the pass's start. **A trip (FR-A12) never counts**
+  (owner, 2026-10-05):
   its episodes hold no slot and are never refused one, and an episode wanted
   only by a trip does not stop a show's own window from waiting for a slot.
-  **A demanded episode (FR-A14) never counts either and is never refused**,
-  like a sample: it is fetched while its show waits for a slot, holds none,
+  **A demanded episode (FR-A14) never counts either and is never refused by
+  K** (its own limit is `demand_max_open`): it is fetched while its show
+  waits for a slot, holds none,
   and the show goes on waiting for the rest of its window. **Nor does FR-A1's
   halfway prefetch** (M20): the extra episode never makes a show hungry for a
   slot or an occupant of one, and is fetched even while the show waits, so the
@@ -510,7 +573,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   the pack and fetch it again, whether the client still reports it fine or
   has put the pack in an error state, starts a pack left stopped while a
   wanted file is still to fetch, and sibling searches of one trip wait
-  for each other rather than adding the same pack at once.
+  for each other rather than adding the same pack at once. A pack **waiting
+  for a person's pick** (FR-A4, M21) is held stopped with nothing selected:
+  it costs no bytes and is not deleted while the pick is pending. Bytes a
+  pack leaves behind that no episode claims any more are FR-T1's **leftover
+  sweep** (M21).
 - FR-A12 **Trips** (M19, owner 2026-10-05). "Prepare for a trip" on a show:
   the next X **aired** episodes after the user's progress (FR-W5's boundary),
   made into small offline copies (FR-P6) for a device to keep. X is chosen by
@@ -521,8 +588,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   the user's call. That room is shared by every trip, so the show page's fit
   check counts what the user's other active trips still have to bring, each
   episode at the server's own estimate of a copy (the median size of its
-  recent copies made with the current settings). Refused for the demo account
-  (FR-D5), while this show already has an active trip of the user's, while
+  recent copies made with the current settings). Refused while this show already has an active trip of the user's, while
   acquisition is held for disk space (FR-T6), for a count outside the range,
   and when nothing has aired after the user's progress.
   The trip's episodes are wanted like any other episode (FR-A2 merges them
@@ -534,7 +600,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   rather than as a dozen singles (FR-A4's trip amendment, FR-A11). A trip is not a list change: it activates no
   dormant entry (FR-A9), holds no slot (FR-A10), touches no list entry, and
   can cause no MyAnimeList write. An episode a trip wants **and** some user
-  wants for streaming (their window, or a sample) is prepared both ways: the
+  wants for streaming (a window, or a demand) is prepared both ways: the
   HLS rendition and the small copy. An episode wanted **only** by trips is
   *trip-only*: the server makes the small copy and **never an HLS rendition**
   (FR-P1); it never becomes `ready` and is never streamable. Its **source is
@@ -675,11 +741,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   in the last ten minutes) is not deleted under it, for at most six hours
   after the last confirmation. Nothing in delivery or expiry touches
   a list entry or MyAnimeList.
-- FR-A13 **Manual release choice** (owner, 2026-10-06). Every account except
-  the demo may choose or change the release an episode — or one of their
+- FR-A13 **Manual release choice** (owner, 2026-10-06). Every account may
+  choose or change the release an episode — or one of their
   active trips — downloads from. The show page's episode row offers **Change
-  release…** for an episode the user already wants (their window, a sample or
-  their trip) that has not arrived yet; the trip panel offers **Choose
+  release…** for an episode the user already wants (any live want of theirs,
+  or their trip) that has not arrived yet; the trip panel offers **Choose
   pack…**. Both open a sheet: what is downloading now, Arc's own candidates
   for it from Nyaa (searched on demand with the same forms and request budget
   as the automatic search, packs included; at most once a minute per person
@@ -711,55 +777,79 @@ that the course professor can log in at any time, and the owner uses it daily.
   release you chose stalled". Every choice is logged with the user, the
   episode or trip and the info hash. Nothing here touches a list entry or
   MyAnimeList.
-- FR-A14 **Play on demand** (M20, owner 2026-10-13). Pressing play on an
-  episode that is not ready asks the server to fetch it now, at the top of
-  the search queue. Allowed only for an episode the user's window covers
-  **before** the device skip and the slot cap — the next N (the show's N:
-  `look_ahead_slow` for a thinly seeded show, FR-A1) and, once the user
-  is actually half-way through the first of them, the halfway prefetch; an
-  episode a device holds is demandable only when it falls inside that reach
-  (a Keep-offline copy of an episode further ahead is not) — or one they
-  already want for another reason (a sample, a trip episode, a window row; an
-  earlier demand does not justify itself); anything else is refused with a
-  sentence (owner Q5: no fetch outside the window). The want is marked
-  demanded: it is kept wanted even when a device holds the episode and even
-  when the show waits for a slot (FR-A10), and it is **re-checked on every
-  reconciliation**: it ends when the episode leaves that covered set — the
-  user watched past it, rewound below half-way, N was lowered, the show left
-  watching/planned — or as FR-T2 and FR-W4 end any want (on a show still
-  followed, not while the episode is downloading and N is not 0 — it ends on
-  the first reconciliation after the download finishes, FR-A1's no-cancel
-  rule). A demanded episode
-  that is a trip's but outside the window stays the trip's (small copy only)
-  and ends with the trip. A demand on an episode that is already ready does
-  nothing. A download already in flight is moved to the top of the torrent
-  client's queue. Refused, with a sentence, while acquisition is paused or
-  held for disk space (FR-T6) — but only for an episode that still has to be
-  fetched. Open to every account, **the demo one included** (it streams):
-  the demo account may therefore demand window episodes of the demo list
-  beyond its K (owner-approved). While the episode is on its way, opening it
-  in the player answers *pending* with its state, download percentage and
-  seeders instead of "not found" — also when a device of the user holds its
-  trip copy (the demand is the "watch it on the Mac" case, so *pending*
-  outranks *offline only*). The player's next-episode reference says whether
-  the next episode can be fetched this way **now**, on the user's real
-  progress — exactly what a demand would accept — so it turns true once the
-  user passes the halfway mark. Nothing here touches a list entry or
-  MyAnimeList. **What the user sees** (M20 T5): the show page's row of a
-  not-ready episode the user may demand has a **Play** button (and the row is
-  a target, like a ready one); the show payload marks such rows by the same
-  rule a demand applies, so a row never offers a play that would be refused
-  as outside the window. Watch Now's Continue watching and Ready to watch
+- FR-A14 **Play on demand** (M20, owner 2026-10-13; **rewritten for M21**,
+  owner 2026-11-03: "every episode on every show is playable when clicked
+  on, the episode goes into download and the video starts playing").
+  Pressing play on **any aired episode of any show** that is not ready asks
+  the server to fetch it now, at the top of the search queue — whatever the
+  user's list status, progress, dormancy (FR-A9), slot cap (FR-A10) or what
+  a device of theirs holds. One click is one demand and opens the player: a
+  single plays while it downloads (FR-P8); an episode served from a season
+  pack (FR-A11) cannot, and the player says "Downloading 43 %, plays when the
+  file is complete". A demand on an episode that is already ready does
+  nothing and counts for nothing. An episode that has **not aired** is
+  refused ("This episode hasn't aired yet.", `not_aired`).
+  **The cap** (M21): a user has at most `demand_max_open` demands open at
+  once (default 3, 0..20, 0 = no cap; FR-D2). A demand is *open* while it is
+  live and the user has not finished the episode since last pressing play on
+  it. Pressing play again on an episode already demanded restamps it and
+  never counts twice; a click on a new episode beyond the cap is refused
+  (`demand_cap`) with "You already have 3 episodes fetching on request.
+  Finish or cancel one first." and the list of the open demands, each
+  linking to its episode. The count is taken under the same lock as the
+  write, so two clicks at once cannot both take the last place.
+  **Lifetime** (M21): a demanded episode is wanted unconditionally — never
+  shelved or cancelled for list status or progress (not when the show leaves
+  watching/planned, not when the user's progress passes it, not at N = 0,
+  not because a device holds it, not while the show waits for a slot) — and
+  ends only when (a) the user **finishes** it in the current pass (a
+  completion after the press; the want is then deleted rather than shelved,
+  so FR-T1's watched grace applies), (b) it has been **untouched for D days**
+  (FR-T2: neither pressed again nor played; in any episode state, the
+  download cancelled — only a new click revives it), or (c) the user
+  **withdraws** it (M21, owner-accepted): the ✕ beside "Fetching on request"
+  on the show page's row, or from the cap refusal's list; the episode then
+  stays wanted only if something else wants it. A demanded trip episode is
+  wanted for streaming as well (an HLS rendition, not only the trip's small
+  copy). An episode with no release yet becomes `unavailable` with FR-A6's
+  daily retry and reads "No release found yet; Arc looks again every day";
+  its demand stays open, and counts toward the cap, until finished, stale or
+  withdrawn. A download already in flight is moved to the top of the
+  torrent client's queue. **Refused**, with a sentence and a code, for an
+  un-aired episode (`not_aired`), beyond the cap (`demand_cap`), while
+  acquisition is paused (`acquisition_paused`) and while it is held for disk
+  space (`storage_held`, FR-T6) — the last two only for an episode that still
+  has to be fetched. M20's refusal of a demand outside the user's window is
+  retired with M21. While the episode is on its
+  way, opening it in the player answers *pending* with its state, download
+  percentage and seeders instead of "not found" — for **any** aired episode,
+  demanded yet or not (the player then makes the demand once), and also when
+  a device of the user holds its trip copy (the demand is the "watch it on
+  the Mac" case, so *pending* outranks *offline only*). Only an unknown or
+  un-aired episode answers "not found". The player's next-episode reference
+  says the next episode can be fetched whenever it has aired, is not ready
+  and nothing on the page would refuse it. Nothing here touches a list entry
+  or MyAnimeList. **What the user sees** (M20 T5, extended in M21): on the
+  show page **every aired, not-ready episode's row** has a **Play** button
+  (and the row is a target, like a ready one), with the hint "Arc fetches it
+  now; it plays as it downloads, or when the file is complete for a season
+  pack."; a demanded row reads "Fetching on request" with a ✕ to withdraw;
+  an un-aired row is inert; when the server would refuse every click on the
+  page (paused, held; at the cap, any row not already demanded), pressing Play shows the sentence in place
+  and does not navigate. Watch Now's Continue watching and Ready to watch
   tiles demand an episode that is not ready (its files deleted after
-  watching, say) when no copy on the device plays it. The player demands
-  the episode before loading it, and also when it opens on an episode that
-  is already on its way (pressing play is the demand). While the episode is
-  on its way the player shows the show and episode, a spinner and
-  **"Searching"**, **"Downloading 43 %"** (with the release's seeders) or
-  **"Preparing"**, asks again every 3 seconds, and becomes the player the
-  moment the episode streams. A refusal — not in the window, acquisition
+  watching, say) when no copy on the device plays it. The player demands the
+  episode before loading it, and also when it opens on an episode that is
+  on its way or that `/play` reports as not yet demanded (pressing play is
+  the demand). While the episode is on its way the player shows the show and
+  episode, a spinner and **"Searching"**, **"Downloading 43 %"** (with the
+  release's seeders) or **"Preparing"**, plus the server's note for a pack,
+  asks again every 3 seconds, and becomes the player the moment the episode
+  streams; a pack-backed episode waiting for a person's file pick (FR-A4)
+  links to Review instead. A refusal — not aired, at the cap, acquisition
   paused, storage held — shows the server's own sentence and **no spinner**:
-  nothing was queued, so nothing is coming and nothing waits to retry.
+  nothing was queued, so nothing is coming and nothing waits to retry; the
+  cap refusal lists the open demands with links.
 - FR-A15 **Device holdings** (M20, owner 2026-10-13). A device reports the
   episodes it holds as downloads the user has not watched, as a whole set
   that replaces what that device reported before; the device is named by a
@@ -774,11 +864,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   the one that reported longest ago removed first (a small call, 2026-10-13:
   a browser that clears its storage mints a new device id). The server uses
   the set only for FR-A1's device skip, together with delivered trip copies
-  (FR-A12). Refused for the demo account, which has no downloads. **A device
+  (FR-A12). **A device
   may also send its download manager's event log** (owner, 2026-10-30; FR-S9
   item 10): up to 500 events and 256 KiB per report, kept for the operator
   to read (`arc.cli device-report`) and never acted on; the newest 20 reports
-  per device and 10 devices per user are kept; refused for the demo account.
+  per device and 10 devices per user are kept.
 - FR-A16 **Seeder warning** (M20, owner 2026-10-13). An episode whose live
   download has fewer than `min_seeders_warn` seeders (default 3, 0..100;
   0 = never; FR-D2) says so on its show-page row: "Few seeders (2) — pin this
@@ -790,7 +880,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   and for a pack. While Arc itself is seeding a finished episode, the
   tracker's count includes Arc, so a `ready` episode's figure may be one
   higher than the swarm that would serve a re-fetch. Once the
-  show is pinned, and for the demo account (which cannot pin), the row keeps
+  show is pinned, the row keeps
   "Few seeders (2)" and drops the suggestion. A release Arc has decided
   against, or retention has evicted, warns about nothing.
 
@@ -970,7 +1060,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   a while to start. Changing the copy settings does **not** re-make copies that
   already exist (owner, 2026-10-06); they are recorded with the settings they
   were made with. Every signed-in account
-  except the demo one may ask for and fetch a ready episode's copy; the copy
+  may ask for and fetch a ready episode's copy; the copy
   is behind the same session rule as every media route, its path is derived
   from the episode id, and it is fetched in resumable pieces like FR-S7's
   file. A copy is deleted with its episode (FR-T1) and on its own when nobody
@@ -1112,6 +1202,22 @@ that the course professor can log in at any time, and the owner uses it daily.
   that the user never said. The status is never rolled back: a show FR-W5
   completed stays completed, because "completed" is the user's word (FR-W2).
   Un-marking never creates a list entry.
+  **The latest finish** (M21): every crossing of the mark that passes the
+  live-duration guard above, and every manual mark (FR-W3), also stamps the
+  episode's *latest finish* for that user — in normal and rewatch mode
+  alike — while the first completion's time stays as it was written. A
+  demand ends on it (FR-A14), a rewatch pass counts its episodes by it
+  (FR-W7) and retention anchors on it (FR-T1); an un-mark clears it. Every
+  progress report also moves the user's **walk** on the show (FR-A1): to the
+  episode before this one while it plays, to this one once it is finished;
+  that is acquisition bookkeeping and touches no list entry. **In rewatch
+  mode** (FR-W7) a report records the position and, at the mark, the latest
+  finish, and **nothing else**: no list progress, no entry created or
+  activated, no status change, no FR-W5 auto-complete and no MyAnimeList
+  write; an un-mark in a pass clears that pass's finish only and never
+  lowers the list. In normal mode, finishing an episode ahead of the list
+  (a click on episode 9 of a show at 3, FR-A14) raises the progress to 9 as
+  above — the existing rule, simply easier to reach since M21.
 - FR-S5 **The end of an episode is two moments** (owner, 2026-09-17, replacing
   the single overlay at the completion mark).
   1. *Crossing the completion mark* (FR-S4's 90 %, unchanged) is bookkeeping,
@@ -1154,9 +1260,11 @@ that the course professor can log in at any time, and the owner uses it daily.
      then, for an episode not ready, demands it (FR-A14) and opens the
      waiting player. A sequel entry in any other status (completed, on hold,
      dropped) is never written by the press: a ready episode just opens, and
-     a not-ready one is offered only if it is already covered (a sample,
-     FR-A8). "Fetchable" here is what the demand will accept once the entry
-     is active. No special prefetch: an active sequel's episode 1 is in the
+     a not-ready one is demanded like any aired episode (FR-A14, M21; until
+     M21 it was offered only when a sample already wanted it). "Fetchable"
+     here is what the demand accepts: aired and not ready. During a rewatch
+     pass the press follows FR-A9's carry-over rule instead (FR-W7, M21). No
+     special prefetch: an active sequel's episode 1 is in the
      ordinary window (FR-A1) on its own. The offer is not worked out while
      the opened episode is still pending or playing from its download
      (FR-P8): a last episode watched that way shows it once it is ready.
@@ -1166,7 +1274,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   cancels a pending one.
 - FR-S7 **A prepared episode as one MP4 file** (owner, 2026-10-04; revised
   2026-10-05). The route that feeds Keep offline (FR-S9): any signed-in user
-  except the demo account can fetch a `ready` episode as one MP4 file. **There
+  can fetch a `ready` episode as one MP4 file. **There
   is no file link in the UI** (owner, 2026-10-05: "i dont want a save file
   option, not needed") — the "Save file" control is gone; the route and the
   payload's `download_url` stay because the in-app downloader uses them. The
@@ -1179,8 +1287,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   download is resumable (byte ranges, a validator that changes when the
   episode is re-prepared) so a later in-app offline mode can fetch it in
   pieces. An episode that is not ready, or whose prepared files are not all
-  present and intact, cannot be downloaded (404, never a partial file). The
-  demo account is refused (403) and sees no offline control. Since M19 the
+  present and intact, cannot be downloaded (404, never a partial file). Since M19 the
   route is **the fallback**, not the first choice: Keep offline takes the
   small copy (FR-P6) whenever the server can make one, and comes here only
   when the episode's source is gone (owner, 2026-10-05). **A rendition with a
@@ -1258,7 +1365,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   not interrupt it, and the player does not switch to the device copy
   mid-playback: it is used the next time the episode is opened. While the
   player is playing *from* the device copy, Remove is disabled and says why
-  (remove it after leaving the player). Not for the demo account; hidden,
+  (remove it after leaving the player). Hidden,
   with no error, where the browser cannot keep files this way (no
   origin-private file system or no workers).
   1. **States**: not downloaded → queued → downloading (a percentage) →
@@ -1363,7 +1470,7 @@ that the course professor can log in at any time, and the owner uses it daily.
      page says quietly which copy each episode is ("smaller copy" / "full
      size") and lists one still being made as "Preparing on the server".
   8. **Trips on the device** (FR-A12, M19 T6, 2026-10-06). The show page
-     offers **Prepare for a trip** (not to the demo account; where the
+     offers **Prepare for a trip** (where the
      browser cannot keep episodes, or cannot play the small copies' video
      format, a one-line sentence says so instead): how many episodes, from 1
      to whichever is fewer of the server's cap (`trip_max_episodes`, sent on
@@ -1463,7 +1570,7 @@ that the course professor can log in at any time, and the owner uses it daily.
      moments close together make one report (a 5-second pause); a set that
      has not changed is not sent again within 10 minutes; with no network the
      report waits and goes on the next sync that reaches the server, or on
-     reconnect. Never for the demo account. A trip copy's own delivered and
+     reconnect. A trip copy's own delivered and
      deleted calls (item 8) carry on as before. Since 2026-10-30 (owner) the
      report carries, for each episode, the ETag, size and SHA-256 of what the
      device holds, the confirmation carries the hash and size the device
@@ -1530,7 +1637,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   same caches rather than a requirement of its own (owner, 2026-09-11). The
   page **updates itself as episodes change state** — a tile appearing, a row
   flipping, a still arriving — with no notifications and no sound (owner,
-  2026-09-13).
+  2026-09-13). **Rewatch** (FR-W7, M21): for a show in an open pass the
+  shelves read the pass — watched means finished in the pass, and Ready to
+  watch offers that show's ready episodes not finished or started since the
+  pass began, whatever the list status. Ready to watch also offers a ready
+  episode the viewer has a live want on (a demand or a walk, FR-A14, FR-A1)
+  and has not watched, whatever the list status.
 - FR-W2 Users can set a show to watching / planned / on hold / dropped /
   completed, and set a score (1–10) from the show page.
 - FR-W3 Marking an episode as watched manually is allowed (e.g. watched
@@ -1545,7 +1657,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   hover) once the episode is watched, by either half of FR-W5. The one episode
   that keeps a ✓ is the one with nothing to press — watched by list progress
   alone, where FR-W5 says the control is not a button.
-- FR-W4 Dropped, completed and on-hold shows generate no acquisition wants.
+- FR-W4 Dropped, completed and on-hold shows generate no **list-window**
+  wants (FR-A1). Since M21 such a show can still be fetched through what the
+  user does on it — a demand (FR-A14), a walk (FR-A1) or a rewatch pass
+  (FR-W7) — and setting a show dropped, on hold or completed in Arc ends its
+  walk (a demand outlives it, FR-A14).
 - FR-W5 **What "watched" means, and when a show completes itself** (owner,
   2026-09-13). An episode counts as watched for a user when its number is at
   or below that user's ListEntry.progress **or** the user has a completed
@@ -1571,12 +1687,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   `dropped` included (owner, 2026-09-13): finishing the last episode of a show
   you had dropped is the clearest statement anybody makes about a list entry.
   A show still airing, a show with an unknown episode count, and a rewatch of
-  an already-completed show are never auto-completed.
+  an already-completed show are never auto-completed; nor is any show in
+  rewatch mode (FR-W7, M21). **While a rewatch pass is open** the watched
+  state of that show reads the pass instead (M21): an episode is watched when
+  it was finished since the pass started (source `arc`, with Unwatch, which
+  clears only the pass's finish), and the list's progress counts for nothing
+  until the pass ends — so the rows, the "Watched N / M" line, the home tiles
+  and the next-thing pick all start again from episode 1.
 
 - FR-W6 **Own failures on Watch Now** (M16, owner 2026-09-12: "a user's own
   failures only"). The home page carries, above the hero, a quiet banner of the
   things that have stopped **for this viewer**: an episode they hold a live want
-  on — the window's (FR-A1) or a sample of their own (FR-A8) — whose state is
+  on — a window's (FR-A1: the list's, a walk's or a rewatch pass's) or a
+  demand of their own (FR-A14) — whose state is
   `failed` (a transcode broke, FR-P4) or `unavailable` (FR-A6 found no release
   and retries daily), and their own MyAnimeList writes that did not land
   (FR-M6). Each row says what stopped, which show and episode, one sentence of
@@ -1592,6 +1715,45 @@ that the course professor can log in at any time, and the owner uses it daily.
   retry of an `unavailable` episode is new news, and a dismissal covers the
   failure it was pressed on and no other. A show with nothing wrong renders no
   banner at all. Notifications (email/push) stay out of scope (§8).
+
+- FR-W7 **Rewatch** (M21, owner 2026-11-03: "we will introduce a rewatch
+  path, that will follow the same logic of normal shows, but not changing the
+  mal entry."). A per-show switch on the show page, **Rewatch**, kept by the
+  server per user, open on any show with an aired episode whatever its list
+  status (a partly watched entry is allowed, and the list stays where it is).
+  While it is on, the show is in a **pass**:
+  1. *Fetching* follows the ordinary rules from the pass's position — the
+     highest episode finished since the pass started, 0 at the start: the
+     same N, thin-swarm N, halfway prefetch and device skip (FR-A1), the same
+     slot rule (FR-A10) and the same demands (FR-A14). The show's list
+     window is suspended for the pass.
+  2. *Watching* is recorded as a pass completion (FR-S4's latest finish,
+     later than the pass's start), which drives that show's watched marks
+     (FR-W5), Continue watching and Ready to watch (FR-W1), the hero's pick
+     and the next-episode offer.
+  3. *Nothing is written to the list or to MyAnimeList*: no progress, no
+     status, no entry created or activated (FR-A9), no auto-complete (FR-W5),
+     no MAL write and nothing in the MAL log; MyAnimeList's own rewatch
+     fields are left alone. A status or score change the user makes by hand
+     during the pass is an ordinary user-originated write (FR-M4).
+  4. *It ends* when the user turns it off, or on finishing the last episode
+     of the pass: the show's last episode when it has finished airing and its
+     count is known, otherwise the newest aired episode (owner-accepted
+     2026-11-03). The player then says "Rewatch finished. Your list was left
+     as it was." A pass never reopens by itself. A report recorded offline
+     (FR-S8) is judged by the pass that was open when the device recorded it:
+     a replay that arrives after the pass ended is still free of list and MAL
+     writes and does not reopen it, and one recorded before the pass began is
+     normal mode.
+  5. *Next season* pressed during a pass (FR-S5 item 3) carries the rewatch on
+     to the sequel when the sequel's list entry has progress above 0 or is
+     completed; otherwise it is the ordinary press, in normal mode (an absent
+     sequel added as Watching; owner-accepted 2026-11-03).
+  6. *Retention* is unchanged; a pass completion is a fresh watched anchor
+     (FR-T1).
+  The show page shows the switch (pressed while on) beside Keep files, a
+  badge "Rewatching · ep X / Y", and the line "Your list and MyAnimeList are
+  left as they are."
 
 ### 4.7 MyAnimeList sync
 - FR-M1 Each user links their own MAL account via OAuth 2.0 (PKCE). Tokens
@@ -1618,7 +1780,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   badge on the show and in the user's sync page.
 - FR-M7 "Never write a change I did not make": there is no code path that
   writes to MAL except via a user-originated event (a list edit, a watch
-  completion, an explicit un-mark) or an explicit revert.
+  completion, an explicit un-mark) or an explicit revert. A completion, mark
+  or un-mark made in **rewatch mode** (FR-W7, M21) is none of these: it
+  writes nothing to MyAnimeList and nothing to the list entry.
 
 ### 4.8 Recommendations (phase 2)
 - FR-R1 Recommendations page with an optional free-text mood prompt ("something
@@ -1663,7 +1827,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   below a user's list progress counts as completed by that user, anchored on
   that entry's last change (never earlier than the file itself) — so an
   episode somebody skipped past is deleted on the same schedule as one they
-  watched in Arc.
+  watched in Arc. **The completion anchor is the latest finish** (M21): each
+  user's latest crossing of the mark (FR-S4), not the first, so a rewatch
+  completion — in a rewatch pass (FR-W7) or not — starts a fresh
+  `watched_grace_hours` grace. A finished demand (FR-A14) and a walk's
+  wants (FR-A1) follow the same rule as any want.
   Four **holds** keep an episode whose grace has run out, for as long as they
   last: (a) **any** user has pinned the show (FR-T8); (b) somebody has a
   partial watch on it (position above zero, not completed) updated within
@@ -1671,7 +1839,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   it** within `watched_grace_hours`, and never less than 30 minutes (so a
   grace of 0 cannot delete an episode whose last minutes are still playing
   after the 90 % completion) — the last progress sample, which also covers a
-  rewatch, since a completion's time is written once; (d) its offline copy was
+  rewatch played but not yet finished; (d) its offline copy was
   **sent to a device within the last 10 minutes** — a download in progress.
   Hold (d) has a ceiling: a device fetching in a loop could otherwise hold the
   episode indefinitely, so it lapses 6 hours after the episode's grace ran out
@@ -1691,7 +1859,10 @@ that the course professor can log in at any time, and the owner uses it daily.
   remain for any reason (watched past, show set to on hold / dropped /
   completed, removed from the list, or dropped as stale), FR-T1's grace
   applies from that moment; a want never disappears without leaving a
-  grace anchor behind.
+  grace anchor behind. A demand (FR-A14) goes stale D days after the later
+  of its last press and the user's last play of the episode, in any episode
+  state; the clock also restarts on a walk's last move and a rewatch pass's
+  start (M21).
 - FR-T3 Deleting files resets the episode to "not acquired"; if a user later
   rewinds or a new user wants it, it is re-acquired. The small offline copy
   (FR-P6) is deleted with the rest, row and file. **A single is re-acquired
@@ -1715,6 +1886,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
   no search at all — a later want is served from the same pack. (FR-A11 is
   unchanged by M20 T9's remembered release: a pack already kept its claims.)
+  **Leftover pack bytes** (M21, owner 2026-11-03, moved from M17). A want
+  withdrawn mid-download leaves whatever had arrived inside the pack's
+  directory with no file record naming it, which the per-episode rule above
+  cannot see, and the pack itself may never reach deletion while somebody
+  keeps the show. The hourly sweep therefore also deletes a file under a
+  pack's directory (`downloads/batch/<hash>/`) when: the pack is one Arc
+  knows; the file is not being ingested and is not an incomplete file of a
+  pack Arc is holding; no library file and no wanted claim names it; the
+  torrent client has it at priority 0, or no longer has the pack; it has
+  not changed for an hour; and it lies under the data root with no symlink
+  on its path. Directories left empty go with it. It starts as a **dry run**
+  (`batch_sweep_dry_run`, default on, FR-D2) that only logs what it would
+  delete, and the retention preview (FR-T4) lists the leftover files and
+  their bytes. A directory under `batch/` that no pack names is out of its
+  scope (FR-L1 already keeps the library away from it).
 - FR-T4 Admin can see disk usage and manually delete or re-fetch. The
   preview of the next sweep gives each episode's reason with its grace in the
   anchor's unit ("…the 6-hour grace period ran out at 11:00 UTC on
@@ -1771,7 +1957,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   every episode of it — source and rendition both are kept. A pin is per user
   and idempotent; the show's files are kept if **any** user has pinned it.
   Pinning fetches nothing, and only the disk floor (FR-T6) can still remove a
-  pinned show's files. The demo account cannot pin (FR-D5).
+  pinned show's files.
 
 ### 4.10 Admin (phase 2 UI; the underlying settings exist from phase 1 via config)
 - FR-D1 Users & invites; deactivate a user.
@@ -1806,48 +1992,42 @@ that the course professor can log in at any time, and the owner uses it daily.
     fetched release recorded fewer seeders than this is "thinly seeded" (FR-A1).
   - `look_ahead_slow` (default 3, 0..10) — how many episodes ahead Arc keeps
     for a thinly seeded show instead of `look_ahead_n` (FR-A1).
+  M21 (owner 2026-11-03) adds two more:
+  - `demand_max_open` (default 3, 0..20, 0 = no cap) — how many demands
+    (FR-A14) a user may have open at once.
+  - `batch_sweep_dry_run` (bool, default on) — while on, FR-T1's leftover
+    sweep only logs what it would delete.
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
-- FR-D4 Match-review queue across all users.
-- FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
-  the demo one (`users.is_demo`), from the admin Users tab or by
-  `arc.cli demo-list --demo`. The flag gates **presentation** — and, since
-  2026-10-04, one capability: the demo account **cannot download an episode
-  as a file** (FR-S7: the route answers 403 and no offline control is
-  shown) and, since M19, **gets no small offline copy** (FR-P6: asking for
-  one, reading where one stands, and fetching one all answer 403, before
-  anything is looked up) and **cannot make a trip** (FR-A12: 403); it streams
-  like anybody else. Otherwise nothing:
-  a fourth top-nav entry, **How Arc works** (and the same entry at the top of
-  the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
-  hero pointing at it — dismissal is remembered per account in that browser.
-  The page is informational: the pipeline from a list entry to a MAL write, one
-  sentence per external service, the three rules that matter (the acquisition
-  window, the review queue, MAL writes), and where to look. It offers no
-  action, reads no per-user data, and the **route** is open to any signed-in
-  account so that a shared link opens rather than 404s; only the nav entry and
-  the strip are gated. The demo account has **no MyAnimeList link**, so no MAL
-  write can originate from it whatever it does; its list, progress and
-  recommendation run are seeded by `arc.cli demo-list` and `arc.cli recs`, and
-  a seeded entry is active rather than dormant (FR-A9) so acquisition runs for
-  it exactly as for anybody else.
+- FR-D4 Match-review queue across all users. Since M21 it also lists the
+  season packs waiting for a person's file pick (FR-A4), with a count in the
+  same summary.
+- FR-D5 **Retired 2026-11-03 (owner), removed in M21.** Arc is used only by
+  its owner: the demo account (M16) was deleted from production on
+  2026-10-15, and M21 removes the `users.is_demo` flag, every refusal and
+  branch that read it, its toggle on the admin Users tab, the `--demo` option
+  of `arc.cli demo-list` (the command stays, for seeding lists), and the
+  **How Arc works** page with its nav entry and Watch Now strip.
+  `/api/auth/me` keeps answering `is_demo: false` for one release, so an
+  installed app still running an older client does not reject the answer.
+  Until M21 the flag refused file downloads, small copies, trips, pins,
+  device reports and manual release choice, and showed How Arc works.
 
 ## 5. Client pages
 
 | Page | Phase | Contents |
 |---|---|---|
 | Login / accept invite | 1 | Email + password; invite token flow |
-| Home | 1 | Season recommendations hero; Continue watching, Ready to watch (a tile whose episode is not ready and not on the device opens the player with a demand — FR-A14, M20), This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
+| Home | 1 | Season recommendations hero; Continue watching, Ready to watch (a tile whose episode is not ready and not on the device opens the player with a demand — FR-A14, M20; a show in a rewatch pass reads its pass — FR-W1, FR-W7, M21), This week (broadcast times and a watched tick, no acquisition state — FR-W1), Catch up (behind on), Picked for you. Above the hero, the viewer's **own** failures (FR-W6): a quiet row per broken episode or MyAnimeList write, each dismissable on its own and remembered in that browser, linking to the show page or the sync log; nothing when nothing is wrong |
 | Schedule | 1 | Three days at a time, starting with today: a day-and-date bar ("Wed 17 Sep") with chevron arrows at both ends that walk the window through the Mon–Sun week a day at a time (arrow keys too, stopping at the week's ends); today carries an accent underline and a "Today" chip; roomy rows with the whole show name, the air time at 15px, the episode number and the "Since Spring 2026" caveat; a show the viewer follows carries a quiet accent left rule and "On your list" for a screen reader; prev/next season — a browsed season's bar carries weekday names alone, no dates and no today, because it is a set of weekday slots rather than this week; add-to-list actions; the unscheduled block |
 | Search / add | 1 | AniList search, add to list in a status |
-| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned; not for the demo account), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons (on a not-ready episode the viewer's window covers, a **Play** button that fetches it on demand and opens the waiting player — FR-A14, M20), and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; not for the demo account; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13; not for the demo account). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned and for the demo account). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
-| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9); gestures on the picture: on touch a tap shows or hides the controls and a double-tap toggles fullscreen, with play/pause on the bar's centre button (a tap never pauses), and with a mouse a click plays/pauses and a double-click toggles fullscreen; autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9, not for the demo account; a ✓/✕ mark-watched control; fullscreen asks the browser (standard, then Safari's prefixed request) and says when the window refuses it, pointing at Safari; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too; at a finished season's last episode the overlay and the Next glyph offer **Next season** (the sequel's episode 1, FR-S5 item 3). An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams; a refused demand shows the server's sentence and no spinner. An episode still downloading plays as it arrives (FR-P8, M20 T7): the bar is the whole episode with the download front drawn on it, a seek past the front waits with "Downloading — 43 % · 12 seeders · will jump to 12:30", → and End stop at the front, "Few seeders" shows under 3, and the page asks again every 5 s until the download ends. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
+| Show | 1 | Cover, synopsis, list status + score controls, a **Keep files** toggle among the hero's actions that pins the show for the viewer (FR-T8, M20; pressed while pinned), and beside it a **Rewatch** toggle (pressed while a pass is open) with the badge "Rewatching · ep X / Y" and the line "Your list and MyAnimeList are left as they are." (FR-W7, M21), episode list with acquisition/prep state (a batch-backed episode shows its own file's percentage and says `from a batch` — FR-A7, FR-A11) and FR-W5's watched marks ("Unwatch" for Arc's own completion, a non-actionable "Watched" for one the list vouches for), play buttons (on **every aired** not-ready episode a **Play** button that fetches it on demand and opens the waiting player, with the hint "Arc fetches it now; it plays as it downloads, or when the file is complete for a season pack."; a demanded row reads "Fetching on request" with a ✕ that withdraws it; an un-aired row is inert; a refusal — paused, held, at the cap — is a sentence in place with no navigation — FR-A14, M20, M21; the hero's play is the first unwatched aired episode, demanded when not ready; the "Try episode 1" button is gone since M21, FR-A8), and on each ready episode the Keep offline icon button with its download state, beside the Watched control (FR-S9; no file link — FR-S7, owner 2026-10-05). **Prepare for a trip** beside the hero's actions and, while the viewer's trip on the show is active, the trip panel above the episodes; a trip episode's row says where the trip has it and its button follows the trip's phase; somebody else's trip-only episode reads "Not prepared for streaming" (FR-A12, FR-S9 item 8, M19). On an episode the viewer wants that has not arrived yet, a "⋯" menu with **Change release…**, and on the trip panel **Choose pack…** (FR-A13). An episode whose season pack waits for a person's file pick links to Review (FR-A4, M21). An episode whose live download has few seeders reads "Few seeders (2) — pin this show to keep it" under its title, with a **Pin** action (FR-A16, M20; the suggestion and the action are dropped once pinned). On a phone the state and the controls take a line of their own under the episode title. For an admin only, beside the episodes heading: **Release rules for this show** (M16) — a chip with a one-line summary of the override in force ("Overrides: SubsPlease · 720p") that opens an inline form for the preferred groups and the resolution, with Save and Clear |
+| Player | 1 | HLS player (a downloaded episode plays from the device, online or not — FR-S9); gestures on the picture: on touch a tap shows or hides the controls and a double-tap toggles fullscreen, with play/pause on the bar's centre button (a tap never pauses), and with a mouse a click plays/pauses and a double-click toggles fullscreen; autoplay on load (muted fallback with a "Tap to unmute" pill), resume, progress reporting; subtitles on by default for a stream with a text track, and a **CC** button in the control bar (only then) that turns them off and on, remembered on the device (FR-S10, M20); the Keep offline icon button in the top bar, opposite the back button, with a short word beside it on a wide screen ("On this device", "42%", "Preparing" while the server makes the smaller copy) — FR-S9; a ✓/✕ mark-watched control; fullscreen asks the browser (standard, then Safari's prefixed request) and says when the window refuses it, pointing at Safari; a "Marked as watched" toast at the completion mark and an end-of-episode overlay (Next episode · Keep watching · Back to the show) with 1:30 left — FR-S5's two moments; Next is offered on a next episode that can be fetched on demand too; at a finished season's last episode the overlay and the Next glyph offer **Next season** (the sequel's episode 1, FR-S5 item 3). An episode on its way (FR-A14, M20) shows a waiting view — "Searching", "Downloading 43 %" with seeders, "Preparing" — that asks again every 3 s and becomes the player when it streams — since M21 for any aired episode, the player making the demand when `/play` says none was made, with the server's note for a pack ("plays when the file is complete"), "No release found yet; Arc looks again every day" for an episode with none, and a link to Review for a pack waiting for a file pick; a refused demand shows the server's sentence and no spinner, and at the cap lists the open demands with links (M21). At the end of a rewatch pass a toast says "Rewatch finished. Your list was left as it was." (FR-W7, M21). An episode still downloading plays as it arrives (FR-P8, M20 T7): the bar is the whole episode with the download front drawn on it, a seek past the front waits with "Downloading — 43 % · 12 seeders · will jump to 12:30", → and End stop at the front, "Few seeders" shows under 3, and the page asks again every 5 s until the download ends. A trip-only episode (`offline_only`, M19) plays from the device, or says "keep it offline first" with a link to Downloads; previous / next prefer downloaded episodes where the server's are not ready (FR-S9 item 8) |
 | MAL link / sync log | 1 | Connect MAL, view write log, revert |
 | Recommendations | 2 | Mood prompt, picks with argued cases, add-to-planned |
-| Match review | 2 | Queue of unsure files with candidates and LLM suggestion |
-| Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16), jobs, disk (Storage: usage, the pinned shows with their bytes and how many users pinned each, and the next sweep's preview with its reasons in hours or days plus the episodes a hold keeps — FR-T4, FR-T8, M20), review queue |
+| Match review | 2 | Queue of unsure files with candidates and LLM suggestion. Since M21 a **Season packs** section (FR-A4): each pack waiting for a file pick with its show, the wanted episode and why, and its video files with the parser's reading of each — **This is episode N** on a file, and **Dismiss**; the show row and the waiting player link here |
+| Admin | 2 | Users/invites, rules (including the per-show overrides, each editable and removable in its own row — M16; `demand_max_open` and `batch_sweep_dry_run` since M21, FR-D2), jobs, disk (Storage: usage, the pinned shows with their bytes and how many users pinned each, and the next sweep's preview with its reasons in hours or days plus the episodes a hold keeps — FR-T4, FR-T8, M20; the leftover pack files and their bytes — FR-T1, M21), review queue |
 | My List | 2 (M15) | The viewer's list by status with season progress and airing state; the same data the Show page's list control edits |
-| How Arc works | 2 (M16) | Informational, demo account only (FR-D5): the lede, the eight-step pipeline as a strip that stacks on narrow screens, one sentence per external service, the three rules, and "where to look". Reached from the nav entry and the Watch Now strip that only an `is_demo` account sees; the route itself is open to any session |
-| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). The switch **Remove episodes once watched** (per device, on by default) and, while it is on, a **Keep** toggle per row; a row reads "Watched · removing soon" or "Kept" (FR-S9 item 9, owner 2026-10-08). Reached from the account menu (not for the demo account) and from the offline line on every page |
+| Downloads | 2 (M18) | The episodes kept on this device (FR-S9), from the device alone so it works with no network: show title, episode, size and progress per episode with which copy it is ("smaller copy" / "full size") and "Preparing on the server" for a copy the server is still making (M19), pause / resume / try again, delete with an in-page confirmation, storage used and allowed and whether it is persistent, and the device notes (downloads need Arc on screen; removing the app deletes them; a download outlives the server's copy; offline progress syncs on reconnect). A trip's episodes are one group, "Trip · show · N episodes · total size", with its counts and Cancel trip while active (M19, FR-S9 item 8). The switch **Remove episodes once watched** (per device, on by default) and, while it is on, a **Keep** toggle per row; a row reads "Watched · removing soon" or "Kept" (FR-S9 item 9, owner 2026-10-08). Reached from the account menu and from the offline line on every page |
 
 Navigation as of M15 (owner decisions 2026-09-11, from the design pass and the
 sign-off on it): a top toolbar with Watch Now (Home), Browse (Search),
@@ -1855,9 +2035,7 @@ Schedule and the search field; the avatar menu holds My List, MyAnimeList,
 Match review (with the pending count), Admin and Log out; Recommendations is a
 button inside Browse and a shelf action on Home. On phones a bottom tab bar
 (Watch Now · Browse · My List · More) replaces the toolbar nav, with Schedule
-at the top of the "More" sheet. The **demo account** carries one more
-destination in both chromes — How Arc works, after Schedule (FR-D5); no other
-account sees it, and the four phone tabs are unchanged.
+at the top of the "More" sheet.
 
 Attribution: where a deployment has a TMDB key (FR-C6), the shell carries
 TMDB's required line — "This product uses the TMDB API but is not endorsed or
@@ -1943,8 +2121,11 @@ through the same edge, without the grace period.
   active trip per show, asked for explicitly. Nor is FR-A13's manual release choice: it only
   redirects an episode or a trip the user has already asked for to another
   release, and a pack is still taken only for the user's wanted files. Nor is
-  FR-A14's play on demand: it fetches only an episode the user's window
-  already covers.) A
+  FR-A14's play on demand (owner 2026-11-03, M21; until then it fetched only
+  inside the user's window): it fetches the one aired episode a user pressed
+  play on, at most `demand_max_open` of them unfinished at once, and the
+  windows that follow a play — a walk, a rewatch pass — are the ordinary
+  next N of FR-A1, never a season.) A
   "save the MP4 to Files" link is out too (owner, 2026-10-05).
 - ASS styling and positioning in the streamed rendition (M20 shows dialogue
   as plain WebVTT; only the burn-in fallback, FR-P7, and the small copy,
@@ -3262,3 +3443,49 @@ through the same edge, without the grace period.
   too, even with an episode still waiting. The deadline and cancel ends are
   unchanged. Only completions recorded in Arc count, and the end is final (an
   un-mark after it does not reopen the trip).
+- 2026-11-03 (owner) — **M21: any episode on click, walking a show, rewatch
+  mode, demo removal, pack hygiene** (built in M21; FR-A1, FR-A4, FR-A8,
+  FR-A9, FR-A10, FR-A11, FR-A14, FR-S4, FR-S5 item 3, FR-W1, FR-W4, FR-W5,
+  FR-W6, new FR-W7, FR-M7, FR-T1, FR-D2, FR-D4, FR-D5, §1, §3, §5, §8; CLAUDE.md
+  acquisition and MAL-write rules). Arc is used only by the owner. Owner:
+  "we should make it so that every episode on every show is playable when
+  clicked on, the episode goes into download and the video starts playing.
+  also we will introduce a rewatch path, that will follow the same logic of
+  normal shows, but not changing the mal entry." The decisions: (1) any
+  episode on click — every episode of every show, list status irrelevant;
+  one click is one demand plus the player (live for a single, "Downloading
+  n %, plays when the file is complete" for a pack) — FR-A14; (2) a demand
+  lives until finished in the current pass or untouched for D days, never
+  shelved or cancelled for list status or progress — FR-A14, FR-T2; (3)
+  walking: after a clicked episode plays, the normal N look-ahead applies
+  from that position (halfway prefetch, thin-swarm N, device skip) without
+  touching the list — FR-A1; (4) a cap `demand_max_open` (default 3, admin
+  setting), demands outside K — FR-A14, FR-A10, FR-D2; (5) normal-mode list
+  effects stay (finishing adds as Watching and advances MAL) — FR-S4; (6)
+  rewatch is a per-show switch kept on the server, ending on off or on the
+  pass's last episode, with no MAL write and no list change, a separate pass
+  completion driving marks, Continue watching, Ready to watch and the hero
+  pick, the same look-ahead from the pass's position, and MAL's rewatch
+  fields untouched — FR-W7, FR-W5, FR-W1, FR-M7; (7) retention unchanged,
+  a rewatch completion stamping a fresh anchor — FR-T1; (8) the docs
+  rewritten (this entry); (9) the demo account and demo-only code removed —
+  FR-D5 retired. Also moved from M17 into M21: match review for a season
+  pack whose files cannot be identified — FR-A4, FR-A11, FR-D4 — and the
+  `downloads/batch` leftover sweep — FR-T1. The text describes the target;
+  "(M21)" marks what is not live until M21 ships.
+- 2026-11-03 (owner, "go") — The five remaining M21 decisions, each on the
+  orchestrator's recommendation: (1) "Try episode 1" (FR-A8) is folded into
+  the click — the button goes now, the code later (FR-A8 retired); (2) a
+  demand can be withdrawn — the ✕ on "Fetching on request", and the cap
+  refusal lists the open demands (FR-A14); (3) Next season pressed during a
+  rewatch carries the rewatch on to the sequel when its list entry has
+  progress above 0 or is completed, otherwise it is normal mode with the
+  entry created as Watching (FR-W7 item 5, FR-A9, FR-S5 item 3); (4) a pass
+  on an airing show ends at the newest aired episode (FR-W7 item 4); (5) the
+  "How Arc works" page is removed (FR-D5, §5).
+- 2026-11-03 (orchestrator, small calls under the above) — `demand_max_open`
+  0 means no cap (as `slot_cap_k`); a pack pick left waiting D days is
+  dismissed on its own (FR-A4); the leftover sweep starts as a dry run and
+  never touches a file changed within the last hour (FR-T1); `/api/auth/me`
+  keeps `is_demo: false` for one release so a cached installed app does not
+  reject it (FR-D5).
