@@ -549,10 +549,11 @@ class _Facts:
 
     active_wants: int = 0
     last_dropped: datetime | None = None
-    #: The latest finish over every user: ``max(coalesce(finished_at,
-    #: completed_at))``. ``finished_at`` is re-stamped on every finish, a
-    #: rewatch pass's included (FR-W7, M21), so a pass finish is a fresh
-    #: watched anchor even though it leaves ``completed`` false.
+    #: The latest finish over every user: ``max(greatest(completed_at,
+    #: finished_at))``, the same per-row moment ``GET /api/progress/completed``
+    #: reports. ``finished_at`` is re-stamped on every finish, a rewatch
+    #: pass's included (FR-W7, M21), so a pass finish is a fresh watched
+    #: anchor even though it leaves ``completed`` false.
     last_completed: datetime | None = None
     #: The latest ``list_entries.updated_at`` of a user whose progress covers
     #: this episode (FR-W5). Watched, on the list's word rather than on a
@@ -767,9 +768,12 @@ async def _facts(
     # ``updated_at`` moves on every progress sample.
     #
     # The latest finish is ``finished_at`` (M21): re-stamped on every finish,
-    # a rewatch pass's included, which never sets ``completed`` (FR-W7).
-    # ``completed_at`` is only a fallback: every completion writes both, and
-    # the migration backfilled one from the other.
+    # a rewatch pass's included, which never sets ``completed`` (FR-W7). Per
+    # row it is taken as ``greatest(completed_at, finished_at)`` — PostgreSQL's
+    # ``greatest`` ignores NULLs — so a row the backfill never reached, or one
+    # whose ``finished_at`` is somehow older than its first watch, anchors on
+    # the newer of the two, exactly as ``GET /api/progress/completed`` answers.
+    # ``max`` skips a row with neither.
     #
     # A finish is not a partial watch. A row finished in a rewatch pass keeps
     # ``completed = false`` with its position at the end, and read as a
@@ -780,11 +784,11 @@ async def _facts(
     # (A replayed completion older than the row's last sample leaves
     # ``updated_at`` ahead of it and so still reads as a partial: the newer
     # sample came after it, and keeping it D days is the safe side.)
-    latest_finish = func.coalesce(WatchProgress.finished_at, WatchProgress.completed_at)
+    latest_finish = func.greatest(WatchProgress.completed_at, WatchProgress.finished_at)
     progress = await session.execute(
         select(
             WatchProgress.episode_id,
-            func.max(latest_finish).filter(latest_finish.is_not(None)),
+            func.max(latest_finish),
             func.max(WatchProgress.updated_at),
             func.max(WatchProgress.updated_at).filter(
                 WatchProgress.completed.is_(False),

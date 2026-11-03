@@ -3,7 +3,7 @@
 A rewatch pass never sets ``completed`` (FR-W7), so before M21 a pass finish
 left retention with nothing but the old first watch to anchor on, and its row
 — not completed, position at the end — read as a *partial* watch that held the
-file for D days. The anchor is now ``max(coalesce(finished_at, completed_at))``
+file for D days. The anchor is now ``max(greatest(completed_at, finished_at))``
 and a row finished since its last report is not a partial: a pass finish at T
 is deletable at T + G (6 h), like any completion.
 
@@ -49,6 +49,8 @@ HOUR = timedelta(hours=1)
 MINUTE = timedelta(minutes=1)
 #: The watched grace (``watched_grace_hours``, default 6).
 G = 6 * HOUR
+#: D (``unwatched_days_d``, default 21): how long hold (b) keeps a partial watch.
+D = timedelta(days=21)
 GB = 1024**3
 LENGTH = 1440.0
 
@@ -203,7 +205,7 @@ async def test_a_normal_mode_completion_still_anchors_on_its_finish(
 async def test_a_completion_row_without_a_finish_falls_back_to_completed_at(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
-    """``coalesce(finished_at, completed_at)``: a row the backfill never touched."""
+    """``greatest(completed_at, finished_at)`` ignores NULLs: a row the backfill never touched."""
     settings = acquisition_settings(tmp_path)
     episode = await make_retained_episode(
         db_session, settings, anilist_id=974804, ready_at=days_ago(2)
@@ -243,9 +245,49 @@ async def test_a_pass_finish_is_not_a_partial_but_a_later_partial_replay_is(
 
     plan = await retention_plan(db_session, settings, now=NOW)
 
-    # Hold (b) is D days (7): only the genuine partial is still inside it.
+    # Hold (b) is D days (21): only the genuine partial is still inside it.
     assert ids(plan.deletable) == [finished.id]
     assert [(item.episode_id, item.hold) for item in plan.held] == [(replayed.id, HOLD_PARTIAL)]
+
+
+# --- The anchor per row and over users -----------------------------------------
+
+
+def a_row(user: User, episode: Episode, **values: object) -> WatchProgress:
+    """A ``watch_progress`` row built whole (see :func:`add_finish` for why)."""
+    return WatchProgress(user_id=user.id, episode_id=episode.id, duration_s=LENGTH, **values)
+
+
+async def test_the_anchor_is_the_newer_of_the_first_watch_and_the_latest_finish(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """``greatest``, not ``coalesce``: a ``finished_at`` older than ``completed_at``
+    does not pull the anchor back (the moment ``GET /api/progress/completed`` reports)."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974814, ready_at=days_ago(30)
+    )
+    user = await make_user(db_session, "m21-ret-greatest@arc.test")
+    db_session.add(
+        a_row(
+            user,
+            episode,
+            position_s=LENGTH,
+            completed=True,
+            completed_at=NOW,
+            finished_at=days_ago(2),
+            updated_at=NOW,
+        )
+    )
+    await db_session.flush()
+
+    before = await retention_plan(db_session, settings, now=NOW + G - MINUTE)
+    # Not past its grace at all — an older anchor would show here as held (c).
+    assert before.deletable == [] and before.held == []
+
+    found = await candidates(db_session, settings, now=NOW + G + MINUTE)
+    assert ids(found) == [episode.id]
+    assert found[0].anchor == NOW
 
 
 # --- 4. Demand lifecycle -------------------------------------------------------
