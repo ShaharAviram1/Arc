@@ -124,6 +124,11 @@ export interface SettingsValues {
   slow_swarm_seeders: number
   /** K — shows one user may have fetching at once (FR-A10); 0 is no cap. */
   slot_cap_k: number
+  /**
+   * Episodes one user may have fetching on request at once (FR-A14, M21):
+   * 0..20, 0 = no cap, like `slot_cap_k`.
+   */
+  demand_max_open: number
   grace_days_g: number
   unwatched_days_d: number
   /**
@@ -150,6 +155,11 @@ export interface SettingsValues {
    * 0..20, 0 = never prefer a pack.
    */
   batch_prefer_ratio: number
+  /**
+   * While true, the sweep of a pack's leftover (unselected) files only logs
+   * what it would delete (FR-T1, M21).
+   */
+  batch_sweep_dry_run: boolean
   /** Days a ready episode's small offline copy may go unfetched before the sweep deletes it (FR-T7, M19). */
   offline_idle_days: number
   /** The most episodes one trip may take (FR-A12, M19): 1..50. */
@@ -193,6 +203,7 @@ export const NUMBER_BOUNDS: Record<
   | 'look_ahead_slow'
   | 'slow_swarm_seeders'
   | 'slot_cap_k'
+  | 'demand_max_open'
   | 'grace_days_g'
   | 'unwatched_days_d'
   | 'watched_grace_hours'
@@ -216,6 +227,8 @@ export const NUMBER_BOUNDS: Record<
   // `MAX_SLOT_CAP` = 50. Fifty simultaneous shows is not a cap; past that the
   // honest setting is 0, which means no cap at all.
   slot_cap_k: { min: 0, max: 50 },
+  // M21: `MAX_DEMAND_MAX_OPEN` = 20; 0 is no cap, like K.
+  demand_max_open: { min: 0, max: 20 },
   grace_days_g: { min: 0, max: 365 },
   unwatched_days_d: { min: 0, max: 365 },
   // M20: `MAX_WATCHED_GRACE_HOURS` = 168, a week; 0 is "at the next hourly sweep".

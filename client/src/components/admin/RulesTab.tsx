@@ -107,6 +107,11 @@ const NUMBER_FIELDS: {
       'recently, and the rest wait on their own show page. 0 means no limit (FR-A10).',
   },
   {
+    key: 'demand_max_open',
+    label: 'Open demands per user',
+    help: 'Episodes a user may have fetching on request at once; 0 removes the cap.',
+  },
+  {
     key: 'grace_days_g',
     label: 'Grace days G',
     help: 'How long a watched episode’s files survive before the sweep deletes them (FR-T1).',
@@ -187,6 +192,9 @@ const BATCH_FALLBACK_HELP =
   'file in the pack is downloaded. Turn it off and such an episode waits for a single instead: ' +
   'no new pack is taken and no further file is enabled in one Arc already has, while a pack ' +
   'already downloading finishes the episodes it was taken for (FR-A4).'
+
+/** The leftover sweep's dry run (FR-T1, M21): a rollout switch, seeded on. */
+const BATCH_SWEEP_DRY_RUN_HELP = 'Log leftover pack files instead of deleting them.'
 
 /** Codes worth offering; the input stays free text, because ours are not all. */
 const SUB_LANGS = ['en', 'es', 'pt', 'fr', 'de', 'it', 'ru', 'ar']
@@ -748,6 +756,21 @@ function RulesForm({ payload }: { payload: SettingsPayload }) {
         }}
         onReset={() => {
           reset('batch_fallback')
+        }}
+      />
+
+      <ToggleField
+        id="rules-batch-sweep-dry-run"
+        label="Leftover pack files: dry run"
+        help={BATCH_SWEEP_DRY_RUN_HELP}
+        value={draft.batch_sweep_dry_run}
+        fallback={defaultLabel(defaults.batch_sweep_dry_run)}
+        error={fieldErrors.batch_sweep_dry_run}
+        onChange={(value) => {
+          set('batch_sweep_dry_run', value)
+        }}
+        onReset={() => {
+          reset('batch_sweep_dry_run')
         }}
       />
 

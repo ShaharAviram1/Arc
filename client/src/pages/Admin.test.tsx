@@ -692,6 +692,46 @@ describe('Admin — Rules (FR-D2, FR-T5)', () => {
     ).toBeVisible()
   })
 
+  it('saves the open-demand cap with its bounds (FR-A14, M21)', async () => {
+    const { fetchMock } = await openRules()
+
+    const field = screen.getByLabelText('Open demands per user')
+    expect(field).toHaveValue(3)
+    // MAX_DEMAND_MAX_OPEN; 0 removes the cap, like K.
+    expect(field).toHaveAttribute('min', '0')
+    expect(field).toHaveAttribute('max', '20')
+    const row = within(fieldOf('Open demands per user'))
+    expect(row.getByText(/0 removes the cap\. Allowed: 0–20\./)).toBeVisible()
+
+    fireEvent.change(field, { target: { value: '0' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ demand_max_open: 0 })
+  })
+
+  it('saves the leftover sweep dry run like any other rule (FR-T1, M21)', async () => {
+    const { fetchMock } = await openRules()
+
+    const field = screen.getByLabelText('Leftover pack files: dry run')
+    // Seeded on: the log is read before the deletions are switched on.
+    expect(field).toBeChecked()
+    expect(
+      within(fieldOf('Leftover pack files: dry run')).getByText(
+        /Log leftover pack files instead of deleting them/,
+      ),
+    ).toBeVisible()
+    await userEvent.click(field)
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(SAVE_SETTINGS)
+    })
+    expect(bodyOf(fetchMock, 'PUT', '/api/settings')).toEqual({ batch_sweep_dry_run: false })
+  })
+
   it('keeps the browser from sending a number outside its range', async () => {
     const { fetchMock } = await openRules()
 

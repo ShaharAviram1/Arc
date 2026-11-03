@@ -79,6 +79,14 @@ LOOK_AHEAD_KEY: Final[str] = "look_ahead_n"
 #: argument for it are in :mod:`arc.services.acquisition.slots`.
 SLOT_CAP_KEY: Final[str] = "slot_cap_k"
 
+#: How many episodes one user may have fetching on request at once (FR-A14,
+#: M21). 0 is no cap, like :data:`SLOT_CAP_KEY`.
+DEMAND_MAX_OPEN_KEY: Final[str] = "demand_max_open"
+
+#: Ceiling on the open-demand cap. Twenty episodes on request at once is
+#: already a whole cour; past that the honest setting is 0.
+MAX_DEMAND_MAX_OPEN: Final[int] = 20
+
 #: The kill switch. While it is true :func:`compute_wants` does nothing at all
 #: and every ``search_release`` requeues itself untouched, so nothing new is
 #: asked of Nyaa or qBittorrent and no episode changes state. Deliberately
@@ -255,6 +263,16 @@ async def slot_cap_k(session: AsyncSession) -> int:
     """
     stored = (await _values(session, [SLOT_CAP_KEY])).get(SLOT_CAP_KEY)
     return _whole_number(stored, key=SLOT_CAP_KEY, ceiling=MAX_SLOT_CAP)
+
+
+async def demand_max_open(session: AsyncSession) -> int:
+    """How many open demands one user may have at once (FR-A14, M21).
+
+    Lenient and clamped like the other counts; 0 is returned as 0 and means
+    *no cap*, as for :func:`slot_cap_k`.
+    """
+    stored = (await _values(session, [DEMAND_MAX_OPEN_KEY])).get(DEMAND_MAX_OPEN_KEY)
+    return _whole_number(stored, key=DEMAND_MAX_OPEN_KEY, ceiling=MAX_DEMAND_MAX_OPEN)
 
 
 async def look_ahead_slow(session: AsyncSession) -> int:
@@ -543,9 +561,11 @@ __all__ = [
     "BATCH_FALLBACK_KEY",
     "BATCH_PREFER_RATIO_KEY",
     "BYTES_PER_GB",
+    "DEMAND_MAX_OPEN_KEY",
     "LOOK_AHEAD_KEY",
     "LOOK_AHEAD_SLOW_KEY",
     "MAX_BATCH_PREFER_RATIO",
+    "MAX_DEMAND_MAX_OPEN",
     "MAX_LOOK_AHEAD",
     "MAX_MIN_FREE_GB",
     "MAX_MIN_SEEDERS_WARN",
@@ -562,6 +582,7 @@ __all__ = [
     "WindowRules",
     "batch_fallback",
     "batch_prefer_ratio",
+    "demand_max_open",
     "is_paused",
     "is_storage_held",
     "load_rules",

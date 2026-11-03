@@ -61,6 +61,7 @@ from arc.models import DEFAULT_SETTINGS, Anime, Setting
 from arc.services.acquisition.names import enqueue_compute_wants as queue_wants
 from arc.services.acquisition.rules import (
     MAX_BATCH_PREFER_RATIO,
+    MAX_DEMAND_MAX_OPEN,
     MAX_LOOK_AHEAD,
     MAX_MIN_FREE_GB,
     MAX_MIN_SEEDERS_WARN,
@@ -230,6 +231,9 @@ _VALIDATORS: Final[dict[str, Any]] = {
     # ceiling is the figure the reader clamps at, so the panel cannot accept a
     # cap acquisition would quietly lower.
     "slot_cap_k": lambda value: _bounded_int(value, low=0, high=MAX_SLOT_CAP),
+    # Episodes one user may have fetching on request at once (FR-A14, M21).
+    # 0 is legal and means *no cap*, as for K; the ceiling is the reader's.
+    "demand_max_open": lambda value: _bounded_int(value, low=0, high=MAX_DEMAND_MAX_OPEN),
     "grace_days_g": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     "unwatched_days_d": lambda value: _bounded_int(value, low=0, high=MAX_DAYS),
     # Hours after the last completion before a watched episode's files go
@@ -246,6 +250,9 @@ _VALIDATORS: Final[dict[str, Any]] = {
     # show takes it instead (FR-A4/FR-A11, owner 2026-10-20). 0 is legal and
     # means "never prefer a batch over a single".
     "batch_prefer_ratio": lambda value: _bounded_int(value, low=0, high=MAX_BATCH_PREFER_RATIO),
+    # The leftover sweep's dry run (FR-T1, M21). A plain boolean; the reader
+    # treats anything else as "dry", the panel refuses it here.
+    "batch_sweep_dry_run": _boolean,
     # The storage floor in whole GB (FR-T6). 0 is a legal value and means "no
     # reserve, fetch until the disk is full"; the ceiling is the same defensive
     # figure the reader clamps at, so what the panel accepts and what

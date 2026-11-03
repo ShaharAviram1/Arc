@@ -46,6 +46,11 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # slots actually allow to arrive at the same time; the shows over the
         # cap wait visibly on their own page and start as the others finish.
         "slot_cap_k": 5,
+        # How many episodes one user may have fetching *on request* at once
+        # (FR-A14, M21: a click on any aired episode demands it). 0 removes
+        # the cap, like K above; three lets a user line up a few without one
+        # person's clicking taking every download slot.
+        "demand_max_open": 3,
         # G — grace days before files are deleted (FR-T1).
         "grace_days_g": 7,
         # D — days a ready episode may sit unwatched before the want is
@@ -56,6 +61,11 @@ DEFAULT_SETTINGS: Final[MappingProxyType[str, Any]] = MappingProxyType(
         # (FR-T1, owner 2026-10-13; behaviour in M20 T8). 0 means "at the next
         # hourly sweep"; six covers a rewatch the same evening.
         "watched_grace_hours": 6,
+        # While true, the sweep of a pack's leftover files — the ones nobody
+        # selected (priority 0) that qBittorrent still wrote partly to disk —
+        # only logs what it would delete (FR-T1, M21). Seeded on: the logs are
+        # read before anyone switches it off.
+        "batch_sweep_dry_run": True,
         # The acquisition kill switch. False on a fresh install: Arc acquires
         # by default, and this is the admin's brake for the day a list import
         # or a rule change asks for more than the machine (or the tracker)
