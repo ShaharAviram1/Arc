@@ -2377,7 +2377,7 @@ Reviewer where marked.
       walk rows; a listed show plus a backwards walk wants both windows;
       device skip on walks; withdraw ends a demand; the coverage helpers
       gone.
-- [ ] **T4 — Read API** (M, **Reviewer: playback/acquisition surface**).
+- [x] **T4 — Read API** (M, **Reviewer: playback/acquisition surface**; verified by the orchestrator 2026-11-03: Validator PASS (21 probes) and Reviewer merge-after-fixes — both caught the sequel's `fetchable` judged against the prequel's rows, the Reviewer the show page and the demand disagreeing on "aired" for an announced-only show and the two shelves overlapping during a pass; one fix round (one aired rule in `catalog/airing.py`, Continue watching reads the pass), all pinned by tests; my own runs: branch full suite 5494 passed, merged main 492331f targeted 329, client 1500, lint clean; the gate, `/play`, Ready to watch and the fix diff read personally).
       `api/playback.py` (`/play`, next, next_season),
       `playback/next_season.py`, `api/anime.py`, `anime_schemas.py`,
       `api/home.py`, `catalog/progress.py`, `api/episode_extras.py`. Tests:
