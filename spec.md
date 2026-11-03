@@ -1,7 +1,7 @@
 # Arc — Project Specification
 
 > Living document. Update whenever scope, behaviour, or a decision changes.
-> Last updated: 2026-10-13. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
+> Last updated: 2026-11-03. Companions: [architecture.md](architecture.md), [roadmap.md](roadmap.md), [CLAUDE.md](CLAUDE.md).
 
 ## 1. Summary
 
@@ -22,12 +22,14 @@ seasonal schedule, a show page, an in-browser player, search/add, and (phase
 product decision, 2026-10-13, M20). It keeps one episode ready per watcher —
 the next one, plus the one after once they are half-way through it — fetches
 just in time, skips what a user's device already holds, and fetches on demand
-when somebody presses play on an episode their window covers. Two users a few
+when somebody presses play on any aired episode (M21; until then only on an
+episode their window covered). Two users a few
 episodes apart on one show may cause the episodes between them to be fetched,
 deleted and fetched again; that cost is accepted.
 
-The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9), so
-that the course professor can log in at any time, and the owner uses it daily.
+The site is hosted publicly, at `arc.atomworks.dev` since 2026-09-09 (§9). It
+was first built for a course, which ended on 2026-10-15; since then the owner
+is its only user, and uses it daily.
 
 ## 2. Users and roles
 
@@ -65,12 +67,20 @@ that the course professor can log in at any time, and the owner uses it daily.
 - **ListEntry** — (user, anime) → status, progress (episodes watched), score,
   source of last change (arc / mal), MAL sync state.
 - **WatchProgress** — (user, episode) → position seconds, duration, completed
-  flag, updated at.
+  flag, first completion, latest finish (M21), updated at.
+- **Rewatch** — (user, anime) pass: when it started, when and why it ended
+  (turned off, or finished). At most one open pass per user and show (FR-W7,
+  M21).
+- **Walk** — (user, anime) → the episode the look-ahead starts after, from
+  the user's latest play, and when it last moved (FR-A1, M21).
+- **PackPick** — a season pack waiting for a person to say which of its
+  files is the wanted episode, and how it was resolved (FR-A4, M21).
 - **MalLink** — per user: OAuth tokens, MAL username, last import/sync time.
 - **MalWriteLog** — every write Arc made to MAL: what, when, why, previous
   value, result. Append-only.
 - **AcquisitionWant** — (user, episode) derived interest; drives what to
-  fetch. Computed from the user's list status and progress (see FR-A1).
+  fetch. Computed from the user's list status and progress, walks and
+  rewatch passes (FR-A1, FR-W7), plus demands (FR-A14) and trips (FR-A12).
 - **Torrent** — a Nyaa release chosen for an Episode: magnet/info hash,
   group, resolution, seeders at pick time, qBittorrent state.
 - **Job** — background unit of work (scan, match, transcode, mal-sync, fetch,
@@ -1815,7 +1825,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   below a user's list progress counts as completed by that user, anchored on
   that entry's last change (never earlier than the file itself) — so an
   episode somebody skipped past is deleted on the same schedule as one they
-  watched in Arc.
+  watched in Arc. **The completion anchor is the latest finish** (M21): each
+  user's latest crossing of the mark (FR-S4), not the first, so a rewatch
+  completion — in a rewatch pass (FR-W7) or not — starts a fresh
+  `watched_grace_hours` grace. A finished demand (FR-A14) and a walk's
+  wants (FR-A1) follow the same rule as any want.
   Four **holds** keep an episode whose grace has run out, for as long as they
   last: (a) **any** user has pinned the show (FR-T8); (b) somebody has a
   partial watch on it (position above zero, not completed) updated within
@@ -1823,7 +1837,7 @@ that the course professor can log in at any time, and the owner uses it daily.
   it** within `watched_grace_hours`, and never less than 30 minutes (so a
   grace of 0 cannot delete an episode whose last minutes are still playing
   after the 90 % completion) — the last progress sample, which also covers a
-  rewatch, since a completion's time is written once; (d) its offline copy was
+  rewatch played but not yet finished; (d) its offline copy was
   **sent to a device within the last 10 minutes** — a download in progress.
   Hold (d) has a ceiling: a device fetching in a loop could otherwise hold the
   episode indefinitely, so it lapses 6 hours after the episode's grace ran out
@@ -1867,6 +1881,21 @@ that the course professor can log in at any time, and the owner uses it daily.
   which file held the episode is **kept**, so FR-T3's "it is re-acquired" costs
   no search at all — a later want is served from the same pack. (FR-A11 is
   unchanged by M20 T9's remembered release: a pack already kept its claims.)
+  **Leftover pack bytes** (M21, owner 2026-11-03, moved from M17). A want
+  withdrawn mid-download leaves whatever had arrived inside the pack's
+  directory with no file record naming it, which the per-episode rule above
+  cannot see, and the pack itself may never reach deletion while somebody
+  keeps the show. The hourly sweep therefore also deletes a file under a
+  pack's directory (`downloads/batch/<hash>/`) when: the pack is one Arc
+  knows; the file is not being ingested and is not an incomplete file of a
+  pack Arc is holding; no library file and no wanted claim names it; the
+  torrent client has it at priority 0, or no longer has the pack; it has
+  not changed for an hour; and it lies under the data root with no symlink
+  on its path. Directories left empty go with it. It starts as a **dry run**
+  (`batch_sweep_dry_run`, default on, FR-D2) that only logs what it would
+  delete, and the retention preview (FR-T4) lists the leftover files and
+  their bytes. A directory under `batch/` that no pack names is out of its
+  scope (FR-L1 already keeps the library away from it).
 - FR-T4 Admin can see disk usage and manually delete or re-fetch. The
   preview of the next sweep gives each episode's reason with its grace in the
   anchor's unit ("…the 6-hour grace period ran out at 11:00 UTC on
@@ -1958,30 +1987,25 @@ that the course professor can log in at any time, and the owner uses it daily.
     fetched release recorded fewer seeders than this is "thinly seeded" (FR-A1).
   - `look_ahead_slow` (default 3, 0..10) — how many episodes ahead Arc keeps
     for a thinly seeded show instead of `look_ahead_n` (FR-A1).
+  M21 (owner 2026-11-03) adds two more:
+  - `demand_max_open` (default 3, 0..20, 0 = no cap) — how many demands
+    (FR-A14) a user may have open at once.
+  - `batch_sweep_dry_run` (bool, default on) — while on, FR-T1's leftover
+    sweep only logs what it would delete.
 - FR-D3 Job queue view with retry/cancel; qBittorrent status; disk usage.
-- FR-D4 Match-review queue across all users.
-- FR-D5 **Demo account** (M16, owner 2026-09-18). An account may be flagged as
-  the demo one (`users.is_demo`), from the admin Users tab or by
-  `arc.cli demo-list --demo`. The flag gates **presentation** — and, since
-  2026-10-04, one capability: the demo account **cannot download an episode
-  as a file** (FR-S7: the route answers 403 and no offline control is
-  shown) and, since M19, **gets no small offline copy** (FR-P6: asking for
-  one, reading where one stands, and fetching one all answer 403, before
-  anything is looked up) and **cannot make a trip** (FR-A12: 403); it streams
-  like anybody else. Otherwise nothing:
-  a fourth top-nav entry, **How Arc works** (and the same entry at the top of
-  the phone "More" sheet), plus a one-line dismissable strip above Watch Now's
-  hero pointing at it — dismissal is remembered per account in that browser.
-  The page is informational: the pipeline from a list entry to a MAL write, one
-  sentence per external service, the three rules that matter (the acquisition
-  window, the review queue, MAL writes), and where to look. It offers no
-  action, reads no per-user data, and the **route** is open to any signed-in
-  account so that a shared link opens rather than 404s; only the nav entry and
-  the strip are gated. The demo account has **no MyAnimeList link**, so no MAL
-  write can originate from it whatever it does; its list, progress and
-  recommendation run are seeded by `arc.cli demo-list` and `arc.cli recs`, and
-  a seeded entry is active rather than dormant (FR-A9) so acquisition runs for
-  it exactly as for anybody else.
+- FR-D4 Match-review queue across all users. Since M21 it also lists the
+  season packs waiting for a person's file pick (FR-A4), with a count in the
+  same summary.
+- FR-D5 **Retired 2026-11-03 (owner), removed in M21.** Arc is used only by
+  its owner: the demo account (M16) was deleted from production on
+  2026-10-15, and M21 removes the `users.is_demo` flag, every refusal and
+  branch that read it, its toggle on the admin Users tab, the `--demo` option
+  of `arc.cli demo-list` (the command stays, for seeding lists), and the
+  **How Arc works** page with its nav entry and Watch Now strip.
+  `/api/auth/me` keeps answering `is_demo: false` for one release, so an
+  installed app still running an older client does not reject the answer.
+  Until M21 the flag refused file downloads, small copies, trips, pins,
+  device reports and manual release choice, and showed How Arc works.
 
 ## 5. Client pages
 
