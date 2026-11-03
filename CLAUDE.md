@@ -60,22 +60,27 @@ directly. Anything with logic goes through a Writer.
 - **MAL writes:** no code path may write to MyAnimeList except from a
   user-originated event (watch completion, explicit status/score change,
   explicit un-mark, or explicit revert). Every write is logged with the
-  previous value. Automatic events never lower progress.
+  previous value. Automatic events never lower progress. Nothing in rewatch
+  mode writes to MyAnimeList or changes a list entry (FR-W7).
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
-- **Acquisition:** only the next N unwatched episodes of shows a user is
-  watching or has planned (N per show: the admin's default, or the deeper
-  `look_ahead_slow` while the show's newest release recorded fewer than
-  `slow_swarm_seeders` seeders — FR-A1, M20.2; plus one more once the user is halfway through
-  the first, and skipping an episode already sitting unwatched on one of the
-  user's devices — FR-A1, M20), an episode inside that window the user
-  explicitly pressed play on (FR-A14), a single first episode a user
-  explicitly asked to sample (FR-A8), and the next X aired unwatched episodes
-  of one show a user explicitly asked for as a trip (FR-A12: at most
+- **Acquisition:** only (a) the next N unwatched episodes of shows a user is
+  watching or has planned whose entry is not dormant (N per show: the
+  admin's default, or the deeper `look_ahead_slow` while the show's newest
+  release recorded fewer than `slow_swarm_seeders` seeders — FR-A1, M20.2;
+  plus one more once the user is halfway through the first, and skipping an
+  episode already sitting unwatched on one of the user's devices — FR-A1,
+  M20); (b) the same N look-ahead counted from the episode a user is playing
+  on any show (a walk) or from the position of an open rewatch pass (FR-A1,
+  FR-W7, M21); (c) any aired episode the user explicitly pressed play on, at
+  most `demand_max_open` unfinished at once, wanted until finished or
+  untouched for D days and never shelved or cancelled for list status or
+  progress (FR-A14, M21); and (d) the next X aired unwatched episodes of one
+  show a user explicitly asked for as a trip (FR-A12: at most
   `trip_max_episodes` per trip, one active trip per show per user). Never
-  fetch whole seasons otherwise; imported list entries stay dormant until touched in Arc
-  (FR-A9), and never more than K shows per user at once (FR-A10; a trip, the
-  halfway prefetch and a demanded episode do not count).
+  fetch whole seasons otherwise; imported list entries stay dormant until
+  touched in Arc (FR-A9), and never more than K shows per user at once
+  (FR-A10; a trip, the halfway prefetch and a demanded episode do not count).
 - **Media routes** require a session. Paths are derived from ids, never from
   user input.
 - **Hosting is undecided.** Do not assume a provider; keep everything to a
