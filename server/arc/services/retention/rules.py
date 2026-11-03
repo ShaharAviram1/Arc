@@ -64,6 +64,13 @@ WATCHED_GRACE_KEY: Final[str] = "watched_grace_hours"
 #: day-counted G is the rule that was meant.
 MAX_WATCHED_GRACE_HOURS: Final[int] = 168
 
+#: While true, the leftover sweep of a pack's unselected files (FR-T1, M21,
+#: §5.7) only logs what it would delete. An admin setting rather than an
+#: environment brake like ``RETENTION_DRY_RUN``: it is a rollout switch for
+#: one new rule, seeded on, and turned off from the panel once its log has
+#: been read.
+BATCH_SWEEP_DRY_RUN_KEY: Final[str] = "batch_sweep_dry_run"
+
 
 async def _value(session: AsyncSession, key: str) -> Any:
     return await session.scalar(select(Setting.value).where(Setting.key == key))
@@ -111,6 +118,22 @@ async def offline_idle_period(session: AsyncSession) -> timedelta:
     return timedelta(days=await offline_idle_days(session))
 
 
+async def batch_sweep_dry_run(session: AsyncSession) -> bool:
+    """Whether the leftover sweep only logs (FR-T1, M21).
+
+    Lenient towards **not deleting**: a missing row or one that is not a JSON
+    boolean reads as the default (true) with a warning, so a mangled row can
+    never be what turns the deletions on.
+    """
+    stored = await _value(session, BATCH_SWEEP_DRY_RUN_KEY)
+    if stored is None:
+        return bool(DEFAULT_SETTINGS[BATCH_SWEEP_DRY_RUN_KEY])
+    if not isinstance(stored, bool):
+        log.warning("batch_sweep_dry_run is not a boolean, using the default")
+        return bool(DEFAULT_SETTINGS[BATCH_SWEEP_DRY_RUN_KEY])
+    return stored
+
+
 async def grace_period(session: AsyncSession) -> timedelta:
     """G as a ``timedelta``, which is how every caller uses it."""
     return timedelta(days=await grace_days(session))
@@ -122,12 +145,14 @@ async def unwatched_period(session: AsyncSession) -> timedelta:
 
 
 __all__ = [
+    "BATCH_SWEEP_DRY_RUN_KEY",
     "GRACE_KEY",
     "MAX_DAYS",
     "MAX_WATCHED_GRACE_HOURS",
     "OFFLINE_IDLE_KEY",
     "UNWATCHED_KEY",
     "WATCHED_GRACE_KEY",
+    "batch_sweep_dry_run",
     "grace_days",
     "grace_period",
     "offline_idle_days",
