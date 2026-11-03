@@ -872,12 +872,17 @@ class ShowDemandOut(BaseModel):
 
     ``open`` is every open demand of the caller's (any show, oldest press
     first) and ``max`` is ``demand_max_open`` (0 = no cap). ``refusal`` is
-    what a click on this page would be refused with right now, in the
-    demand's own order: ``demand_cap`` (applies to a row not already
-    ``demanded``), ``acquisition_paused``, ``storage_held`` (each only for a
-    row that still has to be fetched — ``not_wanted``, ``wanted``,
+    what a click on this page would be refused with right now — **one**
+    refusal, in the demand's own order: ``demand_cap`` (applies to a row not
+    already ``demanded``), ``acquisition_paused``, ``storage_held`` (each only
+    for a row that still has to be fetched — ``not_wanted``, ``wanted``,
     ``searching``, ``unavailable``, ``failed``); null when a press would be
     accepted. The client shows the sentence in place and does not navigate.
+    Because only the first applies, with the cap reached *and* acquisition
+    paused the page says ``demand_cap``, and an already-demanded row that
+    still needs fetching reads as pressable while its press gets 409
+    ``acquisition_paused``: the client must handle the demand's 409 whatever
+    this field says (M21 T6).
     """
 
     open: list[OpenDemandOut] = Field(default_factory=list)

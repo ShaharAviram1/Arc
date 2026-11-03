@@ -201,9 +201,12 @@ async def play(
     A ``ready`` episode answers its playlist. A not-ready one is answered in
     this order (M21, FR-A14):
 
-    1. the caller has an **open demand** on it → ``pending`` with
-       ``demanded: true`` — even when a device of theirs holds its trip copy
-       (the "watch it on the Mac" case);
+    1. the caller has a live want **with a press on it** (``demanded_at``
+       set — an open demand, or one finished since its press that something
+       else keeps live, as on main) → ``pending`` — even when a device of
+       theirs holds its trip copy (the "watch it on the Mac" case).
+       ``pending.demanded`` is true only for an *open* demand (not finished
+       since the press), so the player presses again after a finish;
     2. the caller holds its **trip copy** (FR-A12, M19 T4: a ``pending`` or
        ``delivered`` trip row) → ``offline_only``, no ``playlist_url``, so the
        player opens the device's copy;

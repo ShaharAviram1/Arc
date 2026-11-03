@@ -84,9 +84,15 @@ class DemandGate:
     def refusal(self) -> DemandRefusal | None:
         """The refusal a click on the page would get now, or ``None`` (``AnimeDetail.demand``).
 
-        In the demand's order: the cap first (it applies to any row not already
-        demanded), then the pause, then the hold (each only for a row that
-        still needs fetching — the client reads the row's state).
+        **One** refusal, in the demand's order: the cap first (it applies to
+        any row not already demanded), then the pause, then the hold (each
+        only for a row that still needs fetching — the client reads the row's
+        state). So with the cap reached *and* acquisition paused the page
+        carries ``demand_cap``: an already-demanded row that still needs
+        fetching then reads as pressable, and the press gets 409
+        ``acquisition_paused``. The client must handle the demand's 409
+        whatever this says (M21 T6); :meth:`refuses` is the exact per-episode
+        answer.
         """
         if self.at_cap:
             return DemandRefusal(DEMAND_CAP, demand_cap_message(self.max_open))
