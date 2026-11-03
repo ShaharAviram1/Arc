@@ -281,19 +281,10 @@ avatar, as a disclosure rather than an ARIA menu so its links keep the link
 role. `/recs` keeps working and is reached from Browse and from Home's
 "Picked for you" shelf.
 
-A **fourth toolbar entry, How Arc works (`/how-arc-works`), is drawn only for
-an account whose `me.is_demo` is true** (M16, spec FR-D5) — `mainNav()` in
-`components/Layout.tsx` appends it, and the same function feeds the phone
-"More" sheet, so the sheet gains it beside Schedule and the four tabs are
-untouched. The flag is read once, in `useAccountMenu`, because that is the one
-place in the shell that reads `me`. The **route** is an ordinary child of the
-layout behind `RequireAuth` and is gated on nothing: a link somebody sends on
-should open, and the page (`pages/HowArcWorks.tsx`) is static prose — an
-eight-step pipeline drawn as a four-column grid with two aria-hidden arrow
-glyphs (two even rows on `md:`, a column below, no library and no icon set), one sentence per external
-service, three rules, and four places to look. Watch Now carries the same
-account's one-line strip above the hero, dismissed into `localStorage` under
-`arc:how-arc-works-dismissed:<user id>` with every access wrapped.
+M16's fourth toolbar entry for the demo account, **How Arc works**
+(`/how-arc-works`, `pages/HowArcWorks.tsx`, with its Watch Now strip and the
+`mainNav(isDemo)` branch), is **removed in M21** (owner 2026-11-03, spec FR-D5
+retired): the shell has the same three entries for every account.
 
 Below 768px (`useIsPhone`, `client/src/lib/media.ts`) the same set becomes a
 bottom tab bar — Watch Now · Browse · My List · More — with Schedule at the
@@ -1611,6 +1602,31 @@ owner 2026-10-13).**
    `llm_suggest_match`, which asks a model for the most likely candidate + one
    line reason using structured output; stored for the review UI only.
 3. The parser and scorer are pure functions with a corpus-driven test suite.
+4. **Pack pick (M21 T7, spec FR-A4, FR-A11, FR-D4).** In
+   `acquisition/jobs.py` (the batch refusal near `_abandon`), when a pack is
+   refused permanently for identification — "k files claim" / "no file is",
+   never "too many files" — and nothing is chosen, the best such pack is
+   kept **stopped with nothing selected** (no `delete_files`), its
+   `qbit_state` set to `awaiting_pick`, `torrent_files` rows written for its
+   video files (the parser's reading in `episode_id`, `wanted = false`), a
+   `pack_picks` row inserted, and the episode moved to `unavailable` with
+   the reason "the pack's files need a person's pick (Review)" (the legal
+   edges checked in `states.py`). Every other refused pack keeps its
+   `unreadable` tombstone. `POST /api/review/packs/{id}/pick {file_index}`:
+   under the want lock re-check `awaiting_pick` and a live want (409
+   otherwise, and for a second pick), set the file's `episode_id` and the
+   wanted claim (`claims.py`, the one-claim index), put the torrent back to
+   live, `qbit_reselect`, start it, move the episode to `downloading`
+   through `start_search`/`transition`, stamp the resolution; on landing,
+   ingest links the file through the claim with `review_state = confirmed`
+   and it is encoded or remuxed like any pack file (no live remux).
+   `POST …/dismiss`: the `unreadable` tombstone, delete with files, FR-A6's
+   daily retry. A pick pending D days is dismissed on its own, and a pack
+   deleted from the client is reconciled. No automatic link and no LLM
+   suggestion: v1 shows the parser's readings only. The stopped pack holds
+   a client slot at no byte cost; a pick goes through `qbit_reselect` (the
+   M20.4 start/recheck cool-downs) and never marks `cancelled`, which
+   deletes with files.
 
 ### 5.2a Matching rules as built (M5)
 - Parser: `anitopy` plus normalisation into `ParsedName` (title, `title_key`,
@@ -2406,9 +2422,9 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
 - **Play on demand, client side (M20 T5, FR-A14).** A play button on a
   not-ready episode navigates to `/watch/{id}` with router state
   `{demand: true}` (`WatchState`): the show row when `EpisodeOut.fetchable`
-  (computed by `GET /api/anime/{id}` with `coverable(user)` — only when some
-  row is not ready and the show has a watching/planned entry or a live want
-  of the caller's — so it agrees with `demand`), and Watch Now's Continue
+  (since M21 simply aired and not ready, with the page-level
+  `AnimeDetail.demand.refusal` telling the client when a click would be
+  refused, so it agrees with `demand`), and Watch Now's Continue
   watching / Ready to watch tiles whose episode is not `ready` and not on the
   device. `PlayerView` then calls `POST /api/episodes/{id}/demand` before it
   enables the `/play` query (skipped when a device copy plays), and also once
@@ -2427,8 +2443,49 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   disabled so nothing polls. The end overlay offers Next on
   `next.fetchable`: it demands, then navigates with `{demanded: true}` (the
   player does not ask again); a refusal is the sentence in the card.
+- **M21 client (T6; spec FR-A14, FR-W7, §5).** `Show.tsx` `EpisodeRow`: every
+  aired episode is a link (`playable || fetchable`), with `WatchState
+  {demand: true}` for a non-ready row and a Play chip on every aired
+  not-ready row (hint "Arc fetches it now; it plays as it downloads, or when
+  the file is complete for a season pack."); `demanded` → "Fetching on
+  request" and a ✕ calling `withdrawDemand` (`DELETE …/demand`); un-aired
+  rows inert; `anime.demand.refusal` → an inline toast and no navigation.
+  The hero's `playableEpisode` is the first unwatched aired episode (ready →
+  play, else a demand link "Play episode X"); `RewatchControl` (`aria-pressed`,
+  `useRewatch` → `PUT`/`DELETE /api/anime/{id}/rewatch`) sits beside Keep
+  files with the badge "Rewatching · ep X / Y"; `SampleControl` is removed.
+  `Player.tsx` demands when `/play` says `demanded: false` as well as on
+  `state.demand`; `PendingView` shows `pending.note`, "No release found yet;
+  Arc looks again every day" for `unavailable`, and a link to Review for
+  `awaiting_pick`; a `demand_cap` refusal lists the open demands with links;
+  `ProgressOut.rewatch_ended` raises the toast "Rewatch finished. Your list
+  was left as it was." Types and hooks in `lib/playback.ts` and
+  `lib/anime.ts`; the admin Rules tab edits `demand_max_open` and
+  `batch_sweep_dry_run`.
 
 ### 5.4a Streaming and playback as built (M8)
+- **`/play` for any aired episode (M21 T4, spec FR-A14, FR-W7).**
+  `GET /api/episodes/{id}/play` (`api/playback.py`) answers in this order:
+  an open demand of the caller's → waiting (`pending`); a trip copy the
+  caller holds → `offline_only`; another live want → waiting; and,
+  **new**, any other aired episode that is not ready → waiting with
+  `demanded: false`, on which the player posts the demand once. 404 only
+  for an unknown or un-aired episode. `PendingOut.note` carries
+  `PLAYS_WHEN_DOWNLOADED_MESSAGE` when the episode is pack-backed, its live
+  remux refused, or the source is an MP4 that cannot be cut live, and
+  `PendingOut.awaiting_pick` is set while its pack waits for a person's
+  file pick (§5.2 step 4). `next.fetchable` and `next_season`'s are aired ∧
+  not ready ∧ no page-level refusal; M20's once-active coverage helper is
+  removed.
+  `AnimeDetail` (`api/anime.py`, `anime_schemas.py`) carries
+  `EpisodeOut.fetchable` (aired ∧ not ready), `EpisodeOut.demanded`,
+  `demand: {open, max, refusal: {code, message} | null}` and `rewatch:
+  {started_at, position, finished_in_pass, total} | null`, and reads the
+  watched fields through `rewatch.watch_view()`. `ready_to_watch`
+  (`catalog/progress.py`) gains a rewatch branch (an open pass, any status:
+  episodes not finished in the pass and not started since `started_at`),
+  leaves open-pass shows out of the normal branch, and adds ready unseen
+  episodes the viewer holds a live want on.
 - **The live branch (M20 T6, FR-P8, §5.3d).** Every media route first asks
   `_live_dir`: for an episode that is not `ready`, `live_serve.live_servable`
   returns `DATA_DIR/live/<id>/` when the episode is in `downloading`…
@@ -2776,8 +2833,7 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   once; each part is re-`fstat`ed on open and a part that changed since the
   headers were computed aborts the connection rather than splicing two
   renditions. The handler closes its DB session before the body starts
-  (FastAPI ends `yield` dependencies only after a response is fully sent). The
-  demo account (`users.is_demo`) gets a 403 before any lookup. The show page
+  (FastAPI ends `yield` dependencies only after a response is fully sent). The show page
   sends `EpisodeOut.download_url` (built by `download_url()` next to
   `playlist_url()`, set exactly when `rendition` is), and the player's `/play`
   payload carries the same field on its episode. **No UI links to the file**
@@ -2786,7 +2842,7 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   `reverse_proxy` streams and forwards `Range` as is.
 - **`GET|HEAD /media/{id}/offline.mp4`** (M19 T1, FR-P6) — the small copy, a
   real file, so it goes through `_serve` like a segment: the router's session
-  dependency (401), the demo account 403 **before any lookup**, then the
+  dependency (401), then the
   episode, the `offline_copies` row (must be `ready`) and
   `copies.may_fetch_copy(session, user, episode, copy)` — a `ready` episode's
   copy is any account's; a non-ready (trip-only) copy belongs only to the
@@ -2854,11 +2910,10 @@ nothing is written, not even a dismissal.
   are two pieces of news about one row; `since` is in it because FR-A6 retries
   daily and the same episode failing again is a new failure. The log's id is
   enough on its own — it is append-only, so one id is one attempt for ever.
-- **Client**: `Home.tsx`'s `FailureBanner`, above the hero and below the demo
-  strip, three rows and a "+N more" fold. Dismissal is `localStorage` only —
+- **Client**: `Home.tsx`'s `FailureBanner`, above the hero, three rows and a "+N more" fold. Dismissal is `localStorage` only —
   one entry per dismissed failure under
-  `arc:failure-dismissed:<user id>:<failure key>`, the demo strip's precedent
-  with the failure key appended — and every access is wrapped, since the
+  `arc:failure-dismissed:<user id>:<failure key>`, M16's How Arc works strip's
+  precedent (removed in M21) with the failure key appended — and every access is wrapped, since the
   accessor throws in a browser set to block site data (the failure mode is
   "every row is shown", which is the right way round). On mount the prefix is
   scanned and any key the server no longer reports is **deleted**, which is
@@ -3152,7 +3207,7 @@ files while the new one downloads).
 pure stepper, refusal and row-status rules), `components/Trip.tsx`
 (`TripControl`, `TripPanel`), `offline/useTripAutoKeep.ts`.
 - **Auto-keep.** `useTripAutoKeep(me)` is mounted by `RequireAuth` beside
-  the downloads session; off for the demo account, for nobody, and where
+  the downloads session; off for nobody signed in and where
   `canDownloadInApp()` is false. It is `GET /api/trips` (every active trip,
   oldest first — any number, one per show since 2026-10-28) as a query
   (`['trips','active']`) refetched every 60 s, on focus/visibility and
@@ -3454,9 +3509,8 @@ nothing. Offline (`isOnline()` false), a request with no answer
 `reportHoldingsIfPending()`, and the reconnect triggers report anyway. A
 success writes `{ids, sentAt}`. `PUT /api/devices/{deviceId()}/holdings`
 (`putHoldings`, injectable); the id is `store.ts` `deviceId()` — `crypto.randomUUID`,
-or a v4 built from `getRandomValues` in an insecure context. The demo account
-(`setOwner(id, {demo})` from `useDownloadsSession(id, me.is_demo)`) never
-reports, and a 403 stops the manager reporting for the session. The trip
+or a v4 built from `getRandomValues` in an insecure context. A 403 stops the
+manager reporting for the session. The trip
 path's own `POST|DELETE …/delivered` calls are unchanged (the server unions
 both).
 
@@ -3503,8 +3557,7 @@ and `watchPendingLogout()` (from `main.tsx`) sends it at launch and on every
 reconnect. `withRemembered` reads the owner *before* its request and stamps
 the payload with it; `recallPayload` ignores a payload of another owner.
 `useHome` and `useAnime` fall back to the remembered payload; every page in
-the shell shows "You're offline — your downloads are here" (the demo account:
-"You're offline") while `useOffline()` is true.
+the shell shows "You're offline — your downloads are here" while `useOffline()` is true.
 
 **iOS caveats** (stated on the Downloads page): downloads run only while Arc
 is on screen (the manager nudges and re-takes the wake lock on return);
@@ -3600,7 +3653,7 @@ worker).
   parse_device_id`: a v4 UUID, stored canonical; else 422) before the
   service runs; it is written to `trips.device_id` — the trip is that
   device's (owner, 2026-10-30). Refusals, in
-  this order: demo account 403 `demo_account`; unknown anime 404; an active trip of the
+  this order: unknown anime 404; an active trip of the
   caller's **on this show** 409 `trip_active` (`active_trip(session, user_id,
   anime_id)`; since 2026-10-30 an active trip on the show with **nothing
   pending** is first ended — `_end_finished_trip` locks it `FOR UPDATE`;
@@ -4046,8 +4099,7 @@ above), so what is settled here is the **copy** — file and row — and the
   redoing its own episode. Flushed, not committed; no list entry or MAL
   write.
 - **Authorisation** (`media.copies.may_fetch_copy`, asked by
-  `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy and never the demo
-  account; a `ready` episode's copy → any account; a non-`ready` episode's →
+  `GET|HEAD /media/{id}/offline.mp4`): only a `ready` copy; a `ready` episode's copy → any account; a non-`ready` episode's →
   only a user holding a `pending` or `delivered` row on it
   (`trips.rules.holds_trip_episode`; delivered so a second device can fetch it
   within the settle hour). Everyone else — another user, an `expired` or
@@ -4057,7 +4109,8 @@ above), so what is settled here is the **copy** — file and row — and the
   `playlist_url: null`, `offline_only: true`, `resume_position` and
   `previous`/`next` as usual, and `duration` = the caller's last reported
   `watch_progress.duration_s` (else 0; there is no rendition). Everyone else
-  keeps the 404. For the client: a trip-only neighbour in `previous`/`next`
+  kept the 404 until M21; since then any aired episode answers waiting
+  (§5.4a). For the client: a trip-only neighbour in `previous`/`next`
   reports `ready: false` — whether it is on the device is the device's
   question.
 - **Edge cases.** Two devices of one user: the second fetches within the
