@@ -187,7 +187,7 @@ targets do — see [deploy/README.md §2.2](deploy/README.md).
   catalogue, so a new user's first Home page is not empty. It prints the title
   it matched. One invocation seeds one `--status` group (default `watching`)
   with one `--progress`, so a plausible list is a few runs rather than one long
-  command line. (Its `--demo` flag was removed in M21 with the demo account,
+  command line. (Its `--demo` flag is removed in M21 (T9) with the demo account,
   spec FR-D5, 2026-11-03; the name is historical.) A list entry is what
   drives acquisition, so
   this will start Arc looking for episodes unless acquisition is paused.

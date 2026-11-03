@@ -269,8 +269,8 @@ $R python -m arc.cli recs --user-email prof@example.edu
 ```
 
 All of them are idempotent except `recs` — the sweeps deduplicate on their job
-type, a list entry describes a state rather than an event, and an import whose files have not changed does nothing at all. A
-recommendation run is an event and spends one of the ten a user gets per day
+type, a list entry describes a state rather than an event, and an import
+whose files have not changed does nothing at all. A recommendation run is an event and spends one of the ten a user gets per day
 (FR-R5). `demo-list` needs AniList (or MAL) to be reachable; it prints the
 title it actually matched, so a wrong top hit is visible rather than silent.
 
