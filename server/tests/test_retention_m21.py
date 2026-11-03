@@ -29,10 +29,11 @@ from arc.main import create_app
 from arc.models import Episode, EpisodeState, User, UserRole, Walk, Want, WatchProgress
 from arc.services.acquisition.demand import demand
 from arc.services.acquisition.wants import STALE_DROP_REASON, compute_wants
-from arc.services.playback.progress import record_progress
+from arc.services.playback.progress import record_progress, unmark_watched
 from arc.services.playback.rewatch import start as start_rewatch
 from arc.services.retention.sweep import (
     HOLD_PARTIAL,
+    HOLD_PLAYED,
     REASON_DROPPED,
     REASON_WATCHED,
     Deletable,
@@ -289,6 +290,231 @@ async def test_the_anchor_is_the_newer_of_the_first_watch_and_the_latest_finish(
     found = await candidates(db_session, settings, now=NOW + G + MINUTE)
     assert ids(found) == [episode.id]
     assert found[0].anchor == NOW
+
+
+async def test_the_anchor_is_the_newest_finish_over_every_user(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A's old normal completion and B's newer pass finish, and the reverse: the
+    episode goes G after the newer one, whoever made it."""
+    settings = acquisition_settings(tmp_path)
+    pass_newer = await make_retained_episode(
+        db_session, settings, anilist_id=974815, ready_at=days_ago(200)
+    )
+    normal_newer = await make_retained_episode(
+        db_session, settings, anilist_id=974816, ready_at=days_ago(200)
+    )
+    alice = await make_user(db_session, "m21-ret-two-a@arc.test")
+    bob = await make_user(db_session, "m21-ret-two-b@arc.test")
+    # Alice: an old normal completion of the first, a pass finish of the second.
+    await add_finish(db_session, alice, pass_newer, at=days_ago(120))
+    await pass_finish(db_session, alice, normal_newer, at=NOW - 4 * HOUR)
+    # Bob: the newer of each — a pass finish of the first, a completion of the second.
+    await pass_finish(db_session, bob, pass_newer, at=NOW)
+    await add_finish(db_session, bob, normal_newer, at=NOW)
+
+    # Past the older one's grace, inside the newer one's: neither goes.
+    early = await retention_plan(db_session, settings, now=NOW - 4 * HOUR + G + MINUTE)
+    assert early.deletable == [] and early.held == []
+    assert await candidates(db_session, settings, now=NOW + G - MINUTE) == []
+
+    found = await candidates(db_session, settings, now=NOW + G + MINUTE)
+    assert sorted(ids(found)) == sorted([pass_newer.id, normal_newer.id])
+    assert {target.anchor for target in found} == {NOW}
+
+
+async def test_another_users_live_demand_keeps_a_pass_finished_episode(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    settings = acquisition_settings(tmp_path)
+    real = datetime.now(UTC).replace(microsecond=0)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974817, ready_at=real - timedelta(days=3)
+    )
+    alice = await make_user(db_session, "m21-ret-demand-a@arc.test")
+    bob = await make_user(db_session, "m21-ret-demand-b@arc.test")
+    db_session.add(
+        a_row(
+            alice,
+            episode,
+            position_s=LENGTH,
+            completed=False,
+            finished_at=real - 10 * HOUR,
+            updated_at=real - 10 * HOUR,
+        )
+    )
+    await db_session.flush()
+    assert ids(await candidates(db_session, settings, now=real)) == [episode.id]
+
+    await on_demand(db_session, bob, episode, at=real - HOUR)
+    await compute_wants(db_session)
+    want = await db_session.get(Want, (bob.id, episode.id))
+    assert want is not None and want.demanded_at is not None and want.dropped_at is None
+
+    plan = await retention_plan(db_session, settings, now=real + timedelta(days=3))
+    assert plan.deletable == [] and plan.held == []
+
+
+# --- Un-marks, replays and the partial boundary ---------------------------------
+
+
+async def test_an_unmark_in_a_pass_falls_back_to_the_first_watch(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """The un-mark clears the pass's finish only; the old first watch anchors, so
+    the episode is past its grace and kept only by hold (c) for the watched grace."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974818, ready_at=days_ago(200)
+    )
+    user = await make_user(db_session, "m21-ret-unmark@arc.test")
+    first = days_ago(120)
+    await add_finish(db_session, user, episode, at=first)
+    finish = NOW - HOUR
+    await pass_finish(db_session, user, episode, at=finish)
+    unmarked = finish + MINUTE
+    await unmark_watched(db_session, user_id=user.id, episode=episode, now=unmarked)
+    row = await db_session.get(WatchProgress, (user.id, episode.id))
+    assert row is not None
+    await db_session.refresh(row)
+    assert row.finished_at is None and row.completed is True and row.completed_at == first
+
+    plan = await retention_plan(db_session, settings, now=unmarked + 30 * MINUTE)
+    assert plan.deletable == []
+    assert [(item.episode_id, item.hold, item.anchor) for item in plan.held] == [
+        (episode.id, HOLD_PLAYED, first)
+    ]
+
+    found = await candidates(db_session, settings, now=unmarked + G + MINUTE)
+    assert ids(found) == [episode.id]
+    assert found[0].anchor == first
+
+
+async def test_an_unmarked_pass_only_finish_reads_as_a_partial(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Never completed in normal mode, finished in a pass, then un-marked: no
+    finish is left and the position is at the end, so hold (b) keeps it D days
+    (the documented safe side)."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974819, ready_at=days_ago(30)
+    )
+    user = await make_user(db_session, "m21-ret-unmark-pass@arc.test")
+    finish = days_ago(2)
+    await pass_finish(db_session, user, episode, at=finish)
+    unmarked = finish + MINUTE
+    await unmark_watched(db_session, user_id=user.id, episode=episode, now=unmarked)
+    row = await db_session.get(WatchProgress, (user.id, episode.id))
+    assert row is not None
+    await db_session.refresh(row)
+    assert row.finished_at is None and row.completed is False and row.position_s > 0
+
+    plan = await retention_plan(db_session, settings, now=NOW)
+    assert plan.deletable == []
+    assert [(item.episode_id, item.hold) for item in plan.held] == [(episode.id, HOLD_PARTIAL)]
+
+    late = await retention_plan(db_session, settings, now=unmarked + D - MINUTE)
+    assert [(item.episode_id, item.hold) for item in late.held] == [(episode.id, HOLD_PARTIAL)]
+    assert ids(await candidates(db_session, settings, now=unmarked + D + MINUTE)) == [episode.id]
+
+
+async def test_a_replayed_finish_older_than_the_last_sample_reads_as_a_partial(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Out-of-order offline replay: the row's finish is older than its last sample
+    (``finished_at < updated_at``), so hold (b) keeps it D days — the documented
+    safe side, pinned here. Built as the row such a replay leaves."""
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974820, ready_at=days_ago(30)
+    )
+    user = await make_user(db_session, "m21-ret-replay@arc.test")
+    finish = days_ago(1)
+    sample = finish + 10 * MINUTE
+    db_session.add(
+        a_row(
+            user,
+            episode,
+            position_s=LENGTH,
+            completed=False,
+            finished_at=finish,
+            updated_at=sample,
+        )
+    )
+    await db_session.flush()
+
+    plan = await retention_plan(db_session, settings, now=NOW)
+    assert plan.deletable == []
+    assert [(item.episode_id, item.hold) for item in plan.held] == [(episode.id, HOLD_PARTIAL)]
+    assert ids(await candidates(db_session, settings, now=sample + D + MINUTE)) == [episode.id]
+
+
+async def test_the_partial_boundary_is_strictly_after_the_finish(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """``updated_at`` equal to ``finished_at`` is a finish; one microsecond later is
+    a partial."""
+    settings = acquisition_settings(tmp_path)
+    equal = await make_retained_episode(
+        db_session, settings, anilist_id=974821, ready_at=days_ago(20)
+    )
+    later = await make_retained_episode(
+        db_session, settings, anilist_id=974822, ready_at=days_ago(20)
+    )
+    user = await make_user(db_session, "m21-ret-boundary@arc.test")
+    at = days_ago(2)
+    db_session.add(
+        a_row(user, equal, position_s=LENGTH, completed=False, finished_at=at, updated_at=at)
+    )
+    db_session.add(
+        a_row(
+            user,
+            later,
+            position_s=300.0,
+            completed=False,
+            finished_at=at,
+            updated_at=at + timedelta(microseconds=1),
+        )
+    )
+    await db_session.flush()
+
+    plan = await retention_plan(db_session, settings, now=NOW)
+
+    assert ids(plan.deletable) == [equal.id]
+    assert [(item.episode_id, item.hold) for item in plan.held] == [(later.id, HOLD_PARTIAL)]
+
+
+async def test_a_manual_mark_in_a_pass_is_a_finish(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    settings = acquisition_settings(tmp_path)
+    episode = await make_retained_episode(
+        db_session, settings, anilist_id=974823, ready_at=days_ago(20)
+    )
+    user = await make_user(db_session, "m21-ret-mark@arc.test")
+    mark = NOW - HOUR
+    await start_rewatch(db_session, user_id=user.id, anime_id=episode.anime_id, now=mark - HOUR)
+    await play(db_session, user, episode, 0.3, at=mark - 10 * MINUTE)
+    await record_progress(
+        db_session,
+        user_id=user.id,
+        episode=episode,
+        position_s=LENGTH * 0.3,
+        duration_s=LENGTH,
+        now=mark,
+        force_complete=True,
+    )
+    row = await db_session.get(WatchProgress, (user.id, episode.id))
+    assert row is not None
+    await db_session.refresh(row)
+    assert row.completed is False and row.finished_at == mark and row.updated_at == mark
+
+    before = await retention_plan(db_session, settings, now=mark + G - MINUTE)
+    assert before.deletable == [] and before.held == []
+    found = await candidates(db_session, settings, now=mark + G + MINUTE)
+    assert ids(found) == [episode.id]
+    assert found[0].reason == f"{REASON_WATCHED}; {ran_out(mark + G)}"
 
 
 # --- 4. Demand lifecycle -------------------------------------------------------
