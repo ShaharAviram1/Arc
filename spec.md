@@ -1842,7 +1842,9 @@ is its only user, and uses it daily.
   wants (FR-A1) follow the same rule as any want.
   Four **holds** keep an episode whose grace has run out, for as long as they
   last: (a) **any** user has pinned the show (FR-T8); (b) somebody has a
-  partial watch on it (position above zero, not completed) updated within
+  partial watch on it (position above zero, not completed, and not finished
+  since — a finish in a rewatch pass leaves the episode not completed but is
+  a finish, not a partial) updated within
   **D** days, even with no want — a show on hold, say; (c) **anybody played
   it** within `watched_grace_hours`, and never less than 30 minutes (so a
   grace of 0 cannot delete an episode whose last minutes are still playing
@@ -3521,3 +3523,8 @@ through the same edge, without the grace period.
   written since the pass began; a partial from before the pass belongs to
   Ready to watch, so no episode is on both shelves (M21 T4). The resume
   position itself is unchanged.
+- 2026-11-04 — M21 T5: FR-T1 hold (b) clarified: a partial watch is one not
+  finished since its last report, so a rewatch pass finish (left not
+  completed by FR-W7) is a watched anchor with the 6-hour grace, not a
+  partial that holds the file D days. A later report below the mark still
+  counts as a partial.
