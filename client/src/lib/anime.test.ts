@@ -21,18 +21,18 @@ import {
   malUrl,
   releaseLine,
   renditionLine,
-  sampleErrorMessage,
+  rewatchErrorMessage,
   searchSummary,
   STILL_POLL_MS,
   STILL_POLL_WINDOW_MS,
   useAnime,
   useAnimeSearch,
-  useCancelSample,
   useRemoveListEntry,
-  useRequestSample,
+  useRewatch,
   useRetryTranscode,
   useSetListEntry,
   type AnimeDetail,
+  type Rewatch,
   type EpisodeOut,
 } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
@@ -48,7 +48,6 @@ import {
   FRIEREN_DETAIL_SETTLED,
   FRIEREN_DETAIL_UNMAPPED,
   FRIEREN_DETAIL_WITH_STILLS,
-  FRIEREN_SAMPLE,
   listEntry,
   SEARCH_PAGE_1,
 } from '@/test/animeFixtures'
@@ -683,88 +682,67 @@ describe('useRetryTranscode', () => {
   })
 })
 
-describe('sampleErrorMessage', () => {
-  it("uses the server's own sentence for a refused sample (FR-A8)", () => {
-    const refusal =
-      'you are already following this show; the next episodes are fetched automatically'
-    expect(sampleErrorMessage(new ApiError(409, { detail: refusal }))).toBe(refusal)
+describe('rewatchErrorMessage', () => {
+  it("uses the server's own sentence for a refused pass (FR-W7)", () => {
+    const refusal = 'nothing of this show has aired yet'
+    expect(rewatchErrorMessage(new ApiError(409, { detail: refusal }))).toBe(refusal)
   })
 
   it('falls back when the body carries no sentence', () => {
-    expect(sampleErrorMessage(new ApiError(500, {}))).toBe(
-      'Could not ask for that episode. Try again.',
-    )
-  })
-
-  it('reads anything that is not an ApiError as a reachability problem', () => {
-    expect(sampleErrorMessage(new Error('offline'))).toBe('Could not reach the server.')
+    expect(rewatchErrorMessage(new ApiError(500, {}))).toBe('Could not change rewatch. Try again.')
   })
 })
 
-describe('useRequestSample', () => {
-  it('asks for episode 1 and makes the show page and Watch Now ask again', async () => {
+describe('useRewatch', () => {
+  const PASS: Rewatch = {
+    started_at: '2026-11-04T09:00:00Z',
+    position: 0,
+    finished_in_pass: 0,
+    total: 28,
+  }
+
+  it('opens a pass, writes it into the show and re-asks the show and home', async () => {
     const fetchMock = mockApi({
-      [`POST /api/anime/${FRIEREN.id}/sample`]: { status: 202, body: FRIEREN_SAMPLE },
+      [`PUT /api/anime/${FRIEREN.id}/rewatch`]: { body: PASS },
     })
     const client = createQueryClient()
     seedShowCache(client)
     client.setQueryData(homeQueryKey, EMPTY_HOME)
 
-    const { result } = renderHook(() => useRequestSample(FRIEREN.id), {
-      wrapper: wrapperFor(client),
-    })
+    const { result } = renderHook(() => useRewatch(FRIEREN.id), { wrapper: wrapperFor(client) })
     act(() => {
-      result.current.mutate()
+      result.current.mutate(true)
     })
 
     await waitFor(() => {
       expect(result.current.isSuccess).toBe(true)
     })
-    expect(result.current.data).toEqual(FRIEREN_SAMPLE)
-    expect(requestsMade(fetchMock)).toEqual([`POST /api/anime/${FRIEREN.id}/sample`])
-
-    // The answer is written into the show page's cache, so the button and the
-    // episode row are right before the refetch behind them lands: the server
-    // started the search inside the request, and said so.
-    const cached = client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))
-    expect(cached?.sample).toEqual(FRIEREN_SAMPLE)
-    expect(
-      cached?.episodes.find((episode) => episode.id === FRIEREN_SAMPLE.episode_id)?.state,
-    ).toBe('wanted')
-    // And both views are asked again anyway; the patch is only the bridge.
+    expect(requestsMade(fetchMock)).toEqual([`PUT /api/anime/${FRIEREN.id}/rewatch`])
+    expect(client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))?.rewatch).toEqual(PASS)
     expect(client.getQueryState(animeQueryKey(FRIEREN.id))?.isInvalidated).toBe(true)
     expect(client.getQueryState(homeQueryKey)?.isInvalidated).toBe(true)
   })
-})
 
-describe('useCancelSample', () => {
-  it('drops the sample and re-asks the same two views', async () => {
+  it('ends it with a DELETE and clears it from the show', async () => {
     const fetchMock = mockApi({
-      [`DELETE /api/anime/${FRIEREN.id}/sample`]: { status: 204 },
+      [`DELETE /api/anime/${FRIEREN.id}/rewatch`]: { status: 204 },
     })
     const client = createQueryClient()
     client.setQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id), {
       ...FRIEREN_DETAIL,
-      sample: FRIEREN_SAMPLE,
+      rewatch: PASS,
     })
-    client.setQueryData(homeQueryKey, EMPTY_HOME)
 
-    const { result } = renderHook(() => useCancelSample(FRIEREN.id), {
-      wrapper: wrapperFor(client),
-    })
+    const { result } = renderHook(() => useRewatch(FRIEREN.id), { wrapper: wrapperFor(client) })
     act(() => {
-      result.current.mutate()
+      result.current.mutate(false)
     })
 
     await waitFor(() => {
       expect(result.current.isSuccess).toBe(true)
     })
-    expect(requestsMade(fetchMock)).toEqual([`DELETE /api/anime/${FRIEREN.id}/sample`])
-    // The sample is gone from the page at once; what the episode's state
-    // becomes is the server's to say, so that is left to the refetch.
-    expect(client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))?.sample).toBeNull()
-    expect(client.getQueryState(animeQueryKey(FRIEREN.id))?.isInvalidated).toBe(true)
-    expect(client.getQueryState(homeQueryKey)?.isInvalidated).toBe(true)
+    expect(requestsMade(fetchMock)).toEqual([`DELETE /api/anime/${FRIEREN.id}/rewatch`])
+    expect(client.getQueryData<AnimeDetail>(animeQueryKey(FRIEREN.id))?.rewatch).toBeNull()
   })
 })
 

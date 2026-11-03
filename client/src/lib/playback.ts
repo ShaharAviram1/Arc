@@ -38,7 +38,13 @@ import {
 } from '@/offline/downloads'
 import { crossesCompletion, outbox, type Outbox } from '@/offline/outbox'
 import { pendingWatched } from '@/offline/useOutbox'
-import { animeQueryKey, ANIME_QUERY_KEY, type AnimeSummary, type EpisodeOut } from '@/lib/anime'
+import {
+  animeQueryKey,
+  ANIME_QUERY_KEY,
+  type AnimeSummary,
+  type EpisodeOut,
+  type OpenDemand,
+} from '@/lib/anime'
 import { HOME_QUERY_KEY } from '@/lib/schedule'
 
 /** Where `POST` progress reports go; the unload beacon uses it too. */
@@ -62,7 +68,7 @@ export interface EpisodeRef {
   ready: boolean
   /**
    * The caller may press play on this not-ready episode and have Arc fetch it
-   * now (FR-A14, M20): their window covers it, on their real progress. False
+   * now (FR-A14, M21): it has aired and nothing would refuse the press. False
    * on a ready one. Absent from a server older than M20 T4.
    */
   fetchable?: boolean
@@ -91,18 +97,38 @@ export interface NextSeasonRef {
    * the player says "hasn't aired yet"; absent from a server that predates it.
    */
   aired?: boolean
+  /**
+   * The finished season is in an open rewatch pass and the sequel's entry has
+   * progress (FR-W7 item 5, M21): the press opens the sequel's pass (`PUT
+   * /api/anime/{anime_id}/rewatch`) and makes **no list write**, whatever
+   * `list_state` says. Absent from an older server: the ordinary press.
+   */
+  rewatch_carry?: boolean
 }
 
 /**
- * Where a wanted, not-ready episode stands (FR-A14, M20): what the pending
- * player shows while it polls `/play` for the playlist. `progress` is 0..1
- * of the download, null before anything was reported; `seeders` is the
+ * Where an aired, not-ready episode stands (FR-A14, M20, M21): what the
+ * pending player shows while it polls `/play` for the playlist. `progress` is
+ * 0..1 of the download, null before anything was reported; `seeders` is the
  * release's count, null before there is a release.
  */
 export interface PendingInfo {
   state: string
   progress: number | null
   seeders: number | null
+  /**
+   * The caller has an open demand on it (M21). False (or absent, from an
+   * older server) on one nobody of theirs asked for yet, or wanted only by a
+   * window or a walk: the player then posts the demand once.
+   */
+  demanded?: boolean
+  /**
+   * "This episode will play when its download finishes." while it cannot be
+   * played from its download (a season pack, a refused live remux, an MP4).
+   */
+  note?: string | null
+  /** Its season pack waits for a person's file pick: the player links to Review. */
+  awaiting_pick?: boolean
 }
 
 /**
@@ -799,14 +825,35 @@ export function useUnmarkWatched(): UseMutationResult<ProgressResult, Error, Wat
 
 /** A 409 from `POST /api/episodes/{id}/demand`: the code, and a sentence to show as it is. */
 export interface DemandRefusal {
-  /** `not_in_window`, `acquisition_paused` or `storage_held` today. */
+  /** `not_aired`, `demand_cap`, `acquisition_paused` or `storage_held` (M21). */
   code: string
   message: string
+  /** With `demand_cap`: the viewer's open demands, to link to (empty otherwise). */
+  open: OpenDemand[]
 }
 
 /** `POST /api/episodes/{id}/demand` answered 202: the episode's state now. */
 export interface DemandResult {
   state: string
+  /** It plays while it downloads (FR-P8). */
+  live?: boolean
+  /** Why it will only play once its download finishes, or null. */
+  message?: string | null
+}
+
+/** One `open[]` row as the wire has it, or null for anything else. */
+function openDemand(row: unknown): OpenDemand | null {
+  if (typeof row !== 'object' || row === null) return null
+  const { episode_id, anime_id, title, number } = row as Record<string, unknown>
+  if (
+    typeof episode_id !== 'number' ||
+    typeof anime_id !== 'number' ||
+    typeof title !== 'string' ||
+    typeof number !== 'number'
+  ) {
+    return null
+  }
+  return { episode_id, anime_id, title, number }
 }
 
 /**
@@ -821,9 +868,14 @@ export function demandRefusal(error: unknown): DemandRefusal | null {
   if (typeof body !== 'object' || body === null) return null
   const detail = (body as { detail?: unknown }).detail
   if (typeof detail !== 'object' || detail === null) return null
-  const { code, message } = detail as { code?: unknown; message?: unknown }
+  const { code, message, open } = detail as { code?: unknown; message?: unknown; open?: unknown }
   if (typeof code !== 'string' || typeof message !== 'string') return null
-  return { code, message }
+  const rows: unknown[] = Array.isArray(open) ? open : []
+  return {
+    code,
+    message,
+    open: rows.map(openDemand).filter((row): row is OpenDemand => row !== null),
+  }
 }
 
 /**
@@ -833,6 +885,29 @@ export function demandRefusal(error: unknown): DemandRefusal | null {
  */
 export function demandEpisode(episodeId: number): Promise<DemandResult> {
   return apiFetch<DemandResult>(`/api/episodes/${String(episodeId)}/demand`, { method: 'POST' })
+}
+
+/**
+ * Withdraw the viewer's demand on an episode (FR-A14, M21): `DELETE
+ * /api/episodes/{id}/demand`, 204 whether or not there was one.
+ */
+export function withdrawDemand(episodeId: number): Promise<null> {
+  return apiFetch<null>(`/api/episodes/${String(episodeId)}/demand`, { method: 'DELETE' })
+}
+
+/**
+ * The ✕ on a "Fetching on request" row: withdraw, then refetch the show (the
+ * row and `demand.open`) and the home page.
+ */
+export function useWithdrawDemand(): UseMutationResult<null, Error, WatchedInput> {
+  const client = useQueryClient()
+
+  return useMutation<null, Error, WatchedInput>({
+    mutationFn: ({ episodeId }) => withdrawDemand(episodeId),
+    onSuccess: (_result, { animeId }) => {
+      invalidateAfterCompletion(client, animeId)
+    },
+  })
 }
 
 /** The router state that asks the player to demand its episode before loading it. */
@@ -858,8 +933,9 @@ export function alreadyDemanded(state: unknown): boolean {
 }
 
 /**
- * What the pending player says (FR-A14): "Searching", "Downloading 43 %" or
- * "Preparing", from the server's `pending.state` and `pending.progress`.
+ * What the pending player says (FR-A14): "Searching", "Downloading 43 %",
+ * "Preparing", or that no release was found yet, from the server's
+ * `pending.state` and `pending.progress`.
  */
 export function pendingLabel(pending: PendingInfo): string {
   switch (pending.state) {
@@ -873,6 +949,9 @@ export function pendingLabel(pending: PendingInfo): string {
     case 'matched':
     case 'preparing':
       return 'Preparing'
+    case 'unavailable':
+      // Not a failure: the demand stays open and Arc searches again daily (M21).
+      return 'No release found yet; Arc looks again every day'
     default:
       return 'Searching'
   }

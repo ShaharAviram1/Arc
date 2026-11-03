@@ -7,7 +7,6 @@ import type {
   EpisodeRelease,
   EpisodeRendition,
   ListEntry,
-  Sample,
 } from '@/lib/anime'
 import type { MalStatus, MalWrite } from '@/lib/mal'
 import type { PlayInfo } from '@/lib/playback'
@@ -312,15 +311,8 @@ export const FRIEREN_DETAIL: AnimeDetail = {
   relations: [LINKED_RELATION, UNLINKED_RELATION],
   list_entry: null,
   sample: null,
-}
-
-/** The same show with episode 1 asked for as a sample (FR-A8). */
-export const FRIEREN_SAMPLE: Sample = {
-  episode_id: 9001,
-  episode_number: 1,
-  requested_at: '2026-09-12T09:00:00Z',
-  // What the route answers on a resting episode: it starts the search itself.
-  state: 'wanted',
+  demand: { open: [], max: 3, refusal: null },
+  rewatch: null,
 }
 
 export const FRIEREN_DETAIL_ON_LIST: AnimeDetail = {

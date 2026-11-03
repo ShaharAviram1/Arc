@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from 'react'
+import { useState, type MouseEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
+import { OpenDemandLinks } from '@/components/OpenDemandLinks'
 import { ListStatusControl } from '@/components/ListStatusControl'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
 import { EpisodeMoreMenu } from '@/components/ReleaseSheet'
@@ -44,18 +45,18 @@ import {
   keyVisual,
   listErrorMessage,
   malUrl,
-  sampleErrorMessage,
   searchSummary,
   useAnime,
-  useCancelSample,
-  useRequestSample,
   useSetPinned,
   useRetryTranscode,
+  useRewatch,
+  rewatchErrorMessage,
   useSetListEntry,
   type AnimeCredit,
   type AnimeDetail,
   type AnimeRelation,
   type CatalogSource,
+  type DemandRefusalInfo,
   type EpisodeOut,
   type ListEntry,
 } from '@/lib/anime'
@@ -64,6 +65,7 @@ import type { MalSync } from '@/lib/mal'
 import {
   useMarkWatched,
   useUnmarkWatched,
+  useWithdrawDemand,
   WATCHED_BY_PROGRESS_HINT,
   type WatchState,
 } from '@/lib/playback'
@@ -271,18 +273,68 @@ function metaLine(anime: AnimeDetail): string {
 }
 
 /**
- * The episode the primary action offers: the first one that has arrived and
- * has not been watched, else the first that has arrived at all — a show
- * already finished still has something to play. Null when nothing is ready,
- * which is what turns the button into the disabled notice.
+ * The episode the primary action offers (M21): the first aired episode that
+ * has not been watched — ready or not, since any aired episode plays on a
+ * click (FR-A14) — else, with everything aired watched, the first ready one,
+ * so a finished show still has something to play. Null when there is
+ * neither, which is what turns the button into the disabled notice.
  *
- * "Watched" here is FR-W5's flag, which is the whole reason this reads right
- * on an imported list: a viewer at episode 9 on MyAnimeList is offered 10,
- * not the first episode Arc happens to hold a file for.
+ * "Watched" here is FR-W5's flag (in a rewatch pass, the pass's own, FR-W7),
+ * which is the whole reason this reads right on an imported list: a viewer at
+ * episode 9 on MyAnimeList is offered 10, not the first episode Arc happens
+ * to hold a file for.
  */
 function playableEpisode(episodes: EpisodeOut[]): EpisodeOut | null {
-  const ready = episodes.filter((episode) => episode.state === 'ready')
-  return ready.find((episode) => !episode.watched) ?? ready[0] ?? null
+  const next = episodes.find((episode) => episode.aired && !episode.watched)
+  if (next !== undefined) return next
+  return episodes.find((episode) => episode.state === 'ready') ?? null
+}
+
+/** Episode states a press of play would still have to fetch (the server's own list). */
+const NEEDS_FETCHING: ReadonlySet<string> = new Set([
+  'not_wanted',
+  'wanted',
+  'searching',
+  'unavailable',
+  'failed',
+])
+
+/**
+ * The refusal a press of play on this episode would get right now (FR-A14,
+ * M21), read from the page's one `demand.refusal`: the cap applies to a row
+ * not already demanded; paused and held only to a row that still has to be
+ * fetched. Null when the press goes through to the player — whose own
+ * demand's 409 is still the last word.
+ */
+function refusalFor(anime: AnimeDetail, episode: EpisodeOut): DemandRefusalInfo | null {
+  const refusal = anime.demand?.refusal ?? null
+  if (refusal === null) return null
+  if (refusal.code === 'demand_cap') return episode.demanded === true ? null : refusal
+  return NEEDS_FETCHING.has(episode.state) ? refusal : null
+}
+
+/**
+ * The page's refusal, said in place of the navigation (FR-A14, M21): the
+ * server's sentence and, for the cap, the open demands to go and finish or
+ * withdraw.
+ */
+function RefusalToast({
+  refusal,
+  anime,
+  className,
+}: {
+  refusal: DemandRefusalInfo
+  anime: AnimeDetail
+  className?: string
+}) {
+  return (
+    <div role="alert" className={cx('text-[13px] text-[var(--arc-error)]', className)}>
+      <p>{refusal.message}</p>
+      {refusal.code === 'demand_cap' ? (
+        <OpenDemandLinks open={anime.demand?.open ?? []} className="mt-1" />
+      ) : null}
+    </div>
+  )
 }
 
 /** Whether an upcoming episode lands today in the viewer's own zone (FR-C3). */
@@ -526,50 +578,6 @@ function ScoreControl({ animeId, score }: { animeId: number; score: number | nul
 }
 
 /**
- * The lowest-numbered episode, which is what "episode 1" means here.
- *
- * By number rather than by position: the list arrives in order today, and a
- * button that fetches "the first episode" should not depend on that staying
- * true for a show whose specials were written first.
- */
-function firstEpisode(episodes: EpisodeOut[]): EpisodeOut | null {
-  return episodes.reduce<EpisodeOut | null>(
-    (lowest, episode) => (lowest === null || episode.number < lowest.number ? episode : lowest),
-    null,
-  )
-}
-
-/** What the one button says while each half of the toggle is in flight. */
-const SAMPLE_ASKING = 'Asking…'
-const SAMPLE_CANCELLING = 'Cancelling…'
-
-/** What it offers on hover once the sample is on: the other half of the toggle. */
-const SAMPLE_CANCEL = 'Cancel request'
-
-/**
- * The accessible name of the pressed button — the *action*, since the state is
- * already carried by `aria-pressed` and the visible label. Without it the
- * button reads as a statement ("Episode 1 requested") and nothing tells a
- * keyboard or screen-reader user that pressing it again takes the request back.
- */
-const SAMPLE_CANCEL_HINT = 'Cancel the request'
-
-/**
- * "Try episode 1" — with the episode's own number, which is not always 1: a
- * show whose catalogue entry starts at 0 (a special published as episode 0) is
- * sampled from that row, and a button naming an episode the server will not
- * fetch would be the wrong promise.
- */
-function sampleLabel(number: number): string {
-  return `Try episode ${String(number)}`
-}
-
-/** And what the same button says once the request is in. */
-function sampleRequestedLabel(number: number): string {
-  return `Episode ${String(number)} requested`
-}
-
-/**
  * The tick on the pressed button. A text glyph, like the chevron on the pills
  * and the ⓘ on an episode row: this design ships no icon set, and a character
  * inherits `currentColor` and the line box for free.
@@ -579,96 +587,6 @@ function CheckGlyph() {
     <span aria-hidden="true" className="text-[13px] leading-none">
       ✓
     </span>
-  )
-}
-
-/**
- * "Try episode 1" (spec §4.2 FR-A8).
- *
- * The one way to cause a download without committing to the show: Arc fetches
- * the first episode and nothing else, and the list and MyAnimeList are left
- * exactly as they were. Deciding whether a show is worth adding is what the
- * first episode is *for*, and the alternative was adding it as planned and
- * remembering to take it off again.
- *
- * Shown only where it means something. A show the viewer is watching or plans
- * to watch already has its window fetching episode 1 and the ones after it, so
- * the button would duplicate a rule rather than offer one — **unless that entry
- * is dormant** (FR-A9), in which case there is no window and nothing is being
- * fetched, and one episode is a smaller thing to ask for than the whole show.
- * Both offers then sit in the hero: "Try episode 1" here, and "Fetch this show"
- * in the note below it. An episode that has not aired cannot be fetched by
- * anything, and one that is already `ready` is sitting there to be played — the
- * Play button above is the honest offer in both cases. Everything in between
- * (not fetched, searching, downloading) is reported by the episode's own row
- * (FR-A7), so this control says only whether the viewer has asked.
- *
- * **One button, both directions** (owner, 2026-09-13). Asking and taking it
- * back are the same decision seen from two sides, so they are the same
- * control: a toggle that carries `aria-pressed`, wears the pressed treatment
- * once the request is in, and offers "Cancel request" in place of its label on
- * hover or focus. The swap is two spans and `group-hover`/`group-focus-visible`
- * rather than React state — a label that changes under the pointer is a
- * styling concern, and a piece of state for it would be a second source of
- * truth about what the button does.
- */
-function SampleControl({ anime }: { anime: AnimeDetail }) {
-  const request = useRequestSample(anime.id)
-  const cancel = useCancelSample(anime.id)
-  const error = request.error ?? cancel.error
-
-  // A followed show's window covers episode 1 already — but a dormant entry
-  // has no window (FR-A9), so the offer stands and the server accepts it.
-  const following = anime.list_status === 'watching' || anime.list_status === 'planned'
-  if (following && anime.list_entry?.dormant !== true) return null
-
-  const sample = anime.sample
-  // The episode this would ask for, when there is an ask to make. The pressed
-  // half needs no episode: there is a request to take back whatever state the
-  // episode has reached.
-  const offer = sample === null ? firstEpisode(anime.episodes) : null
-  if (sample === null && (offer === null || !offer.aired || offer.state === 'ready')) return null
-
-  const pressed = sample !== null
-
-  let content: ReactNode = null
-  if (cancel.isPending) content = SAMPLE_CANCELLING
-  else if (request.isPending) content = SAMPLE_ASKING
-  else if (sample !== null) {
-    content = (
-      <>
-        <span className="inline-flex items-center gap-[8px] group-hover:hidden group-focus-visible:hidden">
-          <CheckGlyph />
-          {sampleRequestedLabel(sample.episode_number)}
-        </span>
-        <span className="hidden group-hover:inline group-focus-visible:inline">
-          {SAMPLE_CANCEL}
-        </span>
-      </>
-    )
-  } else if (offer !== null) content = sampleLabel(offer.number)
-
-  return (
-    <div className="flex flex-col items-start">
-      <Button
-        pressed={pressed}
-        disabled={request.isPending || cancel.isPending}
-        aria-label={pressed ? SAMPLE_CANCEL_HINT : undefined}
-        title={pressed ? SAMPLE_CANCEL_HINT : undefined}
-        className={pressed ? 'group' : undefined}
-        onClick={() => {
-          if (pressed) cancel.mutate()
-          else request.mutate()
-        }}
-      >
-        {content}
-      </Button>
-      {error === null ? null : (
-        <p role="alert" className="mt-1.5 text-[13px] text-[var(--arc-error)]">
-          {sampleErrorMessage(error)}
-        </p>
-      )}
-    </div>
   )
 }
 
@@ -890,7 +808,7 @@ const PENDING_SYNC = 'Saved on this device; syncs when Arc is reachable again'
  * since there is nothing yet to have watched.
  *
  * **One control, three states** (FR-W5, owner 2026-09-13), built like the
- * sample toggle above: unwatched it offers "Mark watched"; watched it *is* the
+ * "Keep files" toggle: unwatched it offers "Mark watched"; watched it *is* the
  * row's watched indicator — a pressed pill reading "✓ Watched" — and, where
  * there is a mark to take back, hovering or focusing it offers "Unwatch"
  * instead, from `group-hover` markup rather than from React state.
@@ -1064,15 +982,56 @@ function FewSeeders({
   )
 }
 
-/** The hover hint on a not-ready episode's Play (FR-A14, M20). */
-const PLAY_ON_DEMAND_HINT = 'Arc fetches it now; it plays as soon as it is ready'
+/** The hover hint on a not-ready episode's Play (FR-A14, M21). */
+const PLAY_ON_DEMAND_HINT =
+  'Arc fetches it now; it plays as it downloads, or when the file is complete for a season pack.'
+
+/** An episode the viewer pressed play on and has not finished (FR-A14, M21). */
+const FETCHING_ON_REQUEST = 'Fetching on request'
+const WITHDRAW_FAILED = 'Could not withdraw that. Try again.'
+
+/**
+ * "Fetching on request" and its ✕ (owner decision 2, 2026-11-03): the ✕
+ * withdraws the demand (`DELETE /api/episodes/{id}/demand`) and the page
+ * refetches, so the row and the cap's count follow the server.
+ */
+function DemandedNote({ animeId, episode }: { animeId: number; episode: EpisodeOut }) {
+  const withdraw = useWithdrawDemand()
+  return (
+    <span className="relative z-10 flex flex-col items-start gap-1 sm:items-end">
+      <span className="inline-flex items-center gap-2 text-[13px] text-[var(--arc-text-muted)]">
+        {FETCHING_ON_REQUEST}
+        <button
+          type="button"
+          disabled={withdraw.isPending}
+          aria-label={`Withdraw the request for episode ${String(episode.number)}`}
+          title="Withdraw the request"
+          onClick={() => {
+            withdraw.mutate({ episodeId: episode.id, animeId })
+          }}
+          className={cx('leading-none hover:text-[var(--arc-text)]', FOCUS_RING)}
+        >
+          ✕
+        </button>
+      </span>
+      {withdraw.isError ? (
+        <span role="alert" className="text-[13px] text-[var(--arc-error)]">
+          {WITHDRAW_FAILED}
+        </span>
+      ) : null}
+    </span>
+  )
+}
 
 /**
  * One episode (spec §6).
  *
- * A window episode that is not ready yet but can be fetched on demand
- * (`fetchable`, FR-A14) is a target too, with a Play button: the player asks
- * the server for it and waits.
+ * Every aired episode is a target (M21, FR-A14): a ready one plays, and one
+ * that is not ready yet (`fetchable`) opens the player with the demand flag
+ * and has a Play chip — the player asks the server for it and waits. An
+ * un-aired row is inert. When the page's `demand.refusal` applies to the row
+ * (the cap, acquisition paused, storage held), a press says the server's
+ * sentence in the row and does not navigate.
  *
  * The whole row is the target when the episode is playable — an overlay on the
  * title link rather than a row-wide `<Link>`, because the row also holds a
@@ -1104,10 +1063,18 @@ function EpisodeRow({
   const onDevice = canDownload && record?.state === 'downloaded'
   // A trip-only episode is never ready, but the copy on this device plays (FR-S9).
   const playable = episode.state === 'ready' || onDevice
-  // Play on demand (FR-A14, M20): a window episode that is not ready yet. The
+  // Play on demand (FR-A14, M21): any aired episode that is not ready yet. The
   // player asks the server for it and waits with "Searching" / "Downloading".
-  const fetchable = !playable && episode.fetchable === true
+  const fetchable = !playable && episode.aired && episode.fetchable === true
   const watchState: WatchState | undefined = fetchable ? { demand: true } : undefined
+  const refusal = fetchable ? refusalFor(anime, episode) : null
+  const [refused, setRefused] = useState<DemandRefusalInfo | null>(null)
+  /** A press the page already knows would be refused: say so, stay here. */
+  const guard = (event: MouseEvent) => {
+    if (refusal === null) return
+    event.preventDefault()
+    setRefused(refusal)
+  }
   const title = episode.title ?? `Episode ${String(episode.number)}`
   const state =
     tripEpisodeState(episode, trip?.episode, onDevice, trip?.elsewhere === true) ??
@@ -1132,6 +1099,7 @@ function EpisodeRow({
             <Link
               to={`/watch/${String(episode.id)}`}
               state={watchState}
+              onClick={guard}
               className={cx('after:absolute after:inset-0 after:rounded-row', FOCUS_RING)}
             >
               {`${String(episode.number)}. ${title}`}
@@ -1151,6 +1119,9 @@ function EpisodeRow({
         {canDownload ? (
           <OfflineReason episodeId={episode.id} className="mt-1 block text-[13px]" />
         ) : null}
+        {refused === null ? null : (
+          <RefusalToast refusal={refused} anime={anime} className="relative z-10 mt-1.5" />
+        )}
         {episode.few_seeders === true ? (
           <FewSeeders
             anime={anime}
@@ -1188,6 +1159,9 @@ function EpisodeRow({
               />
             </span>
           )}
+          {fetchable && episode.demanded === true ? (
+            <DemandedNote animeId={anime.id} episode={episode} />
+          ) : null}
           {episode.state === 'failed' && isAdmin ? (
             <span className="relative z-10 flex flex-col items-end gap-1.5">
               <RetryTranscode animeId={anime.id} episodeId={episode.id} />
@@ -1205,6 +1179,7 @@ function EpisodeRow({
             <Link
               to={`/watch/${String(episode.id)}`}
               state={watchState}
+              onClick={guard}
               aria-label={`Fetch and play episode ${String(episode.number)}`}
               title={PLAY_ON_DEMAND_HINT}
               className={buttonClass('chip', 'text-[var(--arc-text)]')}
@@ -1741,6 +1716,91 @@ function PinControl({ anime }: { anime: AnimeDetail }) {
   )
 }
 
+const REWATCH_LABEL = 'Rewatch'
+const REWATCH_WORKING = 'Saving…'
+const REWATCH_HINT_OFF =
+  'Watch this show again without touching your list or MyAnimeList. Arc fetches ahead as usual.'
+const REWATCH_HINT_ON = 'Press to end the rewatch. Your list stays as it is.'
+/** The line under the badge: what a pass does not do (FR-W7). */
+const REWATCH_NOTE = 'Your list and MyAnimeList are left as they are.'
+
+/** "Rewatching · ep 3 / 12": the pass's position and where it ends (FR-W7). */
+function rewatchBadge(position: number, total: number): string {
+  return `Rewatching · ep ${String(position)} / ${String(total)}`
+}
+
+/**
+ * Rewatch mode's switch (spec FR-W7, M21).
+ *
+ * A toggle with `aria-pressed`, beside "Keep files": on opens a pass (`PUT
+ * /api/anime/{id}/rewatch`), off ends it (`DELETE`). In a pass the show's
+ * watched marks, the hero's pick and the home shelves read the pass, and no
+ * watch of it writes to the list or to MyAnimeList. The server's 409 (no
+ * aired episode yet) is said under it.
+ */
+function RewatchControl({ anime }: { anime: AnimeDetail }) {
+  const rewatch = useRewatch(anime.id)
+  const on = anime.rewatch !== null && anime.rewatch !== undefined
+
+  return (
+    <div className="flex flex-col items-start">
+      <Button
+        pressed={on}
+        disabled={rewatch.isPending}
+        aria-label={REWATCH_LABEL}
+        aria-busy={rewatch.isPending}
+        title={on ? REWATCH_HINT_ON : REWATCH_HINT_OFF}
+        onClick={() => {
+          rewatch.mutate(!on)
+        }}
+      >
+        <span className="inline-flex items-center gap-[8px]" aria-hidden="true">
+          {on && !rewatch.isPending ? <CheckGlyph /> : null}
+          {rewatch.isPending ? REWATCH_WORKING : REWATCH_LABEL}
+        </span>
+      </Button>
+      {rewatch.isError ? (
+        <p role="alert" className="mt-1.5 text-[13px] text-[var(--arc-error)]">
+          {rewatchErrorMessage(rewatch.error)}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The hero's primary action (M21): play the first unwatched aired episode —
+ * straight to the player when it is ready, with the demand flag when it is
+ * not, and the page's refusal said in place of the navigation.
+ */
+function HeroPlay({ anime, episode }: { anime: AnimeDetail; episode: EpisodeOut }) {
+  const [refused, setRefused] = useState<DemandRefusalInfo | null>(null)
+  const ready = episode.state === 'ready'
+  const refusal = ready ? null : refusalFor(anime, episode)
+  const state: WatchState | undefined = ready ? undefined : { demand: true }
+  return (
+    <div className="flex flex-col items-start">
+      <Link
+        to={`/watch/${String(episode.id)}`}
+        state={state}
+        onClick={(event) => {
+          if (refusal === null) return
+          event.preventDefault()
+          setRefused(refusal)
+        }}
+        title={ready ? undefined : PLAY_ON_DEMAND_HINT}
+        className={buttonClass('primary')}
+      >
+        <PlayGlyph />
+        {`Play episode ${String(episode.number)}`}
+      </Link>
+      {refused === null ? null : (
+        <RefusalToast refusal={refused} anime={anime} className="mt-1.5 max-w-[46ch]" />
+      )}
+    </div>
+  )
+}
+
 /** The hero, its title block, and the row of actions under it. */
 function Hero({
   anime,
@@ -1780,23 +1840,29 @@ function Hero({
         {playable === null ? (
           <Button disabled>{NOTHING_READY}</Button>
         ) : (
-          <Link to={`/watch/${String(playable.id)}`} className={buttonClass('primary')}>
-            <PlayGlyph />
-            {`Play episode ${String(playable.number)}`}
-          </Link>
+          <HeroPlay anime={anime} episode={playable} />
         )}
         <ListStatusControl
           animeId={anime.id}
           status={anime.list_status}
           className={PILL_WRAP_FORCED}
         />
-        <SampleControl anime={anime} />
         {entry === null ? null : <ScoreControl animeId={anime.id} score={entry.score} />}
         {canTrip ? <PinControl anime={anime} /> : null}
+        <RewatchControl anime={anime} />
         {canTrip && !hasTrip && tripBlocked === null ? <TripControl anime={anime} /> : null}
       </div>
       {tripBlocked === null ? null : (
         <p className="mt-2 text-[13px] text-[var(--arc-text-muted)]">{tripBlocked}</p>
+      )}
+
+      {anime.rewatch === null || anime.rewatch === undefined ? null : (
+        <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-[var(--arc-text-muted)]">
+          <span className="rounded-full border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3 py-1 text-[var(--arc-text)]">
+            {rewatchBadge(anime.rewatch.position, anime.rewatch.total)}
+          </span>
+          <span>{REWATCH_NOTE}</span>
+        </p>
       )}
 
       <DormantNote anime={anime} />
