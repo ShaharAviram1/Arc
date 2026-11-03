@@ -3438,3 +3438,49 @@ through the same edge, without the grace period.
   too, even with an episode still waiting. The deadline and cancel ends are
   unchanged. Only completions recorded in Arc count, and the end is final (an
   un-mark after it does not reopen the trip).
+- 2026-11-03 (owner) — **M21: any episode on click, walking a show, rewatch
+  mode, demo removal, pack hygiene** (built in M21; FR-A1, FR-A4, FR-A8,
+  FR-A9, FR-A10, FR-A11, FR-A14, FR-S4, FR-S5 item 3, FR-W1, FR-W4, FR-W5,
+  FR-W6, new FR-W7, FR-M7, FR-T1, FR-D2, FR-D4, FR-D5, §1, §3, §5, §8; CLAUDE.md
+  acquisition and MAL-write rules). Arc is used only by the owner. Owner:
+  "we should make it so that every episode on every show is playable when
+  clicked on, the episode goes into download and the video starts playing.
+  also we will introduce a rewatch path, that will follow the same logic of
+  normal shows, but not changing the mal entry." The decisions: (1) any
+  episode on click — every episode of every show, list status irrelevant;
+  one click is one demand plus the player (live for a single, "Downloading
+  n %, plays when the file is complete" for a pack) — FR-A14; (2) a demand
+  lives until finished in the current pass or untouched for D days, never
+  shelved or cancelled for list status or progress — FR-A14, FR-T2; (3)
+  walking: after a clicked episode plays, the normal N look-ahead applies
+  from that position (halfway prefetch, thin-swarm N, device skip) without
+  touching the list — FR-A1; (4) a cap `demand_max_open` (default 3, admin
+  setting), demands outside K — FR-A14, FR-A10, FR-D2; (5) normal-mode list
+  effects stay (finishing adds as Watching and advances MAL) — FR-S4; (6)
+  rewatch is a per-show switch kept on the server, ending on off or on the
+  pass's last episode, with no MAL write and no list change, a separate pass
+  completion driving marks, Continue watching, Ready to watch and the hero
+  pick, the same look-ahead from the pass's position, and MAL's rewatch
+  fields untouched — FR-W7, FR-W5, FR-W1, FR-M7; (7) retention unchanged,
+  a rewatch completion stamping a fresh anchor — FR-T1; (8) the docs
+  rewritten (this entry); (9) the demo account and demo-only code removed —
+  FR-D5 retired. Also moved from M17 into M21: match review for a season
+  pack whose files cannot be identified — FR-A4, FR-A11, FR-D4 — and the
+  `downloads/batch` leftover sweep — FR-T1. The text describes the target;
+  "(M21)" marks what is not live until M21 ships.
+- 2026-11-03 (owner, "go") — The five remaining M21 decisions, each on the
+  orchestrator's recommendation: (1) "Try episode 1" (FR-A8) is folded into
+  the click — the button goes now, the code later (FR-A8 retired); (2) a
+  demand can be withdrawn — the ✕ on "Fetching on request", and the cap
+  refusal lists the open demands (FR-A14); (3) Next season pressed during a
+  rewatch carries the rewatch on to the sequel when its list entry has
+  progress above 0 or is completed, otherwise it is normal mode with the
+  entry created as Watching (FR-W7 item 5, FR-A9, FR-S5 item 3); (4) a pass
+  on an airing show ends at the newest aired episode (FR-W7 item 4); (5) the
+  "How Arc works" page is removed (FR-D5, §5).
+- 2026-11-03 (orchestrator, small calls under the above) — `demand_max_open`
+  0 means no cap (as `slot_cap_k`); a pack pick left waiting D days is
+  dismissed on its own (FR-A4); the leftover sweep starts as a dry run and
+  never touches a file changed within the last hour (FR-T1); `/api/auth/me`
+  keeps `is_demo: false` for one release so a cached installed app does not
+  reject it (FR-D5).
