@@ -4505,11 +4505,11 @@ backends), `pool`, `continuations`, `history`, `prompt`, `schema`, `runs`.
 ### 5.7 Retention
 `retention_sweep` (hourly, priority 200, first run 10 min after worker
 start): candidates are `ready|downloaded|matched|failed` episodes with no
-live want. Grace anchor = latest of every completion — since M21 every user's
+live want. Grace anchor = latest of every completion (since M21 every user's
 **latest finish**, `max(coalesce(watch_progress.finished_at, completed_at))`
-over rows where it is not null (the `completed` filter dropped), so a rewatch
-completion, in a pass or not, is a fresh anchor; `completed_at` alone
-before — every `list_entries.updated_at` of a user whose
+over rows where it is not null, the `completed` filter dropped, so a rewatch
+completion, in a pass or not, is a fresh anchor; `completed_at` alone before),
+every `list_entries.updated_at` of a user whose
 `progress` covers the episode's number (FR-W5, 2026-09-13 — one grouped join
 on `(anime_id, number <= progress)`; the column is an approximation, since it
 moves for any change to the row and nothing records "when progress passed
