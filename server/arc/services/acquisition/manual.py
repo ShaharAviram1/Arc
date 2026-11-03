@@ -93,6 +93,7 @@ from arc.services.acquisition.nyaa import (
 )
 from arc.services.acquisition.qbit import (
     DECIDED_STATES,
+    QBIT_AWAITING_PICK,
     QBIT_CANCELLED,
     QBIT_EVICTED,
     QBIT_MISSING,
@@ -484,6 +485,8 @@ TRIED: Final[Mapping[str, str]] = {
     QBIT_REJECTED: "its file was rejected in review",
     QBIT_CANCELLED: "Arc is removing this release right now",
     QBIT_UNREADABLE: "Arc could not identify the files in this pack",
+    # M21: held stopped until a person picks the episode's file in review.
+    QBIT_AWAITING_PICK: "this pack is waiting for someone to pick the episode's file",
     QBIT_MISSING: "this release went missing from the torrent client",
     # The remembered release (M20 T9): the next search re-adds it by itself.
     QBIT_EVICTED: "Arc will fetch this release again on its own",

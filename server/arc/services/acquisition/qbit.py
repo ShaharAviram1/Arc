@@ -187,6 +187,14 @@ QBIT_UNREADABLE: Final[str] = "unreadable"
 #: because the delete already happened and there is nothing left to chase.
 QBIT_EVICTED: Final[str] = "evicted"
 
+#: A **season pack** Arc could not read one wanted episode's file out of, kept
+#: in the client **stopped with nothing selected** while a ``pack_picks`` row
+#: on it is pending (FR-A4, FR-D4, M21; architecture.md §5.2 step 4). A person
+#: picks the file (the pack is re-selected and started) or dismisses the pick
+#: (the pack becomes :data:`QBIT_UNREADABLE`). Held, not cancelled: never
+#: :data:`QBIT_CANCELLED`, which deletes it with its files.
+QBIT_AWAITING_PICK: Final[str] = "awaiting_pick"
+
 #: The values ``poll_qbit`` must never overwrite, in either direction: neither
 #: with a live state string from the client nor with :data:`QBIT_MISSING`. Each
 #: is a *decision* somebody or something made about this download, and the
@@ -194,7 +202,16 @@ QBIT_EVICTED: Final[str] = "evicted"
 #: sixty seconds later, when Arc is the reason it is missing, would lose the
 #: answer to "why is this episode unavailable?".
 DECIDED_STATES: Final[frozenset[str]] = frozenset(
-    {QBIT_REJECTED, QBIT_STALLED, QBIT_CANCELLED, QBIT_UNREADABLE, QBIT_EVICTED}
+    {
+        QBIT_REJECTED,
+        QBIT_STALLED,
+        QBIT_CANCELLED,
+        QBIT_UNREADABLE,
+        QBIT_EVICTED,
+        # M21: a pack held stopped for a person's pick is Arc's decision too;
+        # a poll calling it "stoppedDL" or "missing" would lose the pick.
+        QBIT_AWAITING_PICK,
+    }
 )
 
 #: Below what rate, in KiB/s, qBittorrent counts a torrent as "slow" and stops
@@ -1246,6 +1263,7 @@ __all__ = [
     "FILE_OFF",
     "FILE_ON",
     "MAX_TORRENT_FILES",
+    "QBIT_AWAITING_PICK",
     "QBIT_CANCELLED",
     "QBIT_EVICTED",
     "QBIT_MISSING",

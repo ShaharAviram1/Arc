@@ -4,12 +4,14 @@ A ``Want`` is one user's interest in one episode. Wants from all users merge:
 an episode with any live want is fetched once (FR-A2). A ``Torrent`` is the
 Nyaa release picked for an episode and handed to qBittorrent, and a
 ``TorrentFile`` is one file inside a batch and whether Arc asked for it
-(FR-A11).
+(FR-A11). A ``PackPick`` is a season pack whose file for one episode Arc could
+not identify, waiting for a person to pick it (FR-A4, FR-D4, M21).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -25,6 +27,7 @@ from sqlalchemy import (
     false,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
@@ -296,3 +299,67 @@ class TorrentFile(Base):
     #: to be written is distinguishable from one that was never asked for.
     priority: Mapped[int | None] = mapped_column(SmallInteger)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+#: The two values of :attr:`PackPick.resolution`: a person chose one of the
+#: pack's files for the episode, or dismissed the pick (the pack goes to the
+#: ``unreadable`` tombstone and FR-A6's daily retry).
+PACK_PICK_PICKED = "picked"
+PACK_PICK_DISMISSED = "dismissed"
+
+#: At most one **pending** pick per pack and episode; resolved rows are kept as
+#: the record of who picked what. Named for the migration test.
+PENDING_PACK_PICK_INDEX = "uq_pack_picks_pending"
+PENDING_PACK_PICK_PREDICATE = "resolved_at IS NULL"
+
+#: "Is this episode's pack waiting for a pick?" — what the pending player and
+#: the show page ask, and what an episode's cascade delete scans.
+PACK_PICK_EPISODE_INDEX = "ix_pack_picks_episode_id"
+
+
+class PackPick(Base):
+    """A season pack waiting for a person to pick one episode's file (M21).
+
+    Written by the refusal path in ``acquisition/jobs.py`` when the parser
+    cannot tell which of a pack's files is the wanted episode (the plan's
+    ``refused_reason`` is :attr:`reason`); the pack stays in the client,
+    stopped with nothing selected, as ``qbit_state = 'awaiting_pick'``
+    (:data:`arc.services.acquisition.qbit.QBIT_AWAITING_PICK`). Resolved by
+    the review routes (architecture.md §5.2 step 4). No LLM suggestion is
+    stored or applied.
+    """
+
+    __tablename__ = "pack_picks"
+    __table_args__ = (
+        Index(
+            PENDING_PACK_PICK_INDEX,
+            "torrent_id",
+            "episode_id",
+            unique=True,
+            postgresql_where=text(PENDING_PACK_PICK_PREDICATE),
+        ),
+        Index(PACK_PICK_EPISODE_INDEX, "episode_id"),
+    )
+
+    id: Mapped[int] = bigint_pk()
+    torrent_id: Mapped[int] = mapped_column(
+        ForeignKey("torrents.id", ondelete="CASCADE"), nullable=False
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Why Arc could not pick the file itself, in words for the reviewer.
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The pack's video files with the parser's reading:
+    #: ``[{file_index, path, size, parsed_number | null}]``, paths relative to
+    #: the pack. Data, never a path Arc opens.
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = created_at()
+    #: Null while pending.
+    resolved_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: :data:`PACK_PICK_PICKED` or :data:`PACK_PICK_DISMISSED`; null while pending.
+    resolution: Mapped[str | None] = mapped_column(String(16))
+    #: The file the person chose, when :attr:`resolution` is ``picked``.
+    picked_file_index: Mapped[int | None] = mapped_column(Integer)
+    #: Who resolved it; kept null if that account is deleted.
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))

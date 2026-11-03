@@ -1,19 +1,21 @@
-"""Per-user tracking: ``list_entries`` and ``watch_progress``.
+"""Per-user tracking: ``list_entries``, ``watch_progress``, ``rewatches``, ``walks``.
 
-Both are keyed by (user, thing): a user's view of a show and of an episode.
-Everything acquisition and MAL sync do starts from these two tables
-(architecture.md §5.1, §5.5).
+The first two are keyed by (user, thing): a user's view of a show and of an
+episode. Everything acquisition and MAL sync do starts from them
+(architecture.md §5.1, §5.5). ``rewatches`` holds a user's rewatch passes of a
+show (FR-W7, M21) and ``walks`` where a user's look-ahead on a show starts
+after a play (FR-A1, M21).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, false, text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
-from arc.models._columns import TZDateTime, updated_at
+from arc.models._columns import TZDateTime, bigint_pk, updated_at
 from arc.models.enums import ListStatus, UpdatedBy, enum_column
 
 #: One user's rows, newest first. Named as a constant for the same reason
@@ -136,3 +138,88 @@ class WatchProgress(Base):
     #: against an un-mark made after it, elsewhere (owner, 2026-10-05).
     unmarked_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     updated_at: Mapped[datetime] = updated_at()
+    #: The **latest** moment this user crossed the completion mark (90 %) or
+    #: marked the episode watched by hand, in any mode — normal or a rewatch
+    #: pass (FR-S4, FR-W7, M21). Stamped again on every crossing, never moved
+    #: backwards by a late replay, and cleared by an explicit un-mark (inside a
+    #: rewatch pass only when it falls within that pass). :attr:`completed_at`
+    #: stays the once-written *first* watch; this is the one that ends a demand
+    #: (``finished_at >= wants.demanded_at``), counts a rewatch pass
+    #: (``finished_at >= rewatches.started_at``) and anchors retention's
+    #: watched rule. Backfilled from ``completed_at`` where ``completed``.
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+#: The two values of :attr:`Rewatch.end_reason`: the user turned rewatch mode
+#: off, or the pass reached its last episode (the show's last, or the newest
+#: aired one of an airing show).
+REWATCH_END_OFF = "off"
+REWATCH_END_FINISHED = "finished"
+
+#: At most one open pass per user and show. A partial unique index rather than
+#: a check in code, for the reason :data:`arc.models.trips.ONE_ACTIVE_TRIP_INDEX`
+#: gives: two requests racing the start path's own check can both pass it.
+OPEN_REWATCH_INDEX = "uq_rewatches_open"
+OPEN_REWATCH_PREDICATE = "ended_at IS NULL"
+
+#: "The pass of (user, show) open at time t" and "this user's passes": the
+#: user prefix serves the second, the full key the first.
+REWATCH_LOOKUP_INDEX = "ix_rewatches_user_id_anime_id_started_at"
+
+
+class Rewatch(Base):
+    """One rewatch pass of one show by one user (FR-W7, M21).
+
+    Open while ``ended_at`` is null. Ended rows are kept: an offline report
+    replayed later is judged against the pass that was open when the device
+    recorded it (FR-S8). There is no cursor column — the pass's position is
+    the highest episode number whose ``watch_progress.finished_at`` is at or
+    after :attr:`started_at`. Written only by
+    ``arc.services.playback.rewatch``.
+    """
+
+    __tablename__ = "rewatches"
+    __table_args__ = (
+        Index(
+            OPEN_REWATCH_INDEX,
+            "user_id",
+            "anime_id",
+            unique=True,
+            postgresql_where=text(OPEN_REWATCH_PREDICATE),
+        ),
+        Index(REWATCH_LOOKUP_INDEX, "user_id", "anime_id", "started_at"),
+    )
+
+    id: Mapped[int] = bigint_pk()
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.id", ondelete="CASCADE"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    #: Null while the pass is open.
+    ended_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    #: :data:`REWATCH_END_OFF` or :data:`REWATCH_END_FINISHED`; null while open.
+    end_reason: Mapped[str | None] = mapped_column(String(16))
+
+
+class Walk(Base):
+    """Where one user's look-ahead on one show starts after a play (FR-A1, M21).
+
+    ``after_number`` is k−1 while episode k plays and k once it is finished;
+    the window takes the next N aired episodes after it. Written only by
+    ``record_progress``, and only by a report whose time is at or after
+    :attr:`touched_at`, so an older offline replay does not move it. Stored
+    rather than derived from ``watch_progress`` so the progress rows from
+    before M21 cannot start walks on long-dropped shows: walks start empty.
+    """
+
+    __tablename__ = "walks"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.id", ondelete="CASCADE"), primary_key=True
+    )
+    after_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    touched_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)

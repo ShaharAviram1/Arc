@@ -11,7 +11,12 @@ from arc.db import Base
 from arc.models.acquisition import (
     EPISODE_FILE_INDEX,
     KIND_EPISODE_PREDICATE,
+    PACK_PICK_DISMISSED,
+    PACK_PICK_EPISODE_INDEX,
+    PACK_PICK_PICKED,
+    PENDING_PACK_PICK_INDEX,
     WANTED_CLAIM_INDEX,
+    PackPick,
     Torrent,
     TorrentFile,
     Want,
@@ -62,7 +67,17 @@ from arc.models.offline import (
 from arc.models.pins import ShowPin
 from arc.models.recs import RecRun
 from arc.models.settings import DEFAULT_SETTINGS, Setting
-from arc.models.tracking import IN_PROGRESS_INDEX, ListEntry, WatchProgress
+from arc.models.tracking import (
+    IN_PROGRESS_INDEX,
+    OPEN_REWATCH_INDEX,
+    REWATCH_END_FINISHED,
+    REWATCH_END_OFF,
+    REWATCH_LOOKUP_INDEX,
+    ListEntry,
+    Rewatch,
+    Walk,
+    WatchProgress,
+)
 from arc.models.trips import ONE_ACTIVE_TRIP_INDEX, TRIP_EPISODE_INDEX, Trip, TripEpisode
 from arc.models.user import Invite, Session, User
 
@@ -78,9 +93,17 @@ __all__ = [
     "OFFLINE_SEARCH_INDEX",
     "OFFLINE_SEASON_INDEX",
     "ONE_ACTIVE_TRIP_INDEX",
+    "OPEN_REWATCH_INDEX",
+    "PACK_PICK_DISMISSED",
+    "PACK_PICK_EPISODE_INDEX",
+    "PACK_PICK_PICKED",
+    "PENDING_PACK_PICK_INDEX",
     "PREPARE_EPISODE_INDEX",
     "RENDITION_REMUX",
     "RENDITION_TRANSCODE",
+    "REWATCH_END_FINISHED",
+    "REWATCH_END_OFF",
+    "REWATCH_LOOKUP_INDEX",
     "TRANSCODE_EPISODE_INDEX",
     "TRIP_EPISODE_INDEX",
     "WANTED_CLAIM_INDEX",
@@ -105,9 +128,11 @@ __all__ = [
     "OfflineAnime",
     "OfflineId",
     "OfflineImport",
+    "PackPick",
     "RecRun",
     "Rendition",
     "ReviewState",
+    "Rewatch",
     "Session",
     "Setting",
     "ShowPin",
@@ -121,6 +146,7 @@ __all__ = [
     "UpdatedBy",
     "User",
     "UserRole",
+    "Walk",
     "Want",
     "WatchProgress",
 ]
