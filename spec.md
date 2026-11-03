@@ -167,7 +167,8 @@ is its only user, and uses it daily.
   seeder figure — single or season pack, a re-fetch whose figure was cleared
   skipped — recorded fewer than `slow_swarm_seeders` seeders keeps
   `look_ahead_slow` episodes ahead instead (default 3; never fewer than N, and
-  N = 0 still fetches nothing and stops what is running). It is derived at every reconciliation and
+  N = 0 empties the window and stops what it was fetching — a demand is
+  still honoured). It is derived at every reconciliation and
   stored nowhere, like the halfway prefetch below, and everything else here
   (prefetch, device skip, FR-A9, FR-A10) applies to that show's N unchanged. A
   want whose episode is already **downloading** is **not cancelled** because

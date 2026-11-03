@@ -557,7 +557,8 @@ stores — which rows a reader has dismissed — lives in that browser's
    open rewatch pass, from the pass position instead of the list's (§5.1a
    "M21"). Add the user's open demands (FR-A14) unconditionally. Upsert into
    `wants`. Remove wants
-   for shows now dropped/completed. Apply rule FR-T2 (drop stale wants).
+   for shows now dropped/completed (not demands, and not walks that moved
+   after the status change, §5.1a M21). Apply rule FR-T2 (drop stale wants).
 2. For each episode with ≥1 active want and state `not_wanted`/`unavailable`
    (retry due) → state `wanted`, enqueue `search_release`.
 3. `search_release`: build Nyaa RSS queries (romaji + english title, episode
@@ -1427,7 +1428,7 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
 manual.py`, routes in `api/manual_release.py`. A person can point an episode they want — or their active trip — at a release of
 their choosing: one of Arc's own candidates, or a pasted magnet / Nyaa link.
 It is not a "download anything" door: the scope is an episode the caller has a
-live want on (window, sample or trip; otherwise 404) or the caller's own active
+live want on (any live want — window, walk, demand, sample — or trip; otherwise 404) or the caller's own active
 trip's `pending` episodes, and only episodes with nothing landed
 (`not_wanted`/`wanted`/`searching`/`downloading`/`unavailable`) are touched.
 
@@ -4196,8 +4197,8 @@ above), so what is settled here is the **copy** — file and row — and the
    and score edits during a pass are ordinary user-originated list writes
    and reach MAL; MAL's own rewatch fields are never written. Next season
    during a pass carries the rewatch to the sequel only when its entry has
-   progress > 0 or is completed (otherwise normal mode, the entry created
-   as Watching). In normal mode a re-crossing re-stamps `finished_at`
+   progress > 0 or is completed (otherwise normal mode: an absent sequel
+   added as Watching, a dormant one activated). In normal mode a re-crossing re-stamps `finished_at`
    without a second MAL write (the list progress does not move).
 
 ### 5.5a MAL sync as built (M9)
