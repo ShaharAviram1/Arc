@@ -341,10 +341,10 @@ is its only user, and uses it daily.
   ordinary retry and ends "unavailable · only batch releases, and their files
   could not be identified" — because a missing file is visible and fixable and
   the wrong episode plays as though it were right. **A person may pick the
-  file instead** (M21, owner 2026-11-03, moved from M17): when every pack
-  found is refused for this reason — no file claims the wanted episode, or
-  several do; never a pack refused for holding too many files — and nothing
-  else is chosen, the best such pack is kept in the torrent client
+  file instead** (M21, owner 2026-11-03, moved from M17): when a search
+  chooses nothing and at least one pack was refused for this reason — no
+  file claims the wanted episode, or several do; a pack refused for holding
+  too many files never qualifies — the best such pack is kept in the torrent client
   **stopped, with nothing selected** (not one byte fetched), and the episode
   reads "unavailable · the pack's files need a person's pick (Review)". The
   Review page lists the pack's video files with the parser's reading of each
