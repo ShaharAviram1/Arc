@@ -129,9 +129,13 @@ PLAYS_WHEN_DOWNLOADED_MESSAGE = "This episode will play when its download finish
 
 
 def demand_cap_message(cap: int) -> str:
-    """The cap refusal's sentence (FR-A14): "You already have 3 episodes fetching …"."""
+    """The cap refusal's sentence (FR-A14): "You already have 3 episodes on request. …".
+
+    Not "fetching": the count includes demands whose episode is ready but not
+    yet watched, and ones Arc has found no release for.
+    """
     episodes = "episode" if cap == 1 else "episodes"
-    return f"You already have {cap} {episodes} fetching on request. Finish or cancel one first."
+    return f"You already have {cap} {episodes} on request. Finish or cancel one first."
 
 
 @dataclass(frozen=True, slots=True)

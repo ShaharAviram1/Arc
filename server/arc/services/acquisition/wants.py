@@ -622,6 +622,11 @@ class _Plan:
     #: ∪ an open rewatch pass. What :func:`_reconcile` asks when it chooses
     #: between deleting a row that left the window and shelving it.
     following: frozenset[tuple[int, int]] = frozenset()
+    #: (user, episode) for every episode a held pair's window would want if the
+    #: cap admitted it (its pre-cap window, prefetch included). What tells a
+    #: held show's window rows from rows nothing asks for any more (a withdrawn
+    #: demand), and what a stale demand on a held show counts as still wanted.
+    held_windows: frozenset[tuple[int, int]] = frozenset()
 
     @property
     def held_back(self) -> int:
@@ -787,40 +792,20 @@ async def _halfway(
     }
 
 
-#: List statuses that end a walk when the user sets them in Arc after the walk
-#: last moved (FR-A1, M21): the user said they are not watching the show now.
-WALK_ENDING_STATUSES: frozenset[ListStatus] = frozenset(
-    {ListStatus.DROPPED, ListStatus.ON_HOLD, ListStatus.COMPLETED}
-)
-
-
-def walk_counts(
-    touched_at: datetime,
-    *,
-    pass_started_at: datetime | None,
-    entry: ListEntry | None,
-) -> bool:
-    """Whether a walk touched within D days still opens a window (FR-A1, M21). Pure.
+def walk_counts(touched_at: datetime, *, pass_started_at: datetime | None) -> bool:
+    """Whether a walk touched within D days opens a window (FR-A1, M21). Pure.
 
     With a rewatch pass open, only a walk that moved since the pass began
     counts (FR-W7): the pass has its own position, and a walk left from before
-    it is about another watch. Without one, a walk ends when the user set the
-    show dropped, on hold or completed **in Arc** at or after its last move —
-    an FR-W5 auto-complete included: it stamps the entry with the very moment
-    the finishing report moved the walk, hence "at or after". The entry
-    carries no separate status-change time, so any Arc-side write that leaves
-    the entry in one of those statuses after the walk moved is read as that
-    change. A MyAnimeList-side change is not the user acting in Arc and ends
-    nothing.
+    it is about another watch. Nothing about the list entry is read here: the
+    user setting the show dropped, on hold or completed, FR-W5's auto-complete
+    and a pass ending **delete** the walk where they happen
+    (:mod:`arc.services.acquisition.walks`), because FR-S4's list advance
+    stamps the entry in the very instant a finishing report moves the walk.
     """
     if pass_started_at is not None:
         return touched_at >= pass_started_at
-    return not (
-        entry is not None
-        and entry.status in WALK_ENDING_STATUSES
-        and entry.updated_by is UpdatedBy.ARC
-        and entry.updated_at >= touched_at
-    )
+    return True
 
 
 async def _live_walks(
@@ -937,17 +922,6 @@ async def _plan_wants(
     }
     walks = await _live_walks(session, since=now - stale, user_ids=user_ids)
     passes = await _open_passes(session, user_ids)
-    # The entries of walked shows in any status: whether a walk still counts
-    # depends on what the user set the show to since (:func:`walk_counts`).
-    entries = dict(listed)
-    unread = [key for key in walks if key not in entries]
-    if unread:
-        for entry in (
-            await session.scalars(
-                select(ListEntry).where(tuple_(ListEntry.user_id, ListEntry.anime_id).in_(unread))
-            )
-        ).all():
-            entries[(entry.user_id, entry.anime_id)] = entry
 
     anime_ids = {anime_id for _, anime_id in (*listed, *walks, *passes)}
     shows_by_id: dict[int, Anime] = (
@@ -984,7 +958,7 @@ async def _plan_wants(
         if key[1] not in shows_by_id:
             continue
         pass_started = passes[key][0] if key in passes else None
-        if walk_counts(walk.touched_at, pass_started_at=pass_started, entry=entries.get(key)):
+        if walk_counts(walk.touched_at, pass_started_at=pass_started):
             walking[key] = walk.after_number
     positions: dict[tuple[int, int], tuple[int, ...]] = {}
     for key in {*base, *walking}:
@@ -1035,12 +1009,15 @@ async def _plan_wants(
         rows = episodes.get(anime_id, [])
         walked_at = walks[key].touched_at if key in walking else None
         started = passes[key][0] if key in passes else None
-        listed_entry = entries.get(key) if key in wanting else None
+        listed_entry = listed.get(key) if key in wanting else None
         touches[key] = _pair_touch(listed_entry, walk_at=walked_at, pass_at=started)
         n_show = show_look_ahead(look_ahead, look_ahead_slow, thin=anime_id in thin)
         picked: dict[int, Episode] = {}
         regular: set[int] = set()
         extra_ids: set[int] = set()
+        # The regular window before the device skip: what an occupant has to
+        # be fetching for the show to hold a slot (below).
+        reach: set[int] = set()
         for position in positions[key]:
             first_id = firsts.get((user_id, anime_id, position))
             prefetch = first_id is not None and (user_id, first_id) in halfway
@@ -1054,6 +1031,7 @@ async def _plan_wants(
                 prefetch=prefetch,
             )
             covers[user_id].update(episode.id for episode in unskipped)
+            reach.update(episode.id for episode in unskipped if episode.number <= position + n_show)
             # The same window with the device skip applied (FR-A15): what is
             # actually fetched.
             for episode in window(
@@ -1089,7 +1067,10 @@ async def _plan_wants(
                 anime_id=anime_id,
                 airing=anime.status == RELEASING,
                 updated_at=max(recency),
-                fetching=bool(occupied.get(key, set()) - extra_ids),
+                # An occupant only for its window's episodes (M21): a download
+                # nothing asks for any more — a withdrawn demand — must not
+                # hold the show a slot, or the held-show rule could never see it.
+                fetching=bool((occupied.get(key, set()) & reach) - extra_ids),
                 hungry=any(
                     (user_id, episode.id) not in live
                     for episode in chosen
@@ -1103,6 +1084,7 @@ async def _plan_wants(
     waiting: dict[int, set[int]] = {}
     fetching: dict[int, int] = {}
     held: set[tuple[int, int]] = set()
+    held_windows: set[tuple[int, int]] = set()
     for user_id, user_shows in shows.items():
         admitted, denied = assign_slots(user_shows, cap)
         if denied:
@@ -1118,6 +1100,8 @@ async def _plan_wants(
         for show in user_shows:
             key = (user_id, show.anime_id)
             # A waiting show still gets its halfway prefetch (never refused).
+            if show.anime_id in denied_ids:
+                held_windows.update((user_id, episode.id) for episode in windows[key])
             chosen = extras[key] if show.anime_id in denied_ids else windows[key]
             for episode in chosen:
                 desired[(user_id, episode.id)] = touches[key]
@@ -1138,6 +1122,7 @@ async def _plan_wants(
         thin=thin,
         look_ahead=look_ahead,
         following=following,
+        held_windows=frozenset(held_windows),
     )
     if plan.held_back:
         log.info(
@@ -1397,6 +1382,9 @@ async def compute_wants(
     # lives on as an ordinary want under that source's own rules. Only a stale
     # demand nobody else wants is dropped and its download cancelled.
     elsewhere.update(trips)
+    # The window a held show waits to be admitted with counts too: the slot
+    # cap decides when a window episode starts, not whether it is wanted.
+    elsewhere.update(plan.held_windows)
     stale_kept = demands.stale & elsewhere
 
     result = await _reconcile(
@@ -1410,7 +1398,9 @@ async def compute_wants(
         now=moment,
         planned_at=planned_at,
         keep_in_flight=plan.look_ahead > 0,
-        finished=demands.finished | stale_kept,
+        finished=demands.finished,
+        released=stale_kept,
+        held_windows=plan.held_windows,
     )
     result = replace(result, waiting=plan.held_back)
     result = await _drop_stale(
@@ -1457,20 +1447,24 @@ async def _trip_wants(session: AsyncSession) -> dict[tuple[int, int], _Touch]:
 
 
 async def _sample_wants(
-    session: AsyncSession, wanting: Collection[tuple[int, int]]
+    session: AsyncSession, following: Collection[tuple[int, int]]
 ) -> dict[tuple[int, int], _Touch]:
     """The live "try episode 1" wants the list cannot account for (FR-A8).
 
-    Only the ones whose (user, show) is **not** watching/planned: a sample on a
+    Only the ones whose (user, show) is **not followed** (M21: a list window,
+    a live walk or an open pass, :attr:`_Plan.following`): a sample on a
     followed show is the window's business, and adding it here would keep
-    episode 1 wanted after the user had watched it.
+    episode 1 wanted after the user had watched it. So a pre-M21 live sample on
+    a show the user has since walked is left to the walk's window, and once
+    that window has moved past episode 1 the row is deleted like any
+    watched-past window row.
 
     And only the ones the user has **not watched**. That second condition is
     what gives a sample an ending in the one case nothing else closes. A
     completed watch on an *unlisted* show makes the show ``watching`` (FR-S4),
-    so the row leaves through ``wanting``; but a show already on the list as
+    so the row leaves through ``following``; but a show already on the list as
     ``completed``, ``dropped`` or ``on_hold`` keeps that status — FR-S4 never
-    overrides one — so (user, show) never joins ``wanting``, and FR-T2's stale
+    overrides one — so (user, show) need not be followed, and FR-T2's stale
     drop excludes an episode its user has completed. Without this the row would
     be re-added to ``desired`` every quarter of an hour, retention would skip an
     episode with a live want, and a rewatched sample would pin its bytes for
@@ -1503,7 +1497,7 @@ async def _sample_wants(
     return {
         (want.user_id, want.episode_id): _Touch(at=want.created_at, by=UpdatedBy.ARC)
         for want, anime_id in rows.all()
-        if (want.user_id, anime_id) not in wanting
+        if (want.user_id, anime_id) not in following
     }
 
 
@@ -1599,6 +1593,8 @@ async def _reconcile(
     planned_at: datetime | None = None,
     keep_in_flight: bool = False,
     finished: Collection[tuple[int, int]] = (),
+    released: Collection[tuple[int, int]] = (),
+    held_windows: Collection[tuple[int, int]] = (),
 ) -> WantsResult:
     """Make ``wants`` equal ``desired``: insert, revive, drop, delete.
 
@@ -1608,9 +1604,18 @@ async def _reconcile(
     that left its window is deleted, a row of any other show is shelved, so a
     lapsed walk's leftovers are shelved :data:`REASON_NOT_WANTING`.
 
-    ``finished`` (M21, FR-A14) is the demands that are over: finished since
-    the press (:attr:`_Demands.finished`), plus stale ones something else
-    still asks for (:func:`compute_wants`). A row
+    ``held_windows`` (M21) is the pre-cap windows of the held pairs
+    (:attr:`_Plan.held_windows`). On a held pair a live, non-sample row with
+    no demand that not even that window asks for — a withdrawn demand — is
+    shelved :data:`REASON_NOT_WANTING`, so its download is cancelled rather
+    than left holding the show a slot; every other held row is left as found.
+
+    ``released`` is the stale demands something else still asks for
+    (:func:`compute_wants`): they lose ``demanded_at`` wherever they are, held
+    show included, and are never deleted here.
+
+    ``finished`` (M21, FR-A14) is the demands finished since the press
+    (:attr:`_Demands.finished`). A row
     nothing else asks for is **deleted** — whatever the show's status, held or
     not — so retention's watched grace runs from the fresh ``finished_at``
     rather than a drop anchor keeping the file G days; one something else
@@ -1633,19 +1638,20 @@ async def _reconcile(
     such rows are left exactly as they were found, and a flag would later make
     the trip's ending take the row with it). A trip-flagged row is therefore
     always one the trip itself brought in. When it leaves (the trip ended, or
-    the episode was delivered) it is **deleted** if its show is still in
-    ``wanting`` and not held — the ordinary "left the window" ending — and
+    the episode was delivered) it is **deleted** if its show is still
+    followed and not held — the ordinary "left the window" ending — and
     otherwise **shelved** with :data:`REASON_TRIP_ENDED`, held show included,
     so retention keeps the moment it stopped being wanted (FR-T1's anchor)
     and a held show does not keep an episode wanted for a device that no
     longer asks for it.
 
-    **Leaving is two different things** (FR-W4). A row whose (user, show) still
-    has a ``watching``/``planned`` entry left the *window* — the user watched
-    past it, or N was turned down — and is deleted: there is nothing to
-    remember, and a completion (which is what retention will measure the grace
-    period from) is already in ``watch_progress``. A row whose show is not in
-    ``wanting`` at all stopped being wanted, and is **dropped**
+    **Leaving is two different things** (FR-W4). A row whose (user, show) is
+    still followed (``following``: a list window, a live walk or an open pass)
+    left the *window* — the user watched past it, or N was turned down — and
+    is deleted: there is nothing to remember, and a completion (which is what
+    retention will measure the grace period from) is already in
+    ``watch_progress``. A row whose show is not followed at all stopped being
+    wanted, and is **dropped**
     (:data:`REASON_NOT_WANTING`) so that retention has the moment it stopped.
 
     **An in-flight row is not deleted for leaving the window** (owner
@@ -1662,9 +1668,9 @@ async def _reconcile(
     deletes it as above, and from then on its files are retention's, as for
     any ready episode outside the window. A ``searching`` episode is not
     protected: releasing a search loses no bytes. Every other ending is
-    unchanged: watched past is still deleted, and a show that left
-    ``wanting`` (dormant, dropped, on hold, off the list) is still shelved and
-    cancelled.
+    unchanged: watched past is still deleted, and a show no longer followed
+    (dormant, dropped, on hold, off the list, a lapsed walk, a pass ended) is
+    still shelved and cancelled.
 
     A row that is *already* dropped keeps its ``dropped_at`` — restamping it
     would push the deletion date away every quarter of an hour for as long as
@@ -1722,6 +1728,8 @@ async def _reconcile(
     trip_touches = trips or {}
     wanting = following
     over = set(finished)
+    lapsed = set(released)
+    waiting_for = set(held_windows)
     # Trip-only: a trip asked for it and nothing else did (FR-A12).
     trip_only = {key for key in trip_touches if key not in desired}
     wanted_now: dict[tuple[int, int], _Touch] = dict(desired)
@@ -1766,7 +1774,7 @@ async def _reconcile(
             continue
         if want.trip != is_trip:
             want.trip = is_trip
-        if key in over and want.demanded_at is not None:
+        if (key in over or key in lapsed) and want.demanded_at is not None:
             # A finished demand something else still asks for: an ordinary
             # want from here on (it occupies a slot, searches at the window's
             # priority, and stops counting toward ``demand_max_open``).
@@ -1804,6 +1812,10 @@ async def _reconcile(
             and want.demanded_at > planned_at
         ):
             continue
+        if key in lapsed:
+            # A stale demand a held show's window still asks for: an ordinary
+            # want from here on, and the held-show rule below keeps it.
+            want.demanded_at = None
         if key in over and want.dropped_at is None:
             # Finished since the press (FR-A14, M21): deleted, never shelved —
             # on a held show, an unfollowed one or a trip's alike.
@@ -1828,6 +1840,19 @@ async def _reconcile(
             # takes nothing away (the docstring has the argument).
             if _watched_past(want, number, watched_through.get(pair, 0)):
                 removed.append(key)
+            elif (
+                want.dropped_at is None
+                and want.demanded_at is None
+                and not want.sample
+                and key not in waiting_for
+            ):
+                # Nothing asks for it, not even the window the show waits to
+                # be admitted with — a withdrawn demand, say (M21). Shelved,
+                # so its download stops rather than running on and holding
+                # the show a slot.
+                want.dropped_at = now
+                want.drop_reason = REASON_NOT_WANTING
+                shelved += 1
             continue
         if pair in wanting:
             if (
@@ -1908,10 +1933,13 @@ async def _drop_stale(
 
     Two kinds of row, two clocks (M21). An **open demand** (FR-A14) is in
     ``stale_demands`` when :func:`_demanded_wants` found it untouched for D
-    days — neither pressed again nor played — and is dropped here in **any**
-    episode state, so a download nobody came back for is cancelled by the
-    sweep that follows; the rule below does not look at demands at all. Every
-    other row is a window's, and the rest of this docstring is about those.
+    days — neither pressed again nor played — and nothing else asks for it;
+    in **any** episode state it ends here, so a download nobody came back for
+    is cancelled by the sweep that follows: dropped when the episode is
+    ``ready`` (retention's anchor), **deleted** otherwise (nothing to anchor,
+    and a dropped row would stop a later window fetching the episode). The
+    rule below does not look at demands at all. Every other row is a
+    window's, and the rest of this docstring is about those.
     ``period`` is D, read when not given.
 
     Never a trip's (FR-A12): neither a trip-only row nor any (user, episode)
@@ -2005,17 +2033,28 @@ async def _drop_stale(
     skip = set(exclude)
     found = list(rows.all())
     quiet = [key for key in stale_demands if key not in skip]
+    gone: list[Want] = []
     if quiet:
-        found.extend(
-            (
-                await session.scalars(
-                    select(Want).where(
-                        tuple_(Want.user_id, Want.episode_id).in_(quiet),
-                        Want.dropped_at.is_(None),
-                        Want.demanded_at.is_not(None),
-                    )
+        for want, state in (
+            await session.execute(
+                select(Want, Episode.state)
+                .join(Episode, Episode.id == Want.episode_id)
+                .where(
+                    tuple_(Want.user_id, Want.episode_id).in_(quiet),
+                    Want.dropped_at.is_(None),
+                    Want.demanded_at.is_not(None),
                 )
-            ).all()
+            )
+        ).all():
+            # A stale demand on an episode that is not ``ready`` has no bytes
+            # for retention to anchor, and a dropped row would keep a window
+            # from fetching it later: deleted. A ready one is dropped.
+            (found if state is EpisodeState.READY else gone).append(want)
+    for want in gone:
+        await session.delete(want)
+        log.info(
+            "stale demand deleted",
+            extra={"user_id": want.user_id, "episode_id": want.episode_id},
         )
     dropped = 0
     for want in found:
@@ -2033,9 +2072,9 @@ async def _drop_stale(
                 "days": int(window_d.total_seconds() // 86400),
             },
         )
-    if dropped:
+    if dropped or gone:
         await session.flush()
-    return replace(result, dropped=dropped)
+    return replace(result, dropped=dropped, removed=result.removed + len(gone))
 
 
 async def start_search(
@@ -2572,7 +2611,6 @@ __all__ = [
     "STALE_DROP_REASON",
     "STARTABLE",
     "UNAVAILABLE_RETRY",
-    "WALK_ENDING_STATUSES",
     "WANTING_STATUSES",
     "SlotView",
     "WantsResult",
