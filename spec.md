@@ -1190,6 +1190,22 @@ that the course professor can log in at any time, and the owner uses it daily.
   that the user never said. The status is never rolled back: a show FR-W5
   completed stays completed, because "completed" is the user's word (FR-W2).
   Un-marking never creates a list entry.
+  **The latest finish** (M21): every crossing of the mark that passes the
+  live-duration guard above, and every manual mark (FR-W3), also stamps the
+  episode's *latest finish* for that user — in normal and rewatch mode
+  alike — while the first completion's time stays as it was written. A
+  demand ends on it (FR-A14), a rewatch pass counts its episodes by it
+  (FR-W7) and retention anchors on it (FR-T1); an un-mark clears it. Every
+  progress report also moves the user's **walk** on the show (FR-A1): to the
+  episode before this one while it plays, to this one once it is finished;
+  that is acquisition bookkeeping and touches no list entry. **In rewatch
+  mode** (FR-W7) a report records the position and, at the mark, the latest
+  finish, and **nothing else**: no list progress, no entry created or
+  activated, no status change, no FR-W5 auto-complete and no MyAnimeList
+  write; an un-mark in a pass clears that pass's finish only and never
+  lowers the list. In normal mode, finishing an episode ahead of the list
+  (a click on episode 9 of a show at 3, FR-A14) raises the progress to 9 as
+  above — the existing rule, simply easier to reach since M21.
 - FR-S5 **The end of an episode is two moments** (owner, 2026-09-17, replacing
   the single overlay at the completion mark).
   1. *Crossing the completion mark* (FR-S4's 90 %, unchanged) is bookkeeping,
@@ -1232,9 +1248,11 @@ that the course professor can log in at any time, and the owner uses it daily.
      then, for an episode not ready, demands it (FR-A14) and opens the
      waiting player. A sequel entry in any other status (completed, on hold,
      dropped) is never written by the press: a ready episode just opens, and
-     a not-ready one is offered only if it is already covered (a sample,
-     FR-A8). "Fetchable" here is what the demand will accept once the entry
-     is active. No special prefetch: an active sequel's episode 1 is in the
+     a not-ready one is demanded like any aired episode (FR-A14, M21; until
+     M21 it was offered only when a sample already wanted it). "Fetchable"
+     here is what the demand accepts: aired and not ready. During a rewatch
+     pass the press follows FR-A9's carry-over rule instead (FR-W7, M21). No
+     special prefetch: an active sequel's episode 1 is in the
      ordinary window (FR-A1) on its own. The offer is not worked out while
      the opened episode is still pending or playing from its download
      (FR-P8): a last episode watched that way shows it once it is ready.
@@ -1607,7 +1625,12 @@ that the course professor can log in at any time, and the owner uses it daily.
   same caches rather than a requirement of its own (owner, 2026-09-11). The
   page **updates itself as episodes change state** — a tile appearing, a row
   flipping, a still arriving — with no notifications and no sound (owner,
-  2026-09-13).
+  2026-09-13). **Rewatch** (FR-W7, M21): for a show in an open pass the
+  shelves read the pass — watched means finished in the pass, and Ready to
+  watch offers that show's ready episodes not finished or started since the
+  pass began, whatever the list status. Ready to watch also offers a ready
+  episode the viewer has a live want on (a demand or a walk, FR-A14, FR-A1)
+  and has not watched, whatever the list status.
 - FR-W2 Users can set a show to watching / planned / on hold / dropped /
   completed, and set a score (1–10) from the show page.
 - FR-W3 Marking an episode as watched manually is allowed (e.g. watched
@@ -1622,7 +1645,11 @@ that the course professor can log in at any time, and the owner uses it daily.
   hover) once the episode is watched, by either half of FR-W5. The one episode
   that keeps a ✓ is the one with nothing to press — watched by list progress
   alone, where FR-W5 says the control is not a button.
-- FR-W4 Dropped, completed and on-hold shows generate no acquisition wants.
+- FR-W4 Dropped, completed and on-hold shows generate no **list-window**
+  wants (FR-A1). Since M21 such a show can still be fetched through what the
+  user does on it — a demand (FR-A14), a walk (FR-A1) or a rewatch pass
+  (FR-W7) — and setting a show dropped, on hold or completed in Arc ends its
+  walk (a demand outlives it, FR-A14).
 - FR-W5 **What "watched" means, and when a show completes itself** (owner,
   2026-09-13). An episode counts as watched for a user when its number is at
   or below that user's ListEntry.progress **or** the user has a completed
@@ -1648,12 +1675,19 @@ that the course professor can log in at any time, and the owner uses it daily.
   `dropped` included (owner, 2026-09-13): finishing the last episode of a show
   you had dropped is the clearest statement anybody makes about a list entry.
   A show still airing, a show with an unknown episode count, and a rewatch of
-  an already-completed show are never auto-completed.
+  an already-completed show are never auto-completed; nor is any show in
+  rewatch mode (FR-W7, M21). **While a rewatch pass is open** the watched
+  state of that show reads the pass instead (M21): an episode is watched when
+  it was finished since the pass started (source `arc`, with Unwatch, which
+  clears only the pass's finish), and the list's progress counts for nothing
+  until the pass ends — so the rows, the "Watched N / M" line, the home tiles
+  and the next-thing pick all start again from episode 1.
 
 - FR-W6 **Own failures on Watch Now** (M16, owner 2026-09-12: "a user's own
   failures only"). The home page carries, above the hero, a quiet banner of the
   things that have stopped **for this viewer**: an episode they hold a live want
-  on — the window's (FR-A1) or a sample of their own (FR-A8) — whose state is
+  on — a window's (FR-A1: the list's, a walk's or a rewatch pass's) or a
+  demand of their own (FR-A14) — whose state is
   `failed` (a transcode broke, FR-P4) or `unavailable` (FR-A6 found no release
   and retries daily), and their own MyAnimeList writes that did not land
   (FR-M6). Each row says what stopped, which show and episode, one sentence of
@@ -1669,6 +1703,45 @@ that the course professor can log in at any time, and the owner uses it daily.
   retry of an `unavailable` episode is new news, and a dismissal covers the
   failure it was pressed on and no other. A show with nothing wrong renders no
   banner at all. Notifications (email/push) stay out of scope (§8).
+
+- FR-W7 **Rewatch** (M21, owner 2026-11-03: "we will introduce a rewatch
+  path, that will follow the same logic of normal shows, but not changing the
+  mal entry."). A per-show switch on the show page, **Rewatch**, kept by the
+  server per user, open on any show with an aired episode whatever its list
+  status (a partly watched entry is allowed, and the list stays where it is).
+  While it is on, the show is in a **pass**:
+  1. *Fetching* follows the ordinary rules from the pass's position — the
+     highest episode finished since the pass started, 0 at the start: the
+     same N, thin-swarm N, halfway prefetch and device skip (FR-A1), the same
+     slot rule (FR-A10) and the same demands (FR-A14). The show's list
+     window is suspended for the pass.
+  2. *Watching* is recorded as a pass completion (FR-S4's latest finish,
+     later than the pass's start), which drives that show's watched marks
+     (FR-W5), Continue watching and Ready to watch (FR-W1), the hero's pick
+     and the next-episode offer.
+  3. *Nothing is written to the list or to MyAnimeList*: no progress, no
+     status, no entry created or activated (FR-A9), no auto-complete (FR-W5),
+     no MAL write and nothing in the MAL log; MyAnimeList's own rewatch
+     fields are left alone. A status or score change the user makes by hand
+     during the pass is an ordinary user-originated write (FR-M4).
+  4. *It ends* when the user turns it off, or on finishing the last episode
+     of the pass: the show's last episode when it has finished airing and its
+     count is known, otherwise the newest aired episode (owner-accepted
+     2026-11-03). The player then says "Rewatch finished. Your list was left
+     as it was." A pass never reopens by itself. A report recorded offline
+     (FR-S8) is judged by the pass that was open when the device recorded it:
+     a replay that arrives after the pass ended is still free of list and MAL
+     writes and does not reopen it, and one recorded before the pass began is
+     normal mode.
+  5. *Next season* pressed during a pass (FR-S5 item 3) carries the rewatch on
+     to the sequel when the sequel's list entry has progress above 0 or is
+     completed; otherwise it is the ordinary press, in normal mode (an absent
+     sequel added as Watching; owner-accepted 2026-11-03).
+  6. *Retention* is unchanged; a pass completion is a fresh watched anchor
+     (FR-T1).
+  The show page shows the switch (pressed while on) beside Keep files, a
+  badge "Rewatching · ep X / Y", and the line "Your list and MyAnimeList are
+  left as they are."
 
 ### 4.7 MyAnimeList sync
 - FR-M1 Each user links their own MAL account via OAuth 2.0 (PKCE). Tokens
@@ -1695,7 +1768,9 @@ that the course professor can log in at any time, and the owner uses it daily.
   badge on the show and in the user's sync page.
 - FR-M7 "Never write a change I did not make": there is no code path that
   writes to MAL except via a user-originated event (a list edit, a watch
-  completion, an explicit un-mark) or an explicit revert.
+  completion, an explicit un-mark) or an explicit revert. A completion, mark
+  or un-mark made in **rewatch mode** (FR-W7, M21) is none of these: it
+  writes nothing to MyAnimeList and nothing to the list entry.
 
 ### 4.8 Recommendations (phase 2)
 - FR-R1 Recommendations page with an optional free-text mood prompt ("something
