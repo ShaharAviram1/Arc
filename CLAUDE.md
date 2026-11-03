@@ -60,8 +60,10 @@ directly. Anything with logic goes through a Writer.
 - **MAL writes:** no code path may write to MyAnimeList except from a
   user-originated event (watch completion, explicit status/score change,
   explicit un-mark, or explicit revert). Every write is logged with the
-  previous value. Automatic events never lower progress. Nothing in rewatch
-  mode writes to MyAnimeList or changes a list entry (FR-W7).
+  previous value. Automatic events never lower progress. No watch report,
+  mark or un-mark made in rewatch mode writes to MyAnimeList or changes a
+  list entry (FR-W7); a status or score change the user makes by hand is
+  still an ordinary write.
 - **Matching:** below the confidence threshold the file goes to review;
   never auto-link a guess. LLM suggestions are shown, never applied.
 - **Acquisition:** only (a) the next N unwatched episodes of shows a user is
