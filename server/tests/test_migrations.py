@@ -9,6 +9,7 @@ and migrates the test database.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -27,7 +28,11 @@ from arc.models import (
     IN_PROGRESS_INDEX,
     OFFLINE_SEARCH_INDEX,
     ONE_ACTIVE_TRIP_INDEX,
+    OPEN_REWATCH_INDEX,
+    PACK_PICK_EPISODE_INDEX,
+    PENDING_PACK_PICK_INDEX,
     PREPARE_EPISODE_INDEX,
+    REWATCH_LOOKUP_INDEX,
     TRIP_EPISODE_INDEX,
     WANTED_CLAIM_INDEX,
     Base,
@@ -277,7 +282,7 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     seeded = _fetch_settings(test_database_url)
 
     assert seeded == dict(DEFAULT_SETTINGS)
-    assert len(seeded) == 21
+    assert len(seeded) == 23
     # max_transcodes is env-only (arc.config), never a row here.
     assert "max_transcodes" not in seeded
     # The values the spec names explicitly (FR-A1, FR-A3, FR-T1, FR-T2).
@@ -318,6 +323,10 @@ def test_settings_are_seeded(pg_engine: AsyncEngine, test_database_url: str) -> 
     assert seeded["batch_prefer_ratio"] == 3
     assert seeded["slow_swarm_seeders"] == 20
     assert seeded["look_ahead_slow"] == 3
+    # And M21's two (FR-A14, FR-T1): three open demands per user, and the
+    # leftover sweep starting dry.
+    assert seeded["demand_max_open"] == 3
+    assert seeded["batch_sweep_dry_run"] is True
 
 
 def test_the_history_is_one_squashed_root_and_a_straight_chain(test_database_url: str) -> None:
@@ -901,3 +910,230 @@ def test_verified_delivery_goes_up_and_down(pg_engine: AsyncEngine, test_databas
         assert _column(test_database_url, "device_holdings", "sha256") == text_column
     finally:
         command.upgrade(config, "head")
+
+
+# --- M21 T1 (owner 2026-11-03) ------------------------------------------------
+
+BEFORE_M21 = VERIFIED_DELIVERY
+M21_FINISHED_AT = "b1e5f2a8c4d0"
+M21_REWATCHES = "c3a9d7e1f526"
+M21_WALKS = "d4f8b2c6e937"
+M21_DEMAND_SEED = "e5a1c9d3f748"
+M21_PACK_PICKS = "f6b2d0e4a859"
+M21_DRY_RUN_SEED = "a8c3e1f5b960"
+#: The chain from the newest M21 revision back to the one before M21.
+M21_CHAIN = (
+    M21_DRY_RUN_SEED,
+    M21_PACK_PICKS,
+    M21_DEMAND_SEED,
+    M21_WALKS,
+    M21_REWATCHES,
+    M21_FINISHED_AT,
+)
+_M21_USER = "migration-m21@arc.test"
+
+
+def _scalar(url: str, sql: str, params: dict[str, Any] | None = None) -> Any:
+    async def run() -> Any:
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                return (await connection.execute(text(sql), params or {})).scalar()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def _m21_state(url: str) -> tuple[bool, bool, bool, bool, bool, bool]:
+    """What of M21 T1 is in the database, in chain order."""
+    keys = set(_fetch_settings(url))
+    return (
+        _column(url, "watch_progress", "finished_at") is not None,
+        bool(_column_types(url, "rewatches")),
+        bool(_column_types(url, "walks")),
+        "demand_max_open" in keys,
+        bool(_column_types(url, "pack_picks")),
+        "batch_sweep_dry_run" in keys,
+    )
+
+
+def test_the_m21_revisions_are_the_head_and_a_straight_chain(test_database_url: str) -> None:
+    script = ScriptDirectory.from_config(alembic_config(test_database_url))
+    assert script.get_current_head() == M21_DRY_RUN_SEED
+    for revision, parent in zip(M21_CHAIN, (*M21_CHAIN[1:], BEFORE_M21), strict=True):
+        found = script.get_revision(revision)
+        assert found is not None and found.down_revision == parent
+
+
+def test_the_m21_revisions_go_down_one_at_a_time_and_back_up(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """Each step down removes exactly its own change; the way up restores all six."""
+    config = alembic_config(test_database_url)
+    assert _m21_state(test_database_url) == (True,) * 6
+    try:
+        for step in range(1, len(M21_CHAIN) + 1):
+            command.downgrade(config, "-1")
+            expected = (True,) * (len(M21_CHAIN) - step) + (False,) * step
+            assert _m21_state(test_database_url) == expected, f"after {step} step(s) down"
+        assert _scalar(test_database_url, "SELECT version_num FROM alembic_version") == BEFORE_M21
+
+        command.upgrade(config, "head")
+
+        assert _m21_state(test_database_url) == (True,) * 6
+        assert _diff(test_database_url) == []
+    finally:
+        command.upgrade(config, "head")
+
+
+def test_the_m21_tables_and_indexes(pg_engine: AsyncEngine, test_database_url: str) -> None:
+    url = test_database_url
+    assert _column(url, "watch_progress", "finished_at") == ("timestamp with time zone", "YES")
+    assert _column_types(url, "rewatches") == {
+        "id": ("bigint", "NO"),
+        "user_id": ("bigint", "NO"),
+        "anime_id": ("bigint", "NO"),
+        "started_at": ("timestamp with time zone", "NO"),
+        "ended_at": ("timestamp with time zone", "YES"),
+        "end_reason": ("character varying", "YES"),
+    }
+    assert _column_types(url, "walks") == {
+        "user_id": ("bigint", "NO"),
+        "anime_id": ("bigint", "NO"),
+        "after_number": ("integer", "NO"),
+        "touched_at": ("timestamp with time zone", "NO"),
+    }
+    assert _column_types(url, "pack_picks") == {
+        "id": ("bigint", "NO"),
+        "torrent_id": ("bigint", "NO"),
+        "episode_id": ("bigint", "NO"),
+        "reason": ("text", "NO"),
+        "candidates": ("jsonb", "NO"),
+        "created_at": ("timestamp with time zone", "NO"),
+        "resolved_at": ("timestamp with time zone", "YES"),
+        "resolution": ("character varying", "YES"),
+        "picked_file_index": ("integer", "YES"),
+        "resolved_by": ("bigint", "YES"),
+    }
+
+    rewatch_open = _index_definition(url, "rewatches", OPEN_REWATCH_INDEX)
+    assert rewatch_open is not None
+    assert "UNIQUE INDEX" in rewatch_open and "(user_id, anime_id)" in rewatch_open
+    assert "WHERE (ended_at IS NULL)" in rewatch_open
+    lookup = _index_definition(url, "rewatches", REWATCH_LOOKUP_INDEX)
+    assert lookup is not None and "(user_id, anime_id, started_at)" in lookup
+
+    pending = _index_definition(url, "pack_picks", PENDING_PACK_PICK_INDEX)
+    assert pending is not None
+    assert "UNIQUE INDEX" in pending and "(torrent_id, episode_id)" in pending
+    assert "WHERE (resolved_at IS NULL)" in pending
+    by_episode = _index_definition(url, "pack_picks", PACK_PICK_EPISODE_INDEX)
+    assert by_episode is not None and "UNIQUE" not in by_episode
+
+    assert _check_primary_key(url, "walks") == "PRIMARY KEY (user_id, anime_id)"
+
+
+def _check_primary_key(url: str, table: str) -> str | None:
+    return _scalar(
+        url,
+        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "JOIN pg_class t ON t.oid = c.conrelid WHERE t.relname = :table AND c.contype = 'p'",
+        {"table": table},
+    )
+
+
+def _progress_rows(url: str) -> None:
+    """One user, three episodes: completed, never completed, and completed-flag only."""
+    _execute(
+        url,
+        "WITH u AS (INSERT INTO users (email, password_hash) VALUES (:email, 'x') RETURNING id), "
+        "a AS (INSERT INTO anime (anilist_id, title_romaji) VALUES (989911, 'Migration M21') "
+        "RETURNING id), "
+        "e AS (INSERT INTO episodes (anime_id, number) SELECT a.id, n FROM a, "
+        "generate_series(1, 3) AS n RETURNING id, number) "
+        "INSERT INTO watch_progress (user_id, episode_id, position_s, completed, completed_at) "
+        "SELECT u.id, e.id, 0, e.number <> 2, "
+        "CASE e.number WHEN 1 THEN TIMESTAMPTZ '2026-10-01 20:00+00' END FROM u, e",
+        {"email": _M21_USER},
+    )
+
+
+def _drop_m21_user(url: str) -> None:
+    _execute(url, "DELETE FROM anime WHERE anilist_id = 989911")
+    _execute(url, "DELETE FROM users WHERE email = :email", {"email": _M21_USER})
+
+
+def test_finished_at_is_backfilled_from_completed_at(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """``finished_at = completed_at WHERE completed``; an unfinished row stays null."""
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, BEFORE_M21)
+        _progress_rows(test_database_url)
+
+        command.upgrade(config, M21_FINISHED_AT)
+
+        async def run() -> dict[int, tuple[Any, Any, bool]]:
+            engine = create_async_engine(test_database_url, poolclass=NullPool)
+            try:
+                async with engine.connect() as connection:
+                    rows = await connection.execute(
+                        text(
+                            "SELECT e.number, p.completed_at, p.finished_at, p.completed "
+                            "FROM watch_progress p JOIN episodes e ON e.id = p.episode_id "
+                            "JOIN users u ON u.id = p.user_id WHERE u.email = :email"
+                        ),
+                        {"email": _M21_USER},
+                    )
+                    return {int(n): (c, f, bool(done)) for n, c, f, done in rows.all()}
+            finally:
+                await engine.dispose()
+
+        found = asyncio.run(run())
+        first, unwatched, flag_only = found[1], found[2], found[3]
+        assert first[0] is not None and first[1] == first[0]
+        assert unwatched == (None, None, False)
+        # Completed with no recorded time: nothing to copy, so still null.
+        assert flag_only == (None, None, True)
+    finally:
+        _drop_m21_user(test_database_url)
+        command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize(
+    ("key", "before", "revision", "hand_set"),
+    [
+        ("demand_max_open", M21_WALKS, M21_DEMAND_SEED, "0"),
+        ("batch_sweep_dry_run", M21_PACK_PICKS, M21_DRY_RUN_SEED, "false"),
+    ],
+)
+def test_the_m21_seeds_keep_a_value_set_by_hand(
+    pg_engine: AsyncEngine,
+    test_database_url: str,
+    key: str,
+    before: str,
+    revision: str,
+    hand_set: str,
+) -> None:
+    config = alembic_config(test_database_url)
+    try:
+        command.downgrade(config, before)
+        assert key not in _fetch_settings(test_database_url)
+        _execute(
+            test_database_url,
+            "INSERT INTO settings (key, value) VALUES (:key, CAST(:value AS jsonb))",
+            {"key": key, "value": hand_set},
+        )
+
+        command.upgrade(config, revision)
+
+        assert _fetch_settings(test_database_url)[key] == json.loads(hand_set)
+    finally:
+        command.upgrade(config, "head")
+        _execute(
+            test_database_url,
+            "UPDATE settings SET value = CAST(:value AS jsonb) WHERE key = :key",
+            {"key": key, "value": json.dumps(DEFAULT_SETTINGS[key])},
+        )
