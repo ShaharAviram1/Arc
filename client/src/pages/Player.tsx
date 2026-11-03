@@ -23,6 +23,7 @@ import {
   pendingLabel,
   resumeLabel,
   shouldResume,
+  stillComing,
   useMarkWatched,
   usePlayInfo,
   useReportProgress,
@@ -589,6 +590,8 @@ function NotReady({ message }: { message: string }) {
 
 /** What the pending player says under its state when nothing else applies. */
 const PLAYS_WHEN_READY = 'It plays here as soon as it is ready.'
+/** Under the cap, while a window or walk is already downloading it (M21). */
+const STILL_ON_ITS_WAY = 'It is still on its way for your list.'
 /** A season pack whose files need a person's pick (M21 T7). */
 const AWAITING_PICK = 'Its season pack needs someone to pick the right file.'
 
@@ -601,12 +604,36 @@ const AWAITING_PICK = 'Its season pack needs someone to pick the right file.'
  * one, the server's `note` when it will only play once its download finishes
  * (a season pack), and a link to Review when its pack waits for a file pick.
  */
-function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }) {
+function PendingView({
+  info,
+  pending,
+  capped = null,
+  onWithdrawn,
+}: {
+  info: PlayInfo
+  pending: PendingInfo
+  /**
+   * The press was refused at the cap while the episode is still on its way
+   * for another want (M21): said above the wait, with the open demands and
+   * their ✕, while the page keeps polling.
+   */
+  capped?: DemandRefusal | null
+  onWithdrawn?: () => void
+}) {
   const label = pendingLabel(pending)
   const resting = pending.state === 'unavailable'
   const note = pending.note ?? null
   return (
     <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
+      {capped === null ? null : (
+        <div className="mb-7 text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+          <p role="alert" className="max-w-[52ch]">
+            {capped.message}
+          </p>
+          {pending.state === 'downloading' ? <p className="mt-1">{STILL_ON_ITS_WAY}</p> : null}
+          <OpenDemandLinks open={capped.open} className="mt-3" onWithdrawn={onWithdrawn} />
+        </div>
+      )}
       <p className="text-[14px] text-[var(--arc-text-muted)]">{info.anime.title.preferred}</p>
       <h1 className="mt-1 text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
         Episode {String(info.episode.number)}
@@ -655,7 +682,15 @@ function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }
  * the cap, the open demands are listed, each a link (owner decision 2): the
  * show page's ✕ withdraws one, finishing one closes it.
  */
-function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: number | null }) {
+function DemandRefused({
+  refusal,
+  animeId,
+  onWithdrawn,
+}: {
+  refusal: DemandRefusal
+  animeId: number | null
+  onWithdrawn?: () => void
+}) {
   return (
     <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
       <h1 className="text-[28px] font-semibold tracking-[-0.022em] text-[var(--arc-text)]">
@@ -671,6 +706,7 @@ function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: 
         <OpenDemandLinks
           open={refusal.open}
           className="mt-4 text-[14px] text-[var(--arc-text-muted)]"
+          onWithdrawn={onWithdrawn}
         />
       ) : null}
       <Link
@@ -1239,6 +1275,7 @@ function PlayerView({ id }: { id: number }) {
   const demandedRef = useRef(alreadyDemanded(location.state))
   const [demandSettled, setDemandSettled] = useState(!demandFirst)
   const [refusal, setRefusal] = useState<DemandRefusal | null>(null)
+  const capped = refusal?.code === 'demand_cap'
   /** A demand the server took (202): a 404 from `/play` right after it is the reconciler racing. */
   const [demandAccepted, setDemandAccepted] = useState(alreadyDemanded(location.state))
   const askToFetch = useCallback(() => {
@@ -1266,9 +1303,11 @@ function PlayerView({ id }: { id: number }) {
   // A copy on this device plays from the file: nothing to fetch first.
   const onDevice = local.checked && local.url !== null
   const { data, isPending, isError, isFetching, error, refetch } = usePlayInfo(id, {
-    // Not after a refusal: nothing was queued, so `/play` has nothing to say.
-    enabled: (demandSettled && refusal === null) || onDevice,
-    pollWhilePending: refusal === null,
+    // Not after a refusal: nothing was queued, so `/play` has nothing to say —
+    // except at the cap (M21), where a window or walk may still be bringing
+    // the episode: ask, and keep asking while it is on its way.
+    enabled: (demandSettled && (refusal === null || capped)) || onDevice,
+    pollWhilePending: refusal === null ? true : capped ? stillComing : false,
     retryNotFound: demandAccepted ? DEMAND_NOT_FOUND_RETRIES : 0,
     // A copy on this device plays from the file: nothing live to follow.
     pollWhileLive: !onDevice,
@@ -2087,8 +2126,24 @@ function PlayerView({ id }: { id: number }) {
 
   // Play on demand refused (FR-A14): said, not spun — unless there is
   // something to play anyway (a copy here, or a stream that is ready).
-  if (refusal !== null && local.checked && local.url === null && !data?.playlist_url) {
-    return <DemandRefused refusal={refusal} animeId={data?.anime.id ?? null} />
+  // At the cap (M21) an episode still on its way waits as usual, with the
+  // refusal said above it; until `/play` has answered, the page is loading.
+  const capWaiting =
+    capped && data?.pending != null && data.playlist_url === null && stillComing(data.pending)
+  const refetchPlay = () => {
+    void refetch()
+  }
+  if (
+    refusal !== null &&
+    local.checked &&
+    local.url === null &&
+    !data?.playlist_url &&
+    !capWaiting &&
+    !(capped && isPending)
+  ) {
+    return (
+      <DemandRefused refusal={refusal} animeId={data?.anime.id ?? null} onWithdrawn={refetchPlay} />
+    )
   }
 
   if (isPending || !local.checked) {
@@ -2152,7 +2207,14 @@ function PlayerView({ id }: { id: number }) {
   if (source.kind === 'none') {
     // Wanted and on its way (FR-A14, M20): wait here, polling, until it streams.
     if (info.pending != null && info.playlist_url === null) {
-      return <PendingView info={info} pending={info.pending} />
+      return (
+        <PendingView
+          info={info}
+          pending={info.pending}
+          capped={capWaiting ? refusal : null}
+          onWithdrawn={refetchPlay}
+        />
+      )
     }
     // A trip-only episode with no copy here (or one still on its way): say
     // where it comes from. A copy that is here but would not open is the

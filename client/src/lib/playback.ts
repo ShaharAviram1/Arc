@@ -597,9 +597,11 @@ export interface PlayInfoOptions {
   enabled?: boolean
   /**
    * Re-ask every {@link PENDING_POLL_MS} while the answer is `pending` and has
-   * no `playlist_url` (FR-A14). Off once the player has been refused.
+   * no `playlist_url` (FR-A14). Off once the player has been refused; a
+   * function decides from the pending answer itself (M21: under the cap,
+   * only while the episode is still on its way).
    */
-  pollWhilePending?: boolean
+  pollWhilePending?: boolean | ((pending: PendingInfo) => boolean)
   /**
    * Re-ask every {@link LIVE_POLL_MS} while the answer is a growing stream
    * (FR-P8). Off when the episode plays from a copy on this device.
@@ -620,7 +622,7 @@ export function usePlayInfo(
   episodeId: number,
   options: PlayInfoOptions = {},
 ): UseQueryResult<PlayInfo, Error> {
-  const poll = options.pollWhilePending !== false
+  const poll = options.pollWhilePending ?? true
   const pollLive = options.pollWhileLive !== false
   return useQuery<PlayInfo, Error>({
     queryKey: playQueryKey(episodeId),
@@ -643,9 +645,9 @@ export function usePlayInfo(
           : false
       }
       if (liveAndGrowing(answer)) return pollLive ? LIVE_POLL_MS : false
-      return poll && answer?.pending != null && answer.playlist_url === null
-        ? PENDING_POLL_MS
-        : false
+      if (answer?.pending == null || answer.playlist_url !== null) return false
+      const pollThis = typeof poll === 'function' ? poll(answer.pending) : poll
+      return pollThis ? PENDING_POLL_MS : false
     },
     // A 404 here means "not ready", which asking again will not change; the
     // resume position must also not be re-read behind a playing video, hence
@@ -941,6 +943,18 @@ export function wantsDemand(state: unknown): boolean {
 /** Whether the player was opened with {@link WatchState.demanded}. */
 export function alreadyDemanded(state: unknown): boolean {
   return watchFlag(state, 'demanded')
+}
+
+/** Pending states in which nothing is on its way (M21): no release yet, or no want. */
+const NOT_COMING: ReadonlySet<string> = new Set(['unavailable', 'not_wanted', 'missing'])
+
+/**
+ * Whether a pending episode is still on its way — searching, downloading,
+ * preparing — for somebody's want (M21). Under the cap the player keeps
+ * polling such an episode, since a window or walk may still bring it.
+ */
+export function stillComing(pending: PendingInfo): boolean {
+  return !NOT_COMING.has(pending.state)
 }
 
 /**

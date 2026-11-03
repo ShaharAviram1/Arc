@@ -387,6 +387,95 @@ describe('the pending player, any aired episode (FR-A14, M21)', () => {
   })
 })
 
+describe('the cap while the episode is on its way anyway (M21)', () => {
+  const CAP = 'You already have 3 episodes on request. Finish or withdraw one first.'
+  const OPEN = [{ episode_id: 7001, anime_id: 77, title: 'Dungeon Meshi', number: 3 }]
+  const CAPPED: MockRoutes[string] = {
+    status: 409,
+    body: { detail: { code: 'demand_cap', message: CAP, open: OPEN } },
+  }
+
+  function waiting(state: string, progress: number | null): PlayInfo {
+    const info = pendingInfo(state, progress, null)
+    return { ...info, pending: { state, progress, seeders: null, demanded: false } }
+  }
+
+  it('demand_cap with pending downloading: says the cap above the wait, keeps polling, plays when ready', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const routes: MockRoutes = {
+      'GET /api/auth/me': { body: TEST_USER },
+      [DEMAND]: CAPPED,
+      [PLAY]: { body: waiting('downloading', 0.5) },
+    }
+    const { fetchMock } = renderAt(routes, { pathname: `/watch/${String(EPISODE)}` })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(CAP)
+    expect(screen.getByText('It is still on its way for your list.')).toBeInTheDocument()
+    expect(screen.getByText('Downloading 50 %')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Dungeon Meshi' })).toBeInTheDocument()
+
+    const polls = count(fetchMock, PLAY)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS)
+    })
+    expect(count(fetchMock, PLAY)).toBeGreaterThan(polls)
+
+    routes[PLAY] = { body: PLAY_INFO_EPISODE_2 }
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS)
+    })
+    await waitFor(() => {
+      expect(instances).toHaveLength(1)
+    })
+    expect(count(fetchMock, DEMAND)).toBe(1)
+  })
+
+  it('demand_cap with pending unavailable: the cap view, and the poll stops', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { fetchMock } = renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [DEMAND]: CAPPED,
+        [PLAY]: { body: waiting('unavailable', null) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(
+      await screen.findByRole('heading', { name: 'Can’t fetch this episode now' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(CAP)
+    const polls = count(fetchMock, PLAY)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS * 3)
+    })
+    expect(count(fetchMock, PLAY)).toBe(polls)
+  })
+
+  it('the cap view’s ✕ withdraws and the list shrinks', async () => {
+    const { fetchMock } = renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [DEMAND]: CAPPED,
+        'DELETE /api/episodes/7001/demand': { status: 204 },
+      },
+      { pathname: `/watch/${String(EPISODE)}`, state: { demand: true } },
+    )
+
+    await userEvent.setup().click(
+      await screen.findByRole('button', {
+        name: 'Withdraw the request for Dungeon Meshi episode 3',
+      }),
+    )
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('DELETE /api/episodes/7001/demand')
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'Dungeon Meshi' })).not.toBeInTheDocument()
+    })
+  })
+})
+
 describe('the end overlay’s Next on a fetchable episode (FR-S5 item 2)', () => {
   const CURRENT = `GET /api/episodes/9001/play`
 
