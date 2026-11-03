@@ -54,9 +54,11 @@ field's own cause**:
   explicit edit or a revert is read as the latter and clears it (MAL spells
   that ``score=0``).
 
-Status has no such guard because it cannot be produced by an automatic event:
-:func:`arc.services.playback.progress._advance_list` moves progress and
-nothing else, deliberately (FR-W2).
+Status has no lowering guard: the one automatic status write is FR-W5's
+auto-complete (cause ``watch``, from
+:func:`arc.services.playback.progress._advance_list`), which only ever sets
+``completed`` on finishing the last episode of a finished show; rewatch mode
+writes nothing at all (FR-W7).
 
 Everything sendable goes in **one** ``PATCH``.
 

@@ -454,7 +454,13 @@ async def test_a_report_upserts_the_row_without_completing_it(
     first = await post_progress(client, ids[11], 300.0)
     second = await post_progress(client, ids[11], 600.0)
 
-    assert first == {"completed": False, "newly_completed": False, "list_progress": None}
+    assert first == {
+        "completed": False,
+        "newly_completed": False,
+        "list_progress": None,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     assert second["completed"] is False
     row = await progress_of(api_factory, user, ids[11])
     assert row is not None
@@ -485,7 +491,13 @@ async def test_ninety_per_cent_completes_advances_the_list_and_queues_a_recomput
 
     body = await post_progress(client, ids[11], DURATION * 0.90)
 
-    assert body == {"completed": True, "newly_completed": True, "list_progress": 11}
+    assert body == {
+        "completed": True,
+        "newly_completed": True,
+        "list_progress": 11,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     row = await progress_of(api_factory, user, ids[11])
     assert row is not None and row.completed is True
     assert row.completed_at == NOW
@@ -512,7 +524,13 @@ async def test_pressing_play_activates_a_dormant_entry(
 
     body = await post_progress(client, ids[11], 30.0)
 
-    assert body == {"completed": False, "newly_completed": False, "list_progress": None}
+    assert body == {
+        "completed": False,
+        "newly_completed": False,
+        "list_progress": None,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     entry = await entry_of(api_factory, user, anime_id)
     assert entry is not None and entry.activated_at is not None
     # And nothing else about the row moved: this is not a list change.
@@ -590,7 +608,13 @@ async def test_a_second_report_past_the_threshold_completes_nothing_new(
 
     body = await post_progress(client, ids[11], DURATION * 0.92)
 
-    assert body == {"completed": True, "newly_completed": False, "list_progress": None}
+    assert body == {
+        "completed": True,
+        "newly_completed": False,
+        "list_progress": None,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     # One reconciliation for the burst, not one per report: the enqueue is
     # deduplicated on the job type, and the second report never reached it.
     assert len(await wants_jobs(api_factory)) == 1
@@ -624,7 +648,13 @@ async def test_a_rewatch_never_lowers_list_progress(
 
     body = await post_progress(client, ids[3], DURATION * 0.99)
 
-    assert body == {"completed": True, "newly_completed": True, "list_progress": 11}
+    assert body == {
+        "completed": True,
+        "newly_completed": True,
+        "list_progress": 11,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     entry = await entry_of(api_factory, user, anime_id)
     assert entry is not None
     assert entry.progress == 11
@@ -885,7 +915,13 @@ async def test_marking_an_episode_watched_by_hand_advances_the_list(
     response = await client.post(f"/api/episodes/{ids[11]}/watched")
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"completed": True, "newly_completed": True, "list_progress": 11}
+    assert response.json() == {
+        "completed": True,
+        "newly_completed": True,
+        "list_progress": 11,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     row = await progress_of(api_factory, user, ids[11])
     assert row is not None
     assert row.completed is True
@@ -925,7 +961,13 @@ async def test_marking_an_episode_watched_twice_only_moves_things_once(
 
     second = await client.post(f"/api/episodes/{ids[11]}/watched")
 
-    assert second.json() == {"completed": True, "newly_completed": False, "list_progress": None}
+    assert second.json() == {
+        "completed": True,
+        "newly_completed": False,
+        "list_progress": None,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
 
 
 async def test_un_marking_clears_the_flag_keeps_the_position_and_lowers_the_list(
@@ -945,7 +987,13 @@ async def test_un_marking_clears_the_flag_keeps_the_position_and_lowers_the_list
     response = await client.delete(f"/api/episodes/{ids[11]}/watched")
 
     assert response.status_code == 200
-    assert response.json() == {"completed": False, "newly_completed": False, "list_progress": 10}
+    assert response.json() == {
+        "completed": False,
+        "newly_completed": False,
+        "list_progress": 10,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     row = await progress_of(api_factory, user, ids[11])
     assert row is not None
     assert row.completed is False
@@ -1199,7 +1247,13 @@ async def test_marking_an_episode_below_progress_never_lowers_it(
 
     body = (await client.post(f"/api/episodes/{ids[3]}/watched")).json()
 
-    assert body == {"completed": True, "newly_completed": True, "list_progress": 7}
+    assert body == {
+        "completed": True,
+        "newly_completed": True,
+        "list_progress": 7,
+        "rewatching": False,
+        "rewatch_ended": False,
+    }
     entry = await entry_of(api_factory, user, anime_id)
     assert entry is not None
     assert entry.progress == 7

@@ -35,6 +35,7 @@ from arc.api import (
     recs,
     retention,
     review,
+    rewatch,
     schedule,
     sync,
     trips,
@@ -220,6 +221,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media.router)
     app.include_router(offline_copies.router)
     app.include_router(pins.router)
+    app.include_router(rewatch.router)
     app.include_router(trips.router)
     app.include_router(manual_release.router)
     app.include_router(playback.router)

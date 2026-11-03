@@ -51,7 +51,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from arc.api.anime_schemas import AnimeSummary, EpisodeOut
 from arc.api.deps import MAX_ID, MIN_ID, CurrentUser, EpisodeId, SessionDep, SettingsDep
@@ -458,6 +458,8 @@ def _out(outcome: ProgressOutcome) -> ProgressOut:
         completed=outcome.completed,
         newly_completed=outcome.newly_completed,
         list_progress=outcome.list_progress,
+        rewatching=outcome.rewatching,
+        rewatch_ended=outcome.rewatch_ended,
     )
 
 
@@ -535,7 +537,12 @@ async def unmark(episode_id: EpisodeId, user: CurrentUser, session: SessionDep) 
                 "list_progress": outcome.list_progress,
             },
         )
-    return ProgressOut(completed=False, newly_completed=False, list_progress=outcome.list_progress)
+    return ProgressOut(
+        completed=False,
+        newly_completed=False,
+        list_progress=outcome.list_progress,
+        rewatching=outcome.rewatching,
+    )
 
 
 @router.get(
@@ -553,17 +560,28 @@ async def completed_episodes(
 ) -> CompletedOut:
     """The caller's own completion rows among ``episode_ids``, and when each was made.
 
+    Since M21 a row with a latest finish counts too (a rewatch pass's
+    completion leaves ``completed`` alone), and the time is the later of the
+    first watch and the latest finish.
+
     A read and nothing else: no row is written, no list entry touched. An id
     the caller has no completed row for (or that names no episode) is simply
     absent. The device marks its downloaded copies watched from this answer
     when a completion was never announced to it live (FR-S9 item 9).
     """
     rows = await session.execute(
-        select(WatchProgress.episode_id, WatchProgress.completed_at, WatchProgress.updated_at)
+        select(
+            WatchProgress.episode_id,
+            # ``greatest`` ignores NULLs: the later of the first watch and the
+            # latest finish, so a rewatch pass's completion is news to a
+            # device that synced the first one (M21).
+            func.greatest(WatchProgress.completed_at, WatchProgress.finished_at),
+            WatchProgress.updated_at,
+        )
         .where(
             WatchProgress.user_id == user.id,
             WatchProgress.episode_id.in_(set(episode_ids)),
-            WatchProgress.completed.is_(True),
+            or_(WatchProgress.completed.is_(True), WatchProgress.finished_at.is_not(None)),
         )
         .order_by(WatchProgress.episode_id)
     )

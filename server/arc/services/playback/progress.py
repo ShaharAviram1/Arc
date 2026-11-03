@@ -52,6 +52,11 @@ entry — "pressed play" is not "is watching this show", and FR-S4 draws that
 line at the completion — so the one row this can stamp is one that already
 exists (:func:`_activate_entry`).
 
+**Rewatch mode** (FR-W7, M21) is the exception to all of the above: a report
+recorded while the user has a rewatch pass open on the show stamps the latest
+finish and moves the walk, and never reaches the list or MyAnimeList
+(:func:`_record_in_pass`, :mod:`arc.services.playback.rewatch`).
+
 **The upsert is one statement, and "was it already complete?" comes out of
 that same statement's ``RETURNING``.** At one POST per ten seconds per player
 a read-then-write would be two round trips and a race; ``INSERT … ON CONFLICT
@@ -81,8 +86,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import and_, exists, false, func, literal_column, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    and_,
+    case,
+    exists,
+    false,
+    func,
+    literal_column,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,11 +110,14 @@ from arc.models import (
     EpisodeState,
     ListEntry,
     ListStatus,
+    Rewatch,
     Trip,
     TripEpisode,
     UpdatedBy,
+    Walk,
     WatchProgress,
 )
+from arc.models._columns import TZDateTime
 from arc.models.enums import MalWriteCause
 from arc.services.acquisition.dormancy import activate
 from arc.services.acquisition.names import enqueue_compute_wants
@@ -104,6 +125,13 @@ from arc.services.catalog.airing import FINISHED
 from arc.services.mal.names import enqueue_mal_push, is_linked
 from arc.services.mal.writelog import FIELD_PROGRESS, FIELD_STATUS, record_pending
 from arc.services.media.names import live_duration
+from arc.services.playback.rewatch import (
+    end_number,
+    finish,
+    finished_pass_tail,
+    in_pass,
+    rewatch_judged,
+)
 from arc.services.trips.names import enqueue_trip_sweep
 from arc.services.trips.rules import on_active_trip
 
@@ -249,7 +277,7 @@ class ProgressOutcome:
     (FR-S5) and what M9 will hang a push off; ``list_progress`` is the number
     the show page's badge would now read, and is ``None`` whenever nothing
     touched the list — which is every report but the one that finishes an
-    episode.
+    episode, and every report in a rewatch pass.
     """
 
     completed: bool
@@ -262,6 +290,148 @@ class ProgressOutcome:
     #: Whether this report crossed :data:`PREFETCH_FRACTION` upwards, and so
     #: queued a reconciliation for the halfway prefetch (M20).
     prefetch: bool = False
+    #: The report was judged in a rewatch pass (FR-W7): ``completed`` and
+    #: ``newly_completed`` are about the pass, and the list was not touched.
+    rewatching: bool = False
+    #: This report finished the pass's last episode and so ended the pass.
+    rewatch_ended: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Upserted:
+    """The ``watch_progress`` upsert's answer: the row after, and before."""
+
+    completed: bool
+    was_completed: bool
+    old_position_s: float | None
+    old_duration_s: float | None
+    old_finished_at: datetime | None
+    finished_at: datetime | None
+
+
+async def _upsert_progress(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    episode_id: int,
+    position_s: float,
+    duration_s: float,
+    completing: bool,
+    stamp: datetime,
+    replay: bool,
+    rewatching: bool,
+) -> _Upserted:
+    """One ``INSERT … ON CONFLICT DO UPDATE … RETURNING old.…`` (see the module docstring).
+
+    Both modes write the position, the duration, ``updated_at`` and — when
+    ``completing`` — the latest finish (``finished_at = greatest(finished_at,
+    stamp)``: never moved backwards by a late replay). Only normal mode writes
+    ``completed``/``completed_at``; a rewatch pass leaves them as they were
+    (FR-W7: a pass completion is a latest finish and nothing else).
+    """
+    statement = pg_insert(WatchProgress).values(
+        user_id=user_id,
+        episode_id=episode_id,
+        position_s=position_s,
+        duration_s=duration_s,
+        completed=completing and not rewatching,
+        completed_at=stamp if completing and not rewatching else None,
+        finished_at=stamp if completing else None,
+        updated_at=stamp,
+    )
+    set_: dict[str, Any] = {
+        "position_s": statement.excluded.position_s,
+        "duration_s": statement.excluded.duration_s,
+        # ``greatest`` ignores NULLs in PostgreSQL, so a report that does not
+        # complete (excluded NULL) keeps the stored finish, and a completing
+        # one never moves it backwards.
+        "finished_at": func.greatest(WatchProgress.finished_at, statement.excluded.finished_at),
+        # ``onupdate`` does not fire for the DO UPDATE half of an upsert
+        # (see :func:`arc.models._columns.updated_at`), so it is set here.
+        # A replayed offline report never moves it backwards: it is what
+        # the next replayed sample is judged stale against (FR-S8).
+        "updated_at": (
+            func.greatest(WatchProgress.updated_at, statement.excluded.updated_at)
+            if replay
+            else statement.excluded.updated_at
+        ),
+    }
+    if not rewatching:
+        # Sticky: a later report at 3 % never un-watches an episode.
+        set_["completed"] = or_(WatchProgress.completed, statement.excluded.completed)
+        # Written once and never moved: the *first* watch. The latest one is
+        # ``finished_at`` above, which is what retention anchors on (FR-T1).
+        set_["completed_at"] = func.coalesce(
+            WatchProgress.completed_at, statement.excluded.completed_at
+        )
+    upsert = statement.on_conflict_do_update(
+        index_elements=[WatchProgress.user_id, WatchProgress.episode_id], set_=set_
+    )
+    row: Row[Any] = (
+        await session.execute(
+            upsert.returning(
+                WatchProgress.completed,
+                # ``old`` is PostgreSQL 18's name for the row as it was
+                # immediately before this statement changed it — and on the
+                # insert half of the upsert there was no such row, so it is
+                # NULL and coalesces to false. A literal because SQLAlchemy
+                # has no construct for the alias yet; the column is spelled by
+                # hand and nothing user-supplied goes near it.
+                func.coalesce(literal_column("old.completed"), false()).label("was_completed"),
+                # The same re-read, for the halfway crossing (M20): NULL on
+                # the insert half, which is "no row before".
+                literal_column("old.position_s").label("old_position_s"),
+                literal_column("old.duration_s").label("old_duration_s"),
+                # And for a rewatch pass's "newly completed in the pass": the
+                # latest finish the statement actually overwrote, so of two
+                # concurrent completions exactly one finds it before the pass.
+                literal_column("old.finished_at", type_=TZDateTime).label("old_finished_at"),
+                WatchProgress.finished_at,
+            )
+        )
+    ).one()
+    completed, was_completed, old_position, old_duration, old_finished, finished = row
+    return _Upserted(
+        completed=bool(completed),
+        was_completed=bool(was_completed),
+        old_position_s=None if old_position is None else float(old_position),
+        old_duration_s=None if old_duration is None else float(old_duration),
+        old_finished_at=old_finished,
+        finished_at=finished,
+    )
+
+
+async def _move_walk(
+    session: AsyncSession, *, user_id: int, anime_id: int, after_number: int, stamp: datetime
+) -> bool:
+    """Upsert the user's walk on the show (FR-A1, M21); whether it is new or moved.
+
+    ``after_number`` is the episode before the one playing, or the one just
+    finished. A report older than the stored ``touched_at`` (a late offline
+    replay) moves nothing. Acquisition bookkeeping only: no list entry, no
+    MyAnimeList.
+    """
+    statement = pg_insert(Walk).values(
+        user_id=user_id, anime_id=anime_id, after_number=after_number, touched_at=stamp
+    )
+    upsert = statement.on_conflict_do_update(
+        index_elements=[Walk.user_id, Walk.anime_id],
+        set_={
+            "after_number": statement.excluded.after_number,
+            "touched_at": statement.excluded.touched_at,
+        },
+        where=Walk.touched_at <= statement.excluded.touched_at,
+    )
+    found: Row[Any] | None = (
+        await session.execute(
+            upsert.returning(literal_column("old.after_number").label("old_after_number"))
+        )
+    ).one_or_none()
+    if found is None:
+        # The stored walk is newer than this report: left as it is.
+        return False
+    old_after = found[0]
+    return old_after is None or int(old_after) != after_number
 
 
 async def record_progress(
@@ -274,6 +444,7 @@ async def record_progress(
     now: datetime | None = None,
     force_complete: bool = False,
     reported_at: datetime | None = None,
+    judged_at: datetime | None = None,
 ) -> ProgressOutcome:
     """Upsert one ``watch_progress`` row and, if it just finished, the list.
 
@@ -289,6 +460,17 @@ async def record_progress(
     ``updated_at`` backwards. Everything else — the list advance, its MAL
     write, the activation stamp — is still measured against ``now``, exactly
     as an online report is. ``None`` (every online caller) changes nothing.
+    ``judged_at`` is the replay's skew-adjusted time *before* the sync clamp:
+    when the clamp moved ``reported_at``, the rewatch mode is judged from it
+    (:func:`~arc.services.playback.rewatch.rewatch_judged`, failing closed).
+
+    **Every mode** (M21, architecture.md §5.5 step 6): a report at or past the
+    mark (or the manual mark) that passes the live-duration guard stamps the
+    episode's latest finish, and every report of a play (not the manual mark)
+    moves the user's walk on the show. **A rewatch pass** (FR-W7) — the one open when the report was
+    *recorded* (``reported_at or now``), ended passes included — takes
+    :func:`_record_in_pass` instead of the list half: nothing reaches
+    ``list_entries`` or the MyAnimeList write log.
 
     Flushed, not committed. The caller's transaction is what makes the
     progress, the list advance and the queued reconciliation one thing.
@@ -303,67 +485,79 @@ async def record_progress(
             # arrived (the guard above): progress is kept, the completion is not.
             completing = False
 
-    statement = pg_insert(WatchProgress).values(
+    rewatch = await rewatch_judged(
+        session, user_id=user_id, anime_id=episode.anime_id, at=stamp, judged_at=judged_at
+    )
+    if rewatch is None and not force_complete:
+        # The credits of a pass's last episode, reported after the pass ended
+        # on it (:func:`~arc.services.playback.rewatch.finished_pass_tail`).
+        before = await session.execute(
+            select(
+                WatchProgress.position_s, WatchProgress.duration_s, WatchProgress.finished_at
+            ).where(WatchProgress.user_id == user_id, WatchProgress.episode_id == episode.id)
+        )
+        prior = before.one_or_none()
+        if prior is not None:
+            rewatch = await finished_pass_tail(
+                session,
+                user_id=user_id,
+                episode=episode,
+                at=stamp,
+                old_position_s=prior.position_s,
+                old_duration_s=prior.duration_s,
+                old_finished_at=prior.finished_at,
+                completion_fraction=COMPLETION_FRACTION,
+            )
+
+    upserted = await _upsert_progress(
+        session,
         user_id=user_id,
         episode_id=episode.id,
         position_s=position_s,
         duration_s=duration_s,
-        completed=completing,
-        completed_at=stamp if completing else None,
-        updated_at=stamp,
+        completing=completing,
+        stamp=stamp,
+        replay=reported_at is not None,
+        rewatching=rewatch is not None,
     )
-    upsert = statement.on_conflict_do_update(
-        index_elements=[WatchProgress.user_id, WatchProgress.episode_id],
-        set_={
-            "position_s": statement.excluded.position_s,
-            "duration_s": statement.excluded.duration_s,
-            # Sticky: a later report at 3 % never un-watches an episode.
-            "completed": or_(WatchProgress.completed, statement.excluded.completed),
-            # Written once and never moved: retention measures its grace window
-            # from this, and a rewatch must not push a deletion date away.
-            "completed_at": func.coalesce(
-                WatchProgress.completed_at, statement.excluded.completed_at
-            ),
-            # ``onupdate`` does not fire for the DO UPDATE half of an upsert
-            # (see :func:`arc.models._columns.updated_at`), so it is set here.
-            # A replayed offline report never moves it backwards: it is what
-            # the next replayed sample is judged stale against (FR-S8).
-            "updated_at": (
-                statement.excluded.updated_at
-                if reported_at is None
-                else func.greatest(WatchProgress.updated_at, statement.excluded.updated_at)
-            ),
-        },
-    )
-
-    completed, was_completed, old_position, old_duration = (
-        await session.execute(
-            upsert.returning(
-                WatchProgress.completed,
-                # ``old`` is PostgreSQL 18's name for the row as it was
-                # immediately before this statement changed it — and on the
-                # insert half of the upsert there was no such row, so it is
-                # NULL and coalesces to false. A literal because SQLAlchemy
-                # has no construct for the alias yet; the column is spelled by
-                # hand and nothing user-supplied goes near it.
-                func.coalesce(literal_column("old.completed"), false()).label("was_completed"),
-                # The same re-read, for the halfway crossing (M20): NULL on
-                # the insert half, which is "no row before".
-                literal_column("old.position_s").label("old_position_s"),
-                literal_column("old.duration_s").label("old_duration_s"),
-            )
-        )
-    ).one()
-    previous_position = None if old_position is None else float(old_position)
-    previous_duration = None if old_duration is None else float(old_duration)
+    previous_position = upserted.old_position_s
+    previous_duration = upserted.old_duration_s
 
     # The halfway prefetch (FR-A1, M20): the reconciler wants one more episode
     # while the user is past the middle of the first one in their window, and
     # this is the moment that becomes true. Deduplicated on the job type, so a
-    # report and a completion in one binge cost one reconciliation.
+    # report and a completion in one binge cost one reconciliation. A rewatch
+    # pass has a window too (FR-W7 item 1), so this holds in both modes.
     prefetch = crosses_prefetch(previous_position, previous_duration, position_s, duration_s)
     if prefetch:
         await enqueue_compute_wants(session)
+
+    # The walk (FR-A1, M21): where the look-ahead starts after a play, in both
+    # modes — the episode before this one while it plays, this one once it is
+    # finished. A new or moved walk changes the window, so the reconciler runs.
+    # A manual mark (FR-W3) is not a play: FR-A1 counts a walk from the
+    # episode the user is *playing*, so marking episode 9 by hand moves nothing.
+    if not force_complete and await _move_walk(
+        session,
+        user_id=user_id,
+        anime_id=episode.anime_id,
+        after_number=episode.number if completing else episode.number - 1,
+        stamp=stamp,
+    ):
+        await enqueue_compute_wants(session)
+
+    if rewatch is not None:
+        return await _record_in_pass(
+            session,
+            user_id=user_id,
+            episode=episode,
+            rewatch=rewatch,
+            upserted=upserted,
+            completing=completing,
+            stamp=stamp,
+            now=at,
+            prefetch=prefetch,
+        )
 
     # Play is one of FR-A9's touches, and it is a touch from the *first*
     # report rather than from the one that crosses 90 %: somebody watching
@@ -374,10 +568,10 @@ async def record_progress(
     # stamps a row that is already there.
     await _activate_entry(session, user_id=user_id, anime_id=episode.anime_id, now=at)
 
-    newly_completed = bool(completed) and not bool(was_completed)
+    newly_completed = upserted.completed and not upserted.was_completed
     if not newly_completed:
         return ProgressOutcome(
-            completed=bool(completed),
+            completed=upserted.completed,
             newly_completed=False,
             previous_position_s=previous_position,
             previous_duration_s=previous_duration,
@@ -390,14 +584,7 @@ async def record_progress(
     # one in the look-ahead is now wanted. Deduplicated on the job type, so a
     # binge costs one reconciliation rather than one per episode.
     await enqueue_compute_wants(session)
-    # A trip ends once its user has watched all of it (owner, 2026-10-31). The
-    # rule is the trip sweep's (:func:`~arc.services.trips.sweep.end_if_complete`);
-    # finishing an episode on one of this user's active trips is the moment it
-    # may have become true, so the sweep is queued now rather than left to the
-    # hourly tick. Deduplicated on the job type: a sweep already queued (or
-    # running) is not doubled.
-    if await on_active_trip(session, user_id, episode.id):
-        await enqueue_trip_sweep(session)
+    await _trip_hook(session, user_id=user_id, episode_id=episode.id)
     return ProgressOutcome(
         completed=True,
         newly_completed=True,
@@ -405,6 +592,73 @@ async def record_progress(
         previous_position_s=previous_position,
         previous_duration_s=previous_duration,
         prefetch=prefetch,
+    )
+
+
+async def _trip_hook(session: AsyncSession, *, user_id: int, episode_id: int) -> None:
+    """Queue the trip sweep when a completion lands on an active trip's episode.
+
+    A trip ends once its user has watched all of it (owner, 2026-10-31). The
+    rule is the trip sweep's (:func:`~arc.services.trips.sweep.end_if_complete`);
+    finishing an episode on one of this user's active trips is the moment it
+    may have become true, so the sweep is queued now rather than left to the
+    hourly tick. Deduplicated on the job type: a sweep already queued (or
+    running) is not doubled. In both modes.
+    """
+    if await on_active_trip(session, user_id, episode_id):
+        await enqueue_trip_sweep(session)
+
+
+async def _record_in_pass(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    episode: Episode,
+    rewatch: Rewatch,
+    upserted: _Upserted,
+    completing: bool,
+    stamp: datetime,
+    now: datetime,
+    prefetch: bool,
+) -> ProgressOutcome:
+    """A report inside a rewatch pass (FR-W7): the pass moves, nothing else does.
+
+    No :func:`_activate_entry`, no :func:`_advance_list` (so no entry created,
+    no progress, no FR-W5 auto-complete), no ``record_pending``, no
+    ``enqueue_mal_push`` — none of those is reachable from here, which is the
+    whole of FR-W7 item 3 and the MAL non-negotiable's rewatch sentence.
+
+    *Newly completed in the pass* is a completing report whose overwritten
+    latest finish (``RETURNING old.finished_at``) was before the pass started,
+    or absent: of two concurrent completions the second re-reads the first's
+    finish and is not new. Finishing the pass's last episode
+    (:func:`~arc.services.playback.rewatch.pass_end_number`) ends a pass still
+    open **at the server's time** (``now``), never at the recording time: an
+    offline replay ending the pass at the device's moment would put the end
+    before other records of the same pass still waiting in the queue, and those
+    would then be judged in normal mode and write to MyAnimeList. A pass
+    already ended stays as it is.
+    """
+    completed = in_pass(upserted.finished_at, rewatch.started_at)
+    newly_completed = completing and not in_pass(upserted.old_finished_at, rewatch.started_at)
+    ended = False
+    if newly_completed:
+        # The pass's position moved, and with it the pass's window.
+        await enqueue_compute_wants(session)
+        await _trip_hook(session, user_id=user_id, episode_id=episode.id)
+    if completing and rewatch.ended_at is None:
+        anime = await session.get(Anime, episode.anime_id)
+        if anime is not None and episode.number >= await end_number(session, anime, now=stamp):
+            ended = await finish(session, rewatch, at=now)
+    return ProgressOutcome(
+        completed=completed,
+        newly_completed=newly_completed,
+        list_progress=None,
+        previous_position_s=upserted.old_position_s,
+        previous_duration_s=upserted.old_duration_s,
+        prefetch=prefetch,
+        rewatching=True,
+        rewatch_ended=ended,
     )
 
 
@@ -587,6 +841,9 @@ class UnmarkOutcome:
 
     cleared: bool
     list_progress: int | None = None
+    #: Judged inside a rewatch pass (FR-W7): ``cleared`` is about the pass's
+    #: finish, and the list was not touched.
+    rewatching: bool = False
 
 
 async def unmark_watched(
@@ -596,6 +853,7 @@ async def unmark_watched(
     episode: Episode,
     now: datetime | None = None,
     reported_at: datetime | None = None,
+    judged_at: datetime | None = None,
 ) -> UnmarkOutcome:
     """Take back one watched mark, and the list progress if it was the latest.
 
@@ -647,10 +905,24 @@ async def unmark_watched(
     the un-mark — because that un-mark is exactly the one an older offline
     completion could otherwise undo. Every other un-mark without a row still
     writes nothing.
+
+    **The latest finish goes too** (M21): ``finished_at`` is cleared with the
+    flag. **Inside a rewatch pass** (FR-W7) — the pass open at the un-mark's
+    own moment — only the pass's finish is taken back (:func:`_unmark_in_pass`):
+    ``completed`` and the list stay exactly as they were, and nothing is
+    written to MyAnimeList.
     """
     at = now or datetime.now(UTC)
     when = reported_at or at
     updated = at if reported_at is None else func.greatest(WatchProgress.updated_at, reported_at)
+    unmarked = func.greatest(func.coalesce(WatchProgress.unmarked_at, when), when)
+    rewatch = await rewatch_judged(
+        session, user_id=user_id, anime_id=episode.anime_id, at=when, judged_at=judged_at
+    )
+    if rewatch is not None:
+        return await _unmark_in_pass(
+            session, user_id=user_id, episode=episode, rewatch=rewatch, updated=updated, when=when
+        )
     # ``RETURNING`` rather than ``rowcount``: it is the same round trip, and it
     # is a typed answer to "was there a row?" rather than a driver attribute.
     touched = await session.scalars(
@@ -662,8 +934,11 @@ async def unmark_watched(
         .values(
             completed=False,
             completed_at=None,
+            # The latest finish goes with the mark (M21): a demand, a rewatch
+            # pass and retention all read it as "watched".
+            finished_at=None,
             updated_at=updated,
-            unmarked_at=func.greatest(func.coalesce(WatchProgress.unmarked_at, when), when),
+            unmarked_at=unmarked,
         )
         .returning(WatchProgress.episode_id)
     )
@@ -689,6 +964,46 @@ async def unmark_watched(
             )
         )
     return UnmarkOutcome(cleared=cleared, list_progress=lowered)
+
+
+async def _unmark_in_pass(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    episode: Episode,
+    rewatch: Rewatch,
+    updated: datetime | ColumnElement[datetime],
+    when: datetime,
+) -> UnmarkOutcome:
+    """An un-mark inside a rewatch pass (FR-W7): the pass's finish, and nothing else.
+
+    Clears the latest finish only when it falls within the pass (a finish from
+    before it is the normal-mode watch the pass does not own), stamps
+    ``unmarked_at`` so an older offline completion cannot undo it (FR-S8), and
+    never touches ``completed``, the list or MyAnimeList — no
+    :func:`_retreat_list`, no row created.
+    """
+    old_finished = await session.scalar(
+        update(WatchProgress)
+        .where(
+            WatchProgress.user_id == user_id,
+            WatchProgress.episode_id == episode.id,
+        )
+        .values(
+            finished_at=case(
+                (WatchProgress.finished_at >= rewatch.started_at, None),
+                else_=WatchProgress.finished_at,
+            ),
+            updated_at=updated,
+            unmarked_at=func.greatest(func.coalesce(WatchProgress.unmarked_at, when), when),
+        )
+        .returning(literal_column("old.finished_at", type_=TZDateTime))
+    )
+    cleared = in_pass(old_finished, rewatch.started_at)
+    if cleared:
+        # The pass's position may have moved back, and its window with it.
+        await enqueue_compute_wants(session)
+    return UnmarkOutcome(cleared=cleared, list_progress=None, rewatching=True)
 
 
 async def _retreat_list(

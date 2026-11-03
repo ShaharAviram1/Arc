@@ -570,7 +570,11 @@ async def test_the_halfway_crossing_enqueues_once(db_session: AsyncSession) -> N
         db_session, user_id=user.id, episode=rows[0], position_s=0.4 * LENGTH, duration_s=LENGTH
     )
     assert first.prefetch is False
-    assert await pending_jobs(db_session, COMPUTE_WANTS) == []
+    # The first play starts the user's walk on the show (M21), which queues a
+    # reconciliation of its own; settled here so the crossing is measured alone.
+    (walk_job,) = await pending_jobs(db_session, COMPUTE_WANTS)
+    walk_job.status = JobStatus.DONE
+    await db_session.flush()
 
     second = await record_progress(
         db_session, user_id=user.id, episode=rows[0], position_s=0.55 * LENGTH, duration_s=LENGTH

@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Exists, exists, func, select
+from sqlalchemy import ColumnElement, Exists, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -164,19 +164,28 @@ async def pending_episode_ids(
     return set((await session.scalars(statement)).all())
 
 
-def completed_by(user_id: ColumnElement[int] | InstrumentedAttribute[int] | int) -> Exists:
-    """``EXISTS`` a completed ``watch_progress`` row of ``user_id`` on the row's episode.
+def completed_by(
+    user_id: ColumnElement[int] | InstrumentedAttribute[int] | int,
+    *,
+    since: ColumnElement[datetime] | InstrumentedAttribute[datetime] | datetime,
+) -> Exists:
+    """``EXISTS`` a watched ``watch_progress`` row of ``user_id`` on the row's episode.
 
     The one meaning of "watched" for a trip row (correlated on
-    ``trip_episodes.episode_id``): a completion recorded in Arc. Progress
-    that exists only on MyAnimeList does not count. Shared by the keep rule
-    (:func:`held_episode_ids`) and the end of a fully watched trip
-    (:func:`~arc.services.trips.sweep.end_if_complete`).
+    ``trip_episodes.episode_id``): a completion recorded in Arc — the
+    ``completed`` flag, or a latest finish (``finished_at``) **at or after
+    ``since``**, the trip's ``created_at``. A latest finish is what a rewatch
+    pass records (FR-W7, M21), so finishing a trip's episode in a pass is a
+    watch confirmation like any other; one from before the trip existed (an
+    old pass over the same episodes) is not — the trip was made to watch them
+    again. Progress that exists only on MyAnimeList does not count. Shared by
+    the keep rule (:func:`held_episode_ids`) and the end of a fully watched
+    trip (:func:`~arc.services.trips.sweep.end_if_complete`).
     """
     return exists().where(
         WatchProgress.user_id == user_id,
         WatchProgress.episode_id == TripEpisode.episode_id,
-        WatchProgress.completed.is_(True),
+        or_(WatchProgress.completed.is_(True), WatchProgress.finished_at >= since),
     )
 
 
@@ -192,7 +201,7 @@ async def held_episode_ids(
     the user has watched it or the trip has ended (finished, cancelled or
     expired). Read in one statement, the watch check included.
     """
-    watched = completed_by(Trip.user_id)
+    watched = completed_by(Trip.user_id, since=Trip.created_at)
     statement = (
         select(TripEpisode.episode_id)
         .join(Trip, Trip.id == TripEpisode.trip_id)
