@@ -450,8 +450,8 @@ async def record_progress(
 
     **Every mode** (M21, architecture.md §5.5 step 6): a report at or past the
     mark (or the manual mark) that passes the live-duration guard stamps the
-    episode's latest finish, and every report moves the user's walk on the
-    show. **A rewatch pass** (FR-W7) — the one open when the report was
+    episode's latest finish, and every report of a play (not the manual mark)
+    moves the user's walk on the show. **A rewatch pass** (FR-W7) — the one open when the report was
     *recorded* (``reported_at or now``), ended passes included — takes
     :func:`_record_in_pass` instead of the list half: nothing reaches
     ``list_entries`` or the MyAnimeList write log.
@@ -517,14 +517,15 @@ async def record_progress(
     # The walk (FR-A1, M21): where the look-ahead starts after a play, in both
     # modes — the episode before this one while it plays, this one once it is
     # finished. A new or moved walk changes the window, so the reconciler runs.
-    walked = await _move_walk(
+    # A manual mark (FR-W3) is not a play: FR-A1 counts a walk from the
+    # episode the user is *playing*, so marking episode 9 by hand moves nothing.
+    if not force_complete and await _move_walk(
         session,
         user_id=user_id,
         anime_id=episode.anime_id,
         after_number=episode.number if completing else episode.number - 1,
         stamp=stamp,
-    )
-    if walked:
+    ):
         await enqueue_compute_wants(session)
 
     if rewatch is not None:
