@@ -123,7 +123,7 @@ async def withdraw_demand(
     """204 whether or not there was a demand: withdrawing twice is not an error."""
     if await session.get(Episode, episode_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=EPISODE_NOT_FOUND)
-    await withdraw(session, user_id=user.id, episode_id=episode_id)
+    await withdraw(session, user_id=user.id, episode_id=episode_id, now=now())
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

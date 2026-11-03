@@ -282,6 +282,7 @@ async def test_withdrawing_answers_204_and_is_idempotent(
     async with api_factory() as session:
         want = await session.get(Want, (user.id, ids[8]))
         assert want is not None and want.demanded_at is None
+        assert want.dropped_at is not None, "shelved by the withdrawal"
         queued = (await session.scalars(select(Job).where(Job.type == COMPUTE_WANTS))).all()
         assert len(queued) == 1
 

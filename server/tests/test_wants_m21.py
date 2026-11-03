@@ -431,16 +431,63 @@ async def test_withdraw_ends_a_demand(db_session: AsyncSession) -> None:
         await db_session.delete(job)
     await db_session.flush()
 
-    assert await withdraw(db_session, user_id=user.id, episode_id=rows[2].id) is True
-    assert len(await jobs(db_session, COMPUTE_WANTS)) == 1
-    assert await withdraw(db_session, user_id=user.id, episode_id=rows[2].id) is False
-    await compute_wants(db_session)
+    now = datetime.now(UTC)
+    assert await withdraw(db_session, user_id=user.id, episode_id=rows[2].id, now=now) is True
 
+    # Shelved and cancelled by the withdrawal itself, not at the next tick.
     want = await db_session.get(Want, (user.id, rows[2].id))
-    assert want is not None and want.dropped_at is not None, "an ordinary want: shelved"
-    assert want.drop_reason == REASON_NOT_WANTING
+    assert want is not None and want.demanded_at is None
+    assert want.dropped_at == now and want.drop_reason == REASON_NOT_WANTING
     assert rows[2].state is EpisodeState.NOT_WANTED
     assert torrent.qbit_state == QBIT_CANCELLED
+    assert [job.payload["episode_id"] for job in await jobs(db_session, QBIT_CANCEL)] == [
+        rows[2].id
+    ]
+    assert len(await jobs(db_session, COMPUTE_WANTS)) == 1
+    assert await withdraw(db_session, user_id=user.id, episode_id=rows[2].id, now=now) is False
+    await compute_wants(db_session)
+    assert want.dropped_at == now, "stays shelved"
+
+
+@pg
+async def test_withdrawing_leaves_another_users_demanded_download_running(
+    db_session: AsyncSession,
+) -> None:
+    anime, rows = await a_show(db_session, 972014)
+    user = await make_user(db_session, "m21-withdraw-a@arc.test")
+    other = await make_user(db_session, "m21-withdraw-b@arc.test")
+    for someone in (user, other):
+        await demand(db_session, user_id=someone.id, episode=rows[2], now=datetime.now(UTC))
+    torrent = await downloading(db_session, rows[2], "5" * 40)
+
+    await withdraw(db_session, user_id=user.id, episode_id=rows[2].id, now=datetime.now(UTC))
+    await compute_wants(db_session)
+
+    mine = await db_session.get(Want, (user.id, rows[2].id))
+    theirs = await db_session.get(Want, (other.id, rows[2].id))
+    assert mine is not None and mine.dropped_at is not None
+    assert theirs is not None and theirs.dropped_at is None and theirs.demanded_at is not None
+    assert rows[2].state is EpisodeState.DOWNLOADING
+    assert torrent.qbit_state != QBIT_CANCELLED
+    assert await jobs(db_session, QBIT_CANCEL) == []
+
+
+@pg
+async def test_a_withdrawn_window_episode_is_revived_by_the_next_reconcile(
+    db_session: AsyncSession,
+) -> None:
+    anime, rows = await a_show(db_session, 972015)
+    user = await make_user(db_session, "m21-withdraw-window@arc.test")
+    await make_entry(db_session, user, anime, progress=4)
+    await demand(db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC))
+
+    await withdraw(db_session, user_id=user.id, episode_id=rows[4].id, now=datetime.now(UTC))
+    want = await db_session.get(Want, (user.id, rows[4].id))
+    assert want is not None and want.dropped_at is not None
+    await compute_wants(db_session)
+
+    assert want.dropped_at is None and want.demanded_at is None, "an ordinary window want"
+    assert rows[4].state is EpisodeState.WANTED
 
 
 # --- walks ---------------------------------------------------------------------------
@@ -842,24 +889,27 @@ async def held_show(
 
 
 @pg
-async def test_a_withdrawn_demand_on_a_held_show_is_shelved_and_cancelled(
+async def test_a_withdrawn_demand_on_a_held_show_stays_shelved_and_holds_no_slot(
     db_session: AsyncSession,
 ) -> None:
+    """Withdrawn on the held show's window episode: shelved until the show is admitted."""
     user = await make_user(db_session, "m21-held-withdraw@arc.test")
     anime, rows = await held_show(db_session, user, 972052)
-    await demand(db_session, user_id=user.id, episode=rows[8], now=datetime.now(UTC))
-    torrent = await downloading(db_session, rows[8], "3" * 40)
-    await compute_wants(db_session)
-    assert (await slot_view(db_session, user.id)).waiting == frozenset({anime.id})
-
-    await withdraw(db_session, user_id=user.id, episode_id=rows[8].id)
+    await demand(db_session, user_id=user.id, episode=rows[4], now=datetime.now(UTC))
+    torrent = await downloading(db_session, rows[4], "3" * 40)
     await compute_wants(db_session)
 
-    want = await db_session.get(Want, (user.id, rows[8].id))
+    await withdraw(db_session, user_id=user.id, episode_id=rows[4].id, now=datetime.now(UTC))
+    await compute_wants(db_session)
+    await compute_wants(db_session)
+
+    want = await db_session.get(Want, (user.id, rows[4].id))
     assert want is not None and want.dropped_at is not None
     assert want.drop_reason == REASON_NOT_WANTING
-    assert rows[8].state is EpisodeState.NOT_WANTED
+    assert rows[4].state is EpisodeState.NOT_WANTED
     assert torrent.qbit_state == QBIT_CANCELLED
+    view = await slot_view(db_session, user.id)
+    assert view.waiting == frozenset({anime.id}) and view.fetching == 1, "only the busy show"
 
 
 @pg

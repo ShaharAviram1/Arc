@@ -78,6 +78,10 @@ from arc.models import (
     JobStatus,
     Torrent,
     TorrentKind,
+    Trip,
+    TripEpisode,
+    TripEpisodeState,
+    TripState,
     Want,
     WatchProgress,
 )
@@ -95,7 +99,15 @@ from arc.services.acquisition.names import (
 )
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_MISSING
 from arc.services.acquisition.rules import demand_max_open, is_paused, is_storage_held
-from arc.services.acquisition.wants import STARTABLE, lock_wants, start_search
+from arc.services.acquisition.wants import (
+    REASON_NOT_WANTING,
+    STARTABLE,
+    cancel_if_unwanted,
+    enqueue_cancel,
+    lock_wants,
+    release_if_unwanted,
+    start_search,
+)
 from arc.services.catalog.cache import preferred_title
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.media.names import (
@@ -334,24 +346,59 @@ async def demand(
     )
 
 
-async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int) -> bool:
+async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now: datetime) -> bool:
     """Withdraw the caller's demand on an episode (FR-A14, M21). Flushes; the caller commits.
 
-    ``demanded_at`` goes back to null and a reconciliation is queued; the row
-    then lives or ends as an ordinary want — kept if a window, a walk or a trip
-    still asks for the episode, otherwise deleted or shelved, and the download
-    cancelled when nobody else wants it. ``True`` when there was a demand to
-    withdraw; a second call changes nothing and queues nothing. Taken under
-    the want lock like a demand, so a reconciliation never sees half of it.
+    ``demanded_at`` goes back to null and, unless an active trip of the user's
+    is still waiting on the episode, the row is **shelved** at once
+    (:data:`~arc.services.acquisition.wants.REASON_NOT_WANTING`): the episode
+    is released, or its download cancelled, through the reconciler's own
+    :func:`~arc.services.acquisition.wants.release_if_unwanted` /
+    :func:`~arc.services.acquisition.wants.cancel_if_unwanted` — which leave
+    it alone while another user or a trip still wants it. So a withdrawn
+    demand never runs on as a download holding its show a slot. The queued
+    reconciliation's ordinary revival brings the row back as an ordinary want
+    when the show is admitted and its window wants the episode; on a show
+    the slot cap holds it stays shelved until the show gets a slot (M20's
+    held-show rule). A trip's episode keeps its row live (the trip's own
+    lifetime decides).
+
+    ``True`` when there was a demand to withdraw; a second call changes
+    nothing and queues nothing. Taken under the want lock like a demand.
     """
     await lock_wants(session)
     want = await session.get(Want, (user_id, episode_id), populate_existing=True)
     if want is None or want.demanded_at is None:
         return False
     want.demanded_at = None
+    on_trip = await session.scalar(
+        select(TripEpisode.episode_id)
+        .join(Trip, Trip.id == TripEpisode.trip_id)
+        .where(
+            Trip.user_id == user_id,
+            Trip.state == TripState.ACTIVE,
+            TripEpisode.episode_id == episode_id,
+            TripEpisode.state == TripEpisodeState.PENDING,
+        )
+        .limit(1)
+    )
+    cancelled = False
+    if on_trip is None and want.dropped_at is None:
+        want.dropped_at = now
+        want.drop_reason = REASON_NOT_WANTING
+        await session.flush()
+        episode = await session.get(Episode, episode_id)
+        if episode is not None and not await release_if_unwanted(session, episode):
+            cancelled = await cancel_if_unwanted(session, episode)
+            if cancelled:
+                await session.flush()
+                await enqueue_cancel(session, episode_id)
     await enqueue_compute_wants(session)
     await session.flush()
-    log.info("demand withdrawn", extra={"user_id": user_id, "episode_id": episode_id})
+    log.info(
+        "demand withdrawn",
+        extra={"user_id": user_id, "episode_id": episode_id, "cancelled": cancelled},
+    )
     return True
 
 
