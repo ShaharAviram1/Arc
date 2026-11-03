@@ -54,6 +54,7 @@ from arc.models import (
     UpdatedBy,
 )
 from arc.services.acquisition.dormancy import activate
+from arc.services.acquisition.walks import WALK_ENDING_STATUSES, end_walk
 from arc.services.mal import oauth, writelog
 from arc.services.mal.client import MalApiError, needs_relink, store_tokens
 from arc.services.mal.factory import client_of, oauth_client
@@ -458,10 +459,17 @@ async def revert(log_id: int, user: CurrentUser, session: SessionDep) -> RevertO
     else:
         was = _current(entry, row.field)
 
+    status_before = entry.status if row.field == "status" and was is not None else None
     try:
         apply_change(entry, field=row.field, value=row.old_value)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # An undo that sets the show dropped, on hold or completed is the user
+    # setting it, so it ends their walk on the show (FR-A1, M21) — the same as
+    # the list write. The MyAnimeList sync path never does this.
+    restores_ending = row.field == "status" and entry.status in WALK_ENDING_STATUSES
+    if restores_ending and entry.status != status_before:
+        await end_walk(session, user_id=user.id, anime_id=row.anime_id)
 
     entry.updated_by = UpdatedBy.ARC
     entry.mal_dirty = True

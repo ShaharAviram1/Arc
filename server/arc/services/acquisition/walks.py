@@ -11,7 +11,14 @@ walk moves:
   (``catalog.lists.set_list_entry``; a MyAnimeList-side change ends nothing);
 * FR-W5's auto-complete (``playback.progress._advance_list``);
 * a rewatch pass ending, by the switch or on its last episode, when the walk
-  moved during the pass (``playback.rewatch.stop``/``finish``).
+  moved during the pass (``playback.rewatch.stop``/``finish``);
+* an undo from the MyAnimeList write log that restores such a status
+  (``api.mal.revert``, FR-M7's user-originated revert).
+
+**Accepted limit.** An offline progress report recorded *before* one of
+these endings and replayed *after* it (FR-S8) recreates the walk, because the
+row it would be compared with is gone. That walk then lives until it lapses
+after D days, or until the next ending deletes it again.
 """
 
 from __future__ import annotations

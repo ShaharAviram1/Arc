@@ -29,6 +29,7 @@ from arc.models import (
     MalWriteCause,
     MalWriteLog,
     MalWriteStatus,
+    Walk,
 )
 from arc.services.mal import oauth
 from arc.services.mal.names import IMPORT, PUSH, PUSH_ALL
@@ -569,6 +570,47 @@ async def test_reverting_a_removal_puts_the_show_back_on_the_list(
         # The entry this recreated is a user putting the show back, so it is
         # live rather than dormant from the moment it exists (FR-A9).
         assert entry.activated_at is not None
+
+
+@pytest.mark.parametrize(
+    ("current", "restored", "ends"),
+    [
+        (ListStatus.WATCHING, ListStatus.DROPPED, True),
+        (ListStatus.DROPPED, ListStatus.WATCHING, False),
+    ],
+)
+async def test_an_undo_that_restores_dropped_ends_the_walk(
+    client: AsyncClient,
+    api_factory: SessionFactory,
+    settings: Settings,
+    user_id: int,
+    current: ListStatus,
+    restored: ListStatus,
+    ends: bool,
+) -> None:
+    """M21 (FR-A1): the revert is the user setting the status, like the list write."""
+    await link_user(api_factory, settings, user_id=user_id)
+    anime_id = await make_anime(api_factory, mal_id=409 + int(ends))
+    await make_entry(api_factory, user_id=user_id, anime_id=anime_id, status=current)
+    async with api_factory() as session:
+        session.add(
+            Walk(user_id=user_id, anime_id=anime_id, after_number=3, touched_at=datetime.now(UTC))
+        )
+        await session.commit()
+    row_id = await _write(
+        api_factory,
+        user_id=user_id,
+        anime_id=anime_id,
+        field="status",
+        old=restored.value,
+        new=current.value,
+    )
+
+    response = await client.post(f"/api/mal/log/{row_id}/revert")
+
+    assert response.status_code == 202, response.text
+    async with api_factory() as session:
+        assert (await session.get(Walk, (user_id, anime_id)) is None) is ends
 
 
 async def test_a_failed_write_cannot_be_reverted(
