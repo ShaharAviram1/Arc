@@ -1164,9 +1164,7 @@ function EpisodeRow({
               />
             </span>
           )}
-          {episode.demanded === true ? (
-            <DemandedNote animeId={anime.id} episode={episode} />
-          ) : null}
+          {episode.demanded === true ? <DemandedNote animeId={anime.id} episode={episode} /> : null}
           {episode.state === 'failed' && isAdmin ? (
             <span className="relative z-10 flex flex-col items-end gap-1.5">
               <RetryTranscode animeId={anime.id} episodeId={episode.id} />
