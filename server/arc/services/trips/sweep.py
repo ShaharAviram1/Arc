@@ -229,7 +229,7 @@ async def end_if_complete(session: AsyncSession, trip: Trip, *, now: datetime) -
     """
     if trip.state is not TripState.ACTIVE:
         return None
-    watched = completed_by(trip.user_id)
+    watched = completed_by(trip.user_id, since=trip.created_at)
     rows, done = (
         await session.execute(
             select(func.count(), func.count().filter(watched)).where(TripEpisode.trip_id == trip.id)
