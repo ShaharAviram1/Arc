@@ -39,12 +39,10 @@ their striped placeholders until the nightly sweep happened to reach them. The
 route waits for nothing — it answers with the art it already holds and tells
 the client whether more is possible (``tmdb_mapped``).
 
-The two ``/{id}/sample`` routes are the show page's "try episode 1" (FR-A8):
-the one way a user can cause a download without a list change. They are thin
-over :mod:`arc.services.acquisition.samples`, which owns the three refusals and
-hands each of them up as a sentence this router puts straight into a 409 —
-there is nothing for the client to translate, because the refusal is the
-answer.
+The two ``/{id}/sample`` routes were the show page's "try episode 1" (FR-A8).
+M21 retired it (a sample is a click on episode 1, FR-A14): ``POST`` answers
+410, and ``DELETE`` stays, thin over :mod:`arc.services.acquisition.samples`,
+until the sample rows made before M21 have ended.
 
 The refresh endpoint takes the job type and its dedupe key from
 :mod:`arc.services.catalog.names` rather than spelling them out: the worker's
@@ -81,9 +79,7 @@ from arc.api.schemas import OverrideOut
 from arc.api.trip_schemas import TripLimits, TripOut
 from arc.models import Anime, EpisodeState, Job, ListEntry, UserRole, Want
 from arc.services.acquisition.samples import (
-    SampleError,
     cancel_sample,
-    request_sample,
     sample_for,
 )
 from arc.services.acquisition.wants import WANTING_STATUSES, coverable, slot_view
@@ -463,43 +459,24 @@ async def detail(
     )
 
 
+#: What ``POST /api/anime/{id}/sample`` answers since M21: FR-A8 is retired,
+#: folded into the demand (a sample is a click on episode 1, FR-A14).
+SAMPLE_RETIRED = "Try episode 1 is gone: press play on episode 1 instead."
+
+
 @router.post(
     "/{anime_id}/sample",
-    response_model=SampleOut,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Fetch this show's first episode as a sample (FR-A8)",
-    responses={404: {"description": ANIME_NOT_FOUND}, 409: {"description": "cannot be sampled"}},
+    status_code=status.HTTP_410_GONE,
+    summary="Retired: fetch this show's first episode as a sample (FR-A8)",
+    responses={410: {"description": SAMPLE_RETIRED}},
 )
-async def sample(
-    anime_id: AnimeId,
-    user: CurrentUser,
-    session: SessionDep,
-    settings: SettingsDep,
-) -> SampleOut:
-    """One episode, no list change, no MAL write (FR-A8).
+async def sample(anime_id: AnimeId, user: CurrentUser) -> Response:
+    """410 Gone (M21, owner 2026-11-03): pressing play on episode 1 is the sample now.
 
-    202 rather than 201: what comes back is a want, and the episode behind it
-    is searched for, downloaded and prepared by the same jobs as any other —
-    nothing is ready when this answers. The search *is* started here, though,
-    through the reconciler's own helper, so the response's ``state`` and the
-    episode row on the page say ``wanted`` at once rather than after the next
-    fifteen-minute tick. The three 409s carry the service's own sentence, which
-    is written to be read by a person on the show page.
-
-    Not admin-gated: it is the caller's own want, on the caller's own account,
-    and it fetches strictly less than putting the show on their list would.
+    Nothing is read or written. ``DELETE`` stays while the sample rows made
+    before M21 are still live, and so do they (``wants._sample_wants``).
     """
-    if await session.get(Anime, anime_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ANIME_NOT_FOUND)
-    try:
-        requested = await request_sample(
-            session, user_id=user.id, anime_id=anime_id, now=now(), settings=settings
-        )
-    except SampleError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    out = SampleOut.build(requested.want, requested.episode)
-    await session.commit()
-    return out
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=SAMPLE_RETIRED)
 
 
 @router.delete(
