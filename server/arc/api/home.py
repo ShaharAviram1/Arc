@@ -96,9 +96,10 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     anime_ids = [row.anime.id for shelf in shelves for row in shelf]
     anime_ids += [row.anime.id for row in failures]
     episode_ids = [row.episode.id for shelf in shelves for row in shelf]
-    # One lookup for the list badges on the cards: those rows are all on the
-    # caller's list by construction, but which state they are in is what the
-    # badge says.
+    # One lookup for the list badges on the cards. Most rows are on the
+    # caller's list, but not all: since M21 a rewatch pass, a demand or a walk
+    # can put a show that is not on it on Continue watching or Ready to watch
+    # (no badge then), and a failure row can be a sample's.
     statuses = await list_status_for(session, user_id=user.id, anime_ids=anime_ids)
     # And one for FR-W5's other half: an episode at or below the viewer's list
     # progress is watched, which on a list imported from MyAnimeList is most

@@ -1540,6 +1540,139 @@ async def test_the_three_branches_share_one_newest_file_first_order(
     ]
 
 
+# --- Continue watching reads the pass (T4 fix round 1, orchestrator's call) --
+
+
+def continue_numbers(body: dict[str, list[dict[str, object]]]) -> list[int]:
+    return [row["episode"]["number"] for row in body["continue_watching"]]
+
+
+async def ten_minutes_in(
+    factory: SessionFactory, user: User, episode: Episode, *, at: datetime
+) -> None:
+    await watch_row(factory, user, episode, position_s=600.0, updated_at=at)
+
+
+async def test_a_pre_pass_partial_is_on_ready_to_watch_not_continue_watching(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await old_show(api_factory, title="Before the pass", anilist_id=910090)
+    await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=4)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(days=5))
+    await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+
+    body = await home(client)
+
+    assert ready_numbers(body) == [1]
+    assert continue_numbers(body) == []
+
+
+async def test_a_partial_written_in_the_pass_is_on_continue_watching_not_ready(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    anime_id = await old_show(api_factory, title="In the pass", anilist_id=910091)
+    await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=4)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(hours=1))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [1]
+    assert ready_numbers(body) == []
+
+
+async def test_outside_a_pass_a_partial_is_on_continue_watching_only(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """As on main: an old position is still something to continue."""
+    anime_id = await old_show(api_factory, title="No pass", anilist_id=910092)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=0)
+    first = await episode_number(api_factory, anime_id, 1)
+    await make_ready(api_factory, first)
+    await ten_minutes_in(api_factory, user, first, at=NOW - timedelta(days=5))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [1]
+    assert ready_numbers(body) == []
+
+
+async def test_another_users_pass_changes_nothing_for_this_user(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """Their pass on the same show: this viewer's shelves and marks are the list's."""
+    other = await add_user(api_factory, "pass.other@arc.test", "other-password")
+    anime_id = await old_show(api_factory, title="Shared show", anilist_id=910093)
+    await follow(api_factory, user, anime_id, ListStatus.WATCHING, progress=1)
+    first = await episode_number(api_factory, anime_id, 1)
+    second = await episode_number(api_factory, anime_id, 2)
+    third = await episode_number(api_factory, anime_id, 3)
+    for episode in (first, second, third):
+        await make_ready(api_factory, episode)
+    await ten_minutes_in(api_factory, user, second, at=NOW - timedelta(days=5))
+    await open_pass(api_factory, other, anime_id, NOW - timedelta(days=1))
+
+    body = await home(client)
+
+    assert continue_numbers(body) == [2]
+    assert ready_numbers(body) == [3]
+    assert body["ready_to_watch"][0]["episode"]["watched"] is False
+    assert body["continue_watching"][0]["episode"]["watched"] is False
+
+
+async def count_home_statements(client: AsyncClient, factory: SessionFactory) -> int:
+    counted: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *_rest: object) -> None:
+        counted.append(statement)
+
+    engine = factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = await client.get("/api/home")
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert response.status_code == 200, response.text
+    return len(counted)
+
+
+async def test_the_home_page_costs_the_same_with_more_rows_in_three_passes(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """One query per open pass, never one per row (no N+1 on the pass marks)."""
+    shows: list[int] = []
+    for index in range(3):
+        anime_id = await add_anime(
+            api_factory,
+            title=f"Pass {index}",
+            anilist_id=910094 + index,
+            status="FINISHED",
+            episodes=8,
+        )
+        await add_episodes(api_factory, anime_id, count=8, first_at=NOW - timedelta(weeks=10))
+        await follow(api_factory, user, anime_id, ListStatus.COMPLETED, progress=8)
+        await open_pass(api_factory, user, anime_id, NOW - timedelta(days=1))
+        for number in (1, 2):
+            await make_ready(api_factory, await episode_number(api_factory, anime_id, number))
+        shows.append(anime_id)
+    await count_home_statements(client, api_factory)  # warm-up: art jobs queued once
+    small = await count_home_statements(client, api_factory)
+    assert len((await home(client))["ready_to_watch"]) == 6
+
+    for anime_id in shows:
+        for number in (3, 4, 5, 6):
+            await make_ready(api_factory, await episode_number(api_factory, anime_id, number))
+    await count_home_statements(client, api_factory)
+    big = await count_home_statements(client, api_factory)
+
+    assert len((await home(client))["ready_to_watch"]) == 18
+    assert big == small, (small, big)
+
+
 # --- What a card carries about the show (M15) ---------------------------------
 
 

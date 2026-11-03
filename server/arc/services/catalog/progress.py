@@ -245,7 +245,10 @@ async def ready_to_watch(session: AsyncSession, user: User) -> list[NewEpisodeRo
     :data:`~arc.services.playback.progress.CONTINUE_MIN_POSITION_S`, so the
     two shelves can never both offer one episode — no completion row, and a
     number above the list's progress when there is a list entry (FR-W5 read
-    backwards).
+    backwards). The pass branch keeps the same invariant on the pass's clock:
+    continue watching lists, for a show in an open pass, only positions
+    written since the pass began, and this branch offers exactly the
+    episodes with none (a pre-pass partial is here, not there).
 
     The started rule is also why an episode that falls off continue watching by
     its tail rule (past 90 %, or under three minutes left — owner 2026-09-17,
