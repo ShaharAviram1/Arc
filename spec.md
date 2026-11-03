@@ -835,7 +835,7 @@ is its only user, and uses it daily.
   now; it plays as it downloads, or when the file is complete for a season
   pack."; a demanded row reads "Fetching on request" with a ✕ to withdraw;
   an un-aired row is inert; when the server would refuse every click on the
-  page (paused, held, at the cap), pressing Play shows the sentence in place
+  page (paused, held; at the cap, any row not already demanded), pressing Play shows the sentence in place
   and does not navigate. Watch Now's Continue watching and Ready to watch
   tiles demand an episode that is not ready (its files deleted after
   watching, say) when no copy on the device plays it. The player demands the
