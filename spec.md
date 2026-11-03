@@ -794,8 +794,8 @@ is its only user, and uses it daily.
   live and the user has not finished the episode since last pressing play on
   it. Pressing play again on an episode already demanded restamps it and
   never counts twice; a click on a new episode beyond the cap is refused
-  (`demand_cap`) with "You already have 3 episodes fetching on request.
-  Finish or cancel one first." and the list of the open demands, each
+  (`demand_cap`) with "You already have 3 episodes on request. Finish or
+  cancel one first." and the list of the open demands, each
   linking to its episode. The count is taken under the same lock as the
   write, so two clicks at once cannot both take the last place.
   **Lifetime** (M21): a demanded episode is wanted unconditionally — never
@@ -3496,6 +3496,10 @@ through the same edge, without the grace period.
   never touches a file changed within the last hour (FR-T1); `/api/auth/me`
   keeps `is_demo: false` for one release so a cached installed app does not
   reject it (FR-D5).
+- 2026-11-03 (orchestrator's small call, reported to the owner) — the cap
+  refusal (FR-A14) says "You already have 3 episodes on request." rather than
+  "fetching on request", because the count includes ready-but-unwatched and
+  unavailable episodes.
 - 2026-11-03 (orchestrator's call, reported to the owner) — FR-T2 reworded
   (M21 T3 review): a walk's last move and a rewatch pass's start restart the
   stale clock of window wants only; a demand's clock is its own press or play.
