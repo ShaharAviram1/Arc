@@ -51,7 +51,10 @@ retention's grace window or the continue-watching order.
   at``, read once at the start of the batch so this device's own earlier
   records in the batch do not count): a later
   completion, or a list the user raised later, is the user's newer word.
-  Otherwise FR-S4's un-mark rule, unchanged.
+  Otherwise FR-S4's un-mark rule, unchanged. The latest finish counts here
+  even when it was a *rewatch pass's* finish: a normal-mode un-mark recorded
+  before a later pass finish is dropped as stale **on purpose** — the
+  conservative direction, whose only effect is a lowering write not sent.
 
 **Rewatch mode** (FR-W7, M21) needs nothing of its own here: the replay
 hands ``record_progress`` and ``unmark_watched`` the device's ``at``, and they
@@ -82,7 +85,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.models import Episode, ListEntry, WatchProgress
 from arc.services.playback.progress import record_progress, unmark_watched
-from arc.services.playback.rewatch import rewatch_at
+from arc.services.playback.rewatch import rewatch_judged
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +141,11 @@ class SyncItem:
     at: datetime
     position_s: float | None = None
     duration_s: float | None = None
+    #: ``at`` shifted by the device's skew but **not clamped** (M21): what the
+    #: rewatch mode is judged by when the clamp moved ``at``
+    #: (:func:`~arc.services.playback.rewatch.rewatch_judged`). ``None`` means
+    #: the same as ``at``.
+    judged_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,15 +160,21 @@ def _aware(at: datetime) -> datetime:
     return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
+def shift_timestamp(at: datetime, *, sent_at: datetime | None, now: datetime) -> datetime:
+    """The device's ``at`` moved by its skew (``now − sent_at``), not clamped."""
+    shifted = _aware(at)
+    if sent_at is not None:
+        shifted = shifted + (now - _aware(sent_at))
+    return shifted
+
+
 def adjust_timestamp(at: datetime, *, sent_at: datetime | None, now: datetime) -> datetime:
     """The device's ``at`` on the server's clock, held inside the believable window.
 
     Shifted by the device's skew (``now − sent_at``) when the batch says when
     it was sent, then clamped into ``[max(now − MAX_AGE, FLOOR), now]``.
     """
-    shifted = _aware(at)
-    if sent_at is not None:
-        shifted = shifted + (now - _aware(sent_at))
+    shifted = shift_timestamp(at, sent_at=sent_at, now=now)
     oldest = max(now - MAX_AGE, FLOOR)
     return min(max(shifted, oldest), now)
 
@@ -257,6 +271,7 @@ async def apply_item(
             duration_s=item.duration_s,
             now=now,
             reported_at=at,
+            judged_at=item.judged_at,
         )
         return SyncResult(item.client_id, SyncStatus.APPLIED)
 
@@ -282,18 +297,29 @@ async def apply_item(
             now=now,
             force_complete=True,
             reported_at=at,
+            judged_at=item.judged_at,
         )
         return SyncResult(item.client_id, SyncStatus.APPLIED)
 
     # SyncKind.UNMARK
-    if await rewatch_at(session, user_id=user_id, anime_id=episode.anime_id, at=at) is not None:
+    in_pass = await rewatch_judged(
+        session, user_id=user_id, anime_id=episode.anime_id, at=at, judged_at=item.judged_at
+    )
+    if in_pass is not None:
         # Inside a rewatch pass (FR-W7) the un-mark takes back the pass's
         # finish and never touches the list, so a later finish is the newer
         # word and the list's own changes are beside the point.
         finished_at = row.finished_at if row is not None else None
         if unmark_is_stale(finished_at, None, at):
             return SyncResult(item.client_id, SyncStatus.STALE)
-        await unmark_watched(session, user_id=user_id, episode=episode, now=now, reported_at=at)
+        await unmark_watched(
+            session,
+            user_id=user_id,
+            episode=episode,
+            now=now,
+            reported_at=at,
+            judged_at=item.judged_at,
+        )
         return SyncResult(item.client_id, SyncStatus.APPLIED)
     # The later of the first watch and the latest finish: a re-watch finished
     # after this un-mark was recorded is the user's newer word too (M21).
@@ -307,7 +333,14 @@ async def apply_item(
     ]
     if unmark_is_stale(max(finishes, default=None), list_changed_at, at):
         return SyncResult(item.client_id, SyncStatus.STALE)
-    await unmark_watched(session, user_id=user_id, episode=episode, now=now, reported_at=at)
+    await unmark_watched(
+        session,
+        user_id=user_id,
+        episode=episode,
+        now=now,
+        reported_at=at,
+        judged_at=item.judged_at,
+    )
     return SyncResult(item.client_id, SyncStatus.APPLIED)
 
 
@@ -348,7 +381,11 @@ async def apply_batch(
     list_changed = await _list_changed_at(session, user_id=user_id, episode_ids=unmarks)
     results: list[SyncResult] = []
     for raw in items:
-        item = replace(raw, at=adjust_timestamp(raw.at, sent_at=sent_at, now=now))
+        item = replace(
+            raw,
+            at=adjust_timestamp(raw.at, sent_at=sent_at, now=now),
+            judged_at=shift_timestamp(raw.at, sent_at=sent_at, now=now),
+        )
         try:
             async with session.begin_nested():
                 result = await apply_item(
@@ -390,6 +427,7 @@ __all__ = [
     "SyncResult",
     "SyncStatus",
     "adjust_timestamp",
+    "shift_timestamp",
     "apply_batch",
     "apply_item",
     "completion_is_stale",

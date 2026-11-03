@@ -88,7 +88,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Row, and_, case, exists, false, func, literal_column, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    and_,
+    case,
+    exists,
+    false,
+    func,
+    literal_column,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -118,7 +130,7 @@ from arc.services.playback.rewatch import (
     finish,
     finished_pass_tail,
     in_pass,
-    rewatch_at,
+    rewatch_judged,
 )
 from arc.services.trips.names import enqueue_trip_sweep
 from arc.services.trips.rules import on_active_trip
@@ -432,6 +444,7 @@ async def record_progress(
     now: datetime | None = None,
     force_complete: bool = False,
     reported_at: datetime | None = None,
+    judged_at: datetime | None = None,
 ) -> ProgressOutcome:
     """Upsert one ``watch_progress`` row and, if it just finished, the list.
 
@@ -447,6 +460,9 @@ async def record_progress(
     ``updated_at`` backwards. Everything else — the list advance, its MAL
     write, the activation stamp — is still measured against ``now``, exactly
     as an online report is. ``None`` (every online caller) changes nothing.
+    ``judged_at`` is the replay's skew-adjusted time *before* the sync clamp:
+    when the clamp moved ``reported_at``, the rewatch mode is judged from it
+    (:func:`~arc.services.playback.rewatch.rewatch_judged`, failing closed).
 
     **Every mode** (M21, architecture.md §5.5 step 6): a report at or past the
     mark (or the manual mark) that passes the live-duration guard stamps the
@@ -469,7 +485,9 @@ async def record_progress(
             # arrived (the guard above): progress is kept, the completion is not.
             completing = False
 
-    rewatch = await rewatch_at(session, user_id=user_id, anime_id=episode.anime_id, at=stamp)
+    rewatch = await rewatch_judged(
+        session, user_id=user_id, anime_id=episode.anime_id, at=stamp, judged_at=judged_at
+    )
     if rewatch is None and not force_complete:
         # The credits of a pass's last episode, reported after the pass ended
         # on it (:func:`~arc.services.playback.rewatch.finished_pass_tail`).
@@ -537,6 +555,7 @@ async def record_progress(
             upserted=upserted,
             completing=completing,
             stamp=stamp,
+            now=at,
             prefetch=prefetch,
         )
 
@@ -599,6 +618,7 @@ async def _record_in_pass(
     upserted: _Upserted,
     completing: bool,
     stamp: datetime,
+    now: datetime,
     prefetch: bool,
 ) -> ProgressOutcome:
     """A report inside a rewatch pass (FR-W7): the pass moves, nothing else does.
@@ -613,7 +633,11 @@ async def _record_in_pass(
     or absent: of two concurrent completions the second re-reads the first's
     finish and is not new. Finishing the pass's last episode
     (:func:`~arc.services.playback.rewatch.pass_end_number`) ends a pass still
-    open, at the report's own moment; a pass already ended stays as it is.
+    open **at the server's time** (``now``), never at the recording time: an
+    offline replay ending the pass at the device's moment would put the end
+    before other records of the same pass still waiting in the queue, and those
+    would then be judged in normal mode and write to MyAnimeList. A pass
+    already ended stays as it is.
     """
     completed = in_pass(upserted.finished_at, rewatch.started_at)
     newly_completed = completing and not in_pass(upserted.old_finished_at, rewatch.started_at)
@@ -625,7 +649,7 @@ async def _record_in_pass(
     if completing and rewatch.ended_at is None:
         anime = await session.get(Anime, episode.anime_id)
         if anime is not None and episode.number >= await end_number(session, anime, now=stamp):
-            ended = await finish(session, rewatch, at=stamp)
+            ended = await finish(session, rewatch, at=now)
     return ProgressOutcome(
         completed=completed,
         newly_completed=newly_completed,
@@ -829,6 +853,7 @@ async def unmark_watched(
     episode: Episode,
     now: datetime | None = None,
     reported_at: datetime | None = None,
+    judged_at: datetime | None = None,
 ) -> UnmarkOutcome:
     """Take back one watched mark, and the list progress if it was the latest.
 
@@ -891,7 +916,9 @@ async def unmark_watched(
     when = reported_at or at
     updated = at if reported_at is None else func.greatest(WatchProgress.updated_at, reported_at)
     unmarked = func.greatest(func.coalesce(WatchProgress.unmarked_at, when), when)
-    rewatch = await rewatch_at(session, user_id=user_id, anime_id=episode.anime_id, at=when)
+    rewatch = await rewatch_judged(
+        session, user_id=user_id, anime_id=episode.anime_id, at=when, judged_at=judged_at
+    )
     if rewatch is not None:
         return await _unmark_in_pass(
             session, user_id=user_id, episode=episode, rewatch=rewatch, updated=updated, when=when
@@ -945,7 +972,7 @@ async def _unmark_in_pass(
     user_id: int,
     episode: Episode,
     rewatch: Rewatch,
-    updated: Any,
+    updated: datetime | ColumnElement[datetime],
     when: datetime,
 ) -> UnmarkOutcome:
     """An un-mark inside a rewatch pass (FR-W7): the pass's finish, and nothing else.

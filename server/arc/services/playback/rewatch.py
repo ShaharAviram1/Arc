@@ -20,6 +20,12 @@ its list status. While it is on, the show is in a **pass** — one
   it has finished airing and its count is known, otherwise the newest aired
   one (owner-accepted 2026-11-03). A pass never reopens by itself.
 
+**A millisecond race, accepted.** A report whose :func:`rewatch_at` ran
+before a concurrent :func:`start` committed is judged in normal mode — it was
+recorded, as far as the server can tell, before the pass began. Pressing the
+switch and finishing an episode in the same instant is the only way to reach
+it, and the outcome is the one the order of events describes.
+
 Ended rows are kept: an offline report replayed later (FR-S8) is judged by the
 pass that was open when the device recorded it — ``started_at <= at <
 coalesce(ended_at, ∞)`` — so a replay arriving after the pass ended is still
@@ -34,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
 from sqlalchemy import ColumnElement, func, or_, select, text, update
@@ -165,6 +171,47 @@ async def rewatch_at(
     return found
 
 
+#: How long after a pass ends a report on one of its episodes still belongs
+#: to it (FR-W7 item 4, orchestrator 2026-11-03). The credits of whatever was
+#: playing when the pass ended — by finishing, or by the switch pressed off —
+#: are still the pass's: an hour covers any episode's remaining runtime with
+#: room to spare, and a resume days later is a new watch, in normal mode. The
+#: episode whose finish *ended* the pass keeps its tail for good (see
+#: :func:`tail_applies`).
+TAIL_GRACE = timedelta(hours=1)
+
+
+def tail_applies(
+    *,
+    started_at: datetime,
+    ended_at: datetime,
+    old_finished_at: datetime | None,
+    old_position_s: float | None,
+    old_duration_s: float | None,
+    at: datetime,
+    completion_fraction: float,
+) -> bool:
+    """Whether a report at ``at`` is the tail of the ended pass ``[started_at, ended_at)`` (pure).
+
+    All three must hold:
+
+    1. the episode was finished in the pass (``old_finished_at >= started_at``);
+    2. the row was at or past the mark before this report — the player has not
+       gone back under it since (a scrub under the mark, or a fresh open from
+       0, ends the tail);
+    3. **either** the episode's finish is at or after the pass's end — the
+       episode whose finish ended it, whose credits stay in the pass for good —
+       **or** the report is within :data:`TAIL_GRACE` of the end.
+    """
+    if not in_pass(old_finished_at, started_at) or old_finished_at is None:
+        return False
+    if old_position_s is None or not old_duration_s or old_duration_s <= 0:
+        return False
+    if old_position_s / old_duration_s < completion_fraction:
+        return False
+    return old_finished_at >= ended_at or at - ended_at <= TAIL_GRACE
+
+
 async def finished_pass_tail(
     session: AsyncSession,
     *,
@@ -176,25 +223,23 @@ async def finished_pass_tail(
     old_finished_at: datetime | None,
     completion_fraction: float,
 ) -> Rewatch | None:
-    """The pass a report *after* its end still belongs to, as the tail of its last episode.
+    """The ended pass a report *after* its end still belongs to, as its tail.
 
-    A pass ends the moment its last episode crosses the mark, and the player
-    keeps reporting through the credits. Without this, those later reports are
-    normal mode — the episode has no ``completed`` row from the pass — and the
-    first of them would advance the list to the end, auto-complete the show
-    and write both to MyAnimeList: exactly what FR-W7 says a pass never does.
+    A pass ends the moment its last episode crosses the mark (or the moment the
+    switch is pressed off), and the player keeps reporting through the credits.
+    Without this, those later reports are normal mode — a pass sets no
+    ``completed`` flag — and the first of them would newly complete the
+    episode: the list raised, perhaps FR-W5's auto-complete, and both written
+    to MyAnimeList, which is exactly what FR-W7 says a pass never does.
 
-    So a report recorded after the user's latest pass on the show ended
-    ``finished`` is still judged in that pass when the episode was finished in
-    it (its latest finish is at or after the pass's start) and the row was
-    still at or past the mark before this report — the player has not gone
-    back under the mark since. Scrubbing back under the mark, or opening the
-    episode afresh, ends the tail; a manual mark never reaches here.
+    So a non-manual report recorded after the user's latest pass on the show
+    ended (for either reason) is judged in that pass when :func:`tail_applies`
+    says so: the episode was finished in the pass, the row was still at or past
+    the mark, and either it is the episode whose finish ended the pass or the
+    report is within :data:`TAIL_GRACE` of the end. A non-final episode resumed
+    days later is a new watch, in normal mode. The manual mark never reaches
+    here.
     """
-    if old_finished_at is None or old_position_s is None or not old_duration_s:
-        return None
-    if old_duration_s <= 0 or old_position_s / old_duration_s < completion_fraction:
-        return None
     found: Rewatch | None = await session.scalar(
         select(Rewatch)
         .where(
@@ -208,10 +253,58 @@ async def finished_pass_tail(
         # Fresh column values: ``stop``/``finish`` end passes with a Core UPDATE.
         .execution_options(populate_existing=True)
     )
-    if found is None or found.end_reason != REWATCH_END_FINISHED:
+    if found is None or found.ended_at is None:
         return None
-    if not in_pass(old_finished_at, found.started_at):
-        return None
+    applies = tail_applies(
+        started_at=found.started_at,
+        ended_at=found.ended_at,
+        old_finished_at=old_finished_at,
+        old_position_s=old_position_s,
+        old_duration_s=old_duration_s,
+        at=at,
+        completion_fraction=completion_fraction,
+    )
+    return found if applies else None
+
+
+async def rewatch_judged(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    anime_id: int,
+    at: datetime,
+    judged_at: datetime | None = None,
+) -> Rewatch | None:
+    """The pass a record belongs to, judged at the device's own moment (FR-S8).
+
+    ``at`` is the moment the server stores (an offline replay's time, clamped
+    into ``[now − 30 days, now]`` by :func:`arc.services.playback.sync.
+    adjust_timestamp`); ``judged_at`` is the skew-adjusted time before that
+    clamp. Without a clamp the two agree and this is :func:`rewatch_at`. When
+    the clamp moved the time, the pass open at the raw time is the answer, and
+    failing that **any** pass overlapping the span between the two: a report
+    from inside a pass that ended before the clamp floor must not be judged in
+    normal mode and write to MyAnimeList. Fails closed — the worst outcome is a
+    list write not made.
+    """
+    if judged_at is None or judged_at == at:
+        return await rewatch_at(session, user_id=user_id, anime_id=anime_id, at=at)
+    raw = await rewatch_at(session, user_id=user_id, anime_id=anime_id, at=judged_at)
+    if raw is not None:
+        return raw
+    low, high = min(at, judged_at), max(at, judged_at)
+    found: Rewatch | None = await session.scalar(
+        select(Rewatch)
+        .where(
+            Rewatch.user_id == user_id,
+            Rewatch.anime_id == anime_id,
+            Rewatch.started_at <= high,
+            or_(Rewatch.ended_at.is_(None), Rewatch.ended_at > low),
+        )
+        .order_by(Rewatch.started_at.desc(), Rewatch.id.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
     return found
 
 
@@ -393,20 +486,16 @@ async def watch_view(
     rewatch = await open_rewatch(session, user_id=user_id, anime_id=anime_id)
     if rewatch is not None:
         return WatchView(await pass_finished(session, rewatch, episode_ids=episode_ids), 0, rewatch)
-    statement = (
-        select(WatchProgress.episode_id)
-        .join(Episode, Episode.id == WatchProgress.episode_id)
-        .where(
-            WatchProgress.user_id == user_id,
-            Episode.anime_id == anime_id,
-            WatchProgress.completed.is_(True),
-        )
-    )
-    completed: frozenset[int] = frozenset()
-    if episode_ids is None or episode_ids:
-        if episode_ids is not None:
-            statement = statement.where(WatchProgress.episode_id.in_(set(episode_ids)))
-        completed = frozenset((await session.scalars(statement)).all())
+    # Imported here: ``progress`` imports this module (it asks which mode a
+    # report is in), so the one definition of "completed rows" is reached
+    # lazily rather than copied.
+    from arc.services.playback.progress import completed_episode_ids
+
+    if episode_ids is None:
+        episode_ids = (
+            await session.scalars(select(Episode.id).where(Episode.anime_id == anime_id))
+        ).all()
+    completed = await completed_episode_ids(session, user_id=user_id, episode_ids=list(episode_ids))
     entry = await session.get(ListEntry, (user_id, anime_id))
     return WatchView(completed, entry.progress if entry is not None else 0)
 
@@ -427,7 +516,10 @@ __all__ = [
     "pass_end_number",
     "pass_finished",
     "pass_position",
+    "TAIL_GRACE",
     "rewatch_at",
+    "rewatch_judged",
+    "tail_applies",
     "start",
     "stop",
     "summary",
