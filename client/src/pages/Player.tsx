@@ -10,8 +10,9 @@ import {
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import { OfflineButton, OfflineReason } from '@/components/OfflineButton'
+import { OpenDemandLinks } from '@/components/OpenDemandLinks'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
-import { listErrorMessage, useSetListEntry } from '@/lib/anime'
+import { listErrorMessage, rewatchErrorMessage, useRewatch, useSetListEntry } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
 import {
   alreadyDemanded,
@@ -33,6 +34,7 @@ import {
   type NextSeasonRef,
   type PendingInfo,
   type PlayInfo,
+  type ProgressResult,
   type WatchState,
 } from '@/lib/playback'
 import { rememberPosition } from '@/offline/cache'
@@ -169,6 +171,24 @@ const MARKED_TOAST_MS = 4000
 
 /** The receipt itself. Six words, no action: nothing is being asked. */
 const MARKED_WATCHED = 'Marked as watched'
+
+/**
+ * The pass's last episode was finished, which ended the rewatch (FR-W7, M21).
+ * Said even over the end card, and for longer: it happens once per pass.
+ */
+const REWATCH_FINISHED = 'Rewatch finished. Your list was left as it was.'
+const REWATCH_FINISHED_MS = 6000
+
+/**
+ * The receipt a progress write or a manual mark earns (FR-S4, FR-W7): the
+ * pass's end, else "Marked as watched" for a completion outside a pass — a
+ * pass touches no list, so its completions get no receipt — else none.
+ */
+function receiptFor(result: ProgressResult): string | null {
+  if (result.rewatch_ended) return REWATCH_FINISHED
+  if (result.newly_completed && !result.rewatching) return MARKED_WATCHED
+  return null
+}
 
 /**
  * The offer after a muted autoplay (owner, 2026-09-17).
@@ -567,15 +587,24 @@ function NotReady({ message }: { message: string }) {
   )
 }
 
+/** What the pending player says under its state when nothing else applies. */
+const PLAYS_WHEN_READY = 'It plays here as soon as it is ready.'
+/** A season pack whose files need a person's pick (M21 T7). */
+const AWAITING_PICK = 'Its season pack needs someone to pick the right file.'
+
 /**
- * Play on demand, waiting (FR-A14, M20): the episode is wanted and on its
- * way. The page polls `/play` every few seconds (`usePlayInfo`) and becomes
- * the player the moment `playlist_url` arrives; until then it says where the
- * episode is — "Searching", "Downloading 43 %", "Preparing" — with the
- * release's seeders once there is one.
+ * Play on demand, waiting (FR-A14, M20, M21): the episode is wanted and on
+ * its way. The page polls `/play` every few seconds (`usePlayInfo`) and
+ * becomes the player the moment `playlist_url` arrives; until then it says
+ * where the episode is — "Searching", "Downloading 43 %", "Preparing", or
+ * that no release was found yet — with the release's seeders once there is
+ * one, the server's `note` when it will only play once its download finishes
+ * (a season pack), and a link to Review when its pack waits for a file pick.
  */
 function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }) {
   const label = pendingLabel(pending)
+  const resting = pending.state === 'unavailable'
+  const note = pending.note ?? null
   return (
     <div className="fixed inset-0 mx-auto flex max-w-lg flex-col items-center justify-center p-6 text-center">
       <p className="text-[14px] text-[var(--arc-text-muted)]">{info.anime.title.preferred}</p>
@@ -586,11 +615,13 @@ function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }
         role="status"
         className="mt-5 flex items-center gap-3 text-[16px] text-[var(--arc-text)]"
       >
-        <span
-          aria-hidden="true"
-          data-testid="pending-spinner"
-          className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--arc-border)] border-t-[var(--arc-text)]"
-        />
+        {resting ? null : (
+          <span
+            aria-hidden="true"
+            data-testid="pending-spinner"
+            className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--arc-border)] border-t-[var(--arc-text)]"
+          />
+        )}
         <span>{label}</span>
       </div>
       {pending.seeders === null ? null : (
@@ -598,9 +629,19 @@ function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }
           {pending.seeders === 1 ? '1 seeder' : `${String(pending.seeders)} seeders`}
         </p>
       )}
-      <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
-        It plays here as soon as it is ready.
-      </p>
+      {resting ? null : (
+        <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+          {note ?? PLAYS_WHEN_READY}
+        </p>
+      )}
+      {pending.awaiting_pick === true ? (
+        <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+          {AWAITING_PICK}{' '}
+          <Link to="/review" className={cx('underline underline-offset-4', FOCUS_RING)}>
+            Open Review
+          </Link>
+        </p>
+      ) : null}
       <Link to={`/anime/${String(info.anime.id)}`} className={buttonClass('secondary', 'mt-7')}>
         Back to the show
       </Link>
@@ -609,9 +650,10 @@ function PendingView({ info, pending }: { info: PlayInfo; pending: PendingInfo }
 }
 
 /**
- * Play on demand, refused (FR-A14, M20): the server's own sentence — not in
- * the window, acquisition paused, storage held — and nothing spinning,
- * because nothing was queued and nothing is on its way.
+ * Play on demand, refused (FR-A14, M20, M21): the server's own sentence — the
+ * cap reached, acquisition paused, storage held — and nothing spinning. For
+ * the cap, the open demands are listed, each a link (owner decision 2): the
+ * show page's ✕ withdraws one, finishing one closes it.
  */
 function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: number | null }) {
   return (
@@ -625,6 +667,12 @@ function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: 
       >
         {refusal.message}
       </p>
+      {refusal.code === 'demand_cap' ? (
+        <OpenDemandLinks
+          open={refusal.open}
+          className="mt-4 text-[14px] text-[var(--arc-text-muted)]"
+        />
+      ) : null}
       <Link
         to={animeId === null ? '/' : `/anime/${String(animeId)}`}
         className={buttonClass('secondary', 'mt-7')}
@@ -652,6 +700,10 @@ function DemandRefused({ refusal, animeId }: { refusal: DemandRefusal; animeId: 
  * once the entry is active (`episode.fetchable`). A failed write says the
  * list's sentence; a refused demand says the server's.
  *
+ * **In a rewatch pass** (`rewatch_carry`, FR-W7 item 5, owner decision 3) the
+ * touch is the sequel's pass instead: `PUT /api/anime/{sequel}/rewatch`, and
+ * no list write of any kind — then the episode plays as above.
+ *
  * One instance per player, in {@link PlayerView}: the end overlay and the
  * Next glyph share it, so a press from either disables both and a refusal is
  * known to both.
@@ -669,17 +721,24 @@ interface NextSeasonPress {
 function useNextSeasonPress(season: NextSeasonRef | null): NextSeasonPress {
   const navigate = useNavigate()
   const setEntry = useSetListEntry()
+  const rewatch = useRewatch(season?.anime_id ?? 0)
   const [asking, setAsking] = useState(false)
   const [refused, setRefused] = useState<string | null>(null)
   const episode = season?.episode ?? null
   const offered = episode !== null && (episode.ready || episode.fetchable === true)
-  /** Nothing to do but go there: no touch, no fetch. */
-  const direct = season !== null && season.list_state === 'active' && season.episode.ready
+  /** Nothing to do but go there: no touch, no fetch (and no pass to carry on). */
+  const direct =
+    season !== null &&
+    season.list_state === 'active' &&
+    season.rewatch_carry !== true &&
+    season.episode.ready
 
   const press = async (sequel: NextSeasonRef) => {
     const target = `/watch/${String(sequel.episode.id)}`
     try {
-      if (sequel.list_state !== 'active') {
+      if (sequel.rewatch_carry === true) {
+        await rewatch.mutateAsync(true)
+      } else if (sequel.list_state !== 'active') {
         await setEntry.mutateAsync(
           sequel.list_state === 'absent'
             ? { animeId: sequel.anime_id, status: 'watching' }
@@ -688,7 +747,9 @@ function useNextSeasonPress(season: NextSeasonRef | null): NextSeasonPress {
       }
     } catch (error: unknown) {
       setAsking(false)
-      setRefused(listErrorMessage(error))
+      setRefused(
+        sequel.rewatch_carry === true ? rewatchErrorMessage(error) : listErrorMessage(error),
+      )
       return
     }
     if (sequel.episode.ready) {
@@ -896,7 +957,7 @@ function Notice({
  * viewer gets from the corner of their eye is the one a screen reader gets in
  * words, and neither interrupts the episode.
  */
-function MarkedToast({ onDismiss }: { onDismiss: () => void }) {
+function MarkedToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div
       role="status"
@@ -905,7 +966,7 @@ function MarkedToast({ onDismiss }: { onDismiss: () => void }) {
       onClick={onDismiss}
       className={cx(PILL, 'cursor-pointer')}
     >
-      {MARKED_WATCHED}
+      {message}
     </div>
   )
 }
@@ -1218,9 +1279,15 @@ function PlayerView({ id }: { id: number }) {
   // "Next season" at a finished season's end (FR-S5 item 3): one press for
   // the end overlay and the Next glyph, so neither can start a second one.
   const sequel = useNextSeasonPress(data?.next === null ? (data.next_season ?? null) : null)
-  // A pending episode with no copy on this device: pressing play is the demand.
+  // A pending episode with no copy on this device that the viewer has no
+  // open demand on (M21: `demanded: false` — nobody asked, or only a window
+  // or a walk wants it): pressing play is the demand. Once per open.
   const waitingOnServer =
-    data?.pending != null && data.playlist_url === null && local.checked && local.url === null
+    data?.pending != null &&
+    data.pending.demanded !== true &&
+    data.playlist_url === null &&
+    local.checked &&
+    local.url === null
   useEffect(() => {
     if (waitingOnServer) askToFetch()
   }, [waitingOnServer, askToFetch])
@@ -1270,16 +1337,17 @@ function PlayerView({ id }: { id: number }) {
   /**
    * The three pieces the end of an episode is made of (owner, 2026-09-17).
    *
-   * `markedToast` is the completion receipt and nothing more — it is raised by
-   * the one report the server calls `newly_completed`, which is exactly once
-   * per (user, episode), so a rewatch never raises it and the client needs no
-   * rule of its own for that. `ended` is the media's own end. `endDismissed`
+   * `receipt` is the completion receipt and nothing more — it is raised by
+   * the one report the server calls `newly_completed` outside a rewatch pass
+   * (in a pass nothing was written to the list, FR-W7), or by the report that
+   * ended a pass, with its own sentence ({@link receiptFor}). `ended` is the
+   * media's own end. `endDismissed`
    * is "Keep watching", which holds for the rest of *this* playback: the page
    * is keyed on the episode id, so the next episode starts with it cleared,
    * and nothing in between — a tick, the media ending — brings the card back
    * to someone who has just said they did not want it.
    */
-  const [markedToast, setMarkedToast] = useState(false)
+  const [receipt, setReceipt] = useState<string | null>(null)
   const [ended, setEnded] = useState(false)
   const [endDismissed, setEndDismissed] = useState(false)
   /**
@@ -1532,7 +1600,8 @@ function PlayerView({ id }: { id: number }) {
             setProgressWarningDismissed(false)
             // The completion mark is a receipt, not a decision: a toast, and
             // no overlay (owner, 2026-09-17).
-            if (result.newly_completed) setMarkedToast(true)
+            const said = receiptFor(result)
+            if (said !== null) setReceipt(said)
           },
           onError: () => {
             setProgressFailures((count) => count + 1)
@@ -2003,15 +2072,18 @@ function PlayerView({ id }: { id: number }) {
    * it away early cancels the pending timeout rather than leaving one armed.
    */
   useEffect(() => {
-    if (!markedToast) return
+    if (receipt === null) return
 
-    const timer = window.setTimeout(() => {
-      setMarkedToast(false)
-    }, MARKED_TOAST_MS)
+    const timer = window.setTimeout(
+      () => {
+        setReceipt(null)
+      },
+      receipt === REWATCH_FINISHED ? REWATCH_FINISHED_MS : MARKED_TOAST_MS,
+    )
     return () => {
       window.clearTimeout(timer)
     }
-  }, [markedToast])
+  }, [receipt])
 
   // Play on demand refused (FR-A14): said, not spun — unless there is
   // something to play anyway (a copy here, or a stream that is ready).
@@ -2266,8 +2338,10 @@ function PlayerView({ id }: { id: number }) {
       return
     }
     markWatched.mutate(input, {
-      onSuccess: () => {
+      onSuccess: (result) => {
         setWatchedOverride(true)
+        // Marking a pass's last episode by hand ends the pass too (FR-W7).
+        if (result.rewatch_ended) setReceipt(REWATCH_FINISHED)
       },
     })
   }
@@ -2709,10 +2783,11 @@ function PlayerView({ id }: { id: number }) {
       */}
       <div className="absolute bottom-[108px] left-3 z-10 flex flex-col items-start gap-2 md:left-6">
         {autoplayMuted ? <UnmutePill onUnmute={unmute} /> : null}
-        {markedToast && !endOverlayShown ? (
+        {receipt !== null && (!endOverlayShown || receipt === REWATCH_FINISHED) ? (
           <MarkedToast
+            message={receipt}
             onDismiss={() => {
-              setMarkedToast(false)
+              setReceipt(null)
             }}
           />
         ) : null}

@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -257,6 +257,133 @@ describe('the pending player (FR-A14)', () => {
     await waitFor(() => {
       expect(count(fetchMock, DEMAND)).toBe(1)
     })
+  })
+})
+
+describe('the pending player, any aired episode (FR-A14, M21)', () => {
+  function pending(extra: Partial<NonNullable<PlayInfo['pending']>>): PlayInfo {
+    const info = pendingInfo('downloading', 0.2, 7)
+    return { ...info, pending: { state: 'downloading', progress: 0.2, seeders: 7, ...extra } }
+  }
+
+  it('demands on demanded: false once, not per poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { fetchMock } = renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [DEMAND]: { status: 202, body: { state: 'downloading' } },
+        [PLAY]: { body: pending({ demanded: false }) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(await screen.findByText('Downloading 20 %')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(count(fetchMock, DEMAND)).toBe(1)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS * 3)
+    })
+    expect(count(fetchMock, PLAY)).toBeGreaterThan(1)
+    expect(count(fetchMock, DEMAND)).toBe(1)
+  })
+
+  it('does not demand on demanded: true', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { fetchMock } = renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [DEMAND]: { status: 202, body: { state: 'downloading' } },
+        [PLAY]: { body: pending({ demanded: true }) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(await screen.findByText('Downloading 20 %')).toBeInTheDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS * 2)
+    })
+    expect(count(fetchMock, DEMAND)).toBe(0)
+  })
+
+  it('shows pending.note', async () => {
+    const note = 'This episode will play when its download finishes.'
+    renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [PLAY]: { body: pending({ demanded: true, note }) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(await screen.findByText(note)).toBeInTheDocument()
+    expect(screen.queryByText('It plays here as soon as it is ready.')).not.toBeInTheDocument()
+  })
+
+  it('shows the unavailable sentence', async () => {
+    renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [PLAY]: {
+          body: pending({ state: 'unavailable', progress: null, seeders: null, demanded: true }),
+        },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(
+      await screen.findByText('No release found yet; Arc looks again every day'),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('pending-spinner')).not.toBeInTheDocument()
+  })
+
+  it('awaiting_pick links to Review', async () => {
+    renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [PLAY]: { body: pending({ demanded: true, awaiting_pick: true }) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(await screen.findByRole('link', { name: 'Open Review' })).toHaveAttribute(
+      'href',
+      '/review',
+    )
+  })
+
+  it('demand_cap view lists open demands', async () => {
+    const message = 'You already have 3 episodes on request. Finish or withdraw one first.'
+    renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [DEMAND]: {
+          status: 409,
+          body: {
+            detail: {
+              code: 'demand_cap',
+              message,
+              open: [
+                { episode_id: 7001, anime_id: 77, title: 'Dungeon Meshi', number: 3 },
+                { episode_id: 8002, anime_id: 88, title: 'Mushishi', number: 12 },
+              ],
+            },
+          },
+        },
+      },
+      { pathname: `/watch/${String(EPISODE)}`, state: { demand: true } },
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    const list = screen.getByRole('list', { name: 'Your open requests' })
+    expect(within(list).getByRole('link', { name: 'Dungeon Meshi' })).toHaveAttribute(
+      'href',
+      '/anime/77',
+    )
+    expect(within(list).getByRole('link', { name: 'Episode 12' })).toHaveAttribute(
+      'href',
+      '/watch/8002',
+    )
   })
 })
 
@@ -603,5 +730,47 @@ describe('Next season at a finished season’s end (FR-S5 item 3)', () => {
     })
     expect(count(fetchMock, LIST_PUT)).toBe(1)
     expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
+  })
+  it('next-season press in a pass calls the rewatch route and not the list route', async () => {
+    const REWATCH_PUT = 'PUT /api/anime/77/rewatch'
+    const base = lastEpisode('absent', NOT_READY)
+    const info: PlayInfo = {
+      ...base,
+      next_season:
+        base.next_season === null || base.next_season === undefined
+          ? null
+          : { ...base.next_season, rewatch_carry: true },
+    }
+    const routes = routesFor(info)
+    routes[REWATCH_PUT] = {
+      body: { started_at: '2026-11-04T09:00:00Z', position: 0, finished_in_pass: 0, total: 12 },
+    }
+    const { fetchMock, router } = renderAt(routes, { pathname: '/watch/9001' })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    const made = requestsMade(fetchMock)
+    expect(made.indexOf(REWATCH_PUT)).toBeLessThan(made.indexOf(SEQUEL_DEMAND))
+    expect(count(fetchMock, LIST_PUT)).toBe(0)
+    expect(count(fetchMock, SEQUEL_DEMAND)).toBe(1)
+  })
+
+  it('next-season press outside a pass is unchanged: the list write, no rewatch route', async () => {
+    const { fetchMock, router } = renderAt(routesFor(lastEpisode('absent', NOT_READY)), {
+      pathname: '/watch/9001',
+    })
+    await endEpisode()
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Next season' }))
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe(`/watch/${String(SEQUEL_EPISODE)}`)
+    })
+    expect(count(fetchMock, LIST_PUT)).toBe(1)
+    expect(requestsMade(fetchMock).some((made) => made.includes('/rewatch'))).toBe(false)
   })
 })
