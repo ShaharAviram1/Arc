@@ -598,7 +598,7 @@ is its only user, and uses it daily.
   rather than as a dozen singles (FR-A4's trip amendment, FR-A11). A trip is not a list change: it activates no
   dormant entry (FR-A9), holds no slot (FR-A10), touches no list entry, and
   can cause no MyAnimeList write. An episode a trip wants **and** some user
-  wants for streaming (their window, or a sample) is prepared both ways: the
+  wants for streaming (a window, or a demand) is prepared both ways: the
   HLS rendition and the small copy. An episode wanted **only** by trips is
   *trip-only*: the server makes the small copy and **never an HLS rendition**
   (FR-P1); it never becomes `ready` and is never streamable. Its **source is
