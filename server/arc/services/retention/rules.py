@@ -38,7 +38,8 @@ from arc.models import DEFAULT_SETTINGS, Setting
 
 log = logging.getLogger(__name__)
 
-#: G — days between the last completion (or drop) and the deletion (FR-T1).
+#: G — days between the last drop (or, unwanted, the file's age) and the deletion
+#: (FR-T1). A watched episode runs the hours below instead.
 GRACE_KEY: Final[str] = "grace_days_g"
 
 #: D — days a ready episode may go unwatched before the want is dropped
@@ -56,7 +57,8 @@ OFFLINE_IDLE_KEY: Final[str] = "offline_idle_days"
 MAX_DAYS: Final[int] = 3650
 
 #: The delete-after-watching grace, in hours (FR-T1, M20 T8): how long an
-#: episode's files survive the last completion by everyone who wanted it. 0
+#: episode's files survive the latest finish by anyone (a rewatch pass's
+#: included) once nobody wants it. 0
 #: means "at the next hourly sweep".
 WATCHED_GRACE_KEY: Final[str] = "watched_grace_hours"
 

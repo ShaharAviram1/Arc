@@ -10,10 +10,12 @@ rule with the deletion left out.
 remains *and* the grace period G has run out. What G is measured from depends
 on how the episode stopped being wanted:
 
-* somebody watched it. ``watch_progress.completed_at`` is written once, at the
-  moment the episode was finished, and never moved again (FR-T1 in
-  :class:`arc.models.WatchProgress`), so the grace runs from the *last*
-  completion — the second user to finish it is the one who decides.
+* somebody watched it. ``watch_progress.finished_at`` is the user's *latest*
+  finish of the episode — re-stamped on every finish, a rewatch pass's
+  included (M21, FR-W7: a pass never sets ``completed``, so this is the only
+  trace a pass finish leaves) — and the grace runs from the latest finish
+  over every user: the second user to finish it, or the owner finishing it
+  again in a rewatch, is the one who decides.
 * somebody's **list progress passed it** (FR-W5, owner 2026-09-13). An episode
   at or below a user's ``list_entries.progress`` is watched by that user
   whether or not Arc has a completion row for it: marking episode 9 watched
@@ -61,7 +63,8 @@ makes "two users, one finished it a week ago and one finished it this morning"
 come out as "not yet", which is the whole point of the rule.
 
 **Two graces, chosen by the anchor's kind (M20, owner 2026-10-13).** A
-*watched* anchor — a completion, or list progress passing the episode — uses
+*watched* anchor — a completion or any later finish (a rewatch pass's
+included), or list progress passing the episode — uses
 ``watched_grace_hours`` (default 6): Arc is a cache in front of the indexer,
 and a watched episode leaves the same evening. A drop and "nobody ever wanted
 it" keep G days.
@@ -70,12 +73,14 @@ it" keep G days.
 reported by the preview (:func:`retention_plan`):
 
 * the show is **pinned** by any user (FR-T8);
-* somebody has a **partial watch** on it (not completed, position > 0) updated
+* somebody has a **partial watch** on it (not completed, position > 0, and
+  not finished since — a finish in a rewatch pass leaves ``completed`` false
+  with the position at the end, and is a finish, not a partial) updated
   within D days — a user with the show on hold has no live want, but is
   halfway through this episode;
 * somebody **played** it within ``watched_grace_hours`` —
-  ``max(watch_progress.updated_at)``, which covers a rewatch, because
-  ``completed_at`` is written once;
+  ``max(watch_progress.updated_at)``, which also covers a replay that stopped
+  short of the mark and so stamped no finish;
 * its offline copy was **served** within the last ten minutes: a device is
   downloading it right now.
 
@@ -113,7 +118,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
@@ -544,6 +549,11 @@ class _Facts:
 
     active_wants: int = 0
     last_dropped: datetime | None = None
+    #: The latest finish over every user: ``max(greatest(completed_at,
+    #: finished_at))``, the same per-row moment ``GET /api/progress/completed``
+    #: reports. ``finished_at`` is re-stamped on every finish, a rewatch
+    #: pass's included (FR-W7, M21), so a pass finish is a fresh watched
+    #: anchor even though it leaves ``completed`` false.
     last_completed: datetime | None = None
     #: The latest ``list_entries.updated_at`` of a user whose progress covers
     #: this episode (FR-W5). Watched, on the list's word rather than on a
@@ -563,11 +573,12 @@ class _Facts:
     offline_copy: OfflineCopy | None = None
     #: ``max(watch_progress.updated_at)`` over every user (hold c). It moves on
     #: every progress sample, so it is the last time anybody played the
-    #: episode — a rewatch included, which ``completed_at`` (written once)
-    #: cannot see.
+    #: episode — a replay that never reached the mark included, which
+    #: :attr:`last_completed` (finishes only) cannot see.
     last_played: datetime | None = None
     #: The latest ``updated_at`` of a partial watch: not completed, position
-    #: above zero. :attr:`partial_recent` is it measured against D.
+    #: above zero, and written after the row's latest finish (a pass finish
+    #: is not a partial). :attr:`partial_recent` is it measured against D.
     last_partial: datetime | None = None
     #: Somebody has a partial watch updated within D days (hold b).
     partial_recent: bool = False
@@ -752,26 +763,48 @@ async def _facts(
         facts[episode_id].last_dropped = moment
 
     # One pass over ``watch_progress`` (it has no index on ``episode_id``) for
-    # three facts: the last completion (the watched anchor), and for holds b
-    # and c the last time anybody played it at all and the last partial watch.
+    # three facts: the latest finish (the watched anchor), and for holds b and
+    # c the last time anybody played it at all and the last partial watch.
     # ``updated_at`` moves on every progress sample.
+    #
+    # The latest finish is ``finished_at`` (M21): re-stamped on every finish,
+    # a rewatch pass's included, which never sets ``completed`` (FR-W7). Per
+    # row it is taken as ``greatest(completed_at, finished_at)`` — PostgreSQL's
+    # ``greatest`` ignores NULLs — so a row the backfill never reached, or one
+    # whose ``finished_at`` is somehow older than its first watch, anchors on
+    # the newer of the two, exactly as ``GET /api/progress/completed`` answers.
+    # ``max`` skips a row with neither.
+    #
+    # A finish is not a partial watch. A row finished in a rewatch pass keeps
+    # ``completed = false`` with its position at the end, and read as a
+    # partial it would hold the file D days instead of the watched grace. A
+    # live report past the mark stamps ``finished_at`` and ``updated_at`` with
+    # the same moment, so "``updated_at`` after the latest finish" is a report
+    # below the mark since then: a genuine partial replay, which still counts.
+    # (A replayed completion older than the row's last sample leaves
+    # ``updated_at`` ahead of it and so still reads as a partial: the newer
+    # sample came after it, and keeping it D days is the safe side.)
+    latest_finish = func.greatest(WatchProgress.completed_at, WatchProgress.finished_at)
     progress = await session.execute(
         select(
             WatchProgress.episode_id,
-            func.max(WatchProgress.completed_at).filter(
-                WatchProgress.completed.is_(True), WatchProgress.completed_at.is_not(None)
-            ),
+            func.max(latest_finish),
             func.max(WatchProgress.updated_at),
             func.max(WatchProgress.updated_at).filter(
-                WatchProgress.completed.is_(False), WatchProgress.position_s > 0
+                WatchProgress.completed.is_(False),
+                WatchProgress.position_s > 0,
+                or_(
+                    WatchProgress.finished_at.is_(None),
+                    WatchProgress.finished_at < WatchProgress.updated_at,
+                ),
             ),
         )
         .where(WatchProgress.episode_id.in_(retained))
         .group_by(WatchProgress.episode_id)
     )
-    for episode_id, completed_at, played_at, partial_at in progress.all():
+    for episode_id, finished_at, played_at, partial_at in progress.all():
         fact = facts[episode_id]
-        fact.last_completed = completed_at
+        fact.last_completed = finished_at
         fact.last_played = played_at
         fact.last_partial = partial_at
         fact.partial_recent = partial_at is not None and partial_at > now - partial_window

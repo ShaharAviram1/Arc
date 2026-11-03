@@ -56,7 +56,9 @@
  * deleted only when the last record naming it goes.
  *
  * **A watched copy leaves by itself** (owner, 2026-10-08). Once the server
- * has accepted this account's completion of an episode — the one signal is
+ * has accepted this account's completion of an episode — a completion in a
+ * rewatch pass counts too (M21: the server answers `completed` for it while
+ * leaving the list alone) — the one signal is
  * the outbox's `announceWatched(…, true)`: an online report at or past the
  * mark answered `completed`, the mark-watched call answered, or a replayed
  * completion came back `applied`; never a completion still queued — the
@@ -74,7 +76,10 @@
  * at most once per {@link WATCHED_SYNC_MS} per account — the server is asked
  * which of the account's unmarked records it holds a completion for, and a
  * record is marked when that completion is no older than the record (a copy
- * kept *after* an episode was finished is a rewatch, and stays).
+ * kept *after* an episode was finished is a rewatch, and stays). The server's
+ * `completed_at` is the account's latest finish of the episode, a rewatch
+ * pass's included (M21: the later of the first watch and the latest finish),
+ * so a copy kept for a rewatch is marked once the pass finishes it.
  *
  * **The server hears what the device holds** (M20, FR-S9, architecture
  * §5.4d). {@link DownloadManager.reportHoldings} sends `PUT
