@@ -45,7 +45,9 @@ from arc.services.media.names import LiveDuration
 from arc.services.playback import rewatch as rewatch_service
 from arc.services.playback.progress import ProgressOutcome, record_progress, unmark_watched
 from arc.services.playback.rewatch import (
+    TAIL_GRACE,
     NothingAired,
+    in_pass,
     open_rewatch,
     open_rewatches,
     pass_end_number,
@@ -54,9 +56,10 @@ from arc.services.playback.rewatch import (
     rewatch_at,
     start,
     stop,
+    tail_applies,
     watch_view,
 )
-from arc.services.playback.sync import SyncItem, SyncKind, SyncStatus, apply_item
+from arc.services.playback.sync import SyncItem, SyncKind, SyncStatus, apply_batch, apply_item
 from arc.services.trips.names import TRIP_SWEEP
 from arc.services.trips.rules import held_episode_ids
 from arc.services.trips.sweep import end_if_complete
@@ -641,6 +644,7 @@ async def test_a_completion_in_a_pass_still_queues_the_trip_sweep(
         last_number=4,
         count=2,
         deadline_at=minutes(60 * 24),
+        created_at=minutes(-1),
     )
     db_session.add(trip)
     await db_session.flush()
@@ -668,6 +672,7 @@ async def test_a_pass_finish_is_a_watch_for_trips(db_session: AsyncSession) -> N
         last_number=4,
         count=2,
         deadline_at=minutes(60 * 24 * 7),
+        created_at=minutes(-1),
     )
     db_session.add(trip)
     await db_session.flush()
@@ -971,3 +976,304 @@ async def test_completed_episodes_include_pass_finishes(
         assert one is not None and one.finished_at is not None and one.completed_at is not None
         assert one.finished_at > one.completed_at
         assert datetime.fromisoformat(got[ids[1]]) == one.finished_at
+
+
+# --- fix round 2: the end at the server's time, trips since creation, the tail --
+
+
+async def test_a_replayed_pass_end_ends_the_pass_at_the_servers_time(
+    db_session: AsyncSession,
+) -> None:
+    """Offline in the pass: ep 12 finished at +10, ep 5 watched at +20, both replayed at +30."""
+    user = await make_user(db_session, "rw-end-now@arc.test")
+    await link(db_session, user)
+    anime, eps = await show(db_session, anilist_id=990040)
+    await make_entry(db_session, user, anime, progress=2)
+    before = await entry_snapshot(db_session, user, anime)
+    rewatch = await start(db_session, user_id=user.id, anime_id=anime.id, now=minutes(0))
+
+    last = await apply_item(
+        db_session,
+        user_id=user.id,
+        item=SyncItem("c", SyncKind.COMPLETION, eps[12].id, minutes(10), 1350.0, DURATION),
+        now=minutes(30),
+    )
+    fifth = await apply_item(
+        db_session,
+        user_id=user.id,
+        item=SyncItem("p", SyncKind.POSITION, eps[5].id, minutes(20), 1350.0, DURATION),
+        now=minutes(30),
+    )
+
+    assert last.status is SyncStatus.APPLIED and fifth.status is SyncStatus.APPLIED
+    ended = await pass_of(db_session, rewatch)
+    assert ended.ended_at == minutes(30) and ended.end_reason == REWATCH_END_FINISHED
+    # Episode 5 was judged in the pass: a pass finish, no completion, no list.
+    row = await row_of(db_session, user, eps[5])
+    assert row is not None and row.completed is False and row.finished_at == minutes(20)
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
+
+
+async def a_trip_over(
+    session: AsyncSession, user: User, anime: Anime, eps: dict[int, Episode]
+) -> Trip:
+    trip = Trip(
+        user_id=user.id,
+        anime_id=anime.id,
+        first_number=3,
+        last_number=4,
+        count=2,
+        deadline_at=minutes(60 * 24 * 7),
+        created_at=minutes(0),
+    )
+    session.add(trip)
+    await session.flush()
+    session.add_all(
+        [
+            TripEpisode(
+                trip_id=trip.id,
+                episode_id=eps[n].id,
+                state=TripEpisodeState.DELIVERED,
+                delivered_at=minutes(1),
+            )
+            for n in (3, 4)
+        ]
+    )
+    await session.flush()
+    return trip
+
+
+async def test_a_trip_made_after_an_old_pass_stays_active_and_held(
+    db_session: AsyncSession,
+) -> None:
+    """A finish from an older pass over the trip's episodes is not a watch of the trip."""
+    user = await make_user(db_session, "rw-trip-old-pass@arc.test")
+    anime, eps = await show(db_session, anilist_id=990041)
+    await make_entry(db_session, user, anime, progress=2)
+    await start(db_session, user_id=user.id, anime_id=anime.id, now=minutes(-600))
+    await report(db_session, user, eps[3], 0.95, at=minutes(-590))
+    await report(db_session, user, eps[4], 0.95, at=minutes(-580))
+    await stop(db_session, user_id=user.id, anime_id=anime.id, now=minutes(-570))
+
+    trip = await a_trip_over(db_session, user, anime, eps)
+    held = {eps[3].id, eps[4].id}
+    assert await held_episode_ids(db_session, held) == held
+    locked = await db_session.get(Trip, trip.id, with_for_update=True, populate_existing=True)
+    assert locked is not None
+    assert await end_if_complete(db_session, locked, now=minutes(2)) is None
+    assert locked.state is TripState.ACTIVE
+
+    # Watched again during the trip, in a new pass: now it ends.
+    await start(db_session, user_id=user.id, anime_id=anime.id, now=minutes(3))
+    await report(db_session, user, eps[3], 0.95, at=minutes(4))
+    await report(db_session, user, eps[4], 0.95, at=minutes(5))
+    assert await held_episode_ids(db_session, held) == set()
+    assert await end_if_complete(db_session, locked, now=minutes(6)) == []
+    assert locked.state is TripState.FINISHED
+
+
+# --- the tail: the pure rule at its edges ------------------------------------------
+
+T0 = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
+END = T0 + timedelta(hours=2)
+
+
+def tail(
+    *,
+    finished: datetime | None,
+    position: float = 0.95,
+    at: datetime,
+    ended_at: datetime = END,
+) -> bool:
+    return tail_applies(
+        started_at=T0,
+        ended_at=ended_at,
+        old_finished_at=finished,
+        old_position_s=DURATION * position,
+        old_duration_s=DURATION,
+        at=at,
+        completion_fraction=0.90,
+    )
+
+
+def test_the_tail_keeps_the_episode_that_ended_the_pass_for_good() -> None:
+    assert tail(finished=END, at=END + timedelta(days=3))
+    assert tail(finished=END + timedelta(minutes=5), at=END + timedelta(days=3))
+
+
+def test_the_tail_of_any_other_episode_lasts_the_grace() -> None:
+    earlier = T0 + timedelta(minutes=30)
+    assert TAIL_GRACE == timedelta(hours=1)
+    assert tail(finished=earlier, at=END + timedelta(minutes=10))
+    assert tail(finished=earlier, at=END + TAIL_GRACE)
+    assert not tail(finished=earlier, at=END + TAIL_GRACE + timedelta(microseconds=1))
+    assert not tail(finished=earlier, at=END + timedelta(days=3))
+
+
+def test_the_tail_needs_the_row_still_past_the_mark() -> None:
+    finished = T0 + timedelta(minutes=30)
+    assert not tail(finished=finished, position=0.89, at=END + timedelta(minutes=1))
+    assert not tail(finished=finished, position=0.0, at=END + timedelta(minutes=1))
+    assert not tail(finished=END, position=0.5, at=END + timedelta(days=1))
+    assert not tail_applies(
+        started_at=T0,
+        ended_at=END,
+        old_finished_at=END,
+        old_position_s=None,
+        old_duration_s=None,
+        at=END,
+        completion_fraction=0.90,
+    )
+
+
+def test_the_tail_needs_a_finish_in_the_pass() -> None:
+    assert not tail(finished=None, at=END)
+    assert not tail(finished=T0 - timedelta(microseconds=1), at=END)
+    assert tail(finished=T0, at=END)
+    assert in_pass(T0, T0)
+    assert not in_pass(T0 - timedelta(microseconds=1), T0)
+    assert not in_pass(None, T0)
+
+
+# --- the tail, end to end --------------------------------------------------------
+
+
+async def ended_by_finishing(
+    session: AsyncSession, email: str, anilist_id: int
+) -> tuple[User, Anime, dict[int, Episode], tuple[object, ...] | None]:
+    """A pass over a 12-episode finished show, ep 9 left at 92 %, ended on ep 12 at +20."""
+    user = await make_user(session, email)
+    await link(session, user)
+    anime, eps = await show(session, anilist_id=anilist_id)
+    await make_entry(session, user, anime, progress=5)
+    before = await entry_snapshot(session, user, anime)
+    await start(session, user_id=user.id, anime_id=anime.id, now=minutes(0))
+    await report(session, user, eps[9], 0.92, at=minutes(10))
+    assert (await report(session, user, eps[12], 0.95, at=minutes(20))).rewatch_ended
+    return user, anime, eps, before
+
+
+async def test_the_ending_episode_days_later_is_still_the_tail(db_session: AsyncSession) -> None:
+    user, anime, eps, before = await ended_by_finishing(db_session, "rw-tail-a@arc.test", 990050)
+
+    later = await report(db_session, user, eps[12], 0.97, at=minutes(20) + timedelta(days=3))
+
+    assert later.rewatching and not later.newly_completed
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
+
+
+async def test_a_non_final_episode_days_later_is_normal_mode(db_session: AsyncSession) -> None:
+    user, anime, eps, _before = await ended_by_finishing(db_session, "rw-tail-b@arc.test", 990051)
+
+    later = await report(db_session, user, eps[9], 0.95, at=minutes(20) + timedelta(days=3))
+
+    assert not later.rewatching and later.newly_completed and later.list_progress == 9
+    assert [row.new_value for row in await mal_rows(db_session, user)] == [9]
+
+
+async def test_a_non_final_episode_within_the_hour_is_the_tail(db_session: AsyncSession) -> None:
+    user, anime, eps, before = await ended_by_finishing(db_session, "rw-tail-c@arc.test", 990052)
+
+    within = await report(db_session, user, eps[9], 0.95, at=minutes(50))
+
+    assert within.rewatching and not within.newly_completed
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
+
+
+async def switched_off_at_93(
+    session: AsyncSession, email: str, anilist_id: int
+) -> tuple[User, Anime, dict[int, Episode], tuple[object, ...] | None]:
+    user = await make_user(session, email)
+    await link(session, user)
+    anime, eps = await show(session, anilist_id=anilist_id)
+    await make_entry(session, user, anime, progress=5)
+    before = await entry_snapshot(session, user, anime)
+    await start(session, user_id=user.id, anime_id=anime.id, now=minutes(0))
+    await report(session, user, eps[8], 0.93, at=minutes(1))
+    assert await stop(session, user_id=user.id, anime_id=anime.id, now=minutes(2))
+    return user, anime, eps, before
+
+
+async def test_off_at_93_then_the_credits_within_the_hour_are_the_tail(
+    db_session: AsyncSession,
+) -> None:
+    user, anime, eps, before = await switched_off_at_93(db_session, "rw-tail-d@arc.test", 990053)
+
+    credits = await report(db_session, user, eps[8], 0.98, at=minutes(3))
+
+    assert credits.rewatching and not credits.newly_completed
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
+
+
+async def test_off_then_two_hours_later_is_normal_mode(db_session: AsyncSession) -> None:
+    user, anime, eps, _before = await switched_off_at_93(db_session, "rw-tail-e@arc.test", 990054)
+
+    later = await report(db_session, user, eps[8], 0.98, at=minutes(122))
+
+    assert not later.rewatching and later.newly_completed and later.list_progress == 8
+    assert len(await mal_rows(db_session, user)) == 1
+
+
+async def test_a_scrub_under_the_mark_leaves_the_tail(db_session: AsyncSession) -> None:
+    user, anime, eps, _before = await ended_by_finishing(db_session, "rw-tail-f@arc.test", 990055)
+
+    under = await report(db_session, user, eps[12], 0.5, at=minutes(25))
+    back = await report(db_session, user, eps[12], 0.95, at=minutes(40))
+
+    assert under.rewatching  # still at the mark before this report
+    assert not back.rewatching and back.newly_completed
+    assert len(await mal_rows(db_session, user)) >= 1
+
+
+async def test_a_fresh_open_from_zero_leaves_the_tail(db_session: AsyncSession) -> None:
+    user, anime, eps, _before = await ended_by_finishing(db_session, "rw-tail-g@arc.test", 990056)
+    days = minutes(20) + timedelta(days=2)
+
+    opening = await report(db_session, user, eps[12], 0.0, at=days)
+    playing = await report(db_session, user, eps[12], 0.3, at=days + timedelta(minutes=8))
+    done = await report(db_session, user, eps[12], 0.95, at=days + timedelta(minutes=22))
+
+    # The first report still finds the row past the mark (the open itself); the
+    # play after it is a new watch.
+    assert opening.rewatching
+    assert not playing.rewatching and not done.rewatching
+    assert done.newly_completed and done.list_progress == 12
+
+
+# --- D: a clamped replay fails closed ----------------------------------------------
+
+
+async def test_a_clamped_replay_from_inside_a_long_ended_pass_is_mal_free(
+    db_session: AsyncSession,
+) -> None:
+    user = await make_user(db_session, "rw-clamped@arc.test")
+    await link(db_session, user)
+    anime, eps = await show(db_session, anilist_id=990060)
+    await make_entry(db_session, user, anime, progress=2)
+    before = await entry_snapshot(db_session, user, anime)
+    day = timedelta(days=1)
+    await start(db_session, user_id=user.id, anime_id=anime.id, now=NOW - 45 * day)
+    await stop(db_session, user_id=user.id, anime_id=anime.id, now=NOW - 35 * day)
+
+    # Recorded 40 days ago, inside the pass; the sync clamp moves it to -30 d.
+    results = await apply_batch(
+        db_session,
+        user_id=user.id,
+        items=[
+            SyncItem("c", SyncKind.COMPLETION, eps[3].id, NOW - 40 * day, 1350.0, DURATION),
+            SyncItem("p", SyncKind.POSITION, eps[4].id, NOW - 40 * day, 1350.0, DURATION),
+        ],
+        now=NOW,
+    )
+
+    assert [r.status for r in results] == [SyncStatus.APPLIED, SyncStatus.APPLIED]
+    assert await entry_snapshot(db_session, user, anime) == before
+    assert await mal_rows(db_session, user) == []
+    for number in (3, 4):
+        row = await row_of(db_session, user, eps[number])
+        assert row is not None and row.completed is False
+        assert row.finished_at == NOW - 30 * day
