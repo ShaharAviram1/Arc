@@ -147,7 +147,7 @@ uv run python -m arc.cli warm-catalogue                       # season cache + r
 uv run python -m arc.cli import-catalogue                     # offline catalogue, now
 uv run python -m arc.cli demo-list --user-email prof@example.edu \
     --add "Sousou no Frieren" --add "Vinland Saga" \
-    --status watching --progress 3 --demo
+    --status watching --progress 3
 uv run python -m arc.cli recs --user-email prof@example.edu    # one picks run
 uv run python -m arc.cli remake-copies --trip 4                # re-make a trip's copies with the current OFFLINE_* settings
 uv run python -m arc.cli redo-copies --trip 5 --failed         # redo a trip's failed copies from a freshly fetched source
@@ -187,25 +187,15 @@ targets do — see [deploy/README.md §2.2](deploy/README.md).
   catalogue, so a new user's first Home page is not empty. It prints the title
   it matched. One invocation seeds one `--status` group (default `watching`)
   with one `--progress`, so a plausible list is a few runs rather than one long
-  command line; `--demo` also flags the account as the demo one
-  (`users.is_demo`). A list entry is what drives acquisition, so
+  command line. (Its `--demo` flag was removed in M21 with the demo account,
+  spec FR-D5, 2026-11-03; the name is historical.) A list entry is what
+  drives acquisition, so
   this will start Arc looking for episodes unless acquisition is paused.
 - `recs` — produces one recommendation run for an account through the same
-  service the Recommendations page uses, so the demo account's page has
+  service the Recommendations page uses, so a seeded account's page has
   content without anybody signing in as it. The one command here that is not
   idempotent: a run spends one of the ten a user gets per day.
 - `status` — read-only; safe against a live deployment.
-
-### The demo account
-
-One account can be flagged as the demo one — from the admin Users tab, or with
-`demo-list --demo`. The flag changes presentation and nothing else: that
-account gets a fourth nav entry, **How Arc works** (`/how-arc-works`), and a
-one-line dismissable strip above Watch Now pointing at it. The page is
-informational — the pipeline from a list entry to a MyAnimeList write, one
-sentence per external service, the three rules that matter — and its route is
-open to any signed-in account, so a link somebody shares opens rather than
-404s. No credentials live in this repository.
 
 ## Deploy
 
