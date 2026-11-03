@@ -628,6 +628,70 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
 §5.4e has the whole of it.
 
 ### 5.1a Acquisition as built (M6)
+- **M21 window and demand rules (owner 2026-11-03; built in M21 T3; spec
+  FR-A1, FR-A10, FR-A14, FR-W7).** In `services/acquisition/wants.py` and
+  `demand.py`; they replace M20's "demand only inside the window" (the
+  bullet below keeps M20's window, skip and prefetch, which still hold).
+  - *Admitting a demand* (`demand()`, under `lock_wants`): (1) a `ready`
+    episode writes nothing and counts for nothing; (2) not aired
+    (`is_aired`/`aired_through`) → refuse `not_aired` ("This episode hasn't
+    aired yet."); (3) the caller already has an open demand on it → restamp
+    `demanded_at`, skip the cap; (4) `open_demands(user) >= demand_max_open`
+    (cap ≠ 0) → refuse `demand_cap` with `open: [{episode_id, anime_id,
+    title, number}]` and "You already have 3 episodes fetching on request.
+    Finish or cancel one first." — an open demand is a live want
+    (`dropped_at IS NULL`, `demanded_at IS NOT NULL`) with no
+    `finished_at >= demanded_at`, counted under the lock so two clicks
+    cannot both take the last place; (5) paused / storage-held and the
+    episode needs fetching → refuse as before; (6) upsert,
+    `start_search(retry_now, DEMAND_PRIORITY)`, raise a queued search,
+    `qbit_top`, `_start_live` — unchanged. `withdraw()` (`DELETE
+    /api/episodes/{id}/demand`) sets `demanded_at = NULL` and queues
+    `compute_wants`; the row then lives or ends as an ordinary want.
+  - *Demand lifetime* (`_demanded_wants(session, now, stale)`): every open
+    demand is in `desired` **unconditionally** — any list status, progress,
+    dormancy, slot cap, device holding, N = 0. It ends when finished
+    (`finished_at >= demanded_at` → `_reconcile` **deletes** the row rather
+    than shelving it: a drop anchor would keep the file G days, the fresh
+    `finished_at` gives the 6-hour watched grace), when stale
+    (`greatest(demanded_at, watch_progress.updated_at) < now − D` in any
+    episode state → `_drop_stale` with `STALE_DROP_REASON`; only a new click
+    revives it), or when withdrawn. A demanded trip episode always enters
+    `desired` (it is no longer trip-only, so it gets an HLS rendition).
+    `plan.covers`, M20's coverage helpers and its window-only refusal are
+    deleted.
+  - *Windows per (user, show)* in `_plan_wants`. Base position `p_base`: an
+    open rewatch → `p_rw` (the highest number with `finished_at >=
+    started_at`, else 0) and the list window is **suspended**; else a
+    watching/planned non-dormant entry → `watched_through(list progress,
+    highest completed)`; else none. Walk position `p_walk`:
+    `walks.after_number` when `touched_at >= now − D` and (with a rewatch
+    open, `touched_at >= started_at`; without one, no Arc-side status
+    change to dropped/on-hold/completed later than `touched_at` — an FR-W5
+    auto-complete included). The window is `window(p_base) ∪
+    window(p_walk)`, each with `show_look_ahead`, its own `_halfway`
+    prefetch on its own first episode and the `_device_held` skip;
+    `plan.progress[pair]` is the lower of the positions present.
+  - *Slots* (FR-A10): a walk-only or rewatch show is a `SlotShow` like a
+    listed one (`updated_at` = the later of the walk's touch and the pass's
+    start). The prefetch stays outside the cap; demands stay outside K.
+  - *Delete or shelve*: `following = wanting ∪ walking ∪ rewatching`
+    replaces `wanting` in `_reconcile`'s choice between deleting a
+    watched-past row and shelving it. A lapsed walk's leftovers are shelved
+    `REASON_NOT_WANTING`. FR-T2's `quiet_since` also takes
+    `walks.touched_at` and the open pass's `started_at`; a rewatch never
+    expires, its ready episodes go stale like any other. In-flight
+    protection is unchanged. N = 0 empties the windows; demands are still
+    honoured; pause remains the hard stop.
+  - *Never cancelling a demanded download*: `cancel_if_unwanted` /
+    `release_if_unwanted` cancel only when `_still_wanted` finds no live
+    want, and an open demand is always live — so the held-show
+    `_watched_past` branch, the not-wanting shelve, the sample cancel route,
+    trip cancel/release (`trips/cancel.py`, `release.py`) and `reject.py`
+    never stop it (no rule change; a docstring line and defensive tests).
+  - *Samples* (FR-A8, retired): the show page stops offering "Try episode
+    1", `POST /api/anime/{id}/sample` answers 410, and `_sample_wants` and
+    `wants.sample` stay until the live rows have ended.
 - **M20 window rules (T4, owner 2026-10-13).** All in
   `services/acquisition/wants.py`, all computed per reconciliation and stored
   nowhere except the demand stamp. `window(…, held, prefetch)` stays pure:
@@ -637,20 +701,17 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   reads `_device_held(session, users)` (`trips.rules.delivered_to` ∪
   `device_holdings` with `reported_at` within `DEVICE_HOLDING_DAYS` = 14) and
   `_halfway(session, pairs)` (the `watch_progress` row on each (user, show)'s
-  first candidate, `0.5 ≤ position/duration < 0.9`), and keeps the window
-  **before** the skip in `_Plan.covers` — the set play on demand may ask for
-  (`coverable(user)` = covers ∪ the user's own live wants that are not
-  demanded-only — sample, trip or window rows; measured on real progress).
+  first candidate, `0.5 ≤ position/duration < 0.9`). (Until M21 it also kept
+  the window before the skip as the set a demand was allowed in; M21 lets a
+  demand reach any aired episode, above.)
   The halfway prefetch's episode (`p+N+1`) is outside the slot cap: it is not
   counted when deciding whether the show is hungry or an occupant (so
   `_live_wants` returns occupants per episode), and a show held by the cap
   still contributes it to `desired`. `compute_wants` takes `lock_wants`
   (`pg_advisory_xact_lock(WANTS_LOCK_KEY)`, shared with `demand()`), records
-  `planned_at`, and adds `_demanded_wants` — live rows with `demanded_at`
-  whose episode is in `plan.covers`, re-checked every run — to `desired`
-  after the plan, so a demanded episode beats both the skip and the slot cap
-  and ends once it leaves the covered set; a demanded trip or sample row
-  outside it stays the trip's / sample's (its `trip` flag kept). `_reconcile`
+  `planned_at`, and adds `_demanded_wants` — since M21 every open demand,
+  unconditionally (above) — to `desired` after the plan, so a demanded
+  episode beats both the skip and the slot cap. `_reconcile`
   never deletes or shelves a live row whose `demanded_at` is later than
   `planned_at` (the second guard behind the lock). `_live_wants` counts a
   demanded row as live (not hungry) but never as an occupant, like a sample.
@@ -661,8 +722,9 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   `PREFETCH_FRACTION` (0.5) queues `compute_wants` (deduplicated on the type);
   the offline replay (`playback/sync.py`) goes through the same function.
   `services/acquisition/demand.py` is the press on play: a `ready` episode
-  returns at once (nothing written); otherwise take `lock_wants`, refuse
-  unless the episode is in `coverable`, refuse while paused / storage-held
+  returns at once (nothing written); otherwise take `lock_wants`, refuse an
+  un-aired episode and a new demand beyond `demand_max_open` (M21, above),
+  refuse while paused / storage-held
   when the episode still needs fetching (`not_wanted`/`unavailable`/`wanted`/
   `searching`), upsert the want (`INSERT … ON CONFLICT DO UPDATE` with
   `demanded_at = now` and the drop cleared, so two presses cannot collide),
@@ -794,9 +856,9 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   (anime_id)` by `added_at desc, id desc`; thin when that newest row's
   `seeders < slow_swarm_seeders`. No query at all when the threshold is 0, N
   is 0 or `look_ahead_slow <= N`. Derived on every plan, stored nowhere; the
-  per-show N feeds both `window()` calls (so `covers`, FR-A14, follows) and
-  the slot-cap `extra` test, so the halfway prefetch is `p+N_show+1` and stays
-  outside the cap; `coverable_once_active` applies the same rule. One INFO
+  per-show N feeds the `window()` call and the slot-cap `extra` test, so
+  the halfway prefetch is `p+N_show+1` and stays outside the cap; since M21
+  it is the N of walk and rewatch windows too. One INFO
   line per `compute_wants` names the thin shows (ids when ten or fewer).
   **In-flight rows are not cancelled by a shrinking window**: in `_reconcile`,
   a live want of a followed show whose episode is `downloading` (`IN_FLIGHT`;
@@ -1321,7 +1383,9 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   overwritten by a poll, in either direction. `samples.cancel_sample` calls
   the same two helpers, so pressing Cancel mid-download stops it now rather
   than at the next tick.
-- **Samples (FR-A8, M16).** `POST /api/anime/{id}/sample` writes one `wants`
+- **Samples (FR-A8, M16; retired 2026-11-03, M21 — folded into the demand:
+  the route answers 410, the button goes, and what follows describes the
+  rows still being read until they end).** `POST /api/anime/{id}/sample` writes one `wants`
   row with `sample = true` on the show's lowest-numbered episode, **starts the
   search there and then** and enqueues `compute_wants`; nothing else about
   acquisition changes, and no list entry or MAL write is involved. The route
@@ -1339,8 +1403,8 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   episode nobody else wants goes back to `not_wanted` immediately while one
   that is already downloading is untouched. `arc/services/acquisition/samples.py` owns the
   three refusals (no episodes cached, episode 1 unaired per
-  `catalog.airing`, the show already `watching`/`planned` — the window covers
-  it) and hands each up as the sentence the 409 carries. A second press with a
+  `catalog.airing`, the show already `watching`/`planned`, whose own window
+  wants episode 1) and hands each up as the sentence the 409 carries. A second press with a
   sample already live answers that same sample and writes nothing (one sample
   per (user, show): "the lowest-numbered episode" is not a stable answer, and
   Cancel drops every live sample row on the show rather than one). The reconciler reads
@@ -1369,8 +1433,7 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   pacing and cache shared across concurrent searches.
 
 **Manual release choice (FR-A13, owner 2026-10-06).** `services/acquisition/
-manual.py`, routes in `api/manual_release.py`. A person (any account but the
-demo) can point an episode they want — or their active trip — at a release of
+manual.py`, routes in `api/manual_release.py`. A person can point an episode they want — or their active trip — at a release of
 their choosing: one of Arc's own candidates, or a pasted magnet / Nyaa link.
 It is not a "download anything" door: the scope is an episode the caller has a
 live want on (window, sample or trip; otherwise 404) or the caller's own active
@@ -1464,7 +1527,7 @@ trip's `pending` episodes, and only episodes with nothing landed
   here reads or writes a list entry, a want or MyAnimeList.
 - **Client**: the show page's episode row gets a "⋯" menu with **Change
   release…** for an episode the viewer wants (`EpisodeOut.wanted_by_me`) and
-  nothing has landed for, never for the demo account; the trip panel gets
+  nothing has landed for; the trip panel gets
   **Choose pack…**. Both open `ReleaseSheet`: the current download, the
   candidates (name, single/pack, resolution, size, seeders, "covers 1–12",
   the reason Arc would not take it), a paste box and **Use this release**;
@@ -1526,8 +1589,8 @@ owner 2026-10-13).**
   on the show page and the player's payload; elsewhere the threshold is 0.
   `torrents_for` skips `evicted` rows, so an evicted episode's row shows no
   release, as before T9. Client: the row's "Few seeders (2) — pin this show to
-  keep it" line with a **Pin** button calling `useSetPinned` (FR-T8); pinned or
-  demo → "Few seeders (2)" alone.
+  keep it" line with a **Pin** button calling `useSetPinned` (FR-T8); pinned →
+  "Few seeders (2)" alone.
 
 ### 5.2 Ingest and match
 1. `ingest_file` (a function, called by `library_scan` and by the poll's
