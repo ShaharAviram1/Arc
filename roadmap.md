@@ -2345,7 +2345,7 @@ Reviewer where marked.
       "coverable\|not_in_window\|window covers"` in the docs returns only
       decision-log history); demo mentions only in dated history or
       retirement lines.
-- [ ] **T1 — Model + migrations** (S–M). R1 `watch_progress.finished_at`
+- [x] **T1 — Model + migrations** (S–M; verified by the orchestrator 2026-11-03: Validator ran the six-revision chain up/down against Postgres with no autogenerate drift, the backfill, both partial unique index refusals, the validator bounds and the idempotent seeds; my own run on merged main 15559a8: model + migration tests 82 passed, full server suite 5351 passed, client 1500 passed, lint clean; one docstring nit fixed). R1 `watch_progress.finished_at`
       (backfill from `completed_at`), R2 `rewatches` (partial unique open
       pass), R3 `walks`, R4 seed `demand_max_open` = 3 (+ `DEFAULT_SETTINGS`,
       `_bounded_int` 0..20, `rules.demand_max_open()`), R6 `pack_picks` +
