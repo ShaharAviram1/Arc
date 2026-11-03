@@ -27,11 +27,14 @@ from arc.models import (
     EpisodeState,
     Job,
     ListEntry,
+    ListStatus,
     MalLink,
     MalWriteLog,
     Rewatch,
     Trip,
     TripEpisode,
+    TripEpisodeState,
+    TripState,
     User,
     Walk,
     WatchProgress,
@@ -55,6 +58,8 @@ from arc.services.playback.rewatch import (
 )
 from arc.services.playback.sync import SyncItem, SyncKind, SyncStatus, apply_item
 from arc.services.trips.names import TRIP_SWEEP
+from arc.services.trips.rules import held_episode_ids
+from arc.services.trips.sweep import end_if_complete
 from tests.acquisition_helpers import make_anime, make_entry, make_episodes, make_user
 from tests.conftest import add_user, api_transport, login
 
@@ -422,6 +427,49 @@ async def test_an_unmark_replay_in_a_pass_is_stale_against_a_later_pass_finish(
     assert row is not None and row.finished_at is None and row.unmarked_at == minutes(25)
 
 
+async def test_a_normal_unmark_replay_is_stale_against_a_later_re_finish(
+    db_session: AsyncSession,
+) -> None:
+    """Normal mode: an un-mark recorded before a re-watch finished later is dropped."""
+    user = await make_user(db_session, "rw-unmark-refinish@arc.test")
+    await link(db_session, user)
+    anime, eps = await show(db_session, anilist_id=990025)
+    await make_entry(db_session, user, anime, progress=2)
+    # Completed at -60 (list to 3), re-watched and finished again at +20.
+    await report(db_session, user, eps[3], 0.95, at=minutes(-60))
+    await report(db_session, user, eps[3], 0.1, at=minutes(0))
+    await report(db_session, user, eps[3], 0.95, at=minutes(20))
+    writes = len(await mal_rows(db_session, user))
+
+    # Recorded offline at +10: after the first watch, before the re-finish.
+    stale = await apply_item(
+        db_session,
+        user_id=user.id,
+        item=SyncItem("u", SyncKind.UNMARK, eps[3].id, minutes(10)),
+        now=minutes(30),
+        list_changed_at=minutes(-60),
+    )
+
+    assert stale.status is SyncStatus.STALE
+    row = await row_of(db_session, user, eps[3])
+    assert row is not None and row.completed and row.finished_at == minutes(20)
+    entry = await db_session.get(ListEntry, (user.id, anime.id), populate_existing=True)
+    assert entry is not None and entry.progress == 3
+    assert len(await mal_rows(db_session, user)) == writes
+
+    # Recorded after the re-finish: applied, and the list comes down by one.
+    applied = await apply_item(
+        db_session,
+        user_id=user.id,
+        item=SyncItem("u2", SyncKind.UNMARK, eps[3].id, minutes(25)),
+        now=minutes(30),
+        list_changed_at=minutes(-60),
+    )
+    assert applied.status is SyncStatus.APPLIED
+    entry = await db_session.get(ListEntry, (user.id, anime.id), populate_existing=True)
+    assert entry is not None and entry.progress == 2
+
+
 # --- the end of a pass ------------------------------------------------------------
 
 
@@ -541,6 +589,32 @@ async def test_walks_follow_plays_and_completions(db_session: AsyncSession) -> N
     assert await jobs(db_session, COMPUTE_WANTS) == []
 
 
+async def test_a_manual_mark_does_not_move_the_walk(db_session: AsyncSession) -> None:
+    """FR-A1 (b) counts a walk from the episode being *played*; a hand mark is not one."""
+    user = await make_user(db_session, "rw-walk-mark@arc.test")
+    anime, eps = await show(db_session, anilist_id=990026)
+    await make_entry(db_session, user, anime, status=ListStatus.COMPLETED, progress=12)
+    await clear_jobs(db_session)
+
+    marked = await report(db_session, user, eps[9], 0.0, at=minutes(0), force=True)
+
+    assert marked.completed and marked.newly_completed
+    assert await walk_of(db_session, user, anime) is None
+    # The first mark's one job is FR-S4's completion reconciliation (every
+    # newly completed episode queues it); a second mark, completing nothing
+    # new, shows the walk queues nothing of its own.
+    await clear_jobs(db_session)
+    again = await report(db_session, user, eps[9], 0.0, at=minutes(1), force=True)
+    assert not again.newly_completed
+    assert await walk_of(db_session, user, anime) is None
+    assert await jobs(db_session, COMPUTE_WANTS) == []
+
+    await report(db_session, user, eps[9], 0.1, at=minutes(5))
+    walk = await walk_of(db_session, user, anime)
+    assert walk is not None and walk.after_number == 8
+    assert len(await jobs(db_session, COMPUTE_WANTS)) == 1
+
+
 async def test_a_play_in_a_pass_moves_the_walk_too(db_session: AsyncSession) -> None:
     user = await make_user(db_session, "rw-walk-pass@arc.test")
     anime, eps = await show(db_session, anilist_id=990015)
@@ -581,6 +655,51 @@ async def test_a_completion_in_a_pass_still_queues_the_trip_sweep(
 
     assert outcome.rewatching and outcome.newly_completed
     assert len(await jobs(db_session, TRIP_SWEEP)) == 1
+
+
+async def test_a_pass_finish_is_a_watch_for_trips(db_session: AsyncSession) -> None:
+    """A trip episode never completed normally, finished in a pass, is watched."""
+    user = await make_user(db_session, "rw-trip-watched@arc.test")
+    anime, eps = await show(db_session, anilist_id=990024)
+    trip = Trip(
+        user_id=user.id,
+        anime_id=anime.id,
+        first_number=3,
+        last_number=4,
+        count=2,
+        deadline_at=minutes(60 * 24 * 7),
+    )
+    db_session.add(trip)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            TripEpisode(
+                trip_id=trip.id,
+                episode_id=eps[n].id,
+                state=TripEpisodeState.DELIVERED,
+                delivered_at=minutes(-60),
+            )
+            for n in (3, 4)
+        ]
+    )
+    await db_session.flush()
+    held = {eps[3].id, eps[4].id}
+    assert await held_episode_ids(db_session, held) == held
+
+    await start(db_session, user_id=user.id, anime_id=anime.id, now=minutes(0))
+    await report(db_session, user, eps[3], 0.95, at=minutes(1))
+    assert await held_episode_ids(db_session, held) == {eps[4].id}
+    locked = await db_session.get(Trip, trip.id, with_for_update=True, populate_existing=True)
+    assert locked is not None
+    assert await end_if_complete(db_session, locked, now=minutes(2)) is None
+
+    await report(db_session, user, eps[4], 0.95, at=minutes(3))
+    for number in (3, 4):
+        row = await row_of(db_session, user, eps[number])
+        assert row is not None and row.completed is False and row.finished_at is not None
+    assert await held_episode_ids(db_session, held) == set()
+    assert await end_if_complete(db_session, locked, now=minutes(4)) == []
+    assert locked.state is TripState.FINISHED
 
 
 # --- the service ----------------------------------------------------------------------
