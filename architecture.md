@@ -4158,6 +4158,47 @@ above), so what is settled here is the **copy** — file and row — and the
    `updated_at` vs MAL's `updated_at`, newest wins, conflict logged.
 5. Revert endpoint replays `old_value` through `mal_push` with cause
    `revert`.
+6. **The latest finish, walks and rewatch (M21 T2; spec FR-S4, FR-S8,
+   FR-W3, FR-W5, FR-W7, FR-M4, FR-M7, FR-A9).** In `record_progress`:
+   `stamp = reported_at or now`; `rw = rewatch_at(user, anime, stamp)` —
+   the pass open when the report was recorded, ended rows included. In
+   **every mode**, after the upsert (`RETURNING old.*`), a crossing of the
+   mark (or `force_complete`) that passes the live-duration guard sets
+   `finished_at = greatest(finished_at, stamp)`; the `walks` row is upserted
+   (`after_number` = the number when completing, else number − 1, only when
+   `stamp >= touched_at`), and `compute_wants` is queued when the walk is
+   new or moved. **Rewatch branch** (`rw` open at `stamp`): the upsert
+   writes position, duration and `updated_at` only — no `_activate_entry`,
+   `_advance_list`, `_auto_completes`, `record_pending` or
+   `enqueue_mal_push`, so nothing reaches `list_entries` or
+   `mal_write_log`; the prefetch crossing still queues `compute_wants`;
+   *newly completed in the pass* = crossed ∧ the old `finished_at <
+   started_at` (or null), so two concurrent completions yield one; the pass
+   ends when `number >= last` (`anime.episodes` when the show is finished
+   and the count known, else the newest aired) → `ended_at = stamp`,
+   `end_reason = finished`, `rewatch_ended = True`. It returns `completed`
+   (in the pass), `newly_completed`, `list_progress = None` and
+   `rewatching = True` (`ProgressOut` gains `rewatching` and
+   `rewatch_ended`). The offline replay (`playback/sync.py`) goes through
+   the same function with `reported_at`, so a replay recorded inside a pass
+   that has since ended is still MAL-free and does not reopen it, and one
+   recorded before the pass is normal mode. `unmark_watched` in a pass
+   (judged at `when`) clears `finished_at` only if `>= started_at`, sets
+   `unmarked_at` and never calls `_retreat_list`; in normal mode it also
+   clears `finished_at`. `sync.py::apply_item`'s UNMARK staleness compares
+   against `finished_at` inside a pass. FR-A9 activation never happens in a
+   pass. `services/playback/rewatch.py`: `start` (idempotent, queues
+   `compute_wants`), `stop(reason='off')`, `open_rewatch`, `open_rewatches`,
+   `rewatch_at`, `pass_finished`, `pass_position`, and `watch_view(session,
+   user_id, anime_id | ids)` → `(completed_ids, list_progress)`: in a pass
+   (the episodes finished in it, 0), so `watched_source = arc` for pass
+   episodes only; otherwise (the completed ids, `entry.progress`). Status
+   and score edits during a pass are ordinary user-originated list writes
+   and reach MAL; MAL's own rewatch fields are never written. Next season
+   during a pass carries the rewatch to the sequel only when its entry has
+   progress > 0 or is completed (otherwise normal mode, the entry created
+   as Watching). In normal mode a re-crossing re-stamps `finished_at`
+   without a second MAL write (the list progress does not move).
 
 ### 5.5a MAL sync as built (M9)
 - Link: PKCE `plain`; the `state` is Fernet-encrypted `{user_id, verifier,
@@ -4464,8 +4505,11 @@ backends), `pool`, `continuations`, `history`, `prompt`, `schema`, `runs`.
 ### 5.7 Retention
 `retention_sweep` (hourly, priority 200, first run 10 min after worker
 start): candidates are `ready|downloaded|matched|failed` episodes with no
-live want. Grace anchor = latest of every completion (`watch_progress.
-completed_at`, any user), every `list_entries.updated_at` of a user whose
+live want. Grace anchor = latest of every completion — since M21 every user's
+**latest finish**, `max(coalesce(watch_progress.finished_at, completed_at))`
+over rows where it is not null (the `completed` filter dropped), so a rewatch
+completion, in a pass or not, is a fresh anchor; `completed_at` alone
+before — every `list_entries.updated_at` of a user whose
 `progress` covers the episode's number (FR-W5, 2026-09-13 — one grouped join
 on `(anime_id, number <= progress)`; the column is an approximation, since it
 moves for any change to the row and nothing records "when progress passed
@@ -4492,8 +4536,8 @@ row (FR-T8); **(b) `partial_recent`** — a `watch_progress` row with
 `completed = false` and `position_s > 0` updated within D; **(c)
 `last_played`** — `max(watch_progress.updated_at)` over every user, held while
 `last_played + max(watched_grace_hours, PLAYING_WINDOW = 30 min) > now`
-(covers a rewatch, since `completed_at` is write-once, and a grace of 0 still
-covers the minutes after a 90 % completion); **(d) `copy_serving`** — the
+(covers a rewatch played but not yet finished, and a grace of 0 still covers
+the minutes after a 90 % completion); **(d) `copy_serving`** — the
 offline copy's `last_served_at` within `COPY_SERVING_WINDOW` (10 min; the media
 route now touches it at most every 5 min, `SERVED_TOUCH_SECONDS`), lapsing
 `COPY_SERVING_CEILING` (6 h, the trip settle's `FETCH_CEILING` value) after
@@ -4534,6 +4578,23 @@ keeps one new download from starting the next eviction). Under
 instead. PROTECTED states are never retained, so never evicted. The preview
 sends the plan as `floor[]` with the same reason strings; the Storage tab
 renders it as "Floor evictions".
+
+**Leftover pack files (M21 T8, spec FR-T1, owner 2026-11-03, moved from
+M17).** `retention/batch_sweep.py` `leftover_files(session, settings, qbit)`
+lists files under `downloads/batch/<dir>/` that per-episode retention cannot
+see (a want withdrawn mid-download leaves the arrived bytes with no
+`media_files` row). A file is a candidate only when: its `<dir>` has a
+`torrents` row; it is not held by `ingest.in_flight()` nor inside a held
+pack's incomplete files; no `media_files.path` names it; no
+`torrent_files` row with `wanted = true` claims it; qBittorrent reports
+`priority == 0` for its index, or the torrent is gone from the client; its
+mtime is more than an hour old; and it is under `allowed_roots` with no
+symlink on its path (`safe_path`). Candidates are deleted and empty
+directories pruned, as one step of the hourly `retention_sweep`; while
+`batch_sweep_dry_run` is true (the default on first deploy) it only logs.
+`GET /api/retention/preview` carries `leftover_files` and `leftover_bytes`
+and the admin Retention tab shows them. An unknown `batch/<dir>` is out of
+scope (the library fence keeps it out of the library, §5.2 step 1).
 
 Deletion: qBittorrent torrent with files
 (Arc category only; "not in client" is a no-op), rendition dir, source
