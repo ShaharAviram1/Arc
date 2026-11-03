@@ -14,7 +14,7 @@ they are built from the real one too.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +35,7 @@ from arc.services.retention.sweep import (
     HOLD_PARTIAL,
     REASON_DROPPED,
     REASON_WATCHED,
+    Deletable,
     candidates,
     floor_evictions,
     retention_plan,
@@ -59,7 +60,7 @@ LENGTH = 1440.0
 #: so "deletable at T + G" is checked a minute past it.
 
 
-def ids(found: list) -> list[int]:  # type: ignore[type-arg]
+def ids(found: Sequence[Deletable]) -> list[int]:
     return [target.episode_id for target in found]
 
 
