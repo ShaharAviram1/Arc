@@ -895,14 +895,25 @@ export function withdrawDemand(episodeId: number): Promise<null> {
   return apiFetch<null>(`/api/episodes/${String(episodeId)}/demand`, { method: 'DELETE' })
 }
 
+/** What a failed withdraw says, wherever the ✕ is. */
+export const WITHDRAW_FAILED = 'Could not withdraw that. Try again.'
+
+/** Which demand to withdraw; without `animeId` every cached show is refetched. */
+export interface WithdrawInput {
+  episodeId: number
+  animeId?: number
+}
+
 /**
- * The ✕ on a "Fetching on request" row: withdraw, then refetch the show (the
- * row and `demand.open`) and the home page.
+ * The ✕ on a demanded row or in the cap's list of open demands (FR-A14,
+ * M21): withdraw, then refetch the show (the row and `demand.open`; every
+ * cached show when the demand's own page is not the one open) and the home
+ * page.
  */
-export function useWithdrawDemand(): UseMutationResult<null, Error, WatchedInput> {
+export function useWithdrawDemand(): UseMutationResult<null, Error, WithdrawInput> {
   const client = useQueryClient()
 
-  return useMutation<null, Error, WatchedInput>({
+  return useMutation<null, Error, WithdrawInput>({
     mutationFn: ({ episodeId }) => withdrawDemand(episodeId),
     onSuccess: (_result, { animeId }) => {
       invalidateAfterCompletion(client, animeId)

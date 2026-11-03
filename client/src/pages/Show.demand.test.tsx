@@ -115,6 +115,75 @@ describe('EpisodeRow — play any aired episode (FR-A14, M21)', () => {
     })
   })
 
+  it('a ready demanded row shows "Requested" and its ✕ withdraws', async () => {
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      [DETAIL]: { body: detail({}, { 9001: { demanded: true } }) },
+      'DELETE /api/episodes/9001/demand': { status: 204 },
+    })
+
+    renderShow()
+    expect(await screen.findByText('Requested')).toBeInTheDocument()
+    expect(screen.queryByText('Fetching on request')).not.toBeInTheDocument()
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'Withdraw the request for episode 1' }))
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('DELETE /api/episodes/9001/demand')
+    })
+  })
+
+  it('says so when the withdraw fails', async () => {
+    mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      [DETAIL]: { body: detail({}, { 9004: { demanded: true } }) },
+      'DELETE /api/episodes/9004/demand': { status: 500, body: { detail: 'boom' } },
+    })
+
+    renderShow()
+    await userEvent
+      .setup()
+      .click(await screen.findByRole('button', { name: 'Withdraw the request for episode 4' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not withdraw that. Try again.',
+    )
+  })
+
+  it('the cap list’s ✕ withdraws and the list shrinks', async () => {
+    const demand: ShowDemand = {
+      open: [
+        { episode_id: 7001, anime_id: 77, title: 'Dungeon Meshi', number: 3 },
+        { episode_id: 8002, anime_id: 88, title: 'Mushishi', number: 12 },
+      ],
+      max: 2,
+      refusal: { code: 'demand_cap', message: 'You already have 2 episodes on request.' },
+    }
+    const fetchMock = mockApi({
+      'GET /api/auth/me': { body: TEST_USER },
+      [DETAIL]: { body: detail({ demand }) },
+      'DELETE /api/episodes/7001/demand': { status: 204 },
+    })
+
+    renderShow()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('link', { name: 'Fetch and play episode 4' }))
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Withdraw the request for Dungeon Meshi episode 3',
+      }),
+    )
+
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('DELETE /api/episodes/7001/demand')
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'Dungeon Meshi' })).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole('link', { name: 'Mushishi' })).toBeInTheDocument()
+  })
+
   it('a page refusal shows the toast and does not navigate', async () => {
     const demand: ShowDemand = {
       open: [{ episode_id: 7001, anime_id: 77, title: 'Dungeon Meshi', number: 3 }],

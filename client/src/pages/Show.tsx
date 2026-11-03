@@ -67,6 +67,7 @@ import {
   useUnmarkWatched,
   useWithdrawDemand,
   WATCHED_BY_PROGRESS_HINT,
+  WITHDRAW_FAILED,
   type WatchState,
 } from '@/lib/playback'
 import { CHANGEABLE_STATES } from '@/lib/releases'
@@ -988,19 +989,23 @@ const PLAY_ON_DEMAND_HINT =
 
 /** An episode the viewer pressed play on and has not finished (FR-A14, M21). */
 const FETCHING_ON_REQUEST = 'Fetching on request'
-const WITHDRAW_FAILED = 'Could not withdraw that. Try again.'
+/** The same, once it is ready: nothing is being fetched, but it still holds a place. */
+const REQUESTED = 'Requested'
 
 /**
- * "Fetching on request" and its ✕ (owner decision 2, 2026-11-03): the ✕
- * withdraws the demand (`DELETE /api/episodes/{id}/demand`) and the page
- * refetches, so the row and the cap's count follow the server.
+ * "Fetching on request" (or "Requested" on a ready row) and its ✕ (owner
+ * decision 2, 2026-11-03). A demand stays open until the episode is finished
+ * or goes stale, ready or not, and counts toward the cap all that time, so
+ * every demanded row offers the ✕: it withdraws the demand (`DELETE
+ * /api/episodes/{id}/demand`) and the page refetches, so the row and the
+ * cap's count follow the server.
  */
 function DemandedNote({ animeId, episode }: { animeId: number; episode: EpisodeOut }) {
   const withdraw = useWithdrawDemand()
   return (
     <span className="relative z-10 flex flex-col items-start gap-1 sm:items-end">
       <span className="inline-flex items-center gap-2 text-[13px] text-[var(--arc-text-muted)]">
-        {FETCHING_ON_REQUEST}
+        {episode.state === 'ready' ? REQUESTED : FETCHING_ON_REQUEST}
         <button
           type="button"
           disabled={withdraw.isPending}
@@ -1159,7 +1164,7 @@ function EpisodeRow({
               />
             </span>
           )}
-          {fetchable && episode.demanded === true ? (
+          {episode.demanded === true ? (
             <DemandedNote animeId={anime.id} episode={episode} />
           ) : null}
           {episode.state === 'failed' && isAdmin ? (
