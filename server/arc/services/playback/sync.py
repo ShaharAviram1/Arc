@@ -45,10 +45,11 @@ retention's grace window or the continue-watching order.
   a lost response must not override one made in between. Otherwise applied;
   if the row is newer, its position is kept and only the flag is set. A newer
   completion leaves ``unmarked_at`` as history.
-* *unmark* — ``stale`` when the episode was completed after it
-  (``completed_at > at``), or when the list entry was changed after it
-  (``list_entries.updated_at > at``, read once at the start of the batch so
-  this device's own earlier records in the batch do not count): a later
+* *unmark* — ``stale`` when the episode was completed or finished again after
+  it (the later of ``completed_at`` and ``finished_at`` ``> at``, M21), or
+  when the list entry was changed after it (``list_entries.updated_at >
+  at``, read once at the start of the batch so this device's own earlier
+  records in the batch do not count): a later
   completion, or a list the user raised later, is the user's newer word.
   Otherwise FR-S4's un-mark rule, unchanged.
 
@@ -294,8 +295,17 @@ async def apply_item(
             return SyncResult(item.client_id, SyncStatus.STALE)
         await unmark_watched(session, user_id=user_id, episode=episode, now=now, reported_at=at)
         return SyncResult(item.client_id, SyncStatus.APPLIED)
-    completed_at = row.completed_at if row is not None and row.completed else None
-    if unmark_is_stale(completed_at, list_changed_at, at):
+    # The later of the first watch and the latest finish: a re-watch finished
+    # after this un-mark was recorded is the user's newer word too (M21).
+    finishes = [
+        moment
+        for moment in (
+            row.completed_at if row is not None and row.completed else None,
+            row.finished_at if row is not None else None,
+        )
+        if moment is not None
+    ]
+    if unmark_is_stale(max(finishes, default=None), list_changed_at, at):
         return SyncResult(item.client_id, SyncStatus.STALE)
     await unmark_watched(session, user_id=user_id, episode=episode, now=now, reported_at=at)
     return SyncResult(item.client_id, SyncStatus.APPLIED)
