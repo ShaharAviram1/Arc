@@ -2333,7 +2333,7 @@ release.
 
 Order T0 → T1 → … → T10, one Writer at a time; a Validator on every task, a
 Reviewer where marked.
-- [ ] **T0 — Docs first** (S, Validator). Plan section 8 minus the
+- [x] **T0 — Docs first** (S, Validator; verified by the orchestrator 2026-11-03: Validator traced all 14 decisions into FRs, architecture and roadmap, two medium wording defects fixed in the loop; CLAUDE.md, FR-A14 and FR-W7 read personally). Plan section 8 minus the
       `mal/sync.py` docstring: CLAUDE.md acquisition and MAL-write rules;
       spec FR-A1, FR-A4, FR-A8 (retired), FR-A9, FR-A10, FR-A11, FR-A14,
       FR-S4, FR-S5 item 3, FR-W1, FR-W4, FR-W5, FR-W6, new FR-W7, FR-M7,
