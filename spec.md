@@ -207,8 +207,9 @@ is its only user, and uses it daily.
   move (an offline replay, FR-S8) does not move it. It lapses once the user
   has not played the show for **D** days, when the user sets the show
   dropped, on hold or completed in Arc after the walk last moved, or when
-  FR-W5 auto-completes it; its leftover wants are then shelved (FR-T1's
-  G-day grace). A walk touches no list entry and writes nothing to
+  FR-W5 auto-completes it; while a rewatch pass is open, only a walk that
+  moved since the pass began counts. A lapsed walk's leftover wants are
+  shelved (FR-T1's G-day grace). A walk touches no list entry and writes nothing to
   MyAnimeList. **A rewatch pass** (FR-W7) does the same from its own
   position — the highest episode finished in the pass, 0 before the first —
   and while a pass is open the show's list window is suspended. A show's
