@@ -100,13 +100,14 @@ from arc.services.acquisition.names import (
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_MISSING
 from arc.services.acquisition.rules import demand_max_open, is_paused, is_storage_held
 from arc.services.acquisition.wants import (
-    REASON_NOT_WANTING,
+    REASON_WITHDRAWN,
     STARTABLE,
     cancel_if_unwanted,
     enqueue_cancel,
     lock_wants,
     release_if_unwanted,
     start_search,
+    user_plan,
 )
 from arc.services.catalog.cache import preferred_title
 from arc.services.jobs.queue import enqueue, find_active
@@ -349,28 +350,37 @@ async def demand(
 async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now: datetime) -> bool:
     """Withdraw the caller's demand on an episode (FR-A14, M21). Flushes; the caller commits.
 
-    ``demanded_at`` goes back to null and, unless an active trip of the user's
-    is still waiting on the episode, the row is **shelved** at once
-    (:data:`~arc.services.acquisition.wants.REASON_NOT_WANTING`): the episode
-    is released, or its download cancelled, through the reconciler's own
-    :func:`~arc.services.acquisition.wants.release_if_unwanted` /
-    :func:`~arc.services.acquisition.wants.cancel_if_unwanted` — which leave
-    it alone while another user or a trip still wants it. So a withdrawn
-    demand never runs on as a download holding its show a slot. The queued
-    reconciliation's ordinary revival brings the row back as an ordinary want
-    when the show is admitted and its window wants the episode; on a show
-    the slot cap holds it stays shelved until the show gets a slot (M20's
-    held-show rule). A trip's episode keeps its row live (the trip's own
-    lifetime decides).
+    ``demanded_at`` goes back to null. Then one question, asked of the caller's
+    own reconciliation (their plan, narrowed to them as :func:`slot_view` does
+    it, plus an active trip of theirs waiting on the episode): **does anything
+    the user follows still want this episode now?**
 
-    ``True`` when there was a demand to withdraw; a second call changes
-    nothing and queues nothing. Taken under the want lock like a demand.
+    * Yes — an admitted window, walk or pass, a halfway prefetch, a pending
+      trip episode: the row stays live and becomes an ordinary want in place.
+      Nothing is released or cancelled, so a download the window wants runs
+      on.
+    * No — an unfollowed show, an episode outside every window, a show the
+      slot cap holds: the row is **shelved** at once
+      (:data:`~arc.services.acquisition.wants.REASON_WITHDRAWN`) and the
+      episode is released or its download cancelled through the reconciler's
+      own :func:`~arc.services.acquisition.wants.release_if_unwanted` /
+      :func:`~arc.services.acquisition.wants.cancel_if_unwanted`, which keep it
+      while another user or a trip still wants it. On a held show it stays
+      shelved until the show is admitted and its window revives it (M20's
+      held-show rule), so a withdrawn demand never holds a slot. This happens
+      even while acquisition is paused: the user asked, and it frees space.
+
+    A reconciliation is queued either way. ``True`` when there was a demand to
+    withdraw; a second call changes nothing and queues nothing. Taken under
+    the want lock like a demand. The plan costs one user's lists — fine for a
+    button press.
     """
     await lock_wants(session)
     want = await session.get(Want, (user_id, episode_id), populate_existing=True)
     if want is None or want.demanded_at is None:
         return False
     want.demanded_at = None
+    await session.flush()
     on_trip = await session.scalar(
         select(TripEpisode.episode_id)
         .join(Trip, Trip.id == TripEpisode.trip_id)
@@ -382,10 +392,13 @@ async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now:
         )
         .limit(1)
     )
+    followed = on_trip is not None or (
+        (user_id, episode_id) in (await user_plan(session, user_id, now=now)).desired
+    )
     cancelled = False
-    if on_trip is None and want.dropped_at is None:
+    if not followed and want.dropped_at is None:
         want.dropped_at = now
-        want.drop_reason = REASON_NOT_WANTING
+        want.drop_reason = REASON_WITHDRAWN
         await session.flush()
         episode = await session.get(Episode, episode_id)
         if episode is not None and not await release_if_unwanted(session, episode):
@@ -397,7 +410,12 @@ async def withdraw(session: AsyncSession, *, user_id: int, episode_id: int, now:
     await session.flush()
     log.info(
         "demand withdrawn",
-        extra={"user_id": user_id, "episode_id": episode_id, "cancelled": cancelled},
+        extra={
+            "user_id": user_id,
+            "episode_id": episode_id,
+            "kept": followed,
+            "cancelled": cancelled,
+        },
     )
     return True
 

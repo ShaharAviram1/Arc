@@ -29,9 +29,10 @@ does not slide past it).
 of *any* show, the same window runs from their **walk** (``walks.after_number``:
 k−1 while k plays, k once it is finished) — with the show's own N, its own
 prefetch and its own skip — for as long as the walk is live: touched within
-**D** days (FR-T2's period), and not overtaken by an Arc-side status change to
-dropped, on hold or completed made at or after its last move (an FR-W5
-auto-complete included; :func:`walk_counts`). An open **rewatch pass** replaces
+**D** days (FR-T2's period, :func:`walk_counts`). The user setting the show
+dropped, on hold or completed in Arc, FR-W5's auto-complete, an undo restoring
+such a status and a rewatch pass ending delete it where they happen
+(:func:`arc.services.acquisition.walks.end_walk`). An open **rewatch pass** replaces
 the list window with one counted from the pass's position (the highest number
 finished since it began, 0 before the first) — the list window is *suspended*
 while the pass is open — and only a walk that moved since the pass began
@@ -259,6 +260,13 @@ UNAVAILABLE_RETRY = timedelta(days=1)
 #: (FR-W4). Unlike :data:`STALE_DROP_REASON` it puts no condition on the
 #: revival: the show coming back is the user coming back.
 REASON_NOT_WANTING = "show no longer watching or planned"
+
+#: What a withdrawn demand (FR-A14, M21) is shelved with when nothing the user
+#: follows still asks for the episode (:func:`~arc.services.acquisition.demand.withdraw`).
+#: Revives unconditionally, like :data:`REASON_NOT_WANTING`; on a show the user
+#: no longer follows the reconciler relabels it as that, on a held show it
+#: stays as written.
+REASON_WITHDRAWN = "withdrawn on request"
 
 #: What FR-T2 writes into ``wants.drop_reason``, and the value
 #: :func:`_reconcile` refuses to revive without a sign that the user came back
@@ -1147,6 +1155,16 @@ async def _current_plan(
         slow_seeders=rules.slow_seeders,
         user_ids=user_ids,
     )
+
+
+async def user_plan(session: AsyncSession, user_id: int, *, now: datetime | None = None) -> _Plan:
+    """One user's reconciliation plan, as :func:`slot_view` reads it. Read-only.
+
+    ``desired`` is what the user's windows, walks and passes want this run,
+    after the slot cap (a held show contributes only its prefetch). What
+    :func:`~arc.services.acquisition.demand.withdraw` asks before shelving.
+    """
+    return await _current_plan(session, now=now, user_ids=[user_id])
 
 
 async def coverable(
@@ -2577,6 +2595,7 @@ __all__ = [
     "QBIT_CANCELLED",
     "REASON_NOT_WANTING",
     "REASON_TRIP_ENDED",
+    "REASON_WITHDRAWN",
     "RELEASABLE",
     "STALE_DROP_REASON",
     "STARTABLE",
@@ -2596,6 +2615,7 @@ __all__ = [
     "slot_totals",
     "slot_view",
     "start_search",
+    "user_plan",
     "walk_counts",
     "window",
 ]
