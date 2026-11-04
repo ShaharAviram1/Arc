@@ -2619,7 +2619,9 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   with `next_season.rewatch_carry` the touch is `PUT
   /api/anime/{sequel}/rewatch` and no list write (never the direct link),
   then the demand and the waiting player as before. The admin Rules tab edits
-  `demand_max_open` and `batch_sweep_dry_run` (T1). Home has **no** "Rewatch"
+  `demand_max_open` and `batch_sweep_dry_run` (T1); the Storage tab shows
+  the leftover pack files, the switch's state and a link to Rules (T8,
+  §5.7). Home has **no** "Rewatch"
   label yet: the home rows carry the pass's marks but no flag saying a show
   is in a pass.
 
@@ -4779,21 +4781,65 @@ sends the plan as `floor[]` with the same reason strings; the Storage tab
 renders it as "Floor evictions".
 
 **Leftover pack files (M21 T8, spec FR-T1, owner 2026-11-03, moved from
-M17).** `retention/batch_sweep.py` `leftover_files(session, settings, qbit)`
-lists files under `downloads/batch/<dir>/` that per-episode retention cannot
-see (a want withdrawn mid-download leaves the arrived bytes with no
-`media_files` row). A file is a candidate only when: its `<dir>` has a
-`torrents` row; it is not held by `ingest.in_flight()` nor inside a held
-pack's incomplete files; no `media_files.path` names it; no
-`torrent_files` row with `wanted = true` claims it; qBittorrent reports
-`priority == 0` for its index, or the torrent is gone from the client; its
-mtime is more than an hour old; and it is under `allowed_roots` with no
-symlink on its path (`safe_path`). Candidates are deleted and empty
-directories pruned, as one step of the hourly `retention_sweep`; while
-`batch_sweep_dry_run` is true (the default on first deploy) it only logs.
-`GET /api/retention/preview` carries `leftover_files` and `leftover_bytes`
-and the admin Retention tab shows them. An unknown `batch/<dir>` is out of
-scope (the library fence keeps it out of the library, §5.2 step 1).
+M17; as built).** `retention/batch_sweep.py` `leftover_files(session,
+settings, qbit, *, now)` lists files under `downloads/batch/<hash>/` that
+per-episode retention cannot see (a want withdrawn mid-download leaves the
+arrived bytes with no `media_files` row). Each pack directory is derived from
+a `torrents` row of kind `batch` (`<downloads>/batch/<info_hash>`, resolved,
+like `ingest.in_flight`); an unknown `batch/<dir>` is out of scope (the
+library fence keeps it out of the library, §5.2 step 1). The rule is the pure
+`leftover_reason(FileFacts)`, which keeps by default; a file is a candidate
+only when **all** hold:
+- the pack is **not held**: `qbit_state` not in `HELD_PACK_STATES`
+  (`awaiting_pick`, and `cancelled`, whose `qbit_cancel` job owns that
+  deletion), no pending `pack_picks` row, and the client not in
+  `BUSY_CLIENT_STATES` (a copy of `acquisition.jobs.CHECKING_STATES`, held
+  equal by a test; not imported because that module registers handlers) —
+  otherwise the whole directory is untouchable;
+- it is **not in flight**: while the pack is in the client and still has a
+  `wanted = true` row that is not complete, `ingest.in_flight().holds(path)`
+  applies as it is (every incomplete file of the pack is kept). Once the pack
+  owes Arc nothing, an incomplete file is no longer being ingested — applied
+  unconditionally, `holds` would keep every withdrawn partial for ever, which
+  is exactly the bytes this rule exists for;
+- no `media_files.path` names it and no `torrent_files` row with
+  `wanted = true` claims it (the path matched against the row's `path`, a
+  trailing `.!qB` stripped);
+- qBittorrent reports **priority 0** for the row's `file_index` (the client's
+  row must carry the same name), **or** the torrent is not in Arc's category
+  at all (`REASON_CLIENT_GONE`; then a stray file with no row goes too). A
+  file the client lists nowhere, or lists at priority > 0, is kept;
+- its mtime is more than `MIN_AGE` (1 h) old; and
+- it is a regular file (`lstat`), not a symlink, inside no symlinked
+  directory (`os.walk(followlinks=False)`; a symlinked pack directory is
+  refused whole), and `safe_path` returns the path unchanged
+  (`allowed_roots`, no symlink anywhere on it).
+
+**qBittorrent unreachable or not configured → no candidates** (fail closed):
+`torrents()` failing returns `[]`, and so does a `files()` call that cannot
+connect; a `files()` answer that cannot be parsed holds that one pack. The
+size reported is the bytes **allocated** (`min(st_size, st_blocks × 512)`),
+since a sparse file's apparent size is its finished size.
+`sweep_leftovers(session, settings, qbit, *, dry_run)` is the step: in a dry
+run each candidate is logged at INFO ("batch sweep dry run: would delete a
+leftover pack file", with `path`, `bytes`, `reason`, `torrent_id`) and nothing
+is removed; otherwise each file is re-checked (`lstat`, age, `safe_path`)
+and removed through `delete.remove_file` (the deleter's own confinement
+re-check), then `delete.prune_empty_dirs` removes the directories it left
+empty up to the pack directory — the pack directory itself only when the
+client no longer has the pack. One file's failure is logged and the rest go
+on; nothing is written to the database. It runs in the hourly
+`retention_sweep` after the episode pass, the idle copies and the floor
+eviction (`_sweep_pack_leftovers`, which builds its own `QbitClient` and
+never fails the sweep), dry while `batch_sweep_dry_run` (seeded true) **or**
+`RETENTION_DRY_RUN` is set; the sweep's summary line carries
+`leftover_files`, `leftover_candidates`, `leftover_bytes` and
+`leftover_dry_run`. `GET /api/retention/preview` carries `leftover_files[]`
+(`{path, bytes, torrent_id, reason}`), `leftover_bytes`,
+`batch_sweep_dry_run` and `leftover_checked` (false when qBittorrent could
+not be asked inside the status probe's budget — the list is then empty); the
+admin Storage tab shows them under "Leftover pack files" with the dry-run
+state and a link to the Rules tab, where the switch lives.
 
 Deletion: qBittorrent torrent with files
 (Arc category only; "not in client" is a no-op), rendition dir, source
@@ -4861,9 +4907,8 @@ to the episode, which for a pack is the one file. **What retention cannot see
 is a cancelled member's partial bytes**: a want withdrawn mid-download leaves
 whatever had arrived inside `downloads/batch/<hash>/` with no `media_files` row
 naming it and no episode to charge it to, so it sits there until the pack itself
-reaches DELETE — which for a show somebody keeps on their list may be never (an
-M17 sweep of unclaimed files under `downloads/batch/` is the fix; the bytes are
-bounded by what one un-finished file had fetched).
+reaches DELETE — which for a show somebody keeps on their list may be never
+(the leftover sweep above, M21 T8, is the fix).
 
 **The small offline copies (M19 T1, FR-P6, FR-T7).** Four additions, all in
 `retention/sweep.py` and `retention/delete.py`:
@@ -5508,7 +5553,7 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/progress/completed?episode_ids=…` | any (own rows) | FR-S9 item 9 (owner, 2026-10-08): `{completed: [{episode_id, completed_at}]}` — the caller's own `watch_progress` rows with `completed` among the ids (`completed_at`, or `updated_at` for a row older than that column; **since M21** the rows with `completed OR finished_at IS NOT NULL`, `completed_at` = `greatest(completed_at, finished_at)`, so a pass completion reaches the device), ordered by id; an unknown id or a list-only watched episode is simply absent. 1..200 repeated `episode_ids` (each 1..2⁶³−1), else 422. A read: no writes. The device marks its copies watched from it (§5.4d "Catching up") |
 | `POST /api/sync` | any (own records) | replay what the device recorded offline (FR-S8, §5.4c). Body `{user_id, sent_at, items: [{client_id, kind: position\|completion\|unmark, episode_id, at, position_s?, duration_s?}]}` (≤ 200, 422 above); 409 `these records belong to another account` unless `user_id` is the caller. Every `at` is shifted by the device's skew (`now − sent_at`) and clamped to the last 30 days. Answers `{results: [{client_id, status: applied\|stale\|rejected\|retry, reason}]}` in item order; one bad item (even a non-object) is `rejected`, an item that failed to apply is `retry`, never a failed batch. Every item goes through `record_progress` / `unmark_watched`, the online path's own functions, so MAL writes are the same logged, user-originated ones. Origin required like every POST |
 | `POST /api/episodes/{id}/transcode?force=&mode=` | admin | enqueue a remux or a transcode: retry a `failed`/`matched` episode, or redo a `ready` one with `force=true` (409 otherwise). `mode=remux\|transcode` (M20; anything else 422); no mode means `transcode` with `force` (the burn-in re-encode it always was) and `remux` without. Returns the `JobOut` (202; a dedupe hit returns the queued row) |
-| `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released". Since M21 the preview also carries `leftover_files` and `leftover_bytes` (§5.7 "Leftover pack files") |
+| `GET /api/retention/preview`, `POST /api/retention/sweep`, `POST /api/episodes/{id}/delete-files` | admin | what the next sweep would delete (reasons, bytes); run it now; delete one episode's files (404 unknown, 409 while in flight). Each preview row carries `torrents[]` (hashes that would go **with their data** — always empty for a batch-backed episode, since a pack belongs to no episode and deleting it by hash would take other episodes' bytes) and `torrent_files` (how many pack claims the deletion would give back: 1 for an episode a pack is holding, 0 otherwise — the row and the pack both survive, FR-A11). The Storage tab adds them up into one line, "N batch file claims released". Since M21 the preview also carries `leftover_files[]` (`{path, bytes, torrent_id, reason}`), `leftover_bytes`, `batch_sweep_dry_run` and `leftover_checked` (§5.7 "Leftover pack files"); the leftover half asks qBittorrent within the status probe's budget, and a client that does not answer gives an empty list with `leftover_checked: false` |
 | `GET /api/retention/disk` | admin | `{data_dir: {total, used, free}, retained: {sources, renditions, offline_bytes, total}, episodes_retained}` (`offline_bytes`, M19: the small copies, `SUM(offline_copies.size)` over ready rows) — `shutil.disk_usage` on `DATA_DIR` (the nearest existing parent when it has not been created yet; the GET never creates it) beside Arc's own share, from the same `retained_usage` the acquisition status reports |
 | `POST /api/acquisition/pause`, `POST /api/acquisition/resume`, `GET /api/acquisition/status` | admin | pause/resume acquisition (settings key `acquisition_paused`; while paused `compute_wants` does nothing and `search_release` requeues itself without touching Nyaa or qBittorrent; `poll_qbit` keeps ingesting); status shows `paused`, active wants, searching, downloading, `retained_bytes`, plus (2026-09-13) `storage_held`/`free_bytes`/`min_free_bytes` — FR-T6's guard, read from the same measurement and the same `storage_hold` rule the guard itself uses, with an unmeasurable path reading as zeros and *not* held — `dormant_entries`, the count of `watching`/`planned` entries with `activated_at IS NULL` whose show is not `RELEASING` (FR-A9), and `waiting_shows`/`slot_cap_k` — FR-A10's cap, the (user, show) pairs it is holding back right now and K itself, counted by the reconciler's own `wants.slot_totals(session)` (one pass over every list, K returned with the count) so the panel cannot disagree with the next tick. No upstream call |
 | `POST /api/episodes/{id}/search`, `POST /api/acquisition/compute-wants`, `POST /api/acquisition/poll`, `GET /api/acquisition/wants` | admin | trigger a release search / the wants reconciler / a qBittorrent poll (all deduped, 202); list active wants for debugging |
@@ -8062,3 +8107,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-11-04 (orchestrator's call) — M21 T6 fix round: **withdraw anywhere, and the cap does not stop a download already coming** (§5.4 "M21 client as built"; spec FR-A14). Every demanded row offers the ✕ ("Requested" once ready), and the cap's list of open demands carries a ✕ per row on the show page and in the player. A `demand_cap` 409 on an episode still on its way for a window or walk is said above the pending view while `/play` keeps polling; on one with nothing coming it is the refusal view and the poll stops. The hero plays a device copy without a demand, as the row does. No new dependency, no server change.
 - 2026-11-04 — M21 T7: **pack match review as built** (§5.1 job list and "Pack picks and the batch poll", §5.2 step 4 "As built", §5b review rows; spec FR-A4). New `acquisition/pack_picks.py` (pure `pick_eligible`/`identification_refusal`/`stale`; `open_pick`, `pick`, `dismiss`, `reconcile`), `batch.pick_candidates` (the per-file reading `plan_files` uses, factored out as `_file_number`), job type `qbit_forget_pack` (per torrent, priority 60; deletes only a tombstoned hash), `PACK_PICK_REASON` in `models/acquisition.py`, `EpisodeOut.awaiting_pick` (derived from state and reason), `PendingOut.awaiting_pick` (a pending row, the episode `unavailable`/`wanted`), `ReviewSummary.packs`. Calls inside the plan: the held pack gets `torrent_files` rows for **every** file, not only the videos (`qbit_reselect`'s listing gate needs one row per file); a pick requires the episode `unavailable`/`wanted` with no other live claim (409 `episode_moved_on`); D is floored at one day for a pick; a dismiss leaves the episode `unavailable` with `UNREADABLE_BATCH` for the daily revival rather than searching at once; the reconciliation runs at the head of `compute_wants`, asking the client only while a pick is pending; the routes are admin-only (the §5b row said `any`); the show row's Review link is admin-only.
 - 2026-11-04 (orchestrator's call after the Validator and Reviewer) — M21 T7 fix round 1 (§5.1 "Pack picks and the batch poll", §5.2 step 4 "As built", §5b). A pick obeys the pause and the storage hold (409 `acquisition_paused` / `storage_held`, nothing written). The pick reconciliation takes `lock_wants` before the pick rows. An empty client listing is "unknown", and "gone" needs a pick older than an hour. A pick clears every other row's parser reading on its pack. A search that raises after holding a pack deletes it from the client best-effort. Dead picks (no live want; on its way from a live claim or single) are dismissed by the reconciliation; the age rule waits out a pause or hold. `pick_eligible` loses its always-false `chosen`. `awaiting_pick` has one rule for the show row and `/play` (a pending row, the episode `unavailable`/`wanted`). `_thin_shows` skips an `awaiting_pick` pack. The player's Review link is admin-only like the show row's.
+- 2026-11-04 — M21 T8: **the leftover pack files sweep as built** (§5.7 "Leftover pack files", §5.4 admin tabs, §5b preview row; spec FR-T1). New `retention/batch_sweep.py`: pure `leftover_reason(FileFacts)`, `leftover_files(session, settings, qbit)` and `sweep_leftovers(…, dry_run)`; `delete.remove_file` and `delete.prune_empty_dirs`; a step in `retention_sweep` after the floor eviction, dry while `batch_sweep_dry_run` or `RETENTION_DRY_RUN`. Calls made inside the plan's rule, reported for objection: `in_flight().holds` applies only while the pack is in the client and still owes Arc an incomplete wanted file (applied always, it would keep every withdrawn partial — the bytes the rule is for); a held pack (`awaiting_pick`, `cancelled`, pending pick, client checking) is kept whole; a file the client does not list is kept while the pack is in the client; a pack gone from the client loses its emptied directory, one still in it keeps it; sizes are allocated bytes; the preview adds `batch_sweep_dry_run` and `leftover_checked` beside `leftover_files`/`leftover_bytes`. No schema change, no new dependency.
