@@ -264,18 +264,25 @@ def _conflict(exc: pack_picks.PickConflict) -> HTTPException:
     },
 )
 async def pick_pack_file(
-    pick_id: PackPickId, body: PickRequest, user: AdminUser, session: SessionDep
+    pick_id: PackPickId,
+    body: PickRequest,
+    user: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
 ) -> None:
     """Claim the file for the wanted episode and start the pack.
 
     Under the reconciler's lock (``lock_wants``), so a want cannot be withdrawn
     between the check and the claim. Refused with 409 ``{code, message}`` when
-    the pick is resolved already, the pack is no longer waiting, nobody wants
-    the episode any more, or it is already on its way.
+    the pick is resolved already, acquisition is paused or held for disk space
+    (``acquisition_paused``, ``storage_held``), the pack is no longer waiting,
+    nobody wants the episode any more, or it is already on its way.
     """
     await lock_wants(session)
     try:
-        await pack_picks.pick(session, pick_id, file_index=body.file_index, user_id=user.id)
+        await pack_picks.pick(
+            session, pick_id, file_index=body.file_index, user_id=user.id, settings=settings
+        )
     except pack_picks.PickNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=PACK_PICK_NOT_FOUND

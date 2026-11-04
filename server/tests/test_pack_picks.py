@@ -37,7 +37,11 @@ from arc.models import (
     Want,
 )
 from arc.services.acquisition import batch as batch_module
+from arc.services.acquisition import jobs as acquisition_jobs
 from arc.services.acquisition import pack_picks
+from arc.services.acquisition import rules as acquisition_rules
+from arc.services.acquisition import wants as wants_module
+from arc.services.acquisition.demand import ACQUISITION_PAUSED, STORAGE_HELD
 from arc.services.acquisition.jobs import (
     compute_wants,
     poll_qbit,
@@ -56,13 +60,18 @@ from arc.services.acquisition.qbit import (
     QBIT_CANCELLED,
     QBIT_UNREADABLE,
     FileInfo,
+    QbitUnavailable,
 )
+from arc.services.acquisition.rules import BYTES_PER_GB, PAUSED_KEY
 from arc.services.acquisition.states import transition
-from tests.acquisition_helpers import make_anime, make_episodes, set_setting
+from arc.services.media.names import REMUX, REMUX_LIVE
+from tests.acquisition_helpers import fake_free_space, make_anime, make_episodes, set_setting
 from tests.conftest import ADMIN_EMAIL, add_user, api_transport, login
 from tests.test_acquisition_jobs import (
     BATCH_HASH,
     BATCH_TITLE,
+    SECOND_HASH,
+    TWO_PACKS,
     Wired,
     _finished,
     _pack_names,
@@ -90,21 +99,33 @@ def test_pick_eligibility_a_permanent_identification_refusal_qualifies() -> None
         "2 files claim episode 7: a.mkv, b.mkv",
     ):
         assert pack_picks.identification_refusal(reason)
-        assert pack_picks.pick_eligible(reason, permanent=True, chosen=False)
+        assert pack_picks.pick_eligible(reason, permanent=True)
 
 
 def test_pick_eligibility_too_many_files_never_qualifies() -> None:
     reason = f"{MAX_TORRENT_FILES + 1} files, over {MAX_TORRENT_FILES}"
     assert not pack_picks.identification_refusal(reason)
-    assert not pack_picks.pick_eligible(reason, permanent=True, chosen=False)
+    assert not pack_picks.pick_eligible(reason, permanent=True)
     for other in (None, "", "the client listed no files", "file 3 was asked for and is not"):
-        assert not pack_picks.pick_eligible(other, permanent=True, chosen=False)
+        assert not pack_picks.pick_eligible(other, permanent=True)
 
 
-def test_pick_eligibility_a_search_that_chose_a_file_keeps_no_pack() -> None:
+def test_pick_eligibility_a_transient_refusal_never_qualifies() -> None:
+    """A refusal that may change tomorrow is not a pack to hold for a person."""
     reason = "no file in the batch is episode 7"
-    assert not pack_picks.pick_eligible(reason, permanent=True, chosen=True)
-    assert not pack_picks.pick_eligible(reason, permanent=False, chosen=False)
+    assert not pack_picks.pick_eligible(reason, permanent=False)
+
+
+def test_gone_from_the_client_needs_a_listing_and_an_hour() -> None:
+    now = datetime.now(UTC)
+    old = now - timedelta(hours=2)
+    young = now - timedelta(minutes=10)
+    hash_ = "ab" * 20
+    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=None)
+    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=set())
+    assert not pack_picks.gone_from(hash_, created_at=young, now=now, live={"cd" * 20})
+    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live={hash_})
+    assert pack_picks.gone_from(hash_, created_at=old, now=now, live={"cd" * 20})
 
 
 def test_pick_candidates_are_the_video_files_with_the_parser_reading() -> None:
@@ -256,7 +277,7 @@ async def test_pick_claims_the_file_reselects_and_starts_the_pack(
     user = await db_session.scalar(select(User).where(User.email == "pick4@arc.test"))
     assert user is not None
 
-    await pack_picks.pick(db_session, pick.id, file_index=2, user_id=user.id)
+    await pack_picks.pick(db_session, pick.id, file_index=2, user_id=user.id, settings=None)
 
     torrent = await _pack(db_session)
     assert torrent.qbit_state not in (QBIT_AWAITING_PICK, QBIT_CANCELLED)
@@ -333,7 +354,7 @@ async def test_pick_on_a_withdrawn_want_is_refused_and_changes_nothing(
     )
 
     with pytest.raises(pack_picks.PickConflict) as caught:
-        await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None)
+        await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None, settings=None)
 
     assert caught.value.code == pack_picks.NOT_WANTED
     assert pick.resolved_at is None
@@ -348,10 +369,10 @@ async def test_a_second_pick_on_a_resolved_pick_is_refused(
     _wired, _episode, pick = await _refused(
         db_session, monkeypatch, tmp_path, anilist_id=963707, email="pick8@arc.test"
     )
-    await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None)
+    await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None, settings=None)
 
     with pytest.raises(pack_picks.PickConflict) as caught:
-        await pack_picks.pick(db_session, pick.id, file_index=2, user_id=None)
+        await pack_picks.pick(db_session, pick.id, file_index=2, user_id=None, settings=None)
     assert caught.value.code == pack_picks.NOT_PENDING
     with pytest.raises(pack_picks.PickConflict):
         await pack_picks.dismiss(db_session, pick.id, user_id=None)
@@ -364,7 +385,7 @@ async def test_a_picked_file_lands_linked_as_confirmed(
     wired, episode, pick = await _refused(
         db_session, monkeypatch, tmp_path, anilist_id=963708, email="pick9@arc.test"
     )
-    await pack_picks.pick(db_session, pick.id, file_index=2, user_id=None)
+    await pack_picks.pick(db_session, pick.id, file_index=2, user_id=None, settings=None)
     torrent = await _pack(db_session)
     await qbit_reselect(
         context(db_session, wired.settings, {"torrent_id": torrent.id}, job_type=QBIT_RESELECT)
@@ -438,12 +459,36 @@ async def test_a_pack_gone_from_the_client_is_reconciled(
     await _compute(db_session, wired)
     assert pick.resolved_at is None, "still in the client"
 
-    wired.qbit.torrents = []
+    # The client lists something else, but the pick is younger than an hour:
+    # a restarted qBittorrent lists short at first.
+    other = {**wired.qbit.torrents[0], "hash": "e" * 40}
+    wired.qbit.torrents = [other]
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "younger than an hour"
+
+    pick.created_at = datetime.now(UTC) - timedelta(hours=2)
+    await db_session.flush()
     await _compute(db_session, wired)
 
     assert pick.resolution == PACK_PICK_DISMISSED
     assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
     assert episode.unavailable_reason == batch_module.UNREADABLE_BATCH
+
+
+async def test_an_empty_client_listing_dismisses_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963714, email="pick15@arc.test"
+    )
+    pick.created_at = datetime.now(UTC) - timedelta(hours=2)
+    await db_session.flush()
+    wired.qbit.torrents = []
+
+    await _compute(db_session, wired)
+
+    assert pick.resolved_at is None
+    assert (await _pack(db_session)).qbit_state == QBIT_AWAITING_PICK
 
 
 async def test_an_unreachable_client_leaves_a_young_pick_alone(
@@ -689,3 +734,426 @@ async def test_play_says_awaiting_pick_while_the_pick_is_pending(
     after = (await admin_client.get(f"/api/episodes/{episode_id}/play")).json()
     assert after["pending"]["awaiting_pick"] is False
     assert after["episode"]["awaiting_pick"] is False
+
+
+# --- Fix round 1 ---------------------------------------------------------------
+
+
+async def _nothing_moved(session: AsyncSession, episode: Episode, pick: PackPick) -> None:
+    assert pick.resolved_at is None
+    assert (await _pack(session)).qbit_state == QBIT_AWAITING_PICK
+    assert not any(row.wanted for row in await _rows(session, pick.torrent_id))
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert await queued(session, QBIT_RESELECT) == []
+
+
+async def test_a_pick_while_paused_is_refused_and_writes_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963720, email="fix1@arc.test"
+    )
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    with pytest.raises(pack_picks.PickConflict) as caught:
+        await pack_picks.pick(
+            db_session, pick.id, file_index=1, user_id=None, settings=wired.settings
+        )
+
+    assert caught.value.code == ACQUISITION_PAUSED and caught.value.status == 409
+    await _nothing_moved(db_session, episode, pick)
+
+
+async def test_a_pick_while_storage_is_held_is_refused_and_writes_nothing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963721, email="fix2@arc.test"
+    )
+    fake_free_space(monkeypatch, acquisition_rules, 1 * BYTES_PER_GB)
+
+    with pytest.raises(pack_picks.PickConflict) as caught:
+        await pack_picks.pick(
+            db_session, pick.id, file_index=1, user_id=None, settings=wired.settings
+        )
+
+    assert caught.value.code == STORAGE_HELD
+    await _nothing_moved(db_session, episode, pick)
+
+
+async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The routes lock ``lock_wants`` then a pick row; the job must do the same."""
+    wired, _episode, _pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963722, email="fix3@arc.test"
+    )
+    order: list[str] = []
+    real_lock = acquisition_jobs.lock_wants
+    real_hashes = pack_picks.awaiting_hashes
+    real_reconcile = pack_picks.reconcile
+
+    async def lock(session: AsyncSession) -> None:
+        order.append("lock_wants")
+        await real_lock(session)
+
+    async def hashes(session: AsyncSession) -> list[str]:
+        order.append("pick rows")
+        return await real_hashes(session)
+
+    async def reconcile(session: AsyncSession, **kwargs: object) -> pack_picks.Reconciled:
+        order.append("pick rows")
+        return await real_reconcile(session, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(acquisition_jobs, "lock_wants", lock)
+    monkeypatch.setattr(pack_picks, "awaiting_hashes", hashes)
+    monkeypatch.setattr(pack_picks, "reconcile", reconcile)
+
+    await _compute(db_session, wired)
+
+    assert order[0] == "lock_wants"
+    assert "pick rows" in order
+
+
+async def test_a_picked_pack_offers_no_other_reading_to_a_later_want(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the person's answer stays: "- 08" is not claimable as episode 8."""
+    _wired, episode, pick = await _refused(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=963723,
+        email="fix4@arc.test",
+        names=_pack_names(8, 9),
+    )
+    rows = await _rows(db_session, pick.torrent_id)
+    assert rows[0].episode_id is not None, "the parser read '- 08' as episode 8"
+    assert [c["parsed_number"] for c in pick.candidates] == [8, 9]
+
+    await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None, settings=None)
+
+    rows = await _rows(db_session, pick.torrent_id)
+    assert [(row.file_index, row.episode_id) for row in rows] == [(0, None), (1, episode.id)]
+    assert [c["parsed_number"] for c in pick.candidates] == [8, 9], "kept for display"
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.SEARCHING
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    await db_session.flush()
+
+    assert await batch_module.claim_existing(db_session, eighth) is None
+
+
+async def test_a_search_that_fails_after_holding_a_pack_takes_it_out_of_the_client(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=963724,
+        email="fix5@arc.test",
+        pool=TWO_PACKS,
+    )
+    wired.qbit.add_files(BATCH_HASH, AMBIGUOUS)
+    wired.qbit.add_files(SECOND_HASH, _pack_names(*range(1, 13)))
+    real = acquisition_jobs._add_stopped
+    calls = 0
+
+    async def flaky(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise QbitUnavailable("the client went away mid-search")
+        return await real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(acquisition_jobs, "_add_stopped", flaky)
+
+    with pytest.raises(QbitUnavailable):
+        await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert {"hashes": BATCH_HASH, "deleteFiles": "true"} in wired.qbit.deleted
+    assert all(t["hash"].lower() != BATCH_HASH for t in wired.qbit.torrents)
+    assert (await db_session.scalars(select(PackPick))).all() == []
+
+
+async def test_a_held_pack_is_tombstoned_when_a_later_pack_is_started(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=963725,
+        email="fix6@arc.test",
+        pool=TWO_PACKS,
+    )
+    wired.qbit.add_files(BATCH_HASH, AMBIGUOUS)
+    wired.qbit.add_files(SECOND_HASH, _pack_names(*range(1, 13)))
+
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [SECOND_HASH]
+    assert wired.qbit.deleted == [{"hashes": BATCH_HASH, "deleteFiles": "true"}]
+    assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
+    assert (await db_session.scalars(select(PackPick))).all() == []
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+async def _forgets(session: AsyncSession) -> int:
+    return len(await queued(session, QBIT_FORGET_PACK))
+
+
+async def test_a_pick_nobody_wants_any_more_is_dismissed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963726, email="fix7@arc.test"
+    )
+    await db_session.execute(
+        update(Want).where(Want.episode_id == episode.id).values(dropped_at=datetime.now(UTC))
+    )
+
+    await _compute(db_session, wired)
+    assert pick.resolution == PACK_PICK_DISMISSED
+    assert await _forgets(db_session) == 1
+    await _compute(db_session, wired)
+    assert await _forgets(db_session) == 1, "idempotent"
+
+
+async def test_a_pick_whose_episode_came_as_a_single_is_dismissed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963727, email="fix8@arc.test"
+    )
+    transition(episode, EpisodeState.WANTED, reason="revived")
+    transition(episode, EpisodeState.SEARCHING, reason="revived")
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "a search in flight is not a reason"
+
+    db_session.add(
+        Torrent(
+            kind=TorrentKind.SINGLE,
+            episode_id=episode.id,
+            info_hash="f" * 40,
+            magnet="magnet:?xt=urn:btih:" + "f" * 40,
+            title="[SubsPlease] Sousou no Frieren - 07 (1080p)",
+            qbit_state="downloading",
+        )
+    )
+    transition(episode, EpisodeState.DOWNLOADING, reason="a single turned up")
+    await db_session.flush()
+
+    await _compute(db_session, wired)
+
+    assert pick.resolution == PACK_PICK_DISMISSED
+    assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
+    assert episode.state is EpisodeState.DOWNLOADING
+
+
+async def test_a_pick_whose_episode_is_claimed_from_another_pack_is_dismissed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963728, email="fix9@arc.test"
+    )
+    other = Torrent(
+        kind=TorrentKind.BATCH,
+        episode_id=None,
+        info_hash="9" * 40,
+        magnet="magnet:?xt=urn:btih:" + "9" * 40,
+        title="[Other] Sousou no Frieren [BATCH]",
+        qbit_state="downloading",
+    )
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(
+        TorrentFile(
+            torrent_id=other.id,
+            file_index=0,
+            path="x - 07.mkv",
+            size=1,
+            episode_id=episode.id,
+            wanted=True,
+        )
+    )
+    transition(episode, EpisodeState.WANTED, reason="revived")
+    transition(episode, EpisodeState.SEARCHING, reason="revived")
+    transition(episode, EpisodeState.DOWNLOADING, reason="attached")
+    await db_session.flush()
+
+    await _compute(db_session, wired)
+
+    assert pick.resolution == PACK_PICK_DISMISSED
+
+
+async def test_while_paused_a_stale_pick_is_not_dismissed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963729, email="fix10@arc.test"
+    )
+    pick.created_at = datetime.now(UTC) - timedelta(days=60)
+    await set_setting(db_session, PAUSED_KEY, True)
+
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None
+
+    await set_setting(db_session, PAUSED_KEY, False)
+    await _compute(db_session, wired)
+    assert pick.resolution == PACK_PICK_DISMISSED
+
+
+async def test_a_held_pack_does_not_make_its_show_thin(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The slow-swarm rule reads Arc's releases, not a pack nobody is fetching."""
+    _wired, episode, _pick = await _refused(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=963730,
+        email="fix11@arc.test",
+        names=_pack_names(5, 6, 8),
+    )
+    assert any(row.episode_id for row in await _rows(db_session, _pick.torrent_id))
+
+    thin = await wants_module._thin_shows(db_session, [episode.anime_id], below=1000)
+
+    assert episode.anime_id not in thin
+
+
+async def test_two_picks_on_one_pack_the_second_finds_it_live(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963731, email="fix12@arc.test"
+    )
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.UNAVAILABLE
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    second = PackPick(
+        torrent_id=pick.torrent_id,
+        episode_id=eighth.id,
+        reason="no file in the batch is episode 8",
+        candidates=pick.candidates,
+    )
+    db_session.add(second)
+    await db_session.flush()
+
+    await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None, settings=None)
+    with pytest.raises(pack_picks.PickConflict) as caught:
+        await pack_picks.pick(db_session, second.id, file_index=2, user_id=None, settings=None)
+    assert caught.value.code == pack_picks.NOT_WAITING
+
+    await pack_picks.dismiss(db_session, second.id, user_id=None)
+
+    assert second.resolution == PACK_PICK_DISMISSED
+    assert (await _pack(db_session)).qbit_state == pack_picks.LIVE_AFTER_PICK
+    assert [row.file_index for row in await _rows(db_session, pick.torrent_id) if row.wanted] == [1]
+    assert await _forgets(db_session) == 0
+
+
+async def test_a_pick_on_an_episode_that_moved_on_is_refused(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963732, email="fix13@arc.test"
+    )
+    transition(episode, EpisodeState.WANTED, reason="revived")
+    transition(episode, EpisodeState.SEARCHING, reason="revived")
+    transition(episode, EpisodeState.DOWNLOADING, reason="a single turned up")
+    await db_session.flush()
+
+    with pytest.raises(pack_picks.PickConflict) as caught:
+        await pack_picks.pick(db_session, pick.id, file_index=1, user_id=None, settings=None)
+
+    assert caught.value.code == pack_picks.MOVED_ON
+    assert pick.resolved_at is None
+
+
+async def test_a_landed_pick_queues_the_remux_and_selects_nothing_else(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963733, email="fix14@arc.test"
+    )
+    await pack_picks.pick(db_session, pick.id, file_index=2, user_id=None, settings=None)
+    torrent = await _pack(db_session)
+    await qbit_reselect(
+        context(db_session, wired.settings, {"torrent_id": torrent.id}, job_type=QBIT_RESELECT)
+    )
+    video = tmp_path / "downloads" / "batch" / BATCH_HASH / AMBIGUOUS[2]
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"x" * 4096)
+    for row in wired.qbit.file_lists[BATCH_HASH]:
+        if row["index"] == 2:
+            row["progress"] = 1.0
+
+    await poll_qbit(context(db_session, wired.settings, {}, job_type="poll_qbit"))
+
+    assert episode.state is EpisodeState.MATCHED
+    selected = [row["index"] for row in wired.qbit.file_lists[BATCH_HASH] if row["priority"] > 0]
+    assert selected == [2]
+    assert [row.file_index for row in await _rows(db_session, torrent.id) if row.wanted] == [2]
+    assert len(await queued(db_session, REMUX)) == 1
+    assert await queued(db_session, REMUX_LIVE) == []
+
+
+async def test_pick_route_refuses_while_paused(
+    admin_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    pick_id, _, torrent_id = await _seed(api_factory)
+    async with api_factory() as session:
+        await set_setting(session, PAUSED_KEY, True)
+        await session.commit()
+
+    response = await admin_client.post(f"/api/review/packs/{pick_id}/pick", json={"file_index": 1})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == ACQUISITION_PAUSED
+    assert (await _reload_pick(api_factory, pick_id)).resolved_at is None
+    async with api_factory() as session:
+        torrent = await session.get(Torrent, torrent_id)
+        assert torrent is not None and torrent.qbit_state == QBIT_AWAITING_PICK
+
+
+async def test_the_show_row_and_play_agree_on_awaiting_pick(
+    admin_client: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """One rule: a pending pick and the episode ``unavailable`` or ``wanted``."""
+    _pick_id, episode_id, _ = await _seed(api_factory)
+    async with api_factory() as session:
+        episode = await session.get(Episode, episode_id)
+        assert episode is not None
+        anime_id = episode.anime_id
+
+    async def both() -> tuple[bool, bool]:
+        show = (await admin_client.get(f"/api/anime/{anime_id}")).json()
+        row = next(e for e in show["episodes"] if e["id"] == episode_id)
+        play = (await admin_client.get(f"/api/episodes/{episode_id}/play")).json()
+        return row["awaiting_pick"], play["pending"]["awaiting_pick"]
+
+    async def set_state(state: EpisodeState) -> None:
+        async with api_factory() as session:
+            await session.execute(
+                update(Episode).where(Episode.id == episode_id).values(state=state)
+            )
+            await session.commit()
+
+    assert await both() == (True, True)
+    await set_state(EpisodeState.WANTED)  # the daily revival's window
+    assert await both() == (True, True)
+    await set_state(EpisodeState.DOWNLOADING)  # a single turned up
+    assert await both() == (False, False)

@@ -34,9 +34,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from arc.config import Settings
 from arc.models import (
     PACK_PICK_DISMISSED,
     PACK_PICK_PICKED,
@@ -50,12 +51,24 @@ from arc.models import (
 )
 from arc.services.acquisition.batch import UNREADABLE_BATCH, FilePlan, record_files
 from arc.services.acquisition.claims import enqueue_reselect, live_claim
+from arc.services.acquisition.demand import (
+    ACQUISITION_PAUSED,
+    ACQUISITION_PAUSED_MESSAGE,
+    STORAGE_HELD,
+    STORAGE_HELD_MESSAGE,
+)
 from arc.services.acquisition.names import (
     QBIT_FORGET_PACK,
     QBIT_FORGET_PACK_PRIORITY,
     forget_pack_dedupe_key,
 )
-from arc.services.acquisition.qbit import QBIT_AWAITING_PICK, QBIT_UNREADABLE
+from arc.services.acquisition.qbit import (
+    DECIDED_STATES,
+    QBIT_AWAITING_PICK,
+    QBIT_MISSING,
+    QBIT_UNREADABLE,
+)
+from arc.services.acquisition.rules import is_paused, is_storage_held
 from arc.services.acquisition.states import transition
 from arc.services.jobs.queue import enqueue
 
@@ -128,14 +141,14 @@ def identification_refusal(reason: str | None) -> bool:
     return bool(mark) and count.isdigit()
 
 
-def pick_eligible(reason: str | None, *, permanent: bool, chosen: bool) -> bool:
-    """Whether a refused pack may be kept for a person's pick (FR-A4). Pure.
+def pick_eligible(reason: str | None, *, permanent: bool) -> bool:
+    """Whether a refused pack may be **held** for a person's pick (FR-A4). Pure.
 
-    Only a **permanent** refusal for identification, and only when the search
-    chose nothing: a pack refused while another pack (or a single) was taken
-    has nothing left to ask anybody.
+    Only a **permanent** refusal for identification. Holding is provisional:
+    ``jobs._take_batch`` tombstones the held pack after all when a later
+    candidate is started, so a pick opens only when the search chose nothing.
     """
-    return permanent and not chosen and identification_refusal(reason)
+    return permanent and identification_refusal(reason)
 
 
 def stale(created_at: datetime, *, now: datetime, period: timedelta) -> bool:
@@ -265,7 +278,12 @@ async def _has_live_want(session: AsyncSession, episode_id: int) -> bool:
 
 
 async def pick(
-    session: AsyncSession, pick_id: int, *, file_index: int, user_id: int | None
+    session: AsyncSession,
+    pick_id: int,
+    *,
+    file_index: int,
+    user_id: int | None,
+    settings: Settings | None,
 ) -> PackPick:
     """ "This is episode N": claim one file of the pack and fetch it (FR-A4).
 
@@ -282,10 +300,27 @@ async def pick(
     stamped, and ``qbit_reselect`` writes the selection and starts the pack —
     its M20.4 cool-downs and the poll's start rule apply from there. Never
     ``cancelled``: that deletes a pack with its files.
+
+    **A pick is fetching**, so it obeys the same two brakes as a demand
+    (``demand.demand`` step 5) and a manual release: while acquisition is
+    paused or held for disk space (FR-T6) it is refused with
+    ``acquisition_paused`` / ``storage_held`` before anything is written.
+    ``settings`` locates the disk to measure; ``None`` (no data directory)
+    skips only the hold.
+
+    And **only the person's answer stays** on the pack: every other row's
+    parser reading is cleared, so once the pack is live again
+    ``claim_existing`` cannot attach a later episode to a file nobody
+    confirmed (the matching non-negotiable). The readings remain in the
+    pick's ``candidates`` for display.
     """
     row = await _load(session, pick_id)
     if row.resolved_at is not None:
         raise PickConflict(NOT_PENDING, NOT_PENDING_MESSAGE)
+    if await is_paused(session):
+        raise PickConflict(ACQUISITION_PAUSED, ACQUISITION_PAUSED_MESSAGE)
+    if settings is not None and await is_storage_held(session, settings):
+        raise PickConflict(STORAGE_HELD, STORAGE_HELD_MESSAGE)
     torrent = await session.get(
         Torrent, row.torrent_id, with_for_update=True, populate_existing=True
     )
@@ -308,6 +343,12 @@ async def pick(
     if file_row is None:
         raise PickConflict(NOT_WAITING, NOT_WAITING_MESSAGE)
 
+    await session.execute(
+        update(TorrentFile)
+        .where(TorrentFile.torrent_id == torrent.id, TorrentFile.id != file_row.id)
+        .values(episode_id=None)
+        .execution_options(synchronize_session="fetch")
+    )
     file_row.episode_id = episode.id
     file_row.wanted = True
     file_row.completed_at = None
@@ -401,6 +442,15 @@ async def dismiss(session: AsyncSession, pick_id: int, *, user_id: int | None) -
 
 # --- Reconciliation -------------------------------------------------------------
 
+#: How old a pick must be before "its pack is not in the client's listing" is
+#: believed. A qBittorrent that has just restarted answers the WebUI before it
+#: has loaded its torrents, and its first listings are short.
+GONE_AFTER: Final[timedelta] = timedelta(hours=1)
+
+#: Why :func:`reconcile` dismissed a pick nobody can make any more.
+UNWANTED: Final[str] = "nobody wants the episode any more"
+ELSEWHERE: Final[str] = "the episode is on its way from another release"
+
 
 @dataclass(frozen=True, slots=True)
 class Reconciled:
@@ -408,9 +458,10 @@ class Reconciled:
 
     stale: int = 0
     gone: int = 0
+    dead: int = 0
 
     def as_dict(self) -> dict[str, int]:
-        return {"stale_picks": self.stale, "gone_picks": self.gone}
+        return {"stale_picks": self.stale, "gone_picks": self.gone, "dead_picks": self.dead}
 
 
 async def awaiting_hashes(session: AsyncSession) -> list[str]:
@@ -424,22 +475,79 @@ async def awaiting_hashes(session: AsyncSession) -> list[str]:
     return list(rows.all())
 
 
+async def _live_single(session: AsyncSession, episode_id: int) -> bool:
+    """Whether the episode has a single of its own Arc has not decided about."""
+    found = await session.scalar(
+        select(Torrent.id)
+        .where(
+            Torrent.episode_id == episode_id,
+            or_(
+                Torrent.qbit_state.is_(None),
+                Torrent.qbit_state.not_in(sorted(DECIDED_STATES | {QBIT_MISSING})),
+            ),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+async def dead_reason(session: AsyncSession, episode_id: int) -> str | None:
+    """Why a pending pick on this episode can never succeed, or ``None``.
+
+    :func:`pick` would refuse it for good: nobody wants the episode, or it is
+    out of :data:`PICKABLE_STATES` **and** on its way from something else — a
+    live claim on another pack, or a single the daily revival found. An
+    episode merely ``searching`` (the revival's search running) is neither.
+    """
+    if not await _has_live_want(session, episode_id):
+        return UNWANTED
+    episode = await session.get(Episode, episode_id)
+    if episode is None or episode.state in PICKABLE_STATES:
+        return None
+    if await live_claim(session, episode_id) is not None or await _live_single(session, episode_id):
+        return ELSEWHERE
+    return None
+
+
+def gone_from(
+    info_hash: str, *, created_at: datetime, now: datetime, live: Collection[str] | None
+) -> bool:
+    """Whether a held pack counts as gone from the client. Pure.
+
+    ``live`` is the client's listing, lower-case; ``None`` or **empty** means
+    unknown (unreachable, or a client that has just restarted and listed
+    nothing yet), and so does a pick younger than :data:`GONE_AFTER`.
+    """
+    if not live or now - created_at < GONE_AFTER:
+        return False
+    return info_hash.lower() not in live
+
+
 async def reconcile(
     session: AsyncSession,
     *,
     now: datetime,
     period: timedelta,
     live_hashes: Collection[str] | None,
+    age_rule: bool = True,
 ) -> Reconciled:
-    """Dismiss what nobody will pick: stale picks, and packs gone from the client.
+    """Dismiss the picks nobody will make (FR-A4; architecture.md §5.1).
 
     Run by ``compute_wants`` — the job that revives ``unavailable`` episodes —
-    every pass. ``period`` is D (``unwatched_days_d``), floored at one day
-    (:func:`stale`). ``live_hashes`` is the client's whole listing, lower-case,
-    or ``None`` when it could not be read — then only the age rule applies. The
-    batch poll skips a pack in ``awaiting_pick`` (a decided state), so this is
-    the only place that notices one deleted by hand. Idempotent: a resolved
-    pick is never looked at again.
+    every pass, after it has taken ``lock_wants`` (the routes' order: the want
+    lock, then the pick's row). In this order, each dismissal with its reason:
+
+    * **dead** — :func:`dead_reason`: nobody wants the episode, or it is on its
+      way from another release, so Review and the badge do not show a pick
+      that can only be refused;
+    * **gone** — the pack is not in the client's listing (:func:`gone_from`).
+      The batch poll skips ``awaiting_pick`` (a decided state), so this is the
+      only place that notices a pack deleted by hand;
+    * **stale** — pending ``period`` (D, floored at a day; :func:`stale`).
+      ``age_rule=False`` skips it: while acquisition is paused or held nobody
+      can act on a pick, so its clock is not held against it.
+
+    Idempotent: a resolved pick is never looked at again.
     """
     rows = list(
         (
@@ -463,23 +571,36 @@ async def reconcile(
             )
         ).all()
     }
-    live = None if live_hashes is None else {value.lower() for value in live_hashes}
-    stale_count = gone_count = 0
+    live = None if not live_hashes else {value.lower() for value in live_hashes}
+    stale_count = gone_count = dead_count = 0
     for row in rows:
+        why = await dead_reason(session, row.episode_id)
+        if why is not None:
+            await _forget(session, row, user_id=None, why=why)
+            dead_count += 1
+            continue
         found = hashes.get(row.torrent_id)
-        if live is not None and found is not None and found[1] == QBIT_AWAITING_PICK:
-            if found[0].lower() not in live:
-                await _forget(session, row, user_id=None, why=GONE)
-                gone_count += 1
-                continue
-        if stale(row.created_at, now=now, period=period):
+        if (
+            found is not None
+            and found[1] == QBIT_AWAITING_PICK
+            and gone_from(found[0], created_at=row.created_at, now=now, live=live)
+        ):
+            await _forget(session, row, user_id=None, why=GONE)
+            gone_count += 1
+            continue
+        if age_rule and stale(row.created_at, now=now, period=period):
             await _forget(session, row, user_id=None, why=STALE)
             stale_count += 1
-    return Reconciled(stale=stale_count, gone=gone_count)
+    return Reconciled(stale=stale_count, gone=gone_count, dead=dead_count)
 
 
 __all__ = [
+    "ELSEWHERE",
     "GONE",
+    "GONE_AFTER",
+    "UNWANTED",
+    "dead_reason",
+    "gone_from",
     "LIVE_AFTER_PICK",
     "MOVED_ON",
     "NOT_A_CANDIDATE",

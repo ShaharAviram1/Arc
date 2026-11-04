@@ -172,7 +172,12 @@ from arc.services.acquisition.rules import (
     load_rules,
 )
 from arc.services.acquisition.states import transition
-from arc.services.acquisition.wants import NOBODY_WANTS, QBIT_CANCELLED, start_search
+from arc.services.acquisition.wants import (
+    NOBODY_WANTS,
+    QBIT_CANCELLED,
+    lock_wants,
+    start_search,
+)
 from arc.services.acquisition.wants import compute_wants as reconcile_wants
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
@@ -476,6 +481,13 @@ async def compute_wants(ctx: JobContext) -> None:
     ``ctx.settings`` goes through so the reconciler can measure free space and
     hold the *starting* half while the disk is under the floor (FR-T6). It is
     the only caller that can: everything else enqueues this job.
+
+    The wants half does nothing while acquisition is paused
+    (:func:`~arc.services.acquisition.wants.compute_wants`). The pack-pick half
+    (:func:`_reconcile_pack_picks`) runs first and **does** run during a pause
+    or a storage hold, but only its dead-pick and gone-from-the-client rules:
+    a pick cannot be made while either brake is on, so its D-day clock is not
+    held against it.
     """
     picks = await _reconcile_pack_picks(ctx)
     result = await reconcile_wants(ctx.session, settings=ctx.settings)
@@ -495,7 +507,13 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
     notices a pack deleted by hand. The client's listing is asked for only
     when a pick is pending, and a client that cannot be reached leaves only
     the age rule: the reconciliation must not fail because qBittorrent is down.
+
+    **``lock_wants`` first**, then the pick rows: the routes take the want lock
+    and then a pick's row, and taking them here in the other order would let a
+    pick and this pass deadlock. The lock is transaction-scoped and re-entrant,
+    so ``reconcile_wants`` taking it again after this costs nothing.
     """
+    await lock_wants(ctx.session)
     hashes = await pack_picks.awaiting_hashes(ctx.session)
     live: set[str] | None = None
     if hashes:
@@ -507,11 +525,13 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
                 "could not list the torrent client; pack picks judged by age only",
                 extra={"error": str(exc)},
             )
+    braked = await is_paused(ctx.session) or await is_storage_held(ctx.session, ctx.settings)
     return await pack_picks.reconcile(
         ctx.session,
         now=datetime.now(UTC),
         period=await unwatched_period(ctx.session),
         live_hashes=live,
+        age_rule=not braked,
     )
 
 
@@ -1156,6 +1176,26 @@ async def _add_stopped(
     return torrent, list(listed), save_path
 
 
+async def _drop_held_for_pick(ctx: JobContext, qbit: QbitClient, info_hash: str) -> None:
+    """Best-effort: delete a pack held for a pick whose search is failing (M21).
+
+    Called on the way out of an exception, so it must not replace it: a client
+    that cannot be reached either is logged and left to the operator.
+    """
+    try:
+        await qbit.delete([info_hash], delete_files=True)
+    except Exception as exc:  # noqa: BLE001 - never mask the original failure
+        ctx.log.warning(
+            "could not remove a pack held for a pick after the search failed",
+            extra={"hash": info_hash, "error": str(exc)},
+        )
+    else:
+        ctx.log.info(
+            "a pack held for a pick was removed because the search failed",
+            extra={"hash": info_hash},
+        )
+
+
 async def _take_batch(
     ctx: JobContext,
     episode: Episode,
@@ -1272,154 +1312,164 @@ async def _take_batch(
     last_reason: str | None = None
     for_pick: tuple[Torrent, batch.FilePlan, list[dict[str, Any]]] | None = None
     async with QbitClient.from_settings(ctx.settings) as qbit:
-        for chosen in batches:
-            info_hash = chosen.item.info_hash
-            held = trip.held.pop(info_hash, None) if trip is not None else None
-            if held is not None:
-                torrent, listed = held.torrent, held.listed
-                save_path = torrent.save_path or batch_save_path_for(
-                    info_hash, downloads_path=ctx.settings.qbit_downloads_path
-                )
-            else:
-                taken = await _add_stopped(ctx, qbit, episode, anime, chosen, trip, prefer)
-                if isinstance(taken, int):
-                    refused += taken
-                    continue
-                torrent, listed, save_path = taken
-
-            wanted_for = batch.targets(chosen, episode.number, attachable)
-            plan = batch.plan_files(
-                anime,
-                wanted_for,
-                listed,
-                required=episode.number,
-                offset=batch.plan_offset(chosen, offset),
-            )
-            if trip is not None:
-                _remember_contents(anime.id, info_hash, plan.episodes)
-            if plan.refused_reason is not None:
-                last_reason = plan.refused_reason
-                if (trip is not None or over_single) and not chosen.candidate.covers:
-                    # A pack naming no range never claimed this episode, and
-                    # may be exactly right for the next one (FR-A12, FR-A4).
-                    await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=False)
-                    continue
-                if (
-                    pick
-                    and for_pick is None
-                    and pack_picks.pick_eligible(plan.refused_reason, permanent=True, chosen=False)
-                ):
-                    # The best pack a person could read (FR-A4, M21): every
-                    # file off and still stopped, decided once the rest of the
-                    # candidates have had their turn.
-                    await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
-                    for_pick = (
-                        torrent,
-                        plan,
-                        batch.pick_candidates(
-                            anime, listed, offset=batch.plan_offset(chosen, offset)
-                        ),
+        try:
+            for chosen in batches:
+                info_hash = chosen.item.info_hash
+                held = trip.held.pop(info_hash, None) if trip is not None else None
+                if held is not None:
+                    torrent, listed = held.torrent, held.listed
+                    save_path = torrent.save_path or batch_save_path_for(
+                        info_hash, downloads_path=ctx.settings.qbit_downloads_path
                     )
-                    refused += 1
-                    continue
-                await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=True)
-                refused += 1
-                continue
-            if prefer and trip is not None and not chosen.candidate.covers:
-                covered = len(set(plan.wanted) & set(trip.cover))
-                if covered < trip.need:
-                    trip.held[info_hash] = _Held(torrent=torrent, listed=listed)
-                    ctx.log.info(
-                        "a pack holds too few of the trip's episodes; held for the fallback",
-                        extra={"hash": info_hash, "covered": covered, "need": trip.need},
-                    )
-                    continue
+                else:
+                    taken = await _add_stopped(ctx, qbit, episode, anime, chosen, trip, prefer)
+                    if isinstance(taken, int):
+                        refused += taken
+                        continue
+                    torrent, listed, save_path = taken
 
-            kept = await _lock_targets(ctx.session, episode, plan.wanted, attachable)
-            if kept is None:
-                last_reason = "the searched episode moved on"
-                await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
-                continue
-            if kept != set(plan.wanted):
+                wanted_for = batch.targets(chosen, episode.number, attachable)
                 plan = batch.plan_files(
                     anime,
-                    sorted(kept),
+                    wanted_for,
                     listed,
                     required=episode.number,
                     offset=batch.plan_offset(chosen, offset),
                 )
+                if trip is not None:
+                    _remember_contents(anime.id, info_hash, plan.episodes)
+                if plan.refused_reason is not None:
+                    last_reason = plan.refused_reason
+                    if (trip is not None or over_single) and not chosen.candidate.covers:
+                        # A pack naming no range never claimed this episode, and
+                        # may be exactly right for the next one (FR-A12, FR-A4).
+                        await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=False)
+                        continue
+                    if (
+                        pick
+                        and for_pick is None
+                        and pack_picks.pick_eligible(plan.refused_reason, permanent=True)
+                    ):
+                        # The best pack a person could read (FR-A4, M21): every
+                        # file off and still stopped, decided once the rest of the
+                        # candidates have had their turn.
+                        await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
+                        for_pick = (
+                            torrent,
+                            plan,
+                            batch.pick_candidates(
+                                anime, listed, offset=batch.plan_offset(chosen, offset)
+                            ),
+                        )
+                        refused += 1
+                        continue
+                    await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=True)
+                    refused += 1
+                    continue
+                if prefer and trip is not None and not chosen.candidate.covers:
+                    covered = len(set(plan.wanted) & set(trip.cover))
+                    if covered < trip.need:
+                        trip.held[info_hash] = _Held(torrent=torrent, listed=listed)
+                        ctx.log.info(
+                            "a pack holds too few of the trip's episodes; held for the fallback",
+                            extra={"hash": info_hash, "covered": covered, "need": trip.need},
+                        )
+                        continue
 
-            await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
-            await qbit.file_priority(info_hash, plan.wanted_indices, FILE_ON)
-            try:
-                written = await qbit.files(info_hash)
-            except QbitUnavailable:
-                raise
-            except QbitError as exc:
-                # The selection is written and the torrent is still stopped, so
-                # a read-back Arc cannot read is the same answer as one it
-                # disagrees with: take the pack away rather than start it.
-                last_reason = str(exc)
-                await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
-                continue
-            disagreement = batch.verify_selection(listed, written, plan.wanted_indices)
-            if disagreement is not None:
-                last_reason = disagreement
-                await _abandon(ctx, qbit, torrent, disagreement, permanent=False)
-                continue
+                kept = await _lock_targets(ctx.session, episode, plan.wanted, attachable)
+                if kept is None:
+                    last_reason = "the searched episode moved on"
+                    await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
+                    continue
+                if kept != set(plan.wanted):
+                    plan = batch.plan_files(
+                        anime,
+                        sorted(kept),
+                        listed,
+                        required=episode.number,
+                        offset=batch.plan_offset(chosen, offset),
+                    )
 
-            await qbit.start([info_hash])
-            taken_for = [
-                target.id
-                for number in plan.wanted
-                if (target := attachable.get(number)) is not None
-            ]
-            if taken_for and await trip_only_episode_ids(ctx.session, taken_for) == set(taken_for):
-                # Every episode this pack was taken for is a trip's (FR-A12).
-                await _to_the_back(ctx, qbit, info_hash)
+                await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
+                await qbit.file_priority(info_hash, plan.wanted_indices, FILE_ON)
+                try:
+                    written = await qbit.files(info_hash)
+                except QbitUnavailable:
+                    raise
+                except QbitError as exc:
+                    # The selection is written and the torrent is still stopped, so
+                    # a read-back Arc cannot read is the same answer as one it
+                    # disagrees with: take the pack away rather than start it.
+                    last_reason = str(exc)
+                    await _abandon(ctx, qbit, torrent, last_reason, permanent=False)
+                    continue
+                disagreement = batch.verify_selection(listed, written, plan.wanted_indices)
+                if disagreement is not None:
+                    last_reason = disagreement
+                    await _abandon(ctx, qbit, torrent, disagreement, permanent=False)
+                    continue
 
-            await batch.record_files(ctx.session, torrent, plan)
-            for number in plan.wanted:
-                target = attachable.get(number)
-                if target is not None:
-                    batch.start_downloading(target, f"downloading {chosen.item.title}")
-            await ctx.session.flush()
-            ctx.log.info(
-                "batch chosen",
-                extra={
-                    "job_id": ctx.job.id,
-                    "episode_id": episode.id,
-                    "anime_id": anime.id,
-                    "number": episode.number,
-                    "torrent_id": torrent.id,
-                    "savepath": save_path,
-                    "files": len(plan.files),
-                    "wanted": len(plan.wanted),
-                    "episodes": list(plan.wanted),
-                    "not_held": list(plan.dropped),
-                    # Both figures, side by side and in human units: this one
-                    # line is what proves FR-A4's spirit is intact.
-                    "selected": (
-                        f"{batch.size_label(plan.wanted_bytes)} of "
-                        f"{batch.size_label(plan.total_size)}"
-                    ),
-                    "wanted_bytes": plan.wanted_bytes,
-                    "total_size": plan.total_size,
-                    "candidates": len(batches),
-                    **nyaa_module.as_dict(chosen),
-                },
-            )
-            if for_pick is not None:
-                # Something was chosen after all: the kept pack is what it
-                # would have been without a pick, the tombstone.
-                await _abandon(
-                    ctx,
-                    qbit,
-                    for_pick[0],
-                    for_pick[1].refused_reason or "unreadable",
-                    permanent=True,
+                await qbit.start([info_hash])
+                taken_for = [
+                    target.id
+                    for number in plan.wanted
+                    if (target := attachable.get(number)) is not None
+                ]
+                if taken_for and await trip_only_episode_ids(ctx.session, taken_for) == set(
+                    taken_for
+                ):
+                    # Every episode this pack was taken for is a trip's (FR-A12).
+                    await _to_the_back(ctx, qbit, info_hash)
+
+                await batch.record_files(ctx.session, torrent, plan)
+                for number in plan.wanted:
+                    target = attachable.get(number)
+                    if target is not None:
+                        batch.start_downloading(target, f"downloading {chosen.item.title}")
+                await ctx.session.flush()
+                ctx.log.info(
+                    "batch chosen",
+                    extra={
+                        "job_id": ctx.job.id,
+                        "episode_id": episode.id,
+                        "anime_id": anime.id,
+                        "number": episode.number,
+                        "torrent_id": torrent.id,
+                        "savepath": save_path,
+                        "files": len(plan.files),
+                        "wanted": len(plan.wanted),
+                        "episodes": list(plan.wanted),
+                        "not_held": list(plan.dropped),
+                        # Both figures, side by side and in human units: this one
+                        # line is what proves FR-A4's spirit is intact.
+                        "selected": (
+                            f"{batch.size_label(plan.wanted_bytes)} of "
+                            f"{batch.size_label(plan.total_size)}"
+                        ),
+                        "wanted_bytes": plan.wanted_bytes,
+                        "total_size": plan.total_size,
+                        "candidates": len(batches),
+                        **nyaa_module.as_dict(chosen),
+                    },
                 )
-            return BatchAttempt(started=True, refused=refused, torrent=torrent)
+                if for_pick is not None:
+                    # Something was chosen after all: the kept pack is what it
+                    # would have been without a pick, the tombstone.
+                    await _abandon(
+                        ctx,
+                        qbit,
+                        for_pick[0],
+                        for_pick[1].refused_reason or "unreadable",
+                        permanent=True,
+                    )
+                return BatchAttempt(started=True, refused=refused, torrent=torrent)
+        except Exception:
+            if for_pick is not None:
+                # The held pack is in the client, stopped, and the transaction
+                # that recorded it is about to roll back: take it out again
+                # (it never fetched a byte) so nothing is left orphaned there.
+                await _drop_held_for_pick(ctx, qbit, for_pick[0].info_hash)
+            raise
     if for_pick is not None:
         opened = await pack_picks.open_pick(
             ctx.session,
