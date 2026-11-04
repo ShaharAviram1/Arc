@@ -30,6 +30,7 @@ from arc.api.trip_schemas import TripLimits, TripOut
 from arc.core.text import trim_middle
 from arc.models import (
     DEFAULT_SETTINGS,
+    PICKABLE_STATES,
     Anime,
     Episode,
     EpisodeState,
@@ -42,7 +43,6 @@ from arc.models import (
 from arc.services.acquisition.demand import OpenDemand
 from arc.services.acquisition.demand_gate import DemandGate
 from arc.services.acquisition.dormancy import is_dormant
-from arc.services.acquisition.pack_picks import PICKABLE_STATES
 from arc.services.acquisition.wants import SlotView
 from arc.services.catalog import preferred_title
 from arc.services.catalog.airing import (

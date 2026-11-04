@@ -11,7 +11,7 @@ not identify, waiting for a person to pick it (FR-A4, FR-D4, M21).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import (
     BigInteger,
@@ -32,7 +32,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from arc.db import Base
 from arc.models._columns import TZDateTime, bigint_pk, created_at
-from arc.models.enums import TorrentKind, enum_column
+from arc.models.enums import EpisodeState, TorrentKind, enum_column
 
 #: ``ck_torrents_kind_episode``: a single names its episode and a batch names
 #: none. Written out here and spelled once, because the migration that creates
@@ -312,6 +312,14 @@ PACK_PICK_DISMISSED = "dismissed"
 #: Here rather than in the acquisition package so the show page's schema can
 #: read it without importing the handlers.
 PACK_PICK_REASON = "the pack's files need a person's pick (Review)"
+
+#: The episode states a pick may start a download from: resting and waiting
+#: for it, or woken by the daily revival with its search not yet running.
+#: Here, next to :data:`PACK_PICK_REASON`, for the same reason: the show page's
+#: schema and the pending player read it without importing a service.
+PICKABLE_STATES: Final[frozenset[EpisodeState]] = frozenset(
+    {EpisodeState.UNAVAILABLE, EpisodeState.WANTED}
+)
 
 #: At most one **pending** pick per pack and episode; resolved rows are kept as
 #: the record of who picked what. Named for the migration test.

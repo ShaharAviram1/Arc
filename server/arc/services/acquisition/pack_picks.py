@@ -42,6 +42,7 @@ from arc.models import (
     PACK_PICK_DISMISSED,
     PACK_PICK_PICKED,
     PACK_PICK_REASON,
+    PICKABLE_STATES,
     Episode,
     EpisodeState,
     PackPick,
@@ -101,12 +102,6 @@ MOVED_ON = "episode_moved_on"
 MOVED_ON_MESSAGE = "This episode is already on its way from another release."
 NOT_A_CANDIDATE = "not_a_candidate"
 NOT_A_CANDIDATE_MESSAGE = "That file is not one of this pack's video files."
-
-#: The episode states a pick may start a download from: resting and waiting
-#: for it, or woken by the daily revival with its search not yet running.
-PICKABLE_STATES: Final[frozenset[EpisodeState]] = frozenset(
-    {EpisodeState.UNAVAILABLE, EpisodeState.WANTED}
-)
 
 
 class PickConflict(Exception):
@@ -607,7 +602,6 @@ __all__ = [
     "NOT_PENDING",
     "NOT_WAITING",
     "NOT_WANTED",
-    "PICKABLE_STATES",
     "STALE",
     "PickConflict",
     "PickNotFound",
