@@ -2028,13 +2028,19 @@ async def test_a_second_visit_does_not_queue_the_stills_again(
 async def test_rows_of_a_show_in_an_open_pass_say_in_rewatch(
     client: AsyncClient, user: User, api_factory: SessionFactory
 ) -> None:
-    """``in_rewatch`` (M21 T10): true on the Continue watching and Ready to watch
-    rows of a show with an open pass, false elsewhere, false again once it ends."""
+    """``in_rewatch`` (M21 T10): true on the Continue watching, Ready to watch and
+    This week rows of a show with an open pass, false elsewhere, false again
+    once it ends."""
     again = await old_show(api_factory, title="Again", anilist_id=910090)
     other = await old_show(api_factory, title="Plain", anilist_id=910091)
+    weekly = await airing_show(api_factory, title="Weekly", anilist_id=910092)
+    plain_weekly = await airing_show(api_factory, title="Plain weekly", anilist_id=910093)
     await follow(api_factory, user, again, ListStatus.COMPLETED, progress=4)
     await follow(api_factory, user, other, ListStatus.WATCHING, progress=0)
+    await follow(api_factory, user, weekly, ListStatus.WATCHING, progress=3)
+    await follow(api_factory, user, plain_weekly, ListStatus.WATCHING, progress=3)
     await open_pass(api_factory, user, again, NOW - timedelta(days=2))
+    await open_pass(api_factory, user, weekly, NOW - timedelta(days=2))
     started = await episode_number(api_factory, again, 1)
     unseen = await episode_number(api_factory, again, 2)
     plain_started = await episode_number(api_factory, other, 1)
@@ -2058,10 +2064,12 @@ async def test_rows_of_a_show_in_an_open_pass_say_in_rewatch(
 
     assert flags("continue_watching") == {("Again", 1): True, ("Plain", 1): False}
     assert flags("ready_to_watch") == {("Again", 2): True, ("Plain", 2): False}
+    assert flags("new_this_week") == {("Weekly", 7): True, ("Plain weekly", 7): False}
 
     async with api_factory() as session:
-        await session.execute(update(Rewatch).where(Rewatch.anime_id == again).values(ended_at=NOW))
+        await session.execute(update(Rewatch).values(ended_at=NOW))
         await session.commit()
     body = await home(client)
     assert all(not row["in_rewatch"] for row in body["continue_watching"])
     assert all(not row["in_rewatch"] for row in body["ready_to_watch"])
+    assert all(not row["in_rewatch"] for row in body["new_this_week"])
