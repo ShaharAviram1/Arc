@@ -1,4 +1,4 @@
-"""User administration (spec §4.10 FR-D1, FR-D5): list, enable, promote, demo.
+"""User administration (spec §4.10 FR-D1): list, enable, promote.
 
 Admin-only apart from ``PATCH /api/users/me``, which is every account's own
 profile: the timezone the schedule's weekdays are grouped in (FR-C3). It is
@@ -54,12 +54,6 @@ class UserPatch(BaseModel):
 
     is_active: bool | None = None
     role: UserRole | None = None
-    #: The demo-account flag (M16). Unguarded, unlike the two above: it takes
-    #: nothing away from anybody — it adds a "How Arc works" entry to that
-    #: account's nav and a strip to its Watch Now — so an admin may set it on
-    #: any account including their own, and there is no "last demo account"
-    #: to protect.
-    is_demo: bool | None = None
 
 
 class ProfilePatch(BaseModel):
@@ -115,7 +109,7 @@ async def update_me(body: ProfilePatch, user: CurrentUser, session: SessionDep) 
 @router.patch(
     "/{user_id}",
     response_model=UserAdminOut,
-    summary="Enable/disable an account, change its role, flag it as the demo (admin)",
+    summary="Enable/disable an account or change its role (admin)",
     responses={
         404: {"description": USER_NOT_FOUND},
         409: {"description": f"{NO_SELF_DEACTIVATE} / {NO_SELF_DEMOTE} / {LAST_ADMIN}"},
@@ -148,8 +142,6 @@ async def update(user_id: UserId, body: UserPatch, admin: AdminUser, session: Se
         user.is_active = body.is_active
     if body.role is not None:
         user.role = body.role
-    if body.is_demo is not None:
-        user.is_demo = body.is_demo
 
     if removes_an_admin:
         # Counted *after* the change and before the commit, so the question

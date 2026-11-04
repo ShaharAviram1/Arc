@@ -128,64 +128,38 @@ async def test_an_omitted_field_is_left_alone(
     assert response.json()["role"] == "admin", "role was not in the body"
 
 
-async def test_no_account_is_the_demo_account_until_somebody_says_so(
+async def test_is_demo_is_a_deprecated_constant_false_for_everybody(
     admin_client: AsyncClient, api_app: FastAPI, api_factory: SessionFactory
 ) -> None:
-    """``is_demo`` is on ``/api/auth/me``, and it is false for everybody."""
-    await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
+    """M21 T9: the demo is gone; ``is_demo`` stays one release as ``false``.
+
+    A cached client still requires the field on ``/api/auth/me``, so it is
+    sent to every account, and the admin view carries it too.
+    """
+    user = await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
 
     assert (await me(admin_client))["is_demo"] is False
     async with api_transport(api_app) as member:
         await login(member, USER_EMAIL, USER_PASSWORD)
         assert (await me(member))["is_demo"] is False
+    listed = (await admin_client.get("/api/users")).json()
+    assert {row["id"]: row["is_demo"] for row in listed}[user.id] is False
 
 
-async def test_an_admin_can_flag_and_unflag_the_demo_account(
+async def test_nobody_can_set_is_demo_any_more(
     admin_client: AsyncClient, api_app: FastAPI, api_factory: SessionFactory
 ) -> None:
-    """M16: the flag the "How Arc works" entry and the Watch Now strip read.
-
-    It takes nothing away from anybody, so unlike ``is_active`` and ``role``
-    there is no guard on it — including on the admin's own row.
-    """
+    """The flag is no longer a field anybody may write: a 422, the row untouched."""
     user = await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
 
-    on = await admin_client.patch(f"/api/users/{user.id}", json={"is_demo": True})
-    assert on.status_code == 200, on.text
-    assert on.json()["is_demo"] is True
-    # And the account itself is told, which is the point of the column.
+    refused = await admin_client.patch(f"/api/users/{user.id}", json={"is_demo": True})
+    assert refused.status_code == 422
+
     async with api_transport(api_app) as member:
         await login(member, USER_EMAIL, USER_PASSWORD)
-        assert (await me(member))["is_demo"] is True
-
-    off = await admin_client.patch(f"/api/users/{user.id}", json={"is_demo": False})
-    assert off.status_code == 200
-    assert off.json()["is_demo"] is False
-
-    # Their own row too: there is no "last demo account" to protect.
-    admin = await me(admin_client)
-    self_flag = await admin_client.patch(f"/api/users/{admin['id']}", json={"is_demo": True})
-    assert self_flag.status_code == 200
-    assert self_flag.json()["is_demo"] is True
-
-
-async def test_a_user_cannot_make_themselves_the_demo_account(
-    api_client: AsyncClient, api_factory: SessionFactory
-) -> None:
-    user = await add_user(api_factory, USER_EMAIL, USER_PASSWORD)
-    await login(api_client, USER_EMAIL, USER_PASSWORD)
-
-    refused = await api_client.patch(f"/api/users/{user.id}", json={"is_demo": True})
-
-    assert refused.status_code == 403
-    assert refused.json() == {"detail": ADMIN_REQUIRED}
-    async with api_factory() as session:
-        row = await session.get(User, user.id)
-        assert row is not None and row.is_demo is False
-
-    # Nor through the one route that is their own (it takes a timezone only).
-    own = await api_client.patch("/api/users/me", json={"is_demo": True})
-    assert own.status_code == 422
+        own = await member.patch("/api/users/me", json={"is_demo": True})
+        assert own.status_code == 422
+        assert (await me(member))["is_demo"] is False
 
 
 async def test_an_admin_cannot_lock_themselves_out(

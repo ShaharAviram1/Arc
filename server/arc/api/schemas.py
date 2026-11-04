@@ -15,6 +15,7 @@ has one type and one renderer for it.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -57,11 +58,11 @@ class UserOut(BaseModel):
     role: UserRole
     timezone: str
     created_at: datetime
-    #: The demo account (M16, owner 2026-09-18). On ``UserOut`` rather than on
-    #: the admin view below because the account that needs to know is the one
-    #: reading its own row: the client shows it a "How Arc works" entry and a
-    #: strip on Watch Now, and everybody else a false it never renders.
-    is_demo: bool
+    #: Deprecated, removed next release: always ``False``. The demo account
+    #: and the ``users.is_demo`` column are gone (M21, owner 2026-11-03); the
+    #: field stays one release so a cached client that still requires it on
+    #: ``/api/auth/me`` keeps working.
+    is_demo: Literal[False] = False
 
 
 class UserAdminOut(UserOut):

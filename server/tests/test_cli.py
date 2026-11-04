@@ -108,7 +108,7 @@ def test_demo_list_seeds_watching_with_no_progress_unless_told_otherwise() -> No
 
     assert parsed.status == ListStatus.WATCHING.value
     assert parsed.progress is None
-    assert parsed.demo is False
+    assert not hasattr(parsed, "demo"), "the --demo flag went with the demo (M21)"
 
 
 def test_demo_list_takes_one_status_group_at_a_time() -> None:
@@ -123,11 +123,16 @@ def test_demo_list_takes_one_status_group_at_a_time() -> None:
             "completed",
             "--progress",
             "12",
-            "--demo",
         ]
     )
 
-    assert (parsed.status, parsed.progress, parsed.demo) == ("completed", 12, True)
+    assert (parsed.status, parsed.progress) == ("completed", 12)
+
+
+def test_demo_list_has_no_demo_flag_any_more() -> None:
+    """M21 T9: the demo account is gone, and the flag that nominated it too."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["demo-list", "--user-email", "a@b.test", "--add", "X", "--demo"])
 
 
 def test_demo_list_refuses_a_status_arc_does_not_have() -> None:
@@ -280,7 +285,7 @@ async def test_warm_catalogue_is_idempotent(
 # --- demo-list --------------------------------------------------------------
 #
 # The catalogue is faked rather than reached: what these tests are about is the
-# seeding rules (one status group, one progress, the demo flag, FR-A9's
+# seeding rules (one status group, one progress, FR-A9's
 # activation, and the MAL silence of an unlinked account), and none of that is
 # a question about AniList's search endpoint.
 
@@ -349,7 +354,6 @@ def demo_args(**values: Any) -> Any:
     defaults: dict[str, Any] = {
         "status": ListStatus.WATCHING.value,
         "progress": None,
-        "demo": False,
     }
     return args(**{**defaults, **values})
 
@@ -361,13 +365,13 @@ async def add_account(factory: SessionFactory, email: str) -> User:
         return user
 
 
-async def test_demo_list_seeds_one_status_group_and_flags_the_account(
+async def test_demo_list_seeds_one_status_group(
     api_factory: SessionFactory,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The M16 seeding command, in the shape the demo account is built with."""
+    """The M16 seeding command: one status group, one progress, no flag (M21)."""
     user = await add_account(api_factory, "prof@example.edu")
     use_catalog(monkeypatch, FakeCatalog({BOCCHI: BOCCHI_ANILIST}))
 
@@ -380,20 +384,18 @@ async def test_demo_list_seeds_one_status_group_and_flags_the_account(
                 add=[BOCCHI],
                 status=ListStatus.COMPLETED.value,
                 progress=12,
-                demo=True,
             ),
         )
 
     assert code == 0
     out = capsys.readouterr().out
-    assert "flagged as the demo account" in out
+    assert "demo account" not in out
     assert "completed · 12 / 12" in out
 
     async with api_factory() as session:
-        row = await session.get(User, user.id)
-        assert row is not None and row.is_demo is True
         entry = await session.scalar(select(ListEntry))
         assert entry is not None
+        assert entry.user_id == user.id
         assert entry.status is ListStatus.COMPLETED
         assert entry.progress == 12
         # FR-A9: seeded by hand *is* somebody acting in Arc, so the entry is
@@ -403,7 +405,7 @@ async def test_demo_list_seeds_one_status_group_and_flags_the_account(
         assert await session.scalar(select(func.count()).select_from(MalWriteLog)) == 0
 
 
-async def test_demo_list_twice_leaves_one_entry_and_one_flag(
+async def test_demo_list_twice_leaves_one_entry(
     api_factory: SessionFactory,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -412,7 +414,7 @@ async def test_demo_list_twice_leaves_one_entry_and_one_flag(
     """A seeding script has to be safe to re-run after a half-done deploy."""
     await add_account(api_factory, "prof@example.edu")
     use_catalog(monkeypatch, FakeCatalog({BOCCHI: BOCCHI_ANILIST}))
-    command = demo_args(user_email="prof@example.edu", add=[BOCCHI], progress=4, demo=True)
+    command = demo_args(user_email="prof@example.edu", add=[BOCCHI], progress=4)
 
     async with api_factory() as session:
         assert await cmd_demo_list(session, settings, command) == 0
@@ -420,39 +422,12 @@ async def test_demo_list_twice_leaves_one_entry_and_one_flag(
     async with api_factory() as session:
         assert await cmd_demo_list(session, settings, command) == 0
 
-    assert "is already the demo account" in capsys.readouterr().out
+    capsys.readouterr()
     async with api_factory() as session:
         assert await session.scalar(select(func.count()).select_from(ListEntry)) == 1
         assert await session.scalar(select(func.count()).select_from(Anime)) == 1
         entry = await session.scalar(select(ListEntry))
         assert entry is not None and entry.progress == 4
-        assert await session.scalar(select(func.count()).select_from(User).where(User.is_demo)) == 1
-
-
-async def test_demo_list_leaves_the_flag_alone_without_the_flag(
-    api_factory: SessionFactory,
-    settings: Settings,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Seeding a list and nominating the demo account are two decisions."""
-    user = await add_account(api_factory, "owner@example.edu")
-    use_catalog(monkeypatch, FakeCatalog({BOCCHI: BOCCHI_ANILIST}))
-
-    async with api_factory() as session:
-        assert (
-            await cmd_demo_list(
-                session, settings, demo_args(user_email="owner@example.edu", add=[BOCCHI])
-            )
-            == 0
-        )
-
-    capsys.readouterr()
-    async with api_factory() as session:
-        row = await session.get(User, user.id)
-        assert row is not None and row.is_demo is False
-        entry = await session.scalar(select(ListEntry))
-        assert entry is not None and entry.status is ListStatus.WATCHING
 
 
 async def test_demo_list_reports_the_rule_the_endpoint_would_have_reported(
@@ -583,7 +558,7 @@ async def test_recs_produces_the_same_run_the_page_button_does(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """So the demo account's Recommendations page has content on first sight."""
+    """So an account's Recommendations page has content on first sight."""
     user = await add_account(api_factory, "prof@example.edu")
     candidate_id = await seed_a_pool(api_factory, user)
     use_catalog(monkeypatch, FakeCatalog({}))

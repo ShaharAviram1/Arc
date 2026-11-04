@@ -9,7 +9,7 @@ thing they always want to know, and three repairs:
 * ``import-catalogue``  — import the offline catalogue **now**, in the
                           foreground, instead of waiting for Monday (M15.5).
 * ``demo-list``         — put shows on somebody's list, by title, in one
-                          status; optionally flag the account as the demo one.
+                          status.
 * ``recs``              — produce one recommendation run for an account, so
                           its Recommendations page and Home's "Picked for you"
                           shelf have something on them (M16).
@@ -35,8 +35,8 @@ thing they always want to know, and three repairs:
                           (owner, 2026-10-30;
                           :mod:`arc.services.devices.reports`).
 
-Every one is **idempotent**: ``demo-list`` twice leaves one entry per title
-and one ``is_demo`` flag, the two enqueueing commands deduplicate on the job
+Every one is **idempotent**: ``demo-list`` twice leaves one entry per title,
+the two enqueueing commands deduplicate on the job
 type, ``import-catalogue`` replaces what it imported last time (and skips the
 work entirely when the files have not changed), ``status`` writes nothing,
 ``prune-unfinished-media`` finds nothing the second time, and
@@ -61,7 +61,7 @@ Run it from ``server/``::
 
     uv run python -m arc.cli status
     uv run python -m arc.cli invite --email prof@example.edu
-    uv run python -m arc.cli demo-list --user-email prof@example.edu --demo \\
+    uv run python -m arc.cli demo-list --user-email prof@example.edu \\
         --add "Sousou no Frieren" --add "Vinland Saga"
     uv run python -m arc.cli demo-list --user-email prof@example.edu \\
         --status completed --progress 12 --add "Bocchi the Rock!"
@@ -306,14 +306,7 @@ async def cmd_demo_list(session: AsyncSession, settings: Settings, args: argpars
     that is the shape of a plausible list: several shows finished at their
     episode count, several part-way through, a couple planned. Four or five
     invocations make a list a person recognises; one flag per title would make
-    a command line nobody can read (owner, 2026-09-18, for the M16 demo
-    account).
-
-    ``--demo`` sets ``users.is_demo`` on that account, which is what turns on
-    the "How Arc works" entry in its nav and the strip on its Watch Now. It is
-    a separate flag rather than implied by the command because seeding a list
-    and nominating the demo account are two decisions, and the owner seeds their
-    own list with this too.
+    a command line nobody can read (owner, 2026-09-18).
 
     The lookup is the catalogue's own search, so it needs AniList (or MAL) to
     be reachable; the top hit is taken and printed, and a title that matches
@@ -322,9 +315,9 @@ async def cmd_demo_list(session: AsyncSession, settings: Settings, args: argpars
     describes a state rather than an event — and it is ``set_list_entry`` that
     does all of it: the acquisition window, FR-A9's ``activated_at`` stamp (so
     a seeded entry is active and actually fetches, unlike an imported one) and
-    the FR-M4 write rules. The demo account has no MyAnimeList link, so no
-    write is queued for it at all; that is asserted in ``tests/test_cli.py``
-    rather than trusted.
+    the FR-M4 write rules. An account with no MyAnimeList link has no write
+    queued for it at all; that is asserted in ``tests/test_cli.py`` rather
+    than trusted.
     """
     email = normalize_email(args.user_email)
     user = await get_by_email(session, email)
@@ -333,17 +326,6 @@ async def cmd_demo_list(session: AsyncSession, settings: Settings, args: argpars
         return EXIT_FAILED
 
     status = ListStatus(args.status)
-
-    if args.demo:
-        # Idempotent, and reported either way: an operator re-running the
-        # seeding script wants to see that the flag is on, not to wonder
-        # whether the second run took it off.
-        if user.is_demo:
-            print(f"= {email} is already the demo account (user {user.id})")
-        else:
-            user.is_demo = True
-            await session.commit()
-            print(f"+ {email} flagged as the demo account (user {user.id})")
 
     failures = 0
     async with catalog_for(settings) as catalog:
@@ -412,8 +394,8 @@ async def cmd_recs(session: AsyncSession, settings: Settings, args: argparse.Nam
     """Produce one recommendation run for a user (FR-R1…FR-R5, M16).
 
     The same call ``POST /api/recs/runs`` makes, with the same service, the
-    same provider chain (``RECS_PROVIDER``) and the same daily budget — so the
-    demo account's Recommendations page and Home's "Picked for you" shelf have
+    same provider chain (``RECS_PROVIDER``) and the same daily budget — so an
+    account's Recommendations page and Home's "Picked for you" shelf have
     content without anybody signing in as it and pressing the button.
 
     The one command here that is **not** idempotent, deliberately: a run is an
@@ -848,11 +830,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="episodes watched, applied to every title in this invocation",
-    )
-    demo.add_argument(
-        "--demo",
-        action="store_true",
-        help="flag this account as the demo one (users.is_demo); idempotent",
     )
     demo.set_defaults(handler=cmd_demo_list)
 
