@@ -169,7 +169,7 @@ from arc.services.acquisition.names import (
     search_dedupe_key,
     top_dedupe_key,
 )
-from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_CANCELLED
+from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_AWAITING_PICK, QBIT_CANCELLED
 from arc.services.acquisition.rules import (
     is_paused,
     is_storage_held,
@@ -523,7 +523,13 @@ async def _thin_shows(
         )
         .join(TorrentFile, TorrentFile.torrent_id == Torrent.id)
         .join(Episode, Episode.id == TorrentFile.episode_id)
-        .where(Torrent.seeders.is_not(None), Episode.anime_id.in_(ids))
+        .where(
+            Torrent.seeders.is_not(None),
+            Episode.anime_id.in_(ids),
+            # A pack held for a person's file pick (M21) is not a release Arc
+            # is fetching: its Nyaa figure says nothing about this show's swarm.
+            or_(Torrent.qbit_state.is_(None), Torrent.qbit_state != QBIT_AWAITING_PICK),
+        )
     )
     rows = union_all(singles, batches).subquery()
     newest = (
@@ -1228,7 +1234,9 @@ async def compute_wants(
     releases episodes back to ``not_wanted`` and drops rows, and a pause that
     quietly rewrote a table would be a strange thing for a button labelled
     *pause* to do. The whole point is that resuming finds the world exactly as
-    the pause left it.
+    the pause left it. (The ``compute_wants`` *job* also reconciles pack picks
+    before calling this, and that half does run while paused — only its age
+    rule waits; see ``jobs._reconcile_pack_picks``.)
 
     A **storage hold** (FR-T6) is the opposite bargain, and deliberately so.
     Everything this function does when the disk is nearly full is something
