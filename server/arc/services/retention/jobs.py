@@ -221,6 +221,10 @@ async def _sweep_pack_leftovers(ctx: JobContext, *, dry_run: bool) -> LeftoverSw
             return await sweep_leftovers(ctx.session, ctx.settings, qbit, dry_run=dry)
     except Exception as exc:  # the step must never fail the whole sweep
         ctx.log.warning("the leftover pack sweep failed", extra={"error": repr(exc)})
+        # The step writes nothing, so a rollback loses nothing — and leaves the
+        # session usable for the live-leftover and remembered-release steps
+        # after it, which a failed statement would otherwise abort.
+        await ctx.session.rollback()
         return LeftoverSweep(candidates=0, deleted=0, freed_bytes=0, dry_run=dry)
 
 
