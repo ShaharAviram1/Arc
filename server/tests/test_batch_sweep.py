@@ -15,11 +15,12 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from pydantic import SecretStr
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from arc.config import Settings
@@ -39,13 +40,11 @@ from arc.models import (
     UserRole,
 )
 from arc.services.acquisition import qbit as qbit_module
-from arc.services.acquisition.jobs import CHECKING_STATES
 from arc.services.acquisition.qbit import QbitClient
 from arc.services.jobs.registry import JobContext
 from arc.services.retention import batch_sweep, sweep
 from arc.services.retention import jobs as retention_jobs
 from arc.services.retention.batch_sweep import (
-    BUSY_CLIENT_STATES,
     MIN_AGE,
     REASON_CLIENT_GONE,
     REASON_PRIORITY_ZERO,
@@ -67,6 +66,8 @@ WRITTEN = 3 * 4096
 #: The size the torrent says each file has: the rest of it is sparse.
 APPARENT = 4 * 1024 * 1024
 OLD = 2 * 3600  # seconds: older than the one-hour floor
+#: A torrent in the client that is none of the test packs.
+OTHER = "ee" * 20
 
 
 # --- Builders ----------------------------------------------------------------
@@ -169,7 +170,11 @@ def data_settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture
 def stub() -> QbitStub:
-    return QbitStub()
+    """A client holding one unrelated torrent: an empty listing is "unknown",
+    so a test of "gone from the client" needs the listing to say something."""
+    client = QbitStub()
+    client.add_torrent(OTHER, name="something else", state="stalledUP")
+    return client
 
 
 @pytest.fixture
@@ -207,7 +212,8 @@ def test_the_pure_rule_keeps_by_default_and_names_both_reasons() -> None:
     for keep in (
         facts(held_pack=True),
         facts(safe=False),
-        facts(pack_downloading=True, fenced=True),
+        facts(pack_downloading=True),
+        facts(fenced=True),
         facts(library=True),
         facts(claimed=True),
         facts(age=MIN_AGE),
@@ -216,10 +222,6 @@ def test_the_pure_rule_keeps_by_default_and_names_both_reasons() -> None:
         facts(in_client=False, claimed=True),
     ):
         assert leftover_reason(keep) is None, keep
-
-
-def test_the_busy_client_states_are_the_acquisition_checking_states() -> None:
-    assert BUSY_CLIENT_STATES == CHECKING_STATES
 
 
 async def test_the_dry_run_switch_defaults_on(db_session: AsyncSession) -> None:
@@ -273,8 +275,8 @@ async def test_an_unclaimed_priority_zero_file_is_a_candidate(
 async def test_an_in_flight_path_is_kept(
     db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
 ) -> None:
-    """While the pack still owes a wanted file, ingest's fence applies as it is:
-    every incomplete file of the pack is in flight. A complete, unclaimed one is not."""
+    """While the pack still owes a wanted file it is downloading, and ingest's
+    fence holds every incomplete file of it: nothing is a candidate."""
     await make_pack(
         db_session,
         data_settings,
@@ -283,14 +285,11 @@ async def test_an_in_flight_path_is_kept(
         [
             PackFile("Show - 01.mkv", wanted=True, priority=1),
             PackFile("Show - 02.mkv"),
-            PackFile("Show - 03.mkv", complete=True),
         ],
         client_state="stalledDL",
     )
 
-    found = await leftover_files(db_session, data_settings, qbit)
-
-    assert names(found) == ["Show - 03.mkv"]
+    assert await leftover_files(db_session, data_settings, qbit) == []
 
 
 async def test_a_file_younger_than_an_hour_is_kept(
@@ -309,7 +308,7 @@ async def test_a_file_younger_than_an_hour_is_kept(
     assert names(found) == ["Show - 05.mkv"]
 
 
-async def test_a_file_a_media_file_names_is_kept(
+async def test_a_media_file_row_alone_keeps_the_file(
     db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
 ) -> None:
     await make_pack(
@@ -667,7 +666,9 @@ async def test_a_downloading_pack_is_untouched(
         [
             PackFile("Show - 01.mkv", wanted=True, priority=1),
             PackFile("Show - 02.mkv"),
-            PackFile("Show - 03.mkv"),
+            # Complete, unclaimed, switched off: a leftover anywhere else, but
+            # a downloading pack is kept whole (orchestrator, 2026-11-04).
+            PackFile("Show - 03.mkv", complete=True),
         ],
         client_state="downloading",
     )
@@ -691,6 +692,14 @@ def context(session: AsyncSession, settings: Settings) -> JobContext:
     )
 
 
+def recorded(order: list[str], label: str, real: Any) -> Any:
+    async def wrapper(*args: object, **kwargs: object) -> object:
+        order.append(label)
+        return await real(*args, **kwargs)
+
+    return wrapper
+
+
 async def test_the_hourly_job_runs_the_step_after_the_sweep(
     db_session: AsyncSession,
     data_settings: Settings,
@@ -705,23 +714,20 @@ async def test_the_hourly_job_runs_the_step_after_the_sweep(
     await make_pack(db_session, data_settings, stub, "d1" * 20, [PackFile("Show - 01.mkv")])
     path = pack_dir(data_settings, "d1" * 20) / "Show - 01.mkv"
     order: list[str] = []
-    real_candidates = retention_jobs.candidates
-    real_leftovers = retention_jobs.sweep_leftovers
-
-    async def candidates(*args: object, **kwargs: object) -> object:
-        order.append("sweep")
-        return await real_candidates(*args, **kwargs)  # type: ignore[arg-type]
-
-    async def leftovers(*args: object, **kwargs: object) -> object:
-        order.append("leftovers")
-        return await real_leftovers(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(retention_jobs, "candidates", candidates)
-    monkeypatch.setattr(retention_jobs, "sweep_leftovers", leftovers)
+    for name, label in (
+        ("candidates", "sweep"),
+        ("idle_copies", "idle"),
+        ("_evict_to_floor", "floor"),
+        ("sweep_leftovers", "leftovers"),
+        ("prune_remembered", "remembered"),
+    ):
+        monkeypatch.setattr(
+            retention_jobs, name, recorded(order, label, getattr(retention_jobs, name))
+        )
 
     # Seeded dry: logs only.
     await retention_jobs.retention_sweep(context(db_session, data_settings))
-    assert order == ["sweep", "leftovers"]
+    assert order == ["sweep", "idle", "floor", "leftovers", "remembered"]
     assert path.exists()
 
     # Switched off from the panel: the file goes.
@@ -860,3 +866,349 @@ async def test_a_non_admin_gets_403_on_the_preview(
     async with api_transport(preview_app) as client:
         await login(client, "member-batch-sweep@arc.test", "memberpassword")
         assert (await client.get("/api/retention/preview")).status_code == 403
+
+
+# --- Fix round 1 (Validator / Reviewer, 2026-11-04) ----------------------------------
+
+
+async def test_an_empty_listing_gives_no_candidates(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    """An empty listing is unknown, not "every pack is gone"."""
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f1" * 20,
+        [PackFile("Show - 01.mkv")],
+        qbit_state="missing",
+        in_client=False,
+    )
+    stub.torrents = []
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+    assert result.candidates == 0
+    assert (pack_dir(data_settings, "f1" * 20) / "Show - 01.mkv").exists()
+
+
+async def test_a_pack_moved_to_another_category_is_kept_whole(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    """Absent from Arc's category is not gone: ``has`` finds it elsewhere."""
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f2" * 20,
+        [PackFile("Show - 01.mkv", priority=1), PackFile("Show - 02.mkv")],
+        qbit_state="missing",
+    )
+    for row in stub.torrents:
+        if row["hash"] == "f2" * 20:
+            row["category"] = "mine"
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+    await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+    assert sorted(p.name for p in pack_dir(data_settings, "f2" * 20).iterdir()) == [
+        "Show - 01.mkv",
+        "Show - 02.mkv",
+    ]
+
+
+async def test_a_pack_missing_from_a_partial_listing_is_kept(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    """A row the client sent without a hash is dropped from the listing; the pack
+    looks absent, but its row does not say it is gone, so nothing is swept."""
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f3" * 20,
+        [PackFile("Show - 01.mkv")],
+        qbit_state="stoppedDL",
+        in_client=False,
+    )
+    stub.torrents.append({"hash": "", "name": "unreadable row", "category": "arc"})
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+
+
+async def test_a_gone_pack_needs_its_row_to_agree(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f4" * 20,
+        [PackFile("Show - 01.mkv")],
+        qbit_state="stoppedDL",
+        in_client=False,
+    )
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+
+
+async def test_a_real_run_rechecks_a_pack_the_client_still_holds_once(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f5" * 20,
+        [PackFile("Show - 01.mkv"), PackFile("Show - 02.mkv"), PackFile("Show - 03.mkv")],
+    )
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.deleted == 3
+    assert stub.rechecked == ["f5" * 20]
+    assert result.rechecked == ("f5" * 20,)
+
+
+async def test_a_gone_pack_and_a_dry_run_are_never_rechecked(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "f6" * 20,
+        [PackFile("Show - 01.mkv")],
+        qbit_state="missing",
+        in_client=False,
+    )
+    await make_pack(db_session, data_settings, stub, "f7" * 20, [PackFile("Show - 01.mkv")])
+
+    dry = await sweep_leftovers(db_session, data_settings, qbit, dry_run=True)
+    assert dry.candidates == 2 and stub.rechecked == []
+
+    real = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+    assert real.deleted == 2
+    assert stub.rechecked == ["f7" * 20], "only the pack the client still holds"
+
+
+async def test_a_reselect_between_planning_and_unlinking_keeps_the_file(
+    db_session: AsyncSession,
+    data_settings: Settings,
+    stub: QbitStub,
+    qbit: QbitClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client is asked again right before the pack's first unlink."""
+    torrent = await make_pack(
+        db_session, data_settings, stub, "f8" * 20, [PackFile("Show - 01.mkv")]
+    )
+    real = batch_sweep.leftover_files
+
+    async def then_reselected(*args: object, **kwargs: object) -> list[Leftover]:
+        found = await real(*args, **kwargs)  # type: ignore[arg-type]
+        row = await db_session.scalar(
+            select(TorrentFile).where(TorrentFile.torrent_id == torrent.id)
+        )
+        assert row is not None
+        row.wanted = True
+        await db_session.flush()
+        stub.file_lists["f8" * 20][0]["priority"] = 1
+        return found
+
+    monkeypatch.setattr(batch_sweep, "leftover_files", then_reselected)
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.candidates == 1 and result.deleted == 0
+    assert stub.rechecked == []
+    assert (pack_dir(data_settings, "f8" * 20) / "Show - 01.mkv").exists()
+
+
+async def test_a_client_side_reselect_alone_keeps_the_file(
+    db_session: AsyncSession,
+    data_settings: Settings,
+    stub: QbitStub,
+    qbit: QbitClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await make_pack(db_session, data_settings, stub, "f9" * 20, [PackFile("Show - 01.mkv")])
+    real = batch_sweep.leftover_files
+
+    async def then_reselected(*args: object, **kwargs: object) -> list[Leftover]:
+        found = await real(*args, **kwargs)  # type: ignore[arg-type]
+        stub.file_lists["f9" * 20][0]["priority"] = 1
+        return found
+
+    monkeypatch.setattr(batch_sweep, "leftover_files", then_reselected)
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.deleted == 0
+    assert (pack_dir(data_settings, "f9" * 20) / "Show - 01.mkv").exists()
+
+
+async def test_a_db_error_in_the_step_leaves_the_following_steps_running(
+    db_session: AsyncSession,
+    data_settings: Settings,
+    stub: QbitStub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        qbit_module.QbitClient,
+        "__init__",
+        force_transport(qbit_module.QbitClient, stub.transport()),
+    )
+    await set_setting(db_session, BATCH_SWEEP_DRY_RUN_KEY, False)
+    await db_session.commit()
+
+    async def broken(session: AsyncSession, *args: object, **kwargs: object) -> object:
+        await session.execute(text("SELECT 1 / 0"))
+        raise AssertionError("unreachable")
+
+    order: list[str] = []
+
+    async def live(*args: object, **kwargs: object) -> None:
+        order.append("live")
+
+    monkeypatch.setattr(retention_jobs, "sweep_leftovers", broken)
+    monkeypatch.setattr(retention_jobs, "sweep_live_leftovers", live)
+    monkeypatch.setattr(
+        retention_jobs,
+        "prune_remembered",
+        recorded(order, "remembered", retention_jobs.prune_remembered),
+    )
+
+    await retention_jobs.retention_sweep(context(db_session, data_settings))
+
+    assert order == ["live", "remembered"], "the real prune ran on a usable session"
+
+
+async def test_a_files_error_holds_that_pack_and_the_others_are_still_evaluated(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(db_session, data_settings, stub, "1a" * 20, [PackFile("Show - 01.mkv")])
+    await make_pack(db_session, data_settings, stub, "1b" * 20, [PackFile("Show - 01.mkv")])
+    # A row with no usable name: ``files()`` refuses the whole listing.
+    stub.file_lists["1a" * 20] = [{"index": 0, "size": APPARENT, "priority": 0}]
+
+    found = await leftover_files(db_session, data_settings, qbit)
+
+    assert [item.path.parent.name for item in found] == ["1b" * 20]
+
+
+async def test_the_clients_parts_file_is_kept_while_it_holds_the_pack(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "1c" * 20,
+        [PackFile("Show - 01.mkv", wanted=True, priority=1, complete=True)],
+    )
+    parts = write_file(pack_dir(data_settings, "1c" * 20) / f".{'1c' * 20}.parts")
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+    await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+    assert parts.exists()
+
+
+async def test_nested_pruning_stops_at_the_pack_and_never_takes_batch(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(db_session, data_settings, stub, "1d" * 20, [PackFile("A/B/C/Show - 01.mkv")])
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "1e" * 20,
+        [PackFile("A/B/Show - 01.mkv")],
+        qbit_state="missing",
+        in_client=False,
+    )
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.deleted == 2
+    held = pack_dir(data_settings, "1d" * 20)
+    assert held.is_dir() and list(held.iterdir()) == [], "still in the client: kept, emptied"
+    assert not pack_dir(data_settings, "1e" * 20).exists(), "gone: the pack dir goes too"
+    assert (data_settings.downloads_dir / "batch").is_dir()
+
+
+async def test_a_unicode_nested_pack_is_swept_and_pruned_to_the_pack(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "1f" * 20,
+        [
+            PackFile("進撃の巨人 S1/Disc 1/進撃 - 01.mkv"),
+            PackFile("進撃の巨人 S1/Disc 1/進撃 - 02.mkv", wanted=True, priority=1, complete=True),
+            PackFile("進撃の巨人 S1/Extras/Ñandú – OP.mkv"),
+        ],
+    )
+    directory = pack_dir(data_settings, "1f" * 20)
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.deleted == 2
+    assert not (directory / "進撃の巨人 S1" / "Extras").exists()
+    assert (directory / "進撃の巨人 S1" / "Disc 1" / "進撃 - 02.mkv").exists()
+    assert not (directory / "進撃の巨人 S1" / "Disc 1" / "進撃 - 01.mkv").exists()
+    assert directory.is_dir()
+
+
+async def test_the_preview_reports_the_effective_dry_run(
+    preview_app: FastAPI,
+    preview_settings: Settings,
+    api_factory: SessionFactory,
+    patched_qbit: QbitStub,
+) -> None:
+    """``RETENTION_DRY_RUN`` keeps the sweep dry whatever the setting says."""
+    async with api_factory() as session:
+        await set_setting(session, BATCH_SWEEP_DRY_RUN_KEY, False)
+        await session.commit()
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+
+    app = create_app(preview_settings.model_copy(update={"retention_dry_run": True}))
+    app.state.engine = preview_app.state.engine
+    app.state.session_factory = api_factory
+    async with api_transport(app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        dry = (await client.get("/api/retention/preview")).json()
+    async with api_transport(preview_app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        live = (await client.get("/api/retention/preview")).json()
+
+    assert dry["batch_sweep_dry_run"] is True
+    assert live["batch_sweep_dry_run"] is False
+
+
+async def test_the_preview_calls_an_empty_listing_unchecked(
+    preview_app: FastAPI,
+    preview_settings: Settings,
+    api_factory: SessionFactory,
+    patched_qbit: QbitStub,
+) -> None:
+    async with api_factory() as session:
+        await make_pack(
+            session,
+            preview_settings,
+            patched_qbit,
+            "2a" * 20,
+            [PackFile("x.mkv")],
+            qbit_state="missing",
+            in_client=False,
+        )
+        await session.commit()
+    patched_qbit.torrents = []
+    await add_user(api_factory, ADMIN_EMAIL, ADMIN_PASSWORD, role=UserRole.ADMIN)
+
+    async with api_transport(preview_app) as client:
+        await login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+        body = (await client.get("/api/retention/preview")).json()
+
+    assert body["leftover_files"] == [] and body["leftover_checked"] is False

@@ -8,6 +8,11 @@ never sees them, and the pack itself may never reach ``batch.disposition``'s
 DELETE while somebody keeps the show on a list. This module finds such files
 and, as one step of the hourly ``retention_sweep``, removes them.
 
+**Only a finished or a gone pack is swept.** A pack the client still has and
+that still owes Arc a wanted file is *downloading*, and its whole directory is
+kept; so is a **held** pack (awaiting a pick, being cancelled, being checked by
+the client) and one whose presence in the client cannot be settled.
+
 **The rule is a conjunction, and every half of it says "keep" by default**
 (:func:`leftover_reason`). A file under the batch root is a candidate only
 when *all* of these hold:
@@ -15,32 +20,40 @@ when *all* of these hold:
 * its directory is a pack Arc knows (a ``torrents`` row of kind ``batch``) —
   an unknown ``batch/<dir>`` is out of scope (the library fence already keeps
   it out of the library);
-* the pack is not **held**: not ``awaiting_pick`` (or ``cancelled``, whose
-  ``qbit_cancel`` job owns the deletion), no pending ``pack_picks`` row, and
-  the client is not re-reading its files (a check, a move) — while any of
-  these is true the whole directory is untouchable;
-* it is not **in flight**: while the pack is in the client and still owes Arc
-  a wanted file that is not complete, :meth:`~arc.services.library.ingest.InFlight.holds` is applied
-  as it is (every incomplete file of the pack is kept); once the pack owes
-  nothing, an incomplete file is no longer being ingested;
+* the pack is neither held nor downloading (above), and
+  :meth:`~arc.services.library.ingest.InFlight.holds` does not fence it (for a
+  pack that is not downloading this is the fence's "no pack row" half);
 * no ``media_files.path`` names it, and no ``torrent_files`` row with
   ``wanted = true`` claims it;
-* qBittorrent reports **priority 0** for its index, or the torrent is **gone
-  from the client** altogether;
+* qBittorrent reports **priority 0** for its index, or the pack is **gone from
+  the client** — which takes three agreeing answers: a non-empty listing of
+  Arc's category without it, ``has(hash)`` (any category) saying no, and the
+  row's own ``qbit_state`` already one the poll writes for a torrent the
+  client no longer has (:data:`GONE_STATES`);
 * it has not changed for an hour (:data:`MIN_AGE`), and
 * it is under :func:`~arc.services.retention.sweep.allowed_roots` with no
   symlink on its path (:func:`~arc.services.retention.sweep.safe_path`, plus a
   resolve that must change nothing).
 
-**qBittorrent unreachable means nothing is a candidate** (fail closed): the
-priority half of the rule cannot be answered, and "the torrent is gone" must
-never be inferred from a client that did not answer.
+**qBittorrent unreachable, or answering an empty listing, means nothing is a
+candidate** (fail closed): the priority half cannot be answered, and "the
+torrent is gone" must never be inferred from a client that did not answer.
 
-The deletion goes through :mod:`arc.services.retention.delete`'s own file
-primitive (the confinement re-check right before ``unlink``) and prunes the
-directories it leaves empty. While ``batch_sweep_dry_run`` is true (seeded on)
-— or ``RETENTION_DRY_RUN`` is — each would-be deletion is logged at INFO with
-its path, bytes and reason, and nothing is removed.
+The deletion re-asks the database and the client about each pack right before
+its first unlink, goes through :mod:`arc.services.retention.delete`'s own file
+primitive (the confinement re-check right before ``unlink``), prunes the
+directories it leaves empty, and asks the client to **recheck** each pack it
+still holds that lost a file — otherwise libtorrent goes on believing it has
+the deleted pieces, and a later claim on that file would come out with holes.
+While ``batch_sweep_dry_run`` is true (seeded on) — or ``RETENTION_DRY_RUN``
+is — each would-be deletion is logged at INFO with its path, bytes and reason,
+and nothing is removed or rechecked.
+
+File names are matched **byte for byte** (after the ``.!qB`` suffix is
+stripped) against the names the torrent gives them, with no Unicode
+normalisation: libtorrent writes the names it was given, and a name the
+filesystem stored differently (an NFD-normalising volume) simply matches no row
+and is kept while the pack is in the client.
 """
 
 from __future__ import annotations
@@ -48,8 +61,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -62,10 +76,14 @@ from arc.config import Settings
 from arc.models import MediaFile, PackPick, Torrent, TorrentFile, TorrentKind
 from arc.services.acquisition.qbit import (
     BATCH_DIR,
+    CHECKING_STATES,
     COMPLETE_PROGRESS,
     FILE_OFF,
     QBIT_AWAITING_PICK,
     QBIT_CANCELLED,
+    QBIT_MISSING,
+    QBIT_STALLED,
+    QBIT_UNREADABLE,
     FileInfo,
     QbitClient,
     QbitError,
@@ -87,14 +105,14 @@ MIN_AGE: Final[timedelta] = timedelta(hours=1)
 #: the ``qbit_cancel`` job, which owns that deletion.
 HELD_PACK_STATES: Final[frozenset[str]] = frozenset({QBIT_AWAITING_PICK, QBIT_CANCELLED})
 
-#: Client states under which the client is reading or moving the pack's files
-#: (a recheck, a resume check, a move). The same set as
-#: :data:`arc.services.acquisition.jobs.CHECKING_STATES` — copied rather than
-#: imported because that module registers job handlers on import, and the API
-#: process imports this one; a test holds the two equal.
-BUSY_CLIENT_STATES: Final[frozenset[str]] = frozenset(
-    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData", "moving", "allocating"}
-)
+#: The ``qbit_state`` values the poll (or Arc's own deletion) writes for a
+#: torrent the client no longer has. A pack counts as gone only when its row
+#: already says so: one listing that lacks it is never enough on its own.
+GONE_STATES: Final[frozenset[str]] = frozenset({QBIT_MISSING, QBIT_STALLED, QBIT_UNREADABLE})
+
+#: A v1 (SHA-1) or v2 (SHA-256) info hash, lower-cased. Anything else is no
+#: directory Arc made.
+_HASH = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 #: qBittorrent's optional suffix for an incomplete file ("Append .!qB extension
 #: to incomplete files"). The file is the same torrent file either way.
@@ -123,9 +141,9 @@ class FileFacts:
     """Everything :func:`leftover_reason` decides from, gathered elsewhere."""
 
     #: The pack is held: awaiting a pick, a pending ``pack_picks`` row, being
-    #: cancelled, or the client is checking its files.
+    #: cancelled, the client checking its files, or its presence unsettled.
     held_pack: bool
-    #: The pack still owes Arc a wanted file that is not complete.
+    #: The client still has the pack and it still owes Arc a wanted file.
     pack_downloading: bool
     #: :meth:`InFlight.holds` for the file.
     fenced: bool
@@ -133,7 +151,7 @@ class FileFacts:
     library: bool
     #: A ``torrent_files`` row with ``wanted = true`` claims the file.
     claimed: bool
-    #: The torrent is in Arc's category in the client.
+    #: The pack is in the client; false only once it is confirmed gone.
     in_client: bool
     #: The client's priority for the file's index; ``None`` when no row or no
     #: client listing names it.
@@ -146,9 +164,7 @@ class FileFacts:
 
 def leftover_reason(facts: FileFacts) -> str | None:
     """Why the file is a leftover, or ``None`` when it must be kept. Pure."""
-    if facts.held_pack or not facts.safe:
-        return None
-    if facts.pack_downloading and facts.fenced:
+    if facts.held_pack or facts.pack_downloading or facts.fenced or not facts.safe:
         return None
     if facts.library or facts.claimed:
         return None
@@ -190,6 +206,33 @@ def _relative_name(directory: Path, path: Path) -> str:
     return relative
 
 
+def _downloading(rows: Sequence[TorrentFile]) -> bool:
+    """Whether any wanted file of the pack is still incomplete."""
+    return any(
+        row.wanted
+        and row.completed_at is None
+        and (row.progress is None or row.progress < COMPLETE_PROGRESS)
+        for row in rows
+    )
+
+
+def _priorities(
+    rows: Sequence[TorrentFile], client_files: Mapping[int, FileInfo]
+) -> dict[str, tuple[bool, int | None]]:
+    """``relative path → (wanted, the client's priority)`` for one pack."""
+    files: dict[str, tuple[bool, int | None]] = {}
+    for row in rows:
+        parts = PurePosixPath(row.path).parts
+        if ".." in parts or not parts:
+            continue
+        listed = client_files.get(row.file_index)
+        # The client's own row must name the same file (byte for byte), or its
+        # priority is about something else.
+        priority = listed.priority if listed is not None and listed.name == row.path else None
+        files[PurePosixPath(*parts).as_posix()] = (row.wanted, priority)
+    return files
+
+
 def _walk_pack(
     pack: _Pack, fence: InFlight, library: frozenset[str], settings: Settings, now: datetime
 ) -> list[Leftover]:
@@ -227,7 +270,9 @@ def _walk_pack(
             facts = FileFacts(
                 held_pack=pack.held,
                 pack_downloading=pack.downloading,
-                fenced=fence.holds(str(path)),
+                fenced=fence.holds(str(path))
+                if pack.downloading
+                else (fence.unknown_pack(str(path)) is not None),
                 library=str(path) in library,
                 claimed=wanted,
                 in_client=pack.in_client,
@@ -245,16 +290,49 @@ def _walk_pack(
     return found
 
 
-async def _client_listing(qbit: QbitClient) -> dict[str, str] | None:
-    """``hash → state`` for Arc's category, or ``None`` if the client did not answer."""
+async def client_listing(qbit: QbitClient) -> dict[str, str] | None:
+    """``hash → state`` for Arc's category, or ``None`` when that is unknown.
+
+    ``None`` when the client did not answer, and also when it answered an
+    **empty** listing (the rule T7's pick reconciliation follows): a client
+    that has just restarted, or a category emptied by hand, is no evidence
+    that any pack is gone.
+    """
     try:
-        return {info.hash.lower(): info.state for info in await qbit.torrents()}
+        listing = {info.hash.lower(): info.state for info in await qbit.torrents()}
     except QbitError as exc:  # QbitUnavailable included
         log.warning(
             "qBittorrent did not answer; no pack file is a leftover this time",
             extra={"error": str(exc)},
         )
         return None
+    if not listing:
+        log.warning("qBittorrent listed no torrents; no pack file is a leftover this time")
+        return None
+    return listing
+
+
+async def _confirmed_gone(qbit: QbitClient, info_hash: str, state: str | None) -> bool | None:
+    """Whether a pack missing from the listing is really gone from the client.
+
+    ``True`` only when the row already says so (:data:`GONE_STATES`) **and**
+    ``has`` (any category) says no; ``False`` when the client holds it
+    somewhere; ``None`` when that cannot be settled (the row disagrees, or
+    ``has`` failed) — the caller then holds the pack whole.
+    """
+    try:
+        held_anywhere = await qbit.has(info_hash)
+    except QbitError as exc:
+        log.warning(
+            "could not ask qBittorrent whether it holds a pack; leaving it alone",
+            extra={"hash": info_hash, "error": str(exc)},
+        )
+        return None
+    if held_anywhere:
+        return False
+    if state not in GONE_STATES:
+        return None
+    return True
 
 
 async def leftover_files(
@@ -263,11 +341,13 @@ async def leftover_files(
     qbit: QbitClient | None,
     *,
     now: datetime | None = None,
+    listing: Mapping[str, str] | None = None,
 ) -> list[Leftover]:
     """The files under ``downloads/batch/`` the rule calls leftovers. Read-only.
 
     ``qbit`` is the client to ask; ``None`` (not configured) or a client that
-    does not answer gives an empty list — fail closed.
+    does not answer gives an empty list — fail closed. ``listing`` is
+    :func:`client_listing`'s answer when the caller already has it.
     """
     if qbit is None:
         return []
@@ -282,16 +362,16 @@ async def leftover_files(
         )
     ).all()
     present = [
-        (torrent_id, info_hash, state)
+        (torrent_id, info_hash.lower(), state)
         for torrent_id, info_hash, state in packs
-        # A hash is hex; anything else is no directory Arc made.
-        if info_hash.isalnum() and (root / info_hash.lower()).is_dir()
+        if _HASH.fullmatch(info_hash.lower()) and (root / info_hash.lower()).is_dir()
     ]
     if not present:
         return []
 
-    listing = await _client_listing(qbit)
     if listing is None:
+        listing = await client_listing(qbit)
+    if not listing:
         return []
 
     ids = [torrent_id for torrent_id, _, _ in present]
@@ -311,7 +391,9 @@ async def leftover_files(
     library = frozenset(
         (
             await session.scalars(
-                select(MediaFile.path).where(MediaFile.path.startswith(str(root) + os.sep))
+                select(MediaFile.path).where(
+                    MediaFile.path.startswith(str(root) + os.sep, autoescape=True)
+                )
             )
         ).all()
     )
@@ -319,23 +401,20 @@ async def leftover_files(
 
     built: list[_Pack] = []
     for torrent_id, info_hash, state in present:
-        directory = root / info_hash.lower()
-        client_state = listing.get(info_hash.lower())
-        held = (
-            state in HELD_PACK_STATES
-            or torrent_id in picking
-            or (client_state is not None and client_state in BUSY_CLIENT_STATES)
-        )
+        client_state = listing.get(info_hash)
         own = by_torrent.get(torrent_id, [])
-        # Only a pack the client still has can be fetching anything.
-        downloading = client_state is not None and any(
-            row.wanted
-            and row.completed_at is None
-            and (row.progress is None or row.progress < COMPLETE_PROGRESS)
-            for row in own
-        )
+        held = state in HELD_PACK_STATES or torrent_id in picking
+        in_client = client_state is not None
+        if client_state is None and not held:
+            gone = await _confirmed_gone(qbit, info_hash, state)
+            # Held anywhere, or unsettled: the whole directory stays.
+            held = gone is not True
+            in_client = gone is not True
+        if client_state is not None and client_state in CHECKING_STATES:
+            held = True
+        downloading = in_client and _downloading(own)
         client_files: dict[int, FileInfo] = {}
-        if client_state is not None and not held:
+        if client_state is not None and not held and not downloading:
             try:
                 client_files = {info.index: info for info in await qbit.files(info_hash)}
             except QbitUnavailable as exc:
@@ -350,24 +429,14 @@ async def leftover_files(
                     extra={"torrent_id": torrent_id, "error": str(exc)},
                 )
                 held = True
-        files: dict[str, tuple[bool, int | None]] = {}
-        for row in own:
-            parts = PurePosixPath(row.path).parts
-            if ".." in parts:
-                continue
-            listed = client_files.get(row.file_index)
-            # The client's own row must name the same file, or its priority is
-            # about something else.
-            priority = listed.priority if listed is not None and listed.name == row.path else None
-            files[PurePosixPath(*parts).as_posix()] = (row.wanted, priority)
         built.append(
             _Pack(
                 torrent_id=torrent_id,
-                directory=directory,
+                directory=root / info_hash,
                 held=held,
                 downloading=downloading,
-                in_client=client_state is not None,
-                files=files,
+                in_client=in_client,
+                files=_priorities(own, client_files),
             )
         )
 
@@ -391,10 +460,12 @@ class LeftoverSweep:
     deleted: int
     freed_bytes: int
     dry_run: bool
+    #: Hashes of the packs the client was asked to recheck.
+    rechecked: tuple[str, ...] = ()
 
 
 def _still_leftover(item: Leftover, settings: Settings, now: datetime) -> bool:
-    """The two facts that can change between the plan and the unlink."""
+    """The filesystem facts that can change between the plan and the unlink."""
     try:
         info = item.path.lstat()
     except OSError:
@@ -406,14 +477,13 @@ def _still_leftover(item: Leftover, settings: Settings, now: datetime) -> bool:
     return safe_path(item.path, settings) == item.path
 
 
-async def _named_now(session: AsyncSession, item: Leftover, batch_root: Path) -> bool:
+async def _named_now(session: AsyncSession, item: Leftover, directory: Path) -> bool:
     """Whether a claim, a library row or a pending pick names the file *now*.
 
     Asked immediately before the unlink, as the episode deleter asks for a live
     want: the list was drawn up a moment ago, and a reconciliation running
     alongside can claim a file of the pack in between.
     """
-    directory = batch_root / item.path.relative_to(batch_root).parts[0]
     relative = _relative_name(directory, item.path)
     claimed = await session.scalar(
         select(TorrentFile.id)
@@ -444,6 +514,54 @@ async def _named_now(session: AsyncSession, item: Leftover, batch_root: Path) ->
     return named
 
 
+async def _client_agrees(
+    session: AsyncSession,
+    qbit: QbitClient,
+    info_hash: str,
+    torrent_id: int,
+    items: Sequence[Leftover],
+    directory: Path,
+) -> list[Leftover]:
+    """One pack's items whose client facts still hold, asked right before the
+    first unlink. Any change, or any failure to ask, keeps the whole pack."""
+    gone = all(item.reason == REASON_CLIENT_GONE for item in items)
+    try:
+        info = await qbit.info(info_hash)
+        if gone:
+            # Still nowhere in the client, in any category.
+            return list(items) if info is None else []
+        if info is None or info.state in CHECKING_STATES:
+            return []
+        listed = {row.index: row for row in await qbit.files(info_hash)}
+    except QbitError as exc:
+        log.warning(
+            "could not re-ask qBittorrent about a pack; keeping its files",
+            extra={"hash": info_hash, "error": str(exc)},
+        )
+        return []
+    rows = (
+        await session.scalars(
+            select(TorrentFile)
+            .where(TorrentFile.torrent_id == torrent_id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if _downloading(rows):
+        return []
+    files = _priorities(rows, listed)
+    kept = [
+        item
+        for item in items
+        if files.get(_relative_name(directory, item.path), (True, None)) == (False, FILE_OFF)
+    ]
+    if len(kept) != len(items):
+        log.info(
+            "qBittorrent changed its mind about a pack's files; keeping those",
+            extra={"hash": info_hash, "kept": len(items) - len(kept)},
+        )
+    return kept
+
+
 async def sweep_leftovers(
     session: AsyncSession,
     settings: Settings,
@@ -454,19 +572,17 @@ async def sweep_leftovers(
 ) -> LeftoverSweep:
     """Delete (or, dry, log) every leftover, pruning directories left empty.
 
-    One file's failure never stops the others. Nothing is written to the
-    database, so there is nothing to commit; a re-run finds what is left.
+    Each pack is re-asked about (database and client) right before its first
+    unlink; a pack the client still holds that lost a file is rechecked once
+    afterwards. One file's failure never stops the others. Nothing is written
+    to the database, so there is nothing to commit; a re-run finds what is left.
     """
     moment = now or datetime.now(UTC)
     found = await leftover_files(session, settings, qbit, now=moment)
-    # A pack the client no longer has may lose its directory too once empty.
-    gone = {item.torrent_id for item in found if item.reason == REASON_CLIENT_GONE}
     batch_root = settings.downloads_dir.resolve() / BATCH_DIR
 
-    deleted = 0
-    freed = 0
-    for item in found:
-        if dry_run:
+    if dry_run or qbit is None:
+        for item in found:
             log.info(
                 "batch sweep dry run: would delete a leftover pack file",
                 extra={
@@ -476,49 +592,82 @@ async def sweep_leftovers(
                     "torrent_id": item.torrent_id,
                 },
             )
-            continue
-        try:
-            if await _named_now(session, item, batch_root):
-                continue
-            if not await asyncio.to_thread(_still_leftover, item, settings, datetime.now(UTC)):
-                continue
-            if not await asyncio.to_thread(remove_file, item.path, settings):
-                continue
-            pack_dir = batch_root / item.path.relative_to(batch_root).parts[0]
-            await asyncio.to_thread(
-                prune_empty_dirs,
-                item.path.parent,
-                pack_dir,
-                settings,
-                include_stop=item.torrent_id in gone,
-            )
-        except Exception as exc:  # one file must never stop the rest
-            log.warning(
-                "could not delete a leftover pack file",
-                extra={"path": str(item.path), "error": repr(exc)},
-            )
-            continue
-        deleted += 1
-        freed += item.size
-        log.info(
-            "deleted a leftover pack file",
-            extra={
-                "path": str(item.path),
-                "bytes": item.size,
-                "reason": item.reason,
-                "torrent_id": item.torrent_id,
-            },
+        return LeftoverSweep(
+            candidates=len(found),
+            deleted=0,
+            freed_bytes=sum(item.size for item in found) if dry_run else 0,
+            dry_run=dry_run,
         )
+
+    by_pack: dict[int, list[Leftover]] = {}
+    for item in found:
+        by_pack.setdefault(item.torrent_id, []).append(item)
+
+    deleted = 0
+    freed = 0
+    rechecks: list[str] = []
+    for torrent_id, items in by_pack.items():
+        info_hash = items[0].path.relative_to(batch_root).parts[0]
+        directory = batch_root / info_hash
+        gone = all(item.reason == REASON_CLIENT_GONE for item in items)
+        survivors = await _client_agrees(session, qbit, info_hash, torrent_id, items, directory)
+        lost = 0
+        for item in survivors:
+            try:
+                if await _named_now(session, item, directory):
+                    continue
+                if not await asyncio.to_thread(_still_leftover, item, settings, datetime.now(UTC)):
+                    continue
+                if not await asyncio.to_thread(remove_file, item.path, settings):
+                    continue
+                lost += 1
+                await asyncio.to_thread(
+                    prune_empty_dirs, item.path.parent, directory, settings, include_stop=gone
+                )
+            except Exception as exc:  # one file must never stop the rest
+                log.warning(
+                    "could not delete a leftover pack file",
+                    extra={"path": str(item.path), "error": repr(exc)},
+                )
+                continue
+            deleted += 1
+            freed += item.size
+            log.info(
+                "deleted a leftover pack file",
+                extra={
+                    "path": str(item.path),
+                    "bytes": item.size,
+                    "reason": item.reason,
+                    "torrent_id": item.torrent_id,
+                },
+            )
+        if lost and not gone:
+            rechecks.append(info_hash)
+
+    # The client still believes it has the deleted pieces: once per pack per
+    # run, so a later claim on one of those files is fetched again rather than
+    # trusted. Never for a gone pack (nothing to ask) or in a dry run.
+    for info_hash in rechecks:
+        try:
+            await qbit.recheck([info_hash])
+        except QbitError as exc:
+            log.warning(
+                "could not ask qBittorrent to recheck a swept pack",
+                extra={"hash": info_hash, "error": str(exc)},
+            )
+            continue
+        log.info("asked qBittorrent to recheck a swept pack", extra={"hash": info_hash})
     return LeftoverSweep(
         candidates=len(found),
         deleted=deleted,
-        freed_bytes=sum(item.size for item in found) if dry_run else freed,
-        dry_run=dry_run,
+        freed_bytes=freed,
+        dry_run=False,
+        rechecked=tuple(rechecks),
     )
 
 
 __all__ = [
-    "BUSY_CLIENT_STATES",
+    "GONE_STATES",
     "HELD_PACK_STATES",
     "MIN_AGE",
     "REASON_CLIENT_GONE",
@@ -526,6 +675,7 @@ __all__ = [
     "FileFacts",
     "Leftover",
     "LeftoverSweep",
+    "client_listing",
     "leftover_files",
     "leftover_reason",
     "sweep_leftovers",
