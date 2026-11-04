@@ -4786,7 +4786,7 @@ M17; as built, fix round 1).** `retention/batch_sweep.py`
 `downloads/batch/<hash>/` that per-episode retention cannot see (a want
 withdrawn mid-download leaves the arrived bytes with no `media_files` row).
 **Leftovers are swept only from packs that are finished (every wanted file
-complete) or gone.** Each pack directory is derived from a `torrents` row of
+complete **and** the client fetching nothing in the pack) or gone.** Each pack directory is derived from a `torrents` row of
 kind `batch` whose lower-cased hash matches `[0-9a-f]{40}|[0-9a-f]{64}`
 (`<downloads>/batch/<hash>`, resolved, like `ingest.in_flight`); an unknown
 `batch/<dir>` is out of scope (the library fence keeps it out of the library,
@@ -4800,8 +4800,13 @@ by default; a file is a candidate only when **all** hold:
   list readable, and its presence settled (below) — otherwise the whole
   directory is untouchable;
 - the pack is **not downloading**: while the client still has it and any
-  `wanted = true` row is incomplete, the whole directory is kept
-  (orchestrator, 2026-11-04). `ingest.in_flight()` stays as a fence: for a
+  `wanted = true` row is incomplete, **or** the client is fetching anything in
+  it whatever Arc's rows say (`FETCHING_CLIENT_STATES` — `downloading`,
+  `forcedDL`, `stalledDL`, `metaDL`, `forcedMetaDL`, `queuedDL` — or any
+  listed file at priority > 0 below `COMPLETE_PROGRESS`: the window after
+  `release_files` before `qbit_reselect`, or a re-selection that failed while
+  the client was down), the whole directory is kept (orchestrator,
+  2026-11-04), judged again right before the first unlink. `ingest.in_flight()` stays as a fence: for a
   downloading pack `holds(path)`, otherwise its "no pack row" half;
 - no `media_files.path` names it and no `torrent_files` row with
   `wanted = true` claims it (the path matched byte for byte, no Unicode
@@ -8130,3 +8135,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-11-04 (orchestrator's call after the Validator and Reviewer) — M21 T7 fix round 1 (§5.1 "Pack picks and the batch poll", §5.2 step 4 "As built", §5b). A pick obeys the pause and the storage hold (409 `acquisition_paused` / `storage_held`, nothing written). The pick reconciliation takes `lock_wants` before the pick rows. An empty client listing is "unknown", and "gone" needs a pick older than an hour. A pick clears every other row's parser reading on its pack. A search that raises after holding a pack deletes it from the client best-effort. Dead picks (no live want; on its way from a live claim or single) are dismissed by the reconciliation; the age rule waits out a pause or hold. `pick_eligible` loses its always-false `chosen`. `awaiting_pick` has one rule for the show row and `/play` (a pending row, the episode `unavailable`/`wanted`). `_thin_shows` skips an `awaiting_pick` pack. The player's Review link is admin-only like the show row's.
 - 2026-11-04 — M21 T8: **the leftover pack files sweep as built** (§5.7 "Leftover pack files", §5.4 admin tabs, §5b preview row; spec FR-T1). New `retention/batch_sweep.py`: pure `leftover_reason(FileFacts)`, `leftover_files(session, settings, qbit)` and `sweep_leftovers(…, dry_run)`; `delete.remove_file` and `delete.prune_empty_dirs`; a step in `retention_sweep` after the floor eviction, dry while `batch_sweep_dry_run` or `RETENTION_DRY_RUN`. Calls made inside the plan's rule, reported for objection: `in_flight().holds` applies only while the pack is in the client and still owes Arc an incomplete wanted file (applied always, it would keep every withdrawn partial — the bytes the rule is for); a held pack (`awaiting_pick`, `cancelled`, pending pick, client checking) is kept whole; a file the client does not list is kept while the pack is in the client; a pack gone from the client loses its emptied directory, one still in it keeps it; sizes are allocated bytes; the preview adds `batch_sweep_dry_run` and `leftover_checked` beside `leftover_files`/`leftover_bytes`. No schema change, no new dependency.
 - 2026-11-04 (orchestrator, after the Validator and Reviewer) — M21 T8 fix round 1: **the leftover sweep fails closed on "gone" and repairs the client** (§5.7 "Leftover pack files", §5b preview row; spec FR-T1). Leftovers only from packs that are finished or gone — a downloading pack (in the client with an incomplete wanted file) is kept whole, superseding the "fence only while downloading" call above. "Gone" takes a non-empty category listing without the pack, `has(hash)` false in any category, and the row already `missing`/`stalled`/`unreadable`; an empty listing is unknown (preview `leftover_checked: false`). Each pack the client still holds that lost a file is rechecked once per run; the client and the rows are re-asked per pack right before its first unlink; a failed step rolls the session back so the later steps run. The preview's `batch_sweep_dry_run` is the effective state (setting or `RETENTION_DRY_RUN`). `CHECKING_STATES`/`ERROR_STATES` moved from `acquisition/jobs.py` to `acquisition/qbit.py`. No schema change, no new dependency.
+- 2026-11-04 (orchestrator, after the Reviewer) — M21 T8 fix round 2: **"downloading" is also the client's word** (§5.7 "Leftover pack files"). A pack is kept whole while the client reports an active-download state (`downloading`, `forcedDL`, `stalledDL`, `metaDL`, `forcedMetaDL`, `queuedDL`) or lists any file switched on and incomplete, whatever the `torrent_files` rows say — at planning and again right before the first unlink. The set is spelled out in `retention/batch_sweep.py` (`FETCHING_CLIENT_STATES`) because the poll's `ACTIVE_DL_STATES`/`METADATA_STATES` live in `acquisition/jobs.py`.

@@ -395,7 +395,8 @@ async def test_a_file_the_client_still_fetches_is_kept(
         data_settings,
         stub,
         "b1" * 20,
-        [PackFile("Show - 01.mkv", priority=1), PackFile("Show - 02.mkv")],
+        # On but complete: the client is fetching nothing, the file stays.
+        [PackFile("Show - 01.mkv", priority=1, complete=True), PackFile("Show - 02.mkv")],
     )
 
     found = await leftover_files(db_session, data_settings, qbit)
@@ -508,7 +509,8 @@ async def test_an_incomplete_file_suffix_is_the_same_file(
         [
             PackFile("Show - 01.mkv", wanted=True, priority=1, complete=True),
             PackFile("Show - 02.mkv", on_disk=False),
-            PackFile("Show - 03.mkv", priority=1, on_disk=False),
+            # Claimed: its suffixed name must still find the claim.
+            PackFile("Show - 03.mkv", wanted=True, priority=1, complete=True, on_disk=False),
         ],
     )
     write_file(pack_dir(data_settings, "b8" * 20) / "Show - 02.mkv.!qB")
@@ -1212,3 +1214,93 @@ async def test_the_preview_calls_an_empty_listing_unchecked(
         body = (await client.get("/api/retention/preview")).json()
 
     assert body["leftover_files"] == [] and body["leftover_checked"] is False
+
+
+# --- Fix round 2: the client's own word on downloading ----------------------------
+
+
+async def test_a_pack_the_client_is_still_fetching_is_kept_whole(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    """No row is wanted (released, the re-selection not yet run), but the client
+    still has file 01 on and incomplete: the pack is downloading, kept whole."""
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "3a" * 20,
+        [PackFile("Show - 01.mkv", priority=1), PackFile("Show - 02.mkv", complete=True)],
+        client_state="stoppedDL",
+    )
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+    assert result.candidates == 0
+    assert (pack_dir(data_settings, "3a" * 20) / "Show - 02.mkv").exists()
+
+
+async def test_an_active_download_state_keeps_the_pack_whole(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "3b" * 20,
+        [PackFile("Show - 01.mkv"), PackFile("Show - 02.mkv", complete=True)],
+        client_state="downloading",
+    )
+
+    assert await leftover_files(db_session, data_settings, qbit) == []
+
+
+async def test_a_pack_the_client_fetches_nothing_in_still_yields_its_candidate(
+    db_session: AsyncSession, data_settings: Settings, stub: QbitStub, qbit: QbitClient
+) -> None:
+    """The same pack once the client's files are all complete or off."""
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "3c" * 20,
+        [
+            PackFile("Show - 01.mkv", priority=1, complete=True),
+            PackFile("Show - 02.mkv", complete=True),
+        ],
+        client_state="stoppedUP",
+    )
+
+    found = await leftover_files(db_session, data_settings, qbit)
+
+    assert names(found) == ["Show - 02.mkv"]
+
+
+async def test_the_client_starting_to_fetch_before_the_unlink_keeps_the_pack(
+    db_session: AsyncSession,
+    data_settings: Settings,
+    stub: QbitStub,
+    qbit: QbitClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await make_pack(
+        db_session,
+        data_settings,
+        stub,
+        "3d" * 20,
+        [PackFile("Show - 01.mkv", priority=1, complete=True), PackFile("Show - 02.mkv")],
+    )
+    real = batch_sweep.leftover_files
+
+    async def then_fetching(*args: object, **kwargs: object) -> list[Leftover]:
+        found = await real(*args, **kwargs)  # type: ignore[arg-type]
+        for row in stub.torrents:
+            if row["hash"] == "3d" * 20:
+                row["state"] = "downloading"
+        return found
+
+    monkeypatch.setattr(batch_sweep, "leftover_files", then_fetching)
+
+    result = await sweep_leftovers(db_session, data_settings, qbit, dry_run=False)
+
+    assert result.candidates == 1 and result.deleted == 0
+    assert (pack_dir(data_settings, "3d" * 20) / "Show - 02.mkv").exists()

@@ -8,9 +8,11 @@ never sees them, and the pack itself may never reach ``batch.disposition``'s
 DELETE while somebody keeps the show on a list. This module finds such files
 and, as one step of the hourly ``retention_sweep``, removes them.
 
-**Only a finished or a gone pack is swept.** A pack the client still has and
-that still owes Arc a wanted file is *downloading*, and its whole directory is
-kept; so is a **held** pack (awaiting a pick, being cancelled, being checked by
+**Only a finished or a gone pack is swept.** A pack the client still has is
+*downloading* while it owes Arc a wanted file **or** the client is fetching
+anything in it (an active-download state, or a file switched on and
+incomplete, whatever Arc's rows say), and its whole directory is kept; so is
+a **held** pack (awaiting a pick, being cancelled, being checked by
 the client) and one whose presence in the client cannot be settled.
 
 **The rule is a conjunction, and every half of it says "keep" by default**
@@ -110,6 +112,15 @@ HELD_PACK_STATES: Final[frozenset[str]] = frozenset({QBIT_AWAITING_PICK, QBIT_CA
 #: already says so: one listing that lacks it is never enough on its own.
 GONE_STATES: Final[frozenset[str]] = frozenset({QBIT_MISSING, QBIT_STALLED, QBIT_UNREADABLE})
 
+#: Client states under which the client is fetching (or about to fetch) bytes
+#: of the pack: the poll's ``ACTIVE_DL_STATES`` and ``METADATA_STATES`` plus
+#: ``queuedDL`` (``checkingDL`` is in :data:`CHECKING_STATES`, which holds the
+#: pack anyway). Spelled out here because those sets live in
+#: ``acquisition/jobs.py``, which registers job handlers on import.
+FETCHING_CLIENT_STATES: Final[frozenset[str]] = frozenset(
+    {"downloading", "forcedDL", "stalledDL", "metaDL", "forcedMetaDL", "queuedDL"}
+)
+
 #: A v1 (SHA-1) or v2 (SHA-256) info hash, lower-cased. Anything else is no
 #: directory Arc made.
 _HASH = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -143,7 +154,8 @@ class FileFacts:
     #: The pack is held: awaiting a pick, a pending ``pack_picks`` row, being
     #: cancelled, the client checking its files, or its presence unsettled.
     held_pack: bool
-    #: The client still has the pack and it still owes Arc a wanted file.
+    #: The client still has the pack and it still owes Arc a wanted file, or
+    #: the client is fetching anything in it.
     pack_downloading: bool
     #: :meth:`InFlight.holds` for the file.
     fenced: bool
@@ -213,6 +225,18 @@ def _downloading(rows: Sequence[TorrentFile]) -> bool:
         and row.completed_at is None
         and (row.progress is None or row.progress < COMPLETE_PROGRESS)
         for row in rows
+    )
+
+
+def _client_fetching(state: str | None, files: Mapping[int, FileInfo]) -> bool:
+    """Whether the client is fetching anything in the pack, whatever Arc's rows
+    say: an active-download state, or any file switched on and not complete
+    (the window after ``release_files`` and before ``qbit_reselect``, or a
+    re-selection that failed while the client was down)."""
+    if state is not None and state in FETCHING_CLIENT_STATES:
+        return True
+    return any(
+        info.priority > FILE_OFF and info.progress < COMPLETE_PROGRESS for info in files.values()
     )
 
 
@@ -412,7 +436,7 @@ async def leftover_files(
             in_client = gone is not True
         if client_state is not None and client_state in CHECKING_STATES:
             held = True
-        downloading = in_client and _downloading(own)
+        downloading = in_client and (_downloading(own) or _client_fetching(client_state, {}))
         client_files: dict[int, FileInfo] = {}
         if client_state is not None and not held and not downloading:
             try:
@@ -429,6 +453,8 @@ async def leftover_files(
                     extra={"torrent_id": torrent_id, "error": str(exc)},
                 )
                 held = True
+            # Judged from the client too, not only from Arc's rows.
+            downloading = _client_fetching(client_state, client_files)
         built.append(
             _Pack(
                 torrent_id=torrent_id,
@@ -533,6 +559,12 @@ async def _client_agrees(
         if info is None or info.state in CHECKING_STATES:
             return []
         listed = {row.index: row for row in await qbit.files(info_hash)}
+        if _client_fetching(info.state, listed):
+            log.info(
+                "qBittorrent is fetching in a pack about to be swept; keeping it",
+                extra={"hash": info_hash},
+            )
+            return []
     except QbitError as exc:
         log.warning(
             "could not re-ask qBittorrent about a pack; keeping its files",
