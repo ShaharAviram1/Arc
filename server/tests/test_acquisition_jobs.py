@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import (
+    PACK_PICK_REASON,
     Anime,
     Episode,
     EpisodeState,
@@ -35,6 +36,7 @@ from arc.models import (
 from arc.services.acquisition import batch as batch_module
 from arc.services.acquisition import jobs as acquisition_jobs
 from arc.services.acquisition import nyaa as nyaa_module
+from arc.services.acquisition import pack_picks
 from arc.services.acquisition import qbit as qbit_module
 from arc.services.acquisition import rules as acquisition_rules
 from arc.services.acquisition.jobs import (
@@ -80,6 +82,7 @@ from arc.services.acquisition.reject import (
     reject_download,
 )
 from arc.services.acquisition.rules import BYTES_PER_GB, PAUSED_KEY
+from arc.services.acquisition.states import transition
 from arc.services.acquisition.wants import cancel_if_unwanted
 from arc.services.jobs.queue import DEDUPE_FIELD
 from arc.services.jobs.registry import JobContext
@@ -2666,18 +2669,14 @@ async def test_extras_inside_the_pack_are_never_selected(
     assert episode.state is EpisodeState.DOWNLOADING
 
 
-async def test_a_batch_whose_wanted_file_cannot_be_identified_is_deleted(
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+async def test_a_batch_whose_wanted_file_cannot_be_identified_is_never_started(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The plan's D5: a pack Arc cannot read is not downloaded at all.
 
-    It was added stopped, so nothing has been fetched — and it goes with its
-    files, the episode keeps FR-A6's ordinary retry, and the row it leaves
-    behind is the tombstone that stops the same pack being fetched again in six
-    hours (:data:`~arc.services.acquisition.qbit.QBIT_UNREADABLE`).
+    Since M21 the best such pack is kept **stopped with nothing selected** for
+    a person's pick (``test_pack_picks.py`` pins the rest), and nothing of it
+    is fetched: every file is written to priority 0 and it is never started.
     """
     wired, episode = await _finished(
         db_session, monkeypatch, tmp_path, anilist_id=962103, email="batch4@arc.test"
@@ -2685,19 +2684,53 @@ async def test_a_batch_whose_wanted_file_cannot_be_identified_is_deleted(
     # The pack holds the show, and not this episode.
     wired.qbit.add_files(BATCH_HASH, _pack_names(1, 2, 3))
 
+    await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
+
+    assert wired.qbit.started == [], "nothing may be started that was not read"
+    assert wired.qbit.deleted == []
+    assert [(call["priority"], call["indices"]) for call in wired.qbit.priorities] == [
+        (0, [0, 1, 2])
+    ]
+    held = await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    assert held is not None and held.qbit_state == qbit_module.QBIT_AWAITING_PICK
+    assert not any(row.wanted for row in await _torrent_files(db_session, held.id))
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == PACK_PICK_REASON
+
+
+async def test_a_second_unreadable_batch_is_still_deleted_and_remembered(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only the **best** refused pack waits for a pick; the rest are as before.
+
+    The second goes with its files, and the row it leaves behind is the
+    tombstone that stops the same pack being fetched again in six hours
+    (:data:`~arc.services.acquisition.qbit.QBIT_UNREADABLE`).
+    """
+    wired, episode = await _finished(
+        db_session,
+        monkeypatch,
+        tmp_path,
+        anilist_id=962163,
+        email="batch4b@arc.test",
+        pool=TWO_PACKS,
+    )
+    wired.qbit.add_files(BATCH_HASH, _pack_names(1, 2, 3))
+    wired.qbit.add_files(SECOND_HASH, _pack_names(4, 5))
+
     with caplog.at_level(logging.WARNING):
         await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
 
-    assert wired.qbit.deleted == [{"hashes": BATCH_HASH, "deleteFiles": "true"}]
-    assert wired.qbit.started == [], "nothing may be started that was not read"
-    assert wired.qbit.torrents == [], "and it is gone from the client"
-    tombstone = await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    assert wired.qbit.deleted == [{"hashes": SECOND_HASH, "deleteFiles": "true"}]
+    assert wired.qbit.started == []
+    tombstone = await db_session.scalar(select(Torrent).where(Torrent.info_hash == SECOND_HASH))
     assert tombstone is not None
     assert tombstone.qbit_state == QBIT_UNREADABLE
     assert tombstone.kind is TorrentKind.BATCH and tombstone.episode_id is None
     assert await _torrent_files(db_session, tombstone.id) == []
-    assert episode.state is EpisodeState.SEARCHING
-    assert len(await queued(db_session, SEARCH_RELEASE)) == 1
     refused = next(
         row
         for row in caplog.records
@@ -2723,9 +2756,12 @@ async def test_two_files_claiming_the_episode_refuse_the_batch(
 
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
 
-    assert wired.qbit.priorities == [], "a refused plan writes no selection at all"
-    assert wired.qbit.deleted != []
-    assert episode.state is EpisodeState.SEARCHING
+    assert all(call["priority"] == 0 for call in wired.qbit.priorities), (
+        "a refused plan selects nothing at all"
+    )
+    assert wired.qbit.started == []
+    assert episode.state is EpisodeState.UNAVAILABLE
+    assert episode.unavailable_reason == PACK_PICK_REASON
 
 
 async def test_a_tampered_read_back_deletes_the_batch_and_tries_the_next(
@@ -2790,13 +2826,20 @@ async def test_every_batch_refused_ends_unavailable_with_its_own_sentence(
         )
     )
 
+    # M21: the best of them waits for a person's pick, and says so.
     assert episode.state is EpisodeState.UNAVAILABLE
-    assert episode.unavailable_reason == batch_module.UNREADABLE_BATCH
+    assert episode.unavailable_reason == PACK_PICK_REASON
     assert episode.unavailable_reason != NO_RELEASE
-    assert len(wired.qbit.deleted) == 2, "both packs were added, read and removed"
-    # Both left a tombstone, so tomorrow's revival does not fetch either again.
+    assert len(wired.qbit.deleted) == 1, "the other pack was added, read and removed"
+    # Neither is fetched again by tomorrow's revival: one is held, one remembered.
     states = (await db_session.scalars(select(Torrent.qbit_state))).all()
-    assert sorted(states) == [QBIT_UNREADABLE, QBIT_UNREADABLE]
+    assert sorted(states) == sorted([qbit_module.QBIT_AWAITING_PICK, QBIT_UNREADABLE])
+
+    # Dismissed, it is the pre-M21 ending: unreadable packs, their own sentence.
+    pick = await pack_picks.pending_for(db_session, episode.id)
+    assert pick is not None
+    await pack_picks.dismiss(db_session, pick.id, user_id=None)
+    assert episode.unavailable_reason == batch_module.UNREADABLE_BATCH
 
 
 async def test_two_episodes_wanted_at_once_share_one_batch(
@@ -4113,6 +4156,13 @@ async def test_an_unreadable_pack_is_not_fetched_again_tomorrow(
     wired.qbit.add_files(BATCH_HASH, _pack_names(1, 2, 3))
     await search_release(context(db_session, wired.settings, {"episode_id": episode.id}))
     assert await db_session.scalar(select(Torrent).where(Torrent.info_hash == BATCH_HASH))
+    # M21: the pack waited for a pick; a person dismissed it, and the daily
+    # revival wants the episode again.
+    pick = await pack_picks.pending_for(db_session, episode.id)
+    assert pick is not None
+    await pack_picks.dismiss(db_session, pick.id, user_id=None)
+    transition(episode, EpisodeState.WANTED, reason="revived")
+    await db_session.flush()
     wired.nyaa.fetched.clear()
     wired.qbit.uploaded.clear()
     started = (datetime.now(UTC) - GIVE_UP_AFTER - timedelta(hours=1)).isoformat()

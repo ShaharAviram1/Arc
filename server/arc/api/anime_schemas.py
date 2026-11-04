@@ -42,6 +42,7 @@ from arc.models import (
 from arc.services.acquisition.demand import OpenDemand
 from arc.services.acquisition.demand_gate import DemandGate
 from arc.services.acquisition.dormancy import is_dormant
+from arc.services.acquisition.pack_picks import PICKABLE_STATES
 from arc.services.acquisition.wants import SlotView
 from arc.services.catalog import preferred_title
 from arc.services.catalog.airing import (
@@ -697,6 +698,11 @@ class EpisodeOut(BaseModel):
     #: The episode plays from its download right now (FR-P8): the row reads
     #: "downloading 43 % · playable" (FR-A7). False for a ready episode.
     live_playable: bool = False
+    #: Its season pack waits for a person's file pick (M21, FR-A4): a pending
+    #: ``pack_picks`` row on it while it is ``unavailable`` or ``wanted`` —
+    #: the same rule as ``PendingOut.awaiting_pick``. The show page's row links
+    #: to Review. Show page and player only; false elsewhere.
+    awaiting_pick: bool = False
 
     @classmethod
     def from_episode(
@@ -720,6 +726,7 @@ class EpisodeOut(BaseModel):
         fetchable: bool = False,
         demanded: bool = False,
         live_playable: bool = False,
+        awaiting_pick: bool = False,
     ) -> EpisodeOut:
         """``boundary`` is the list's :func:`aired_through`; see that module.
 
@@ -786,6 +793,9 @@ class EpisodeOut(BaseModel):
             few_seeders=few_seeders(release, min_seeders_warn),
             seeders=release.live_seeders if release is not None else None,
             live_playable=live_playable and episode.state is not EpisodeState.READY,
+            # The one definition (``pack_picks.awaiting``): the caller passes
+            # whether a pick on it is pending, and the state decides the rest.
+            awaiting_pick=awaiting_pick and episode.state in PICKABLE_STATES,
         )
 
 
@@ -1162,6 +1172,7 @@ class AnimeDetail(AnimeCore):
         demand: DemandGate | None = None,
         rewatch: RewatchSummary | None = None,
         live_playable: frozenset[int] = frozenset(),
+        awaiting_pick: frozenset[int] = frozenset(),
     ) -> AnimeDetail:
         """``completed`` and ``list_progress`` are FR-W5's two halves as the
         caller's :func:`~arc.services.playback.rewatch.watch_view` read them
@@ -1253,6 +1264,7 @@ class AnimeDetail(AnimeCore):
                     fetchable=True,
                     demanded=episode.id in demanded,
                     live_playable=episode.id in live_playable,
+                    awaiting_pick=episode.id in awaiting_pick,
                 )
                 for episode in episodes
             ],

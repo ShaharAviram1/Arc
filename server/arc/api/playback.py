@@ -79,6 +79,7 @@ from arc.models import (
     Want,
     WatchProgress,
 )
+from arc.services.acquisition import pack_picks
 from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
 from arc.services.acquisition.demand_gate import DemandGate, demand_gate
 from arc.services.catalog import episodes_for
@@ -218,7 +219,8 @@ async def play(
        unknown one.
 
     ``pending`` is the state, download percentage and seeders, plus ``note``
-    (:func:`pending_note`) and ``awaiting_pick`` (M21 T7; false until then).
+    (:func:`pending_note`) and ``awaiting_pick`` (M21 T7: its pack waits for a
+    person's file pick, §5.2 step 4).
     With a live want and a live remux serving its download (FR-P8) the answer
     is the playlist and ``live`` instead.
 
@@ -374,7 +376,10 @@ async def play(
                 if downloading and release is not None
                 else None
             ),
-            awaiting_pick=False,
+            # The same rule as ``EpisodeOut.awaiting_pick``: a pending pick
+            # while the episode still rests on it (not after a single turned up).
+            awaiting_pick=episode.state in pack_picks.PICKABLE_STATES
+            and episode.id in extras.awaiting_pick,
         )
     return PlayInfo(
         episode=EpisodeOut.from_episode(
@@ -394,6 +399,7 @@ async def play(
             trip_only=episode.id in extras.trip_only,
             min_seeders_warn=extras.min_seeders_warn,
             live_playable=live is not None,
+            awaiting_pick=episode.id in extras.awaiting_pick,
         ),
         anime=AnimeSummary.from_anime(anime),
         playlist_url=playlist_url(episode.id) if not not_ready or live is not None else None,

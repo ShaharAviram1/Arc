@@ -11,8 +11,10 @@ import {
   GONE_MESSAGE,
   NOT_IGNORED_MESSAGE,
   parseEpisodeInput,
+  packErrorMessage,
   parsedChips,
   REVIEW_CONFLICT_DETAILS,
+  reviewBadge,
   reviewErrorMessage,
   reviewQueueQueryKey,
   reviewSummaryQueryKey,
@@ -175,5 +177,37 @@ describe('query keys', () => {
     expect(reviewQueueQueryKey('pending')).toEqual(['review', 'queue', 'pending'])
     expect(reviewQueueQueryKey('auto')).toEqual(['review', 'queue', 'auto'])
     expect(reviewSummaryQueryKey).toEqual(['review', 'summary'])
+  })
+})
+
+describe('reviewBadge (M21)', () => {
+  it('counts files alone in the old words', () => {
+    expect(reviewBadge({ pending: 2 })).toEqual({ count: 2, label: '2 files need review' })
+    expect(reviewBadge(undefined)).toEqual({ count: 0, label: '0 files need review' })
+  })
+
+  it('adds the packs waiting for a pick', () => {
+    expect(reviewBadge({ pending: 0, packs: 1 })).toEqual({
+      count: 1,
+      label: '1 item needs review',
+    })
+    expect(reviewBadge({ pending: 2, packs: 2 })).toEqual({
+      count: 4,
+      label: '4 items need review',
+    })
+  })
+})
+
+describe('packErrorMessage (M21)', () => {
+  it("says the server's own sentence for a refused pick", () => {
+    const error = new ApiError(409, {
+      detail: { code: 'not_wanted', message: 'Nobody wants this episode any more.' },
+    })
+    expect(packErrorMessage(error)).toBe('Nobody wants this episode any more.')
+  })
+
+  it('falls back to a sentence of its own', () => {
+    expect(packErrorMessage(new ApiError(409, { detail: 'x' }))).toMatch(/Refresh/)
+    expect(packErrorMessage(new ApiError(404, { detail: 'x' }))).toMatch(/no longer waiting/)
   })
 })

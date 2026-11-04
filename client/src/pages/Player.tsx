@@ -14,6 +14,7 @@ import { OpenDemandLinks } from '@/components/OpenDemandLinks'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
 import { listErrorMessage, rewatchErrorMessage, useRewatch, useSetListEntry } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
+import { SEASON_PACKS_PATH } from '@/lib/review'
 import {
   alreadyDemanded,
   DEMAND_NOT_FOUND_RETRIES,
@@ -602,7 +603,8 @@ const AWAITING_PICK = 'Its season pack needs someone to pick the right file.'
  * where the episode is — "Searching", "Downloading 43 %", "Preparing", or
  * that no release was found yet — with the release's seeders once there is
  * one, the server's `note` when it will only play once its download finishes
- * (a season pack), and a link to Review when its pack waits for a file pick.
+ * (a season pack), and — for an admin, who alone can make it — a link to
+ * Review when its pack waits for a file pick.
  */
 function PendingView({
   info,
@@ -620,6 +622,7 @@ function PendingView({
   capped?: DemandRefusal | null
   onWithdrawn?: () => void
 }) {
+  const { data: me } = useMe()
   const label = pendingLabel(pending)
   const resting = pending.state === 'unavailable'
   const note = pending.note ?? null
@@ -661,10 +664,11 @@ function PendingView({
           {note ?? PLAYS_WHEN_READY}
         </p>
       )}
-      {pending.awaiting_pick === true ? (
+      {/* Only an admin can make the pick (M21), so only an admin is sent there. */}
+      {pending.awaiting_pick === true && me?.role === 'admin' ? (
         <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
           {AWAITING_PICK}{' '}
-          <Link to="/review" className={cx('underline underline-offset-4', FOCUS_RING)}>
+          <Link to={SEASON_PACKS_PATH} className={cx('underline underline-offset-4', FOCUS_RING)}>
             Open Review
           </Link>
         </p>

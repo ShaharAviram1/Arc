@@ -317,10 +317,10 @@ class TestSummary:
         await seed_file(api_factory, data_dir, name="b.mkv", review_state=ReviewState.IGNORED)
         await seed_file(api_factory, data_dir, name="c.mkv", review_state=ReviewState.CONFIRMED)
 
-        assert (await user_client.get("/api/review/summary")).json() == {"pending": 1}
+        assert (await user_client.get("/api/review/summary")).json() == {"pending": 1, "packs": 0}
 
     async def test_it_is_zero_on_an_empty_library(self, user_client: AsyncClient) -> None:
-        assert (await user_client.get("/api/review/summary")).json() == {"pending": 0}
+        assert (await user_client.get("/api/review/summary")).json() == {"pending": 0, "packs": 0}
 
 
 class TestConfirm:

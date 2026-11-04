@@ -270,6 +270,13 @@ describe('Account menu review badge', () => {
     expect(screen.getByRole('link', { name: /Review/ })).toContainElement(pill)
   })
 
+  it('counts the season packs waiting for a pick with the files (M21)', async () => {
+    renderShell({ review: { body: { pending: 2, packs: 1 } } })
+    await openAccountMenu()
+
+    expect(screen.getByLabelText('3 items need review')).toHaveTextContent('3')
+  })
+
   it('says it in the singular for a single file', async () => {
     renderShell({ review: { body: { pending: 1 } } })
     await openAccountMenu()

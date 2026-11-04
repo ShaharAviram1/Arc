@@ -307,6 +307,12 @@ class TorrentFile(Base):
 PACK_PICK_PICKED = "picked"
 PACK_PICK_DISMISSED = "dismissed"
 
+#: The sentence an episode waiting on a pending pick shows (spec FR-A4, M21):
+#: ``unavailable`` with this reason exactly while its pack's pick is pending.
+#: Here rather than in the acquisition package so the show page's schema can
+#: read it without importing the handlers.
+PACK_PICK_REASON = "the pack's files need a person's pick (Review)"
+
 #: At most one **pending** pick per pack and episode; resolved rows are kept as
 #: the record of who picked what. Named for the migration test.
 PENDING_PACK_PICK_INDEX = "uq_pack_picks_pending"

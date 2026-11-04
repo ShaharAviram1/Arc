@@ -50,15 +50,29 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import Path as PathParam
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.api.anime_schemas import AnimeSummary
 from arc.api.anime_schemas import SearchPage as AnimeSearchPage
-from arc.api.deps import CatalogDep, CurrentUser, MediaFileId, SessionDep, SettingsDep
+from arc.api.deps import (
+    MAX_ID,
+    MIN_ID,
+    AdminUser,
+    CatalogDep,
+    CurrentUser,
+    MediaFileId,
+    SessionDep,
+    SettingsDep,
+)
 from arc.api.review_schemas import (
     CandidateOut,
     ConfirmRequest,
+    PackCandidateOut,
+    PackEpisodeOut,
+    PackPickOut,
+    PickRequest,
     ReviewItem,
     ReviewPage,
     ReviewSummary,
@@ -66,8 +80,10 @@ from arc.api.review_schemas import (
     SuggestJobOut,
 )
 from arc.config import Settings
-from arc.models import Anime, MediaFile, ReviewState
+from arc.models import Anime, Episode, MediaFile, PackPick, ReviewState, Torrent, UserRole
+from arc.services.acquisition import pack_picks
 from arc.services.acquisition.reject import reject_download
+from arc.services.acquisition.wants import lock_wants
 from arc.services.catalog import (
     CATALOGUE_UNAVAILABLE,
     SourceUnavailable,
@@ -87,6 +103,10 @@ ALREADY_LINKED = "this file is already linked to an episode"
 NOT_IGNORED = "only an ignored file can be reopened"
 SUGGESTIONS_DISABLED = "Suggestions are not enabled"
 NOT_PENDING = "only a file waiting for review can be suggested for"
+PACK_PICK_NOT_FOUND = "pack pick not found"
+
+#: A ``pack_picks`` row id in a path.
+PackPickId = Annotated[int, PathParam(ge=MIN_ID, le=MAX_ID, description="A pack pick row id.")]
 
 #: How many rows one page of the queue returns. The queue is meant to be
 #: emptied, not paged through; a library that has hundreds pending has a
@@ -174,8 +194,127 @@ async def list_queue(
     summary="How many files are waiting for review",
 )
 async def summary(user: CurrentUser, session: SessionDep) -> ReviewSummary:
-    """One ``COUNT``. The client sidebar polls this, so it stays this small."""
-    return ReviewSummary(pending=await _pending_count(session))
+    """Two ``COUNT``s. The client sidebar polls this, so it stays this small.
+
+    ``packs`` (M21) only for an admin: the season-pack picks are theirs to
+    make, and nobody else is shown a count they cannot act on.
+    """
+    packs = await pack_picks.pending_count(session) if user.role is UserRole.ADMIN else 0
+    return ReviewSummary(pending=await _pending_count(session), packs=packs)
+
+
+@router.get(
+    "/packs",
+    response_model=list[PackPickOut],
+    summary="Season packs waiting for a person's file pick (M21, FR-A4)",
+)
+async def list_packs(user: AdminUser, session: SessionDep) -> list[PackPickOut]:
+    """Every pending pick, oldest first, with the parser's reading of each file.
+
+    The readings are shown and never applied (no LLM suggestion either): a
+    person chooses with "This is episode N", or dismisses the pack.
+    """
+    rows = (
+        await session.execute(
+            select(PackPick, Episode, Anime, Torrent)
+            .join(Episode, Episode.id == PackPick.episode_id)
+            .join(Anime, Anime.id == Episode.anime_id)
+            .join(Torrent, Torrent.id == PackPick.torrent_id)
+            .where(PackPick.resolved_at.is_(None))
+            .order_by(PackPick.created_at, PackPick.id)
+        )
+    ).all()
+    statuses = await list_status_for(
+        session, user_id=user.id, anime_ids=sorted({anime.id for _, _, anime, _ in rows})
+    )
+    found: list[PackPickOut] = []
+    for row, episode, anime, torrent in rows:
+        candidates = [
+            candidate
+            for raw in row.candidates
+            if isinstance(raw, dict)
+            and (candidate := PackCandidateOut.from_stored(raw)) is not None
+        ]
+        found.append(
+            PackPickOut(
+                id=row.id,
+                anime=AnimeSummary.from_anime(anime, statuses.get(anime.id)),
+                episode=PackEpisodeOut(id=episode.id, number=episode.number, title=episode.title),
+                reason=row.reason,
+                title=torrent.title,
+                candidates=candidates,
+                created_at=row.created_at,
+            )
+        )
+    return found
+
+
+def _conflict(exc: pack_picks.PickConflict) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message})
+
+
+@router.post(
+    "/packs/{pick_id}/pick",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="This is episode N: fetch one file of a pack (M21, FR-A4)",
+    responses={
+        404: {"description": PACK_PICK_NOT_FOUND},
+        409: {"description": "the pick is resolved, the pack or the want moved on"},
+        422: {"description": "the file is not one of the pack's video files"},
+    },
+)
+async def pick_pack_file(
+    pick_id: PackPickId,
+    body: PickRequest,
+    user: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> None:
+    """Claim the file for the wanted episode and start the pack.
+
+    Under the reconciler's lock (``lock_wants``), so a want cannot be withdrawn
+    between the check and the claim. Refused with 409 ``{code, message}`` when
+    the pick is resolved already, acquisition is paused or held for disk space
+    (``acquisition_paused``, ``storage_held``), the pack is no longer waiting,
+    nobody wants the episode any more, or it is already on its way.
+    """
+    await lock_wants(session)
+    try:
+        await pack_picks.pick(
+            session, pick_id, file_index=body.file_index, user_id=user.id, settings=settings
+        )
+    except pack_picks.PickNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=PACK_PICK_NOT_FOUND
+        ) from exc
+    except pack_picks.PickConflict as exc:
+        await session.rollback()
+        raise _conflict(exc) from exc
+    await session.commit()
+
+
+@router.post(
+    "/packs/{pick_id}/dismiss",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Forget a pack Arc could not read (M21, FR-A4)",
+    responses={
+        404: {"description": PACK_PICK_NOT_FOUND},
+        409: {"description": "the pick is resolved already"},
+    },
+)
+async def dismiss_pack(pick_id: PackPickId, user: AdminUser, session: SessionDep) -> None:
+    """The pack becomes the ``unreadable`` tombstone and is deleted with its files."""
+    await lock_wants(session)
+    try:
+        await pack_picks.dismiss(session, pick_id, user_id=user.id)
+    except pack_picks.PickNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=PACK_PICK_NOT_FOUND
+        ) from exc
+    except pack_picks.PickConflict as exc:
+        await session.rollback()
+        raise _conflict(exc) from exc
+    await session.commit()
 
 
 @router.get(
@@ -397,6 +536,7 @@ __all__ = [
     "ITEM_NOT_FOUND",
     "NOT_IGNORED",
     "NOT_PENDING",
+    "PACK_PICK_NOT_FOUND",
     "PAGE_LIMIT",
     "SUGGESTIONS_DISABLED",
     "router",

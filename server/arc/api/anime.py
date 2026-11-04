@@ -442,6 +442,8 @@ async def detail(
         min_seeders_warn=extras.min_seeders_warn,
         # FR-A7's "playable" while downloading (FR-P8).
         live_playable=extras.live_playable,
+        # M21: the episodes whose pack waits for a person's file pick.
+        awaiting_pick=extras.awaiting_pick,
     )
 
 

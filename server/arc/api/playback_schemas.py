@@ -125,7 +125,8 @@ class PendingOut(BaseModel):
     #: or the release is named as an MP4. Null otherwise.
     note: str | None = None
     #: Its season pack is waiting for a person's file pick (M21 T7, §5.2 step
-    #: 4): the player links to Review. Always false until T7 fills it.
+    #: 4): a ``pack_picks`` row on the episode is pending. The player links to
+    #: Review.
     awaiting_pick: bool = False
 
 

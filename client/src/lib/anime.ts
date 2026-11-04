@@ -347,6 +347,12 @@ export interface EpisodeOut {
    * tracker's once the client has scraped — or null with no live torrent.
    */
   seeders?: number | null
+  /**
+   * Its season pack waits for a person's file pick (M21, FR-A4): the row
+   * links to the Review page's season-pack section. Optional on the wire so
+   * an older payload parses as no pick.
+   */
+  awaiting_pick?: boolean
 }
 
 /**
