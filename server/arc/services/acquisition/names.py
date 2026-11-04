@@ -73,6 +73,13 @@ QBIT_TOP = "qbit_top_prio"
 #: on its episode (M20 T6, FR-P8). Read-then-toggle, so it is idempotent.
 QBIT_SEQUENTIAL = "qbit_sequential"
 
+#: Remove a dismissed pack pick's pack from the client **with its files** (M21,
+#: FR-A4): the row is already the ``unreadable`` tombstone when this runs, and
+#: the handler deletes only a hash whose row says so. A job for
+#: ``qbit_cancel``'s reasons: the dismiss must not span an HTTP call, and a
+#: client that is down must not be able to fail it.
+QBIT_FORGET_PACK = "qbit_forget_pack"
+
 # --- Queue priorities (lower runs first; the default is 100) ----------------
 #
 # Acquisition is the greediest thing Arc does and the least urgent. A single
@@ -100,6 +107,7 @@ QBIT_CANCEL_PRIORITY = 60
 QBIT_RESELECT_PRIORITY = 60
 QBIT_TOP_PRIORITY = 60
 QBIT_SEQUENTIAL_PRIORITY = 60
+QBIT_FORGET_PACK_PRIORITY = 60
 
 #: Above the default: reconciling the whole wants table is a handful of
 #: queries, but nothing is waiting on the answer within the minute.
@@ -140,6 +148,11 @@ def sequential_dedupe_key(episode_id: int) -> str:
     return f"{QBIT_SEQUENTIAL}:{episode_id}"
 
 
+def forget_pack_dedupe_key(torrent_id: int) -> str:
+    """One queued removal per dismissed pack."""
+    return f"{QBIT_FORGET_PACK}:{torrent_id}"
+
+
 def reselect_dedupe_key(torrent_id: int) -> str:
     """One queued re-selection per **torrent**, not per episode.
 
@@ -174,6 +187,8 @@ __all__ = [
     "POLL_QBIT_PRIORITY",
     "QBIT_CANCEL",
     "QBIT_CANCEL_PRIORITY",
+    "QBIT_FORGET_PACK",
+    "QBIT_FORGET_PACK_PRIORITY",
     "QBIT_POLICY",
     "QBIT_POLICY_PRIORITY",
     "QBIT_RESELECT",
@@ -186,6 +201,7 @@ __all__ = [
     "SEARCH_RELEASE_PRIORITY",
     "cancel_dedupe_key",
     "enqueue_compute_wants",
+    "forget_pack_dedupe_key",
     "reselect_dedupe_key",
     "search_dedupe_key",
     "sequential_dedupe_key",

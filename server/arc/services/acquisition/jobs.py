@@ -103,30 +103,34 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from arc.config import Settings
 from arc.models import (
+    PACK_PICK_REASON,
     Anime,
     Episode,
     EpisodeState,
     Job,
     MediaFile,
+    PackPick,
+    ReviewState,
     Torrent,
     TorrentFile,
     TorrentKind,
     TripEpisode,
     Want,
 )
-from arc.services.acquisition import batch, claims
+from arc.services.acquisition import batch, claims, pack_picks
 from arc.services.acquisition import nyaa as nyaa_module
 from arc.services.acquisition.names import (
     COMPUTE_WANTS,
     POLL_QBIT,
     QBIT_CANCEL,
+    QBIT_FORGET_PACK,
     QBIT_POLICY,
     QBIT_RESELECT,
     QBIT_SEQUENTIAL,
@@ -173,8 +177,10 @@ from arc.services.acquisition.wants import compute_wants as reconcile_wants
 from arc.services.jobs.queue import enqueue, find_active
 from arc.services.jobs.registry import JobContext, register
 from arc.services.library import ingest
+from arc.services.library.link import link
 from arc.services.library.names import MATCH_FILE, match_dedupe_key
 from arc.services.media.names import enqueue_remux_live, episode_demanded
+from arc.services.retention.rules import unwatched_period
 from arc.services.trips.names import TRIP_BATCH_MIN, TRIP_SEARCH_PRIORITY
 from arc.services.trips.rules import (
     needs_rendition,
@@ -471,8 +477,42 @@ async def compute_wants(ctx: JobContext) -> None:
     hold the *starting* half while the disk is under the floor (FR-T6). It is
     the only caller that can: everything else enqueues this job.
     """
+    picks = await _reconcile_pack_picks(ctx)
     result = await reconcile_wants(ctx.session, settings=ctx.settings)
-    ctx.log.info("wants computed", extra={"job_id": ctx.job.id, **result.as_dict()})
+    ctx.log.info(
+        "wants computed",
+        extra={"job_id": ctx.job.id, **result.as_dict(), **picks.as_dict()},
+    )
+
+
+async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
+    """Dismiss the pack picks nobody will make (M21, FR-A4; §5.2 step 4).
+
+    Before the wants are reconciled, so an episode whose pick was dismissed
+    here is on the ordinary daily retry in the same pass. A pick pending D
+    days is dismissed; so is one whose pack is gone from the client — the
+    batch poll skips ``awaiting_pick`` (a decided state), so this is what
+    notices a pack deleted by hand. The client's listing is asked for only
+    when a pick is pending, and a client that cannot be reached leaves only
+    the age rule: the reconciliation must not fail because qBittorrent is down.
+    """
+    hashes = await pack_picks.awaiting_hashes(ctx.session)
+    live: set[str] | None = None
+    if hashes:
+        try:
+            async with QbitClient.from_settings(ctx.settings) as qbit:
+                live = {info.hash.lower() for info in await qbit.torrents()}
+        except QbitError as exc:
+            ctx.log.warning(
+                "could not list the torrent client; pack picks judged by age only",
+                extra={"error": str(exc)},
+            )
+    return await pack_picks.reconcile(
+        ctx.session,
+        now=datetime.now(UTC),
+        period=await unwatched_period(ctx.session),
+        live_hashes=live,
+    )
 
 
 async def _pick(ctx: JobContext, episode: Episode, ranked: list[Ranked]) -> Ranked | None:
@@ -681,6 +721,32 @@ async def _schedule_retry(
     )
 
 
+async def _retry_unless_picking(
+    ctx: JobContext, episode: Episode, *, now: datetime, reason: str = NO_RELEASE
+) -> None:
+    """:func:`_schedule_retry`, unless a pack waits for a person's pick (M21).
+
+    An episode whose pack pick is pending rests ``unavailable`` with
+    :data:`~arc.models.PACK_PICK_REASON` instead of searching every six hours:
+    the answer it is waiting for is a person's, and the reconciler's daily
+    revival (``wants.UNAVAILABLE_RETRY``) still looks again once a day in case
+    a single turns up. Its pick is open until picked, dismissed, D days old or
+    its pack is gone (:func:`~arc.services.acquisition.pack_picks.reconcile`).
+    """
+    if (
+        episode.state is EpisodeState.SEARCHING
+        and await pack_picks.pending_for(ctx.session, episode.id) is not None
+    ):
+        transition(episode, EpisodeState.UNAVAILABLE, reason=PACK_PICK_REASON)
+        await ctx.session.flush()
+        ctx.log.info(
+            "the episode waits for a person to pick its pack's file",
+            extra={"episode_id": episode.id},
+        )
+        return
+    await _schedule_retry(ctx, episode, now=now, reason=reason)
+
+
 #: The two lines :func:`_requeue_paused` can log. One function because the
 #: behaviour is identical — requeue, touch nothing, ask Nyaa nothing — and the
 #: only thing an operator needs from the log is *which* brake is on, since one
@@ -856,6 +922,9 @@ class BatchAttempt:
     reason: str | None = None
     #: The reserved ``torrents`` row of the pack that was started.
     torrent: Torrent | None = None
+    #: The pack kept for a person's file pick when nothing was started (M21,
+    #: FR-A4): only when the caller asked for one (``pick=True``).
+    pick: PackPick | None = None
 
 
 #: First half of the advisory lock a trip-only search of a finished show holds
@@ -1098,6 +1167,7 @@ async def _take_batch(
     trip: TripPass | None = None,
     prefer: bool = False,
     over_single: bool = False,
+    pick: bool = False,
 ) -> BatchAttempt:
     """Take the best batch whose files Arc can read (FR-A4's exception, FR-A11).
 
@@ -1190,9 +1260,17 @@ async def _take_batch(
     through here too, with its pack already added stopped and read and handed
     over as ``trip.held`` — so it is selected, verified and started by exactly
     this sequence, and never by a second copy of it.
+
+    ``pick`` (M21, FR-A4; only the search's own fallback passes it) keeps the
+    **best** pack refused permanently for identification
+    (:func:`~arc.services.acquisition.pack_picks.pick_eligible`) in the client,
+    stopped with every file at priority 0, instead of deleting it: if a later
+    candidate is started it is tombstoned after all, and if none is it waits
+    for a person (:func:`~arc.services.acquisition.pack_picks.open_pick`).
     """
     refused = 0
     last_reason: str | None = None
+    for_pick: tuple[Torrent, batch.FilePlan, list[dict[str, Any]]] | None = None
     async with QbitClient.from_settings(ctx.settings) as qbit:
         for chosen in batches:
             info_hash = chosen.item.info_hash
@@ -1225,6 +1303,24 @@ async def _take_batch(
                     # A pack naming no range never claimed this episode, and
                     # may be exactly right for the next one (FR-A12, FR-A4).
                     await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=False)
+                    continue
+                if (
+                    pick
+                    and for_pick is None
+                    and pack_picks.pick_eligible(plan.refused_reason, permanent=True, chosen=False)
+                ):
+                    # The best pack a person could read (FR-A4, M21): every
+                    # file off and still stopped, decided once the rest of the
+                    # candidates have had their turn.
+                    await qbit.file_priority(info_hash, plan.indices, FILE_OFF)
+                    for_pick = (
+                        torrent,
+                        plan,
+                        batch.pick_candidates(
+                            anime, listed, offset=batch.plan_offset(chosen, offset)
+                        ),
+                    )
+                    refused += 1
                     continue
                 await _abandon(ctx, qbit, torrent, plan.refused_reason, permanent=True)
                 refused += 1
@@ -1313,7 +1409,26 @@ async def _take_batch(
                     **nyaa_module.as_dict(chosen),
                 },
             )
+            if for_pick is not None:
+                # Something was chosen after all: the kept pack is what it
+                # would have been without a pick, the tombstone.
+                await _abandon(
+                    ctx,
+                    qbit,
+                    for_pick[0],
+                    for_pick[1].refused_reason or "unreadable",
+                    permanent=True,
+                )
             return BatchAttempt(started=True, refused=refused, torrent=torrent)
+    if for_pick is not None:
+        opened = await pack_picks.open_pick(
+            ctx.session,
+            torrent=for_pick[0],
+            episode=episode,
+            plan=for_pick[1],
+            candidates=for_pick[2],
+        )
+        return BatchAttempt(started=False, refused=refused, reason=last_reason, pick=opened)
     return BatchAttempt(started=False, refused=refused, reason=last_reason)
 
 
@@ -2047,9 +2162,12 @@ async def search_release(ctx: JobContext) -> None:
                         "min_seeders": min_seeders,
                     },
                 )
-                await _schedule_retry(ctx, episode, now=now, reason=batch.THIN_PACK)
+                await _retry_unless_picking(ctx, episode, now=now, reason=batch.THIN_PACK)
                 return
         if offered_batches and fallback:
+            # One pending pick per episode at a time (M21, FR-A4): a revival
+            # that finds the same refusals tombstones them as before.
+            waiting = await pack_picks.pending_for(ctx.session, episode.id)
             attempt = await _take_batch(
                 ctx,
                 episode,
@@ -2058,6 +2176,7 @@ async def search_release(ctx: JobContext) -> None:
                 attachable=attachable,
                 offset=offset,
                 trip=trip,
+                pick=waiting is None,
             )
             await _drop_held(ctx, trip)
             if attempt.started:
@@ -2067,7 +2186,7 @@ async def search_release(ctx: JobContext) -> None:
             # Where every candidate was merely *skipped* — already tried, or a
             # ``.torrent`` Nyaa would not hand over — nothing was read, and the
             # ordinary sentence is the honest one.
-            await _schedule_retry(
+            await _retry_unless_picking(
                 ctx,
                 episode,
                 now=now,
@@ -2082,7 +2201,7 @@ async def search_release(ctx: JobContext) -> None:
                 "batch fallback is off; the batches on offer were not considered",
                 extra={"episode_id": episode.id, "batches": len(found.batches)},
             )
-        await _schedule_retry(
+        await _retry_unless_picking(
             ctx,
             episode,
             now=now,
@@ -2672,6 +2791,8 @@ async def _complete_file(
         anime_id=episode.anime_id,
         number=episode.number,
     )
+    if await _link_picked(ctx, torrent, row, episode, handoff):
+        return True
     transition(episode, EpisodeState.MATCHING, reason="handed to the matcher")
     ctx.log.info(
         "a batch file was handed to the library",
@@ -2683,6 +2804,48 @@ async def _complete_file(
             "indexed_here": handoff.created,
             "path": str(path),
             "expected": [episode.anime_id, episode.number],
+        },
+    )
+    return True
+
+
+async def _link_picked(
+    ctx: JobContext, torrent: Torrent, row: TorrentFile, episode: Episode, handoff: Handoff
+) -> bool:
+    """Link a pack file a **person** picked for this episode, as confirmed (M21).
+
+    The pick (:func:`~arc.services.acquisition.pack_picks.pick`) is the
+    person's answer to the very question the matcher would ask, so the landed
+    file is linked through the claim with ``review_state = confirmed`` — the
+    review's own link — and the queued ``match_file`` finds it decided and
+    leaves it alone. It is then prepared like any pack file (the remux the
+    link queues; no live remux for a pack). Any other pack file returns
+    ``False`` and takes the matcher with its prior, as before.
+    """
+    if row.episode_id != episode.id or (
+        await pack_picks.picked_file(
+            ctx.session, torrent_id=torrent.id, file_index=row.file_index, episode_id=episode.id
+        )
+        is None
+    ):
+        return False
+    media_file = await ctx.session.get(MediaFile, handoff.media_file_id)
+    if media_file is None or media_file.episode_id is not None:
+        return False
+    await link(
+        ctx.session,
+        media_file,
+        anime_id=episode.anime_id,
+        episode_number=episode.number,
+        review_state=ReviewState.CONFIRMED,
+    )
+    ctx.log.info(
+        "a picked pack file was linked as confirmed",
+        extra={
+            "episode_id": episode.id,
+            "torrent_id": torrent.id,
+            "file_index": row.file_index,
+            "media_file_id": media_file.id,
         },
     )
     return True
@@ -3765,6 +3928,42 @@ async def qbit_reselect(ctx: JobContext) -> None:
             "episodes": sorted(row.episode_id for row in wanted if row.episode_id is not None),
             "disposition": verdict.value,
         },
+    )
+
+
+@register(QBIT_FORGET_PACK)
+async def qbit_forget_pack(ctx: JobContext) -> None:
+    """Delete a dismissed pack pick's pack from the client, with its files (M21).
+
+    The dismiss (:func:`~arc.services.acquisition.pack_picks.dismiss`, or the
+    reconciliation's) has already made the row the
+    :data:`~arc.services.acquisition.qbit.QBIT_UNREADABLE` tombstone; this is
+    the request to the client, and it is made **only** for a row that says so —
+    a pack anything else has decided about, or one picked in the meantime, is
+    not this job's to delete. The pack never fetched a byte (it was held
+    stopped with nothing selected). Idempotent: deleting a hash the client no
+    longer holds is a no-op there.
+    """
+    torrent_id = int(ctx.payload["torrent_id"])
+    torrent = await ctx.session.get(Torrent, torrent_id)
+    if (
+        torrent is None
+        or torrent.kind is not TorrentKind.BATCH
+        or torrent.qbit_state != QBIT_UNREADABLE
+    ):
+        ctx.log.info(
+            "nothing to forget",
+            extra={
+                "torrent_id": torrent_id,
+                "state": torrent.qbit_state if torrent is not None else None,
+            },
+        )
+        return
+    async with QbitClient.from_settings(ctx.settings) as qbit:
+        await qbit.delete([torrent.info_hash], delete_files=True)
+    ctx.log.info(
+        "a dismissed pack was removed from the client",
+        extra={"job_id": ctx.job.id, "torrent_id": torrent.id, "hash": torrent.info_hash},
     )
 
 
