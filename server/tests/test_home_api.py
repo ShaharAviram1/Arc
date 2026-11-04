@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arc.config import Settings
@@ -2023,3 +2023,53 @@ async def test_a_second_visit_does_not_queue_the_stills_again(
     await home(client)
 
     assert len(await enrichments(api_factory)) == 1
+
+
+async def test_rows_of_a_show_in_an_open_pass_say_in_rewatch(
+    client: AsyncClient, user: User, api_factory: SessionFactory
+) -> None:
+    """``in_rewatch`` (M21 T10): true on the Continue watching, Ready to watch and
+    This week rows of a show with an open pass, false elsewhere, false again
+    once it ends."""
+    again = await old_show(api_factory, title="Again", anilist_id=910090)
+    other = await old_show(api_factory, title="Plain", anilist_id=910091)
+    weekly = await airing_show(api_factory, title="Weekly", anilist_id=910092)
+    plain_weekly = await airing_show(api_factory, title="Plain weekly", anilist_id=910093)
+    await follow(api_factory, user, again, ListStatus.COMPLETED, progress=4)
+    await follow(api_factory, user, other, ListStatus.WATCHING, progress=0)
+    await follow(api_factory, user, weekly, ListStatus.WATCHING, progress=3)
+    await follow(api_factory, user, plain_weekly, ListStatus.WATCHING, progress=3)
+    await open_pass(api_factory, user, again, NOW - timedelta(days=2))
+    await open_pass(api_factory, user, weekly, NOW - timedelta(days=2))
+    started = await episode_number(api_factory, again, 1)
+    unseen = await episode_number(api_factory, again, 2)
+    plain_started = await episode_number(api_factory, other, 1)
+    plain_ready = await episode_number(api_factory, other, 2)
+    for episode in (started, unseen, plain_started, plain_ready):
+        await make_ready(api_factory, episode)
+    await watch_row(
+        api_factory, user, started, position_s=300.0, updated_at=NOW - timedelta(hours=1)
+    )
+    await watch_row(
+        api_factory, user, plain_started, position_s=300.0, updated_at=NOW - timedelta(hours=2)
+    )
+
+    body = await home(client)
+
+    def flags(shelf: str) -> dict[tuple[str, int], bool]:
+        return {
+            (row["anime"]["title"]["preferred"], row["episode"]["number"]): row["in_rewatch"]
+            for row in body[shelf]
+        }
+
+    assert flags("continue_watching") == {("Again", 1): True, ("Plain", 1): False}
+    assert flags("ready_to_watch") == {("Again", 2): True, ("Plain", 2): False}
+    assert flags("new_this_week") == {("Weekly", 7): True, ("Plain weekly", 7): False}
+
+    async with api_factory() as session:
+        await session.execute(update(Rewatch).values(ended_at=NOW))
+        await session.commit()
+    body = await home(client)
+    assert all(not row["in_rewatch"] for row in body["continue_watching"])
+    assert all(not row["in_rewatch"] for row in body["ready_to_watch"])
+    assert all(not row["in_rewatch"] for row in body["new_this_week"])

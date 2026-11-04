@@ -70,6 +70,7 @@ from arc.api.playback_schemas import (
     SubtitlesOut,
 )
 from arc.models import (
+    PICKABLE_STATES,
     Anime,
     Episode,
     EpisodeState,
@@ -79,7 +80,6 @@ from arc.models import (
     Want,
     WatchProgress,
 )
-from arc.services.acquisition import pack_picks
 from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
 from arc.services.acquisition.demand_gate import DemandGate, demand_gate
 from arc.services.catalog import episodes_for
@@ -377,8 +377,7 @@ async def play(
             ),
             # The same rule as ``EpisodeOut.awaiting_pick``: a pending pick
             # while the episode still rests on it (not after a single turned up).
-            awaiting_pick=episode.state in pack_picks.PICKABLE_STATES
-            and episode.id in extras.awaiting_pick,
+            awaiting_pick=episode.state in PICKABLE_STATES and episode.id in extras.awaiting_pick,
         )
     return PlayInfo(
         episode=EpisodeOut.from_episode(

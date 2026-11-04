@@ -639,6 +639,8 @@ interface EpisodeItem {
   duration: number | null
   /** Resumable only from the trip copy on the viewer's device (FR-A12). */
   onDevice: boolean
+  /** The show is in an open rewatch pass (FR-W7): the tile says "Rewatch". */
+  inRewatch: boolean
 }
 
 /** Whole minutes left, or null when nothing knows how long the episode is. */
@@ -663,6 +665,7 @@ function continueWatching(home: HomePage): EpisodeItem[] {
     position: entry.position_s,
     duration: entry.duration_s,
     onDevice: entry.on_device,
+    inRewatch: entry.in_rewatch === true,
   }))
 }
 
@@ -684,6 +687,7 @@ function readyToWatch(home: HomePage): EpisodeItem[] {
     position: null,
     duration: null,
     onDevice: false,
+    inRewatch: entry.in_rewatch === true,
   }))
 }
 
@@ -786,6 +790,12 @@ function needsDemand(item: EpisodeItem): boolean {
   return item.episode.state !== 'ready' && !item.onDevice
 }
 
+/**
+ * The label on a tile whose show is in an open rewatch pass (FR-W7, M21): the
+ * episode plays as any other, but finishing it moves the pass, not the list.
+ */
+const REWATCH_LABEL = 'Rewatch'
+
 function EpisodeTile({ item }: { item: EpisodeItem }) {
   const resuming = item.position !== null
   const state: WatchState | undefined = needsDemand(item) ? { demand: true } : undefined
@@ -801,7 +811,14 @@ function EpisodeTile({ item }: { item: EpisodeItem }) {
       <p className="mt-2.5 truncate text-[16px] font-medium text-[var(--arc-text)]">
         {item.anime.title.preferred}
       </p>
-      <p className="mt-1 truncate text-[14px] text-[var(--arc-text-muted)]">{tileLine(item)}</p>
+      <p className="mt-1 flex items-center gap-2 text-[14px] text-[var(--arc-text-muted)]">
+        {item.inRewatch ? (
+          <span className="shrink-0 rounded-full border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-2 py-px text-[12px] text-[var(--arc-text)]">
+            {REWATCH_LABEL}
+          </span>
+        ) : null}
+        <span className="truncate">{tileLine(item)}</span>
+      </p>
     </Link>
   )
 }

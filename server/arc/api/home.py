@@ -123,6 +123,8 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
     # ``rewatch.watch_view`` reads it) — watched means finished in the pass,
     # and the list's progress counts for nothing. One query per open pass
     # with a row on this page; a user has a handful at most.
+    # The same passes say which cards carry the "Rewatch" label (``in_rewatch``,
+    # M21 T10): no query of their own.
     passes = {found.anime_id: found for found in await open_rewatches(session, user_id=user.id)}
     in_pass: set[int] = set()
     for anime_id, found in passes.items():
@@ -181,6 +183,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
                 offline=extras.offline.out(row.episode),
                 trip_only=row.episode.id in extras.trip_only,
+                in_rewatch=row.anime.id in passes,
             )
             for row in started
         ],
@@ -201,6 +204,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
                 offline=extras.offline.out(row.episode),
                 trip_only=row.episode.id in extras.trip_only,
+                in_rewatch=row.anime.id in passes,
             )
             for row in ready
         ],
@@ -223,6 +227,7 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
                 transcode_job=extras.transcode_jobs.get(row.episode.id),
                 offline=extras.offline.out(row.episode),
                 trip_only=row.episode.id in extras.trip_only,
+                in_rewatch=row.anime.id in passes,
             )
             for row in fresh
         ],

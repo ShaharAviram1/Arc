@@ -116,16 +116,32 @@ def test_pick_eligibility_a_transient_refusal_never_qualifies() -> None:
     assert not pack_picks.pick_eligible(reason, permanent=False)
 
 
-def test_gone_from_the_client_needs_a_listing_and_an_hour() -> None:
+def test_gone_from_the_client_needs_two_misses_an_hour_apart() -> None:
     now = datetime.now(UTC)
-    old = now - timedelta(hours=2)
-    young = now - timedelta(minutes=10)
     hash_ = "ab" * 20
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=None)
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=set())
-    assert not pack_picks.gone_from(hash_, created_at=young, now=now, live={"cd" * 20})
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live={hash_})
-    assert pack_picks.gone_from(hash_, created_at=old, now=now, live={"cd" * 20})
+    other = {"cd" * 20}
+    gone_from = pack_picks.gone_from
+    Sighting = pack_picks.Sighting
+
+    # An unknown listing (unreachable, or empty) changes nothing either way.
+    assert gone_from(hash_, absent_since=None, now=now, live=None) == Sighting(False, None)
+    assert gone_from(hash_, absent_since=None, now=now, live=set()) == Sighting(False, None)
+    earlier = now - timedelta(hours=2)
+    assert gone_from(hash_, absent_since=earlier, now=now, live=None) == Sighting(False, earlier)
+    # Listed: kept, and an earlier miss is forgotten.
+    assert gone_from(hash_, absent_since=None, now=now, live={hash_}) == Sighting(False, None)
+    assert gone_from(hash_, absent_since=earlier, now=now, live={hash_}) == Sighting(False, None)
+    # The first miss only stamps the moment.
+    assert gone_from(hash_, absent_since=None, now=now, live=other) == Sighting(False, now)
+    # A second miss under an hour later keeps waiting; an hour or more is gone.
+    recent = now - timedelta(minutes=59)
+    assert gone_from(hash_, absent_since=recent, now=now, live=other) == Sighting(False, recent)
+    hour = now - pack_picks.GONE_AFTER
+    assert gone_from(hash_, absent_since=hour, now=now, live=other) == Sighting(True, hour)
+    # Case does not matter: the listing is lower-case, a stored hash may not be.
+    assert gone_from(hash_.upper(), absent_since=None, now=now, live={hash_}) == Sighting(
+        False, None
+    )
 
 
 def test_pick_candidates_are_the_video_files_with_the_parser_reading() -> None:
@@ -458,21 +474,175 @@ async def test_a_pack_gone_from_the_client_is_reconciled(
     )
     await _compute(db_session, wired)
     assert pick.resolved_at is None, "still in the client"
+    assert pick.absent_since is None
 
-    # The client lists something else, but the pick is younger than an hour:
-    # a restarted qBittorrent lists short at first.
-    other = {**wired.qbit.torrents[0], "hash": "e" * 40}
+    # The client lists something else: the first miss is only noted.
+    listed = wired.qbit.torrents[0]
+    other = {**listed, "hash": "e" * 40}
     wired.qbit.torrents = [other]
+    before = datetime.now(UTC)
     await _compute(db_session, wired)
-    assert pick.resolved_at is None, "younger than an hour"
+    assert pick.resolved_at is None, "absent once: kept"
+    assert pick.absent_since is not None and pick.absent_since >= before
+    first_miss = pick.absent_since
 
-    pick.created_at = datetime.now(UTC) - timedelta(hours=2)
+    # Missing again minutes later: still kept, and the first miss stands.
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "absent twice, but not an hour apart"
+    assert pick.absent_since == first_miss
+
+    # Missing again an hour after the first miss: gone.
+    pick.absent_since = datetime.now(UTC) - pack_picks.GONE_AFTER - timedelta(minutes=1)
     await db_session.flush()
     await _compute(db_session, wired)
 
     assert pick.resolution == PACK_PICK_DISMISSED
     assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
     assert episode.unavailable_reason == batch_module.UNREADABLE_BATCH
+
+
+async def test_a_pack_listed_again_between_two_misses_resets_the_clock(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963723, email="gone2@arc.test"
+    )
+    listed = wired.qbit.torrents[0]
+    other = {**listed, "hash": "e" * 40}
+
+    # Missed once, long enough ago that a second miss would dismiss it ...
+    wired.qbit.torrents = [other]
+    await _compute(db_session, wired)
+    assert pick.absent_since is not None
+    pick.absent_since = datetime.now(UTC) - timedelta(hours=3)
+    await db_session.flush()
+
+    # ... but the client lists it again in between: the miss is forgotten.
+    wired.qbit.torrents = [listed, other]
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None
+    assert pick.absent_since is None
+
+    # So the next miss is a first miss again, not a second.
+    wired.qbit.torrents = [other]
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "a fresh first miss"
+    assert pick.absent_since is not None
+    assert (await _pack(db_session)).qbit_state == QBIT_AWAITING_PICK
+
+
+async def test_an_unknown_listing_neither_confirms_nor_clears_a_miss(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963724, email="gone3@arc.test"
+    )
+    stamped = datetime.now(UTC) - timedelta(hours=3)
+    pick.absent_since = stamped
+    await db_session.flush()
+
+    wired.qbit.torrents = []  # a client that has just restarted lists nothing
+    await _compute(db_session, wired)
+
+    assert pick.resolved_at is None
+    assert pick.absent_since == stamped
+
+
+async def test_a_pick_opened_after_the_listing_was_read_is_not_judged_missing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The race B1 opens: the hashes are read, the client is listed, and only then
+    is the want lock taken — a pick on a pack held in between is in the rows
+    ``reconcile`` locks but was not asked about, so a listing that misses it
+    says nothing about it. Pack A was asked about and is stamped; pack B is not."""
+    wired, episode, first = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963726, email="gone5@arc.test"
+    )
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.UNAVAILABLE
+    eighth.unavailable_reason = PACK_PICK_REASON
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    later_pack = Torrent(
+        episode_id=None,
+        kind=TorrentKind.BATCH,
+        info_hash=SECOND_HASH,
+        title="[Other] Sousou no Frieren (Season 1) [1080p]",
+        qbit_state=QBIT_AWAITING_PICK,
+    )
+    db_session.add(later_pack)
+    await db_session.flush()
+    second = PackPick(
+        torrent_id=later_pack.id,
+        episode_id=eighth.id,
+        reason="no file in the batch is episode 8",
+        candidates=first.candidates,
+    )
+    db_session.add(second)
+    await db_session.flush()
+
+    # The hashes were read before pack B's pick existed: only pack A's.
+    async def before_b(session: AsyncSession) -> list[str]:
+        return [BATCH_HASH]
+
+    monkeypatch.setattr(pack_picks, "awaiting_hashes", before_b)
+    # The client lists neither pack.
+    wired.qbit.torrents = [{**wired.qbit.torrents[0], "hash": "e" * 40}]
+
+    await _compute(db_session, wired)
+
+    assert first.absent_since is not None, "asked about and missing: the first miss"
+    assert second.absent_since is None, "never asked about: unknown, not missing"
+    assert first.resolved_at is None and second.resolved_at is None
+
+
+async def test_a_pack_found_gone_dismisses_every_pick_on_it(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two picks on one pack: one miss, a second an hour later — both picks are
+    dismissed as gone in that pass, and the pack is forgotten once."""
+    wired, episode, first = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963727, email="gone6@arc.test"
+    )
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.UNAVAILABLE
+    eighth.unavailable_reason = PACK_PICK_REASON
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    second = PackPick(
+        torrent_id=first.torrent_id,
+        episode_id=eighth.id,
+        reason="no file in the batch is episode 8",
+        candidates=first.candidates,
+    )
+    db_session.add(second)
+    await db_session.flush()
+
+    wired.qbit.torrents = [{**wired.qbit.torrents[0], "hash": "e" * 40}]
+    await _compute(db_session, wired)
+    assert first.absent_since is not None and second.absent_since is not None
+    assert first.resolved_at is None and second.resolved_at is None
+
+    # The second pick's own stamp is younger: only the first's is an hour old.
+    first.absent_since = datetime.now(UTC) - pack_picks.GONE_AFTER - timedelta(minutes=1)
+    await db_session.flush()
+    await _compute(db_session, wired)
+
+    assert first.resolution == PACK_PICK_DISMISSED
+    assert second.resolution == PACK_PICK_DISMISSED
+    assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
+    assert await _forgets(db_session) == 1
+    # Neither episode is left resting on a pick that no longer exists.
+    assert episode.unavailable_reason != PACK_PICK_REASON
+    assert eighth.unavailable_reason != PACK_PICK_REASON
 
 
 async def test_an_empty_client_listing_dismisses_nothing(
@@ -781,10 +951,12 @@ async def test_a_pick_while_storage_is_held_is_refused_and_writes_nothing(
     await _nothing_moved(db_session, episode, pick)
 
 
-async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
+async def test_the_pick_reconciliation_lists_the_client_before_the_want_lock(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The routes lock ``lock_wants`` then a pick row; the job must do the same."""
+    """The listing (an HTTP call) is read before ``lock_wants`` is taken, and
+    the pick rows are locked only after it: the routes' order, the want lock
+    then a pick row, and the global lock never held across the client call."""
     wired, _episode, _pick = await _refused(
         db_session, monkeypatch, tmp_path, anilist_id=963722, email="fix3@arc.test"
     )
@@ -792,14 +964,19 @@ async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
     real_lock = acquisition_jobs.lock_wants
     real_hashes = pack_picks.awaiting_hashes
     real_reconcile = pack_picks.reconcile
+    real_torrents = acquisition_jobs.QbitClient.torrents
 
     async def lock(session: AsyncSession) -> None:
         order.append("lock_wants")
         await real_lock(session)
 
     async def hashes(session: AsyncSession) -> list[str]:
-        order.append("pick rows")
+        order.append("pick hashes")
         return await real_hashes(session)
+
+    async def torrents(self: object, *args: object, **kwargs: object) -> object:
+        order.append("listing")
+        return await real_torrents(self, *args, **kwargs)  # type: ignore[arg-type]
 
     async def reconcile(session: AsyncSession, **kwargs: object) -> pack_picks.Reconciled:
         order.append("pick rows")
@@ -807,12 +984,12 @@ async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
 
     monkeypatch.setattr(acquisition_jobs, "lock_wants", lock)
     monkeypatch.setattr(pack_picks, "awaiting_hashes", hashes)
+    monkeypatch.setattr(acquisition_jobs.QbitClient, "torrents", torrents)
     monkeypatch.setattr(pack_picks, "reconcile", reconcile)
 
     await _compute(db_session, wired)
 
-    assert order[0] == "lock_wants"
-    assert "pick rows" in order
+    assert order[:4] == ["pick hashes", "listing", "lock_wants", "pick rows"], order
 
 
 async def test_a_picked_pack_offers_no_other_reading_to_a_later_want(

@@ -1070,6 +1070,52 @@ describe('Watch Now shelves', () => {
     expect(within(shelf('Continue watching')).getAllByRole('link')).toHaveLength(1)
   })
 
+  it('labels the tiles of a show in an open rewatch pass "Rewatch"', async () => {
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          continue_watching: [{ ...CONTINUE_FRIEREN, in_rewatch: true }],
+          ready_to_watch: [
+            {
+              anime: FRIEREN,
+              episode: readyEpisode({ id: 9303, number: 6 }),
+              in_rewatch: true,
+            },
+            { anime: APOTHECARY, episode: readyEpisode({ id: 9302, number: 2 }) },
+          ],
+        },
+      },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'Ready to watch' })
+    const resumed = within(shelf('Continue watching')).getAllByRole('link')[0] as HTMLElement
+    expect(within(resumed).getByText('Rewatch')).toBeInTheDocument()
+    expect(within(resumed).getByText('Episode 5 · 11 min left')).toBeInTheDocument()
+    // The label is beside the line, not in the tile's name: the press is the same.
+    expect(resumed).toHaveAccessibleName(`Resume ${FRIEREN.title.preferred} episode 5`)
+
+    const ready = within(shelf('Ready to watch')).getAllByRole('link')
+    expect(within(ready[0] as HTMLElement).getByText('Rewatch')).toBeInTheDocument()
+    // A show with no pass, or a row from a server that never sent the field.
+    expect(within(ready[1] as HTMLElement).queryByText('Rewatch')).not.toBeInTheDocument()
+  })
+
+  it('shows no "Rewatch" label when the pass is not open', async () => {
+    renderHome({
+      'GET /api/home': {
+        body: {
+          ...EMPTY_HOME,
+          continue_watching: [{ ...CONTINUE_FRIEREN, in_rewatch: false }],
+        },
+      },
+    })
+
+    await screen.findByRole('heading', { level: 2, name: 'Continue watching' })
+    const tile = within(shelf('Continue watching')).getAllByRole('link')[0] as HTMLElement
+    expect(within(tile).queryByText('Rewatch')).not.toBeInTheDocument()
+  })
+
   it('no longer builds "Ready to watch" out of this week’s episodes', async () => {
     // The bug (owner, 2026-09-17): the shelf was `new_this_week` filtered for
     // the ready, unstarted rows, so it silently required the episode to have
