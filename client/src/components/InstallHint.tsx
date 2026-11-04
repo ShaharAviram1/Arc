@@ -13,8 +13,7 @@ import { installGuide, type InstallGuide } from '@/lib/install'
  * browser, any desktop, and the installed app itself get nothing at all
  * (`lib/install.ts`).
  *
- * Built like the demo account's first-visit strip on Watch Now: one line, a ✕,
- * and once dismissed it does not come back in this browser. The key is not
+ * One line, a ✕, and once dismissed it does not come back in this browser. The key is not
  * per user — installing is something a device does, not an account.
  */
 export const INSTALL_HINT_KEY = 'arc:install-hint-dismissed'

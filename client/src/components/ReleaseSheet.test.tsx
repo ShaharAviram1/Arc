@@ -14,7 +14,6 @@ import {
   jsonBodyOf,
   mockApi,
   requestsMade,
-  TEST_DEMO_USER,
   TEST_USER,
   type MockRoutes,
 } from '@/test/apiMock'
@@ -22,8 +21,7 @@ import {
 /**
  * "Change release…" and "Choose pack…" (FR-A13): the sheet lists what Arc
  * found and why it would not take some of it, a pasted link to the wrong host
- * is refused in a sentence, a choice calls the route and refreshes the show,
- * and the demo account sees none of it.
+ * is refused in a sentence, and a choice calls the route and refreshes the show.
  */
 
 const EPISODE_ID = 9004
@@ -306,15 +304,6 @@ describe('the episode row', () => {
       [`GET ${DETAIL}`]: { body: detailWith({ wanted_by_me: false }) },
     })
     await screen.findByText('4. The Land Where Souls Rest')
-    expect(screen.queryByRole('button', { name: /^More for episode/ })).not.toBeInTheDocument()
-  })
-
-  it('offers nothing to the demo account', async () => {
-    renderShow({
-      'GET /api/auth/me': { body: TEST_DEMO_USER },
-      [`GET ${DETAIL}`]: { body: detailWith({ wanted_by_me: true }) },
-    })
-    await screen.findByRole('heading', { name: FRIEREN.title.preferred })
     expect(screen.queryByRole('button', { name: /^More for episode/ })).not.toBeInTheDocument()
   })
 })

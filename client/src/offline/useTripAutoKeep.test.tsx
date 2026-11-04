@@ -8,7 +8,7 @@ import type { Trip, TripEpisode } from '@/lib/trips'
 import { setDownloads, type DownloadRecord } from '@/offline/downloads'
 import { autoKeep, keepsTrips, useTripAutoKeep } from '@/offline/useTripAutoKeep'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
-import { mockApi, requestsMade, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
 import {
   downloadedRecord,
   managerHarness,
@@ -337,11 +337,11 @@ describe('useTripAutoKeep', () => {
     return <QueryClientProvider client={createQueryClient()}>{children}</QueryClientProvider>
   }
 
-  it('is off for the demo account, for nobody, and where the browser cannot keep files', () => {
+  it('is on for every account, off for nobody and where the browser cannot keep files', () => {
     expect(keepsTrips(TEST_USER)).toBe(false) // jsdom: no OPFS
     pretendOpfs()
     expect(keepsTrips(TEST_USER)).toBe(true)
-    expect(keepsTrips(TEST_DEMO_USER)).toBe(false)
+    expect(keepsTrips({ ...TEST_USER, id: 3, email: 'other@example.com' })).toBe(true)
     expect(keepsTrips(null)).toBe(false)
     expect(keepsTrips(undefined)).toBe(false)
   })
@@ -374,11 +374,11 @@ describe('useTripAutoKeep', () => {
     expect(requestsMade(fetchMock)).toContain('GET /api/trips')
   })
 
-  it('asks nothing for the demo account or once signed out', async () => {
+  it('asks nothing while nobody is signed in', async () => {
     pretendOpfs()
     const fetchMock = mockApi({ 'GET /api/trips': { body: [] } })
 
-    const initialProps: { me: User | null } = { me: TEST_DEMO_USER }
+    const initialProps: { me: User | null } = { me: null }
     const { rerender } = renderHook(
       ({ me }: { me: User | null }) => {
         useTripAutoKeep(me)

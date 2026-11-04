@@ -6,14 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { routes } from '@/app/router'
 import { PHONE_MEDIA_QUERY } from '@/lib/media'
 import { createQueryClient } from '@/lib/queryClient'
-import {
-  mockApi,
-  requestsMade,
-  TEST_ADMIN,
-  TEST_DEMO_USER,
-  TEST_USER,
-  type MockResponse,
-} from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_ADMIN, TEST_USER, type MockResponse } from '@/test/apiMock'
 
 const HEALTH = { body: { status: 'ok', version: '0.1.0', env: 'test' } }
 const REVIEW_SUMMARY = 'GET /api/review/summary'
@@ -149,26 +142,16 @@ describe('Toolbar', () => {
     expect(screen.queryByRole('link', { name: 'Recommendations' })).not.toBeInTheDocument()
   })
 
-  it('gives the demo account a fourth destination, and nobody else one', async () => {
-    renderShell({ me: TEST_DEMO_USER })
+  it('has the three destinations and no fourth, for every account (M21)', async () => {
+    renderShell()
 
-    const entry = await screen.findByRole('link', { name: 'How Arc works' })
-    const nav = screen.getByRole('navigation', { name: 'Main' })
-    expect(nav).toContainElement(entry)
-    expect(entry).toHaveAttribute('href', '/how-arc-works')
-    // Last, after the three every account has.
+    const nav = await screen.findByRole('navigation', { name: 'Main' })
+    await screen.findByRole('link', { name: 'Watch Now' })
     expect(
       within(nav)
         .getAllByRole('link')
         .map((link) => link.textContent),
-    ).toEqual(['Watch Now', 'Browse', 'Schedule', 'How Arc works'])
-  })
-
-  it('keeps it out of an ordinary account’s toolbar', async () => {
-    renderShell()
-
-    await screen.findByRole('link', { name: 'Watch Now' })
-    expect(screen.queryByRole('link', { name: 'How Arc works' })).not.toBeInTheDocument()
+    ).toEqual(['Watch Now', 'Browse', 'Schedule'])
   })
 
   it('sends a typed query to Browse', async () => {
@@ -444,24 +427,7 @@ describe('Phone chrome', () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
-  it('puts How Arc works in the More sheet for the demo account alone', async () => {
-    renderShell({ me: TEST_DEMO_USER, phone: true })
-
-    const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'More' }))
-
-    const entry = screen.getByRole('link', { name: 'How Arc works' })
-    expect(entry).toHaveAttribute('href', '/how-arc-works')
-    // Beneath Schedule and above the account items, same order as the toolbar.
-    expect(screen.getByRole('link', { name: 'Schedule' }).compareDocumentPosition(entry)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    )
-    expect(entry.compareDocumentPosition(screen.getByRole('link', { name: 'MyAnimeList' }))).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    )
-  })
-
-  it('leaves the sheet as it was for an ordinary account', async () => {
+  it('puts only Schedule above the account items in the sheet', async () => {
     renderShell({ phone: true })
 
     const user = userEvent.setup()
@@ -469,6 +435,26 @@ describe('Phone chrome', () => {
 
     expect(screen.getByRole('link', { name: 'Schedule' })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'How Arc works' })).not.toBeInTheDocument()
+  })
+
+  it('offers Downloads to every signed-in account where the browser can keep files', async () => {
+    // OPFS and a Worker: what `canDownloadInApp` asks for. No account is
+    // refused any more (the demo account that was went in M21).
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      value: { getDirectory: () => Promise.reject(new Error('not in tests')) },
+    })
+    vi.stubGlobal('Worker', class {})
+    try {
+      renderShell({ phone: true })
+
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: 'More' }))
+
+      expect(screen.getByRole('link', { name: 'Downloads' })).toHaveAttribute('href', '/downloads')
+    } finally {
+      Reflect.deleteProperty(navigator, 'storage')
+    }
   })
 
   it('opens the account items in the More sheet, and closes it on Escape', async () => {

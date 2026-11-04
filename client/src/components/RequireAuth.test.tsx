@@ -8,8 +8,10 @@ import { RequireAuth } from '@/components/RequireAuth'
 import { apiFetch } from '@/lib/api'
 import { authMeQueryKey } from '@/lib/auth'
 import { createQueryClient } from '@/lib/queryClient'
+import { setDownloads } from '@/offline/downloads'
 import { Login } from '@/pages/Login'
 import { mockApi, requestsMade, TEST_ADMIN, TEST_USER } from '@/test/apiMock'
+import { managerHarness } from '@/test/downloadFixtures'
 
 const NOT_AUTHED = { status: 401, body: { detail: 'not authenticated' } }
 const HEALTH = { body: { status: 'ok', version: '0.1.0', env: 'test' } }
@@ -99,6 +101,22 @@ describe('RequireAuth', () => {
 
     expect(requestsMade(fetchMock)).toContain('POST /api/auth/logout')
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
+  })
+
+  it('points the downloads at the signed-in account, with nothing else to say (M21)', async () => {
+    // The demo flag that once rode along (`{ demo }`) went with the demo.
+    const { manager } = managerHarness()
+    const setOwner = vi.spyOn(manager, 'setOwner')
+    setDownloads(manager)
+    mockApi({ 'GET /api/auth/me': { body: TEST_USER }, 'GET /api/probe': { body: { ok: true } } })
+
+    renderProbe()
+
+    await screen.findByText('probe')
+    await vi.waitFor(() => {
+      expect(setOwner).toHaveBeenLastCalledWith(TEST_USER.id)
+    })
+    for (const call of setOwner.mock.calls) expect(call).toHaveLength(1)
   })
 
   it('bounces to login when any other request 401s mid-session', async () => {

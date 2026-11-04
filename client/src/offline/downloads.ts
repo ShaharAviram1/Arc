@@ -88,7 +88,7 @@
  * those episodes. At launch, on reconnect, when a download completes and when
  * one is deleted; debounced 5 s; an unchanged set is not sent again within 10
  * minutes; with no network the report waits (`meta`) and goes on the outbox's
- * next landed flush or the reconnect; never for the demo account.
+ * next landed flush or the reconnect.
  *
  * **A file is never touched while the worker may hold it.** From the moment a
  * pause is sent until the worker's terminal message for that file (which the
@@ -949,8 +949,6 @@ export class DownloadManager {
   private readonly deviceId: () => Promise<string>
   private readonly meta: KeyStore
 
-  /** The signed-in account is the demo one: it holds nothing and reports nothing. */
-  private demo = false
   /** This device's own id once read ({@link thisDevice}). */
   private knownDevice: string | null = null
   /** The debounce of {@link reportHoldings}. */
@@ -1141,8 +1139,7 @@ export class DownloadManager {
    * back, its downloads that failed for want of a session carry on by
    * themselves.
    */
-  setOwner(userId: number | null, options: { demo?: boolean } = {}): void {
-    this.demo = userId !== null && options.demo === true
+  setOwner(userId: number | null): void {
     if (this.owner === userId) return
     this.owner = userId
     if (this.holdingsTimer !== null) {
@@ -1862,10 +1859,10 @@ export class DownloadManager {
    * deleted; debounced by {@link HOLDINGS_DEBOUNCE_MS}, so a burst of
    * completions is one request. The set is every complete download not marked
    * watched, trip copies included (the trip path keeps its own `/delivered`
-   * calls besides). Never for the demo account, which keeps no copies.
+   * calls besides).
    */
   reportHoldings(): void {
-    if (this.owner === null || this.demo) return
+    if (this.owner === null) return
     if (this.holdingsTimer !== null) clearTimeout(this.holdingsTimer)
     this.holdingsTimer = setTimeout(() => {
       this.holdingsTimer = null
@@ -1880,7 +1877,7 @@ export class DownloadManager {
    */
   async reportHoldingsIfPending(): Promise<void> {
     const owner = this.owner
-    if (owner === null || this.demo) return
+    if (owner === null) return
     // The outbox's flush landed: a release still waiting goes now too.
     void this.flushReleases()
     const note = await this.meta.get<HoldingsNote>(holdingsKey(owner))
@@ -1921,9 +1918,9 @@ export class DownloadManager {
 
   private async sendHoldingsNow(): Promise<void> {
     const owner = this.owner
-    if (owner === null || this.demo) return
+    if (owner === null) return
     await this.hydrate()
-    if (this.owner !== owner || this.demo) return
+    if (this.owner !== owner) return
     const episodes = this.heldEpisodes(owner)
     const ids = episodes.map((episode) => episode.episode_id)
     // The per-copy shape only once no release of this account waits to be
@@ -1963,9 +1960,6 @@ export class DownloadManager {
         // No answer, or the server failed: the next reconnect or landed flush
         // sends it again.
         await this.meta.put(key, waits)
-      } else if (error instanceof ApiError && error.status === 403) {
-        // The demo account: the server keeps nothing for it; neither do we.
-        this.demo = true
       }
       // Anything else (a 4xx) is tried again at the next of the four moments.
     }
@@ -2015,7 +2009,7 @@ export class DownloadManager {
 
   private async flushReleasesOnce(): Promise<void> {
     const owner = this.owner
-    if (owner === null || this.demo) return
+    if (owner === null) return
     let device: string | null = null
     let settledAny = false
     /** Releases tried in this flush: one queued meanwhile is tried too. */

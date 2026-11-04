@@ -927,8 +927,8 @@ function fewSeedersLabel(seeders: number | null): string {
  * Under the episode's meta line when its live torrent has fewer seeders than
  * the admin's threshold. The Pin action is the hero's "Keep files" (FR-T8)
  * through the same mutation, so both controls agree the moment either is
- * pressed. Once the show is pinned — or for the demo account, which may not
- * pin — the line keeps the count and drops the suggestion. Raised over the
+ * pressed. Once the show is pinned — or before `me` has loaded — the line
+ * keeps the count and drops the suggestion. Raised over the
  * row's link overlay so the button is reachable.
  */
 function FewSeeders({
@@ -1219,7 +1219,7 @@ function EpisodeRow({
           ) : null}
           <WatchedControl animeId={anime.id} episode={episode} />
           {/* "Change release…" (FR-A13): only for an episode the viewer wants
-              and nothing has landed for yet; never for the demo account. */}
+              and nothing has landed for yet. */}
           {canDownload && episode.wanted_by_me === true && CHANGEABLE_STATES.has(episode.state) ? (
             <EpisodeMoreMenu animeId={anime.id} episodeId={episode.id} number={episode.number} />
           ) : null}
@@ -1696,8 +1696,7 @@ const PIN_FAILED = 'Could not change “Keep files”. Try again.'
  * (FR-T1). A pin keeps the show's files instead — for a show somebody rewatches,
  * or one whose release is hard to find again. It is per user, and the server
  * keeps the files if anyone has pinned the show; the disk floor (FR-T6) may
- * still evict them as a last resort. A toggle with `aria-pressed`, hidden for
- * the demo account, which the server refuses.
+ * still evict them as a last resort. A toggle with `aria-pressed`.
  */
 function PinControl({ anime }: { anime: AnimeDetail }) {
   const setPinned = useSetPinned(anime.id)
@@ -1835,7 +1834,7 @@ function Hero({
 }: {
   anime: AnimeDetail
   timezone?: string
-  /** Not the demo account (FR-D5), and `me` has loaded. Also gates "Keep files". */
+  /** `me` has loaded. Also gates "Keep files". */
   canTrip: boolean
 }) {
   const hasTrip = anime.trip !== null && anime.trip !== undefined
@@ -1981,16 +1980,15 @@ export function Show() {
 
   return (
     <div>
-      <Hero anime={anime} timezone={timezone} canTrip={me?.is_demo === false} />
-      {me?.is_demo === false && anime.trip !== null && anime.trip !== undefined ? (
+      <Hero anime={anime} timezone={timezone} canTrip={me != null} />
+      {me != null && anime.trip !== null && anime.trip !== undefined ? (
         <TripPanel trip={anime.trip} />
       ) : null}
       <Episodes
         anime={anime}
         isAdmin={me?.role === 'admin'}
-        // Off for the demo account (FR-S7, owner 2026-10-04), and off until
-        // `me` has loaded rather than flashing on and then away.
-        canDownload={me?.is_demo === false}
+        // Off until `me` has loaded rather than flashing on and then away.
+        canDownload={me != null}
         timezone={timezone}
       />
       <Franchise anime={anime} />

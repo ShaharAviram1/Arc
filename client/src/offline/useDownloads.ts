@@ -38,11 +38,10 @@ export function wireWatchedRemoval(box: Outbox, manager: DownloadManager): () =>
   }
 }
 
-export function useDownloadsSession(userId: number | null, demo = false): void {
+export function useDownloadsSession(userId: number | null): void {
   useEffect(() => {
     const manager = downloads()
-    // The demo account reports no holdings (M20): the server refuses them.
-    manager.setOwner(userId, { demo })
+    manager.setOwner(userId)
     void manager.hydrate()
     if (userId === null) return undefined
     const unlisten = manager.listen()
@@ -51,7 +50,7 @@ export function useDownloadsSession(userId: number | null, demo = false): void {
       unwire()
       unlisten()
     }
-  }, [userId, demo])
+  }, [userId])
 }
 
 /** This device's "Remove episodes once watched" switch. */

@@ -6,7 +6,6 @@ import { RouteError } from '@/components/RouteError'
 import { Admin } from '@/pages/Admin'
 import { Downloads } from '@/pages/Downloads'
 import { Home } from '@/pages/Home'
-import { HowArcWorks } from '@/pages/HowArcWorks'
 import { Invite } from '@/pages/Invite'
 import { List } from '@/pages/List'
 import { Login } from '@/pages/Login'
@@ -45,10 +44,6 @@ export const routes = [
           { path: '/list', element: <List /> },
           { path: '/anime/:id', element: <Show /> },
           { path: '/mal', element: <Mal /> },
-          // The nav entry that leads here belongs to the demo account alone
-          // (`Layout.tsx`), but the route does not: a link somebody sends on
-          // should open, and the page says nothing an account may not read.
-          { path: '/how-arc-works', element: <HowArcWorks /> },
           { path: '/recs', element: <Recs /> },
           // Episodes kept on this device (FR-S9). Everything on it is read from
           // the device, so it is where an offline launch points.

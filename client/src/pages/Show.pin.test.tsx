@@ -7,11 +7,11 @@ import type { AnimeDetail } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
 import { Show } from '@/pages/Show'
 import { FRIEREN, FRIEREN_DETAIL } from '@/test/animeFixtures'
-import { mockApi, requestsMade, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
 
 /**
  * "Keep files" on the show page (FR-T8, M20 T8): a toggle in the hero that
- * PUTs or DELETEs the viewer's pin, and is not offered to the demo account.
+ * PUTs or DELETEs the viewer's pin.
  */
 
 const DETAIL = `GET /api/anime/${String(FRIEREN.id)}`
@@ -127,22 +127,5 @@ describe('Show — Keep files (FR-T8)', () => {
       .click(await within(await hero()).findByRole('button', { name: 'Keep files' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not change')
-  })
-
-  it('is not offered to the demo account', async () => {
-    const fetchMock = mockApi({
-      'GET /api/auth/me': { body: TEST_DEMO_USER },
-      [DETAIL]: { body: FRIEREN_DETAIL },
-    })
-
-    renderShow()
-    const section = await hero()
-    // Wait for `me` so the absence is not just "not loaded yet".
-    await waitFor(() => {
-      expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
-    })
-    await new Promise((resolve) => setTimeout(resolve, 20))
-
-    expect(within(section).queryByRole('button', { name: /Keep files/ })).not.toBeInTheDocument()
   })
 })

@@ -558,7 +558,7 @@ function TripGroup({
 export function Downloads() {
   const records = useDownloads()
   const { data: me } = useMe()
-  const { data: active } = useActiveTrips(me !== undefined && me !== null && !me.is_demo)
+  const { data: active } = useActiveTrips(me !== undefined && me !== null)
   const here = useThisDevice()
   const [confirming, setConfirming] = useState<number | null>(null)
   const items = Object.values(records).sort((a, b) => {
@@ -661,9 +661,7 @@ export function Downloads() {
           </section>
         )}
         <StorageCard used={used} />
-        {canDownloadInApp() && me !== undefined && me !== null && !me.is_demo ? (
-          <SendReport />
-        ) : null}
+        {canDownloadInApp() && me !== undefined && me !== null ? <SendReport /> : null}
 
         <ul className="flex list-disc flex-col gap-1.5 pl-5 text-[13px] text-[var(--arc-text-muted)]">
           {NOTES.map((note) => (

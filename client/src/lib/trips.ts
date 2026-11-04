@@ -366,11 +366,9 @@ export function tripCodecsPlayable(
 }
 
 /** The refusal codes `POST /api/anime/{id}/trip` answers with. */
-export type TripRefusal =
-  'demo_account' | 'trip_active' | 'storage_held' | 'count_out_of_range' | 'nothing_aired'
+export type TripRefusal = 'trip_active' | 'storage_held' | 'count_out_of_range' | 'nothing_aired'
 
 const REFUSALS: Record<TripRefusal, string> = {
-  demo_account: 'The demo account cannot prepare trips.',
   trip_active: 'This show already has a trip being prepared.',
   storage_held:
     'Arc’s server is short of disk space right now, so it cannot start a trip. Try again later.',

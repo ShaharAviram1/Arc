@@ -30,9 +30,9 @@ export function RequireAuth() {
   useOutboxSession(me?.id ?? null)
   // And the downloads' (FR-S9): whose episodes are visible and playable, the
   // launch-time check of records against files, and the resume triggers.
-  useDownloadsSession(me?.id ?? null, me?.is_demo === true)
+  useDownloadsSession(me?.id ?? null)
   // A trip's copies download by themselves while Arc is open (FR-A12, M19);
-  // not for the demo account, nor where the browser cannot keep files.
+  // not where the browser cannot keep files.
   useTripAutoKeep(me)
 
   if (isPending) return <AuthPending />

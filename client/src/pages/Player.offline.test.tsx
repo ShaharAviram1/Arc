@@ -16,7 +16,7 @@ import { resetNetwork } from '@/offline/network'
 import { Outbox, setOutbox } from '@/offline/outbox'
 import { memoryStore } from '@/offline/store'
 import { PLAY_INFO, PLAY_INFO_EPISODE_2 } from '@/test/animeFixtures'
-import { mockApi, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock'
+import { mockApi, TEST_USER } from '@/test/apiMock'
 import { downloadedRecord, managerHarness, recordEntry } from '@/test/downloadFixtures'
 import { instances, resetHls } from '@/test/hlsMock'
 
@@ -649,19 +649,6 @@ describe('the offline control in the player (FR-S9, owner 2026-10-05)', () => {
     } finally {
       vi.useRealTimers()
     }
-  })
-
-  it('is not offered to the demo account', async () => {
-    pretendOpfs()
-    mockApi({ ...STREAMING, 'GET /api/auth/me': { body: TEST_DEMO_USER } })
-    install([])
-
-    renderPlayer()
-    await waitFor(() => {
-      expect(instances).toHaveLength(1)
-    })
-    expect(screen.getByRole('link', { name: 'Back to show' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /offline|on this device/ })).not.toBeInTheDocument()
   })
 })
 

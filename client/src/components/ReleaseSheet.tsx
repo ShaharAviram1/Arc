@@ -309,7 +309,7 @@ const CHANGE_RELEASE = 'Change release…'
 /**
  * The episode row's overflow: one "⋯" button, one menu, one item for now.
  * Rendered by the row only for an episode the viewer wants and nothing has
- * landed for yet, and never for the demo account.
+ * landed for yet.
  */
 export function EpisodeMoreMenu({
   animeId,
