@@ -550,6 +550,56 @@ describe('Player', () => {
    * episode is the decision and gets the card. They used to be one moment, and
    * the card arrived ten minutes early.
    */
+  it('rewatch_ended toast: says the pass finished and the list was left alone (FR-W7)', async () => {
+    renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
+      'POST /api/progress': {
+        body: {
+          completed: true,
+          newly_completed: true,
+          list_progress: null,
+          rewatching: true,
+          rewatch_ended: true,
+        },
+      },
+    })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    completeAt(video, 1300)
+
+    expect(
+      await screen.findByText('Rewatch finished. Your list was left as it was.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(MARKED_WATCHED)).not.toBeInTheDocument()
+  })
+
+  it('no "Marked as watched" toast when rewatching (FR-W7)', async () => {
+    const { fetchMock } = renderPlayer({
+      [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },
+      'POST /api/progress': {
+        body: {
+          completed: true,
+          newly_completed: true,
+          list_progress: null,
+          rewatching: true,
+          rewatch_ended: false,
+        },
+      },
+    })
+
+    const video = await readyVideo()
+    fireEvent.loadedMetadata(video)
+    completeAt(video, 1300)
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain(PROGRESS_PATH)
+    })
+
+    expect(screen.queryByText(MARKED_WATCHED)).not.toBeInTheDocument()
+    // And nothing else was written: a pass touches no list (FR-W7 item 2).
+    expect(requestsMade(fetchMock).filter((made) => made.startsWith('PUT /api/list'))).toEqual([])
+  })
+
   it('shows a toast, and no card, when the server calls the episode complete (FR-S4)', async () => {
     renderPlayer({
       [PLAY_PATH]: { body: PLAY_INFO_NEXT_READY },

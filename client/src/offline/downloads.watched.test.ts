@@ -322,6 +322,18 @@ describe('catching up on completions made elsewhere', () => {
     expect(manager.record(9002)?.watched).toBeUndefined()
   })
 
+  it('marks watched a copy kept for a rewatch once the pass finishes it (M21)', async () => {
+    // The first watch was before the copy was kept (BEFORE); the server's
+    // `completed_at` is the later of that and the pass's finish (AFTER), so
+    // the copy kept for the rewatch is marked by the existing path.
+    const loadCompleted = vi.fn(() => Promise.resolve([{ episode_id: 9001, completed_at: AFTER }]))
+    const { manager, removed } = await launch([downloadedRecord(ALICE)], { loadCompleted })
+    await manager.syncWatched()
+
+    expect(manager.record(9001)).toBeUndefined()
+    expect(removed).toEqual(['episode-9001.mp4'])
+  })
+
   it('leaves a copy kept after the episode was finished (a rewatch)', async () => {
     const loadCompleted = vi.fn(() => Promise.resolve([{ episode_id: 9001, completed_at: BEFORE }]))
     const { manager, removed } = await launch([downloadedRecord(ALICE)], { loadCompleted })

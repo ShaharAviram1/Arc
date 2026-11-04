@@ -321,12 +321,19 @@ export interface EpisodeOut {
    */
   wanted_by_me?: boolean
   /**
-   * The viewer may press play on this not-ready episode and have Arc fetch
-   * it now (FR-A14, M20): their window covers it, exactly the rule `POST
-   * /api/episodes/{id}/demand` accepts. Never true on a ready episode.
-   * Optional on the wire so a payload from before M20 T5 parses as false.
+   * The viewer may press play on this episode and have Arc fetch it now
+   * (FR-A14, M21): it has aired and is not ready. Whether a press would be
+   * refused right now is {@link AnimeDetail.demand}'s `refusal`, not this
+   * flag. Never true on a ready episode. Optional on the wire so a payload
+   * from before M20 T5 parses as false.
    */
   fetchable?: boolean
+  /**
+   * The viewer has an open demand on this episode (FR-A14, M21): the row
+   * reads "Fetching on request" with a ✕ that withdraws it. Show page only;
+   * optional on the wire so an older payload parses as false.
+   */
+  demanded?: boolean
   /**
    * The live torrent has fewer seeders than the admin's `min_seeders_warn`
    * (FR-A16, M20): the row says "Few seeders (2)" and offers the show pin
@@ -479,26 +486,51 @@ export interface AnimeCredit {
 }
 
 /**
- * The viewer's live "try episode 1" want on this show (spec §4.2 FR-A8).
- *
- * Null whenever there is nothing to cancel — nobody asked, the sample was
- * cancelled, or it was dropped for going unwatched for D days (FR-T2). The
- * episode's own acquisition state stays where it always was, on its row in
- * `episodes[]`; this only says that the viewer is the one who asked for it.
+ * One of the viewer's open demands (FR-A14, M21): the show page's
+ * `demand.open` and the `demand_cap` refusal both list these, each linking
+ * to its episode.
  */
-export interface Sample {
+export interface OpenDemand {
   episode_id: number
-  episode_number: number
-  requested_at: string
-  /**
-   * The episode's state as of the response — `wanted` straight after a
-   * request on a resting episode (spec §6, FR-A7). The server acts on the
-   * episode inside the request rather than leaving it to the next
-   * reconciliation, so this is what the row says before any refetch: the
-   * mutation writes it into the cached detail, and the invalidation that
-   * follows only confirms it.
-   */
-  state: string
+  anime_id: number
+  /** The show's title. */
+  title: string
+  number: number
+}
+
+/** A refusal a press of play would get now: the demand's own code and sentence. */
+export interface DemandRefusalInfo {
+  /** `demand_cap`, `acquisition_paused` or `storage_held`. */
+  code: string
+  message: string
+}
+
+/**
+ * `AnimeDetail.demand` (FR-A14, M21): the viewer's open demands (any show),
+ * the admin's `demand_max_open` (0 = no cap), and the one refusal a click on
+ * this page would get right now, or null. The cap applies to a row not
+ * already demanded; the paused and held refusals only to a row that still
+ * has to be fetched. A 409 from the demand itself is still the truth.
+ */
+export interface ShowDemand {
+  open: OpenDemand[]
+  max: number
+  refusal: DemandRefusalInfo | null
+}
+
+/**
+ * The viewer's open rewatch pass on a show (FR-W7, M21): what the badge
+ * reads, "Rewatching · ep `position` / `total`". `PUT
+ * /api/anime/{id}/rewatch` answers it too.
+ */
+export interface Rewatch {
+  started_at: string
+  /** The highest episode number finished in the pass; 0 at the start. */
+  position: number
+  /** How many episodes have been finished in the pass. */
+  finished_in_pass: number
+  /** The number whose finish ends the pass. */
+  total: number
 }
 
 export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
@@ -528,8 +560,18 @@ export interface AnimeDetail extends Omit<AnimeSummary, 'episodes'> {
   next_airing: NextAiring | null
   relations: AnimeRelation[]
   list_entry: ListEntry | null
-  /** The viewer's own sample want, or null — the ordinary case (FR-A8). */
-  sample: Sample | null
+  /**
+   * Always null since M21: "Try episode 1" (FR-A8) was folded into play on
+   * any episode (owner, 2026-11-03). Kept on the wire for one release.
+   */
+  sample?: null
+  /**
+   * Where the viewer stands with play on demand (FR-A14, M21). Optional on
+   * the wire so an older payload parses as "no refusal".
+   */
+  demand?: ShowDemand
+  /** The viewer's open rewatch pass on this show, or null (FR-W7, M21). */
+  rewatch?: Rewatch | null
   /**
    * This show's per-show release-rule override (FR-A3), **for an admin only**:
    * null for everybody else and for a show that follows the global rules. It
@@ -1389,71 +1431,34 @@ export function useRetryTranscode(): UseMutationResult<null, Error, RetryTransco
   })
 }
 
-/**
- * A message a person can act on when "try episode 1" is refused (FR-A8).
- *
- * The three 409s are the server saying something true about the show — no
- * episodes yet, episode 1 has not aired, you already follow this — so its own
- * sentence is the message, and there is nothing here to keep in step with it.
- */
-export function sampleErrorMessage(error: unknown): string {
+/** The sentence for a failed rewatch switch: the server's 409, else a generic one. */
+export function rewatchErrorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return 'Could not reach the server.'
-  return errorDetail(error) ?? 'Could not ask for that episode. Try again.'
+  return errorDetail(error) ?? 'Could not change rewatch. Try again.'
 }
 
 /**
- * What a sample changes in the caches, written from the server's answer.
- *
- * The show page, because the button and the episode's own row are both read
- * from it, and Watch Now, because a sample puts an episode into the pipeline
- * its shelves report on. The detail patch is what the response's `state` is
- * for: the server has already moved the episode, so the row can say
- * "Wanted" at once instead of showing "Not fetched" until the refetch lands.
- * The invalidation behind it is still the authority — the patch only has to be
- * true for the second in between.
+ * Turn rewatch mode on or off for a show (FR-W7, M21): `PUT` answers the
+ * pass, `DELETE` answers 204; both idempotent. The cached show is patched
+ * from the answer and then refetched, with the home page, whose shelves
+ * read a show in a pass by the pass.
  */
-function refreshAfterSample(client: QueryClient, animeId: number, sample: Sample | null): void {
-  client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) => {
-    if (current === undefined) return current
-    return {
-      ...current,
-      sample,
-      episodes:
-        sample === null
-          ? current.episodes
-          : current.episodes.map((episode) =>
-              episode.id === sample.episode_id ? { ...episode, state: sample.state } : episode,
-            ),
-    }
-  })
-  void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
-  void client.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
-}
-
-/** Ask the server to fetch this show's first episode (spec §4.2 FR-A8). */
-export function useRequestSample(animeId: number): UseMutationResult<Sample, Error, void> {
+export function useRewatch(animeId: number): UseMutationResult<Rewatch | null, Error, boolean> {
   const client = useQueryClient()
 
-  return useMutation<Sample, Error, void>({
-    mutationFn: () => apiFetch<Sample>(`/api/anime/${animeId}/sample`, { method: 'POST' }),
-    onSuccess: (sample) => {
-      refreshAfterSample(client, animeId, sample)
+  return useMutation<Rewatch | null, Error, boolean>({
+    mutationFn: async (on) => {
+      const path = `/api/anime/${String(animeId)}/rewatch`
+      if (on) return apiFetch<Rewatch>(path, { method: 'PUT' })
+      await apiFetch<null>(path, { method: 'DELETE' })
+      return null
     },
-  })
-}
-
-/**
- * Drop it again. The episode's own state is left to the refetch: the server
- * releases it only when nobody else wants it (FR-A2), and guessing which of
- * those two happened is exactly the sort of thing a cache patch gets wrong.
- */
-export function useCancelSample(animeId: number): UseMutationResult<null, Error, void> {
-  const client = useQueryClient()
-
-  return useMutation<null, Error, void>({
-    mutationFn: () => apiFetch<null>(`/api/anime/${animeId}/sample`, { method: 'DELETE' }),
-    onSuccess: () => {
-      refreshAfterSample(client, animeId, null)
+    onSuccess: (rewatch) => {
+      client.setQueryData<AnimeDetail>(animeQueryKey(animeId), (current) =>
+        current === undefined ? current : { ...current, rewatch },
+      )
+      void client.invalidateQueries({ queryKey: animeQueryKey(animeId) })
+      void client.invalidateQueries({ queryKey: [HOME_QUERY_KEY] })
     },
   })
 }

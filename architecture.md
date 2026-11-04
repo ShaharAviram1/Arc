@@ -2467,8 +2467,9 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   watching / Ready to watch tiles whose episode is not `ready` and not on the
   device. `PlayerView` then calls `POST /api/episodes/{id}/demand` before it
   enables the `/play` query (skipped when a device copy plays), and also once
-  when `/play` answers `pending` with no device copy (the press is the
-  demand; it also surfaces a paused/held refusal). `usePlayInfo`'s
+  when `/play` answers `pending` with no device copy and `pending.demanded`
+  not true (M21: the press is the demand; it also surfaces a cap, paused or
+  held refusal; never once per poll). `usePlayInfo`'s
   `refetchInterval` re-asks every `PENDING_POLL_MS` (3 s) while the answer has
   `pending` and no `playlist_url`, and never once the query is in error (a
   pending answer that became a 404 stops the poll); after an accepted demand
@@ -2482,25 +2483,60 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   disabled so nothing polls. The end overlay offers Next on
   `next.fetchable`: it demands, then navigates with `{demanded: true}` (the
   player does not ask again); a refusal is the sentence in the card.
-- **M21 client (T6; spec FR-A14, FR-W7, §5).** `Show.tsx` `EpisodeRow`: every
-  aired episode is a link (`playable || fetchable`), with `WatchState
-  {demand: true}` for a non-ready row and a Play chip on every aired
-  not-ready row (hint "Arc fetches it now; it plays as it downloads, or when
-  the file is complete for a season pack."); `demanded` → "Fetching on
-  request" and a ✕ calling `withdrawDemand` (`DELETE …/demand`); un-aired
-  rows inert; `anime.demand.refusal` → an inline toast and no navigation.
-  The hero's `playableEpisode` is the first unwatched aired episode (ready →
-  play, else a demand link "Play episode X"); `RewatchControl` (`aria-pressed`,
-  `useRewatch` → `PUT`/`DELETE /api/anime/{id}/rewatch`) sits beside Keep
-  files with the badge "Rewatching · ep X / Y"; `SampleControl` is removed.
-  `Player.tsx` demands when `/play` says `demanded: false` as well as on
-  `state.demand`; `PendingView` shows `pending.note`, "No release found yet;
-  Arc looks again every day" for `unavailable`, and a link to Review for
-  `awaiting_pick`; a `demand_cap` refusal lists the open demands with links;
-  `ProgressOut.rewatch_ended` raises the toast "Rewatch finished. Your list
-  was left as it was." Types and hooks in `lib/playback.ts` and
-  `lib/anime.ts`; the admin Rules tab edits `demand_max_open` and
-  `batch_sweep_dry_run`.
+- **M21 client as built (T6; spec FR-A14, FR-W7, §5).** `Show.tsx`
+  `EpisodeRow`: every aired episode is a target — a ready row (or one on the
+  device) plays; a not-ready row with `EpisodeOut.fetchable` (aired ∧ not
+  ready) opens the player with `WatchState {demand: true}` from its title and
+  from a Play chip (`title` hint "Arc fetches it now; it plays as it
+  downloads, or when the file is complete for a season pack."); un-aired rows
+  are inert. **Every** row with `demanded` (a demand stays open, and counts
+  toward the cap, until finished or stale, ready or not) reads "Fetching on
+  request" — "Requested" on a ready row — with a ✕ (`useWithdrawDemand` →
+  `withdrawDemand`, `DELETE …/demand`, then the show and home are
+  refetched; a failure says "Could not withdraw that. Try again."). `refusalFor(anime, episode)` applies the page's
+  one `demand.refusal` as the server documents it — `demand_cap` only to a
+  row not already `demanded`, `acquisition_paused`/`storage_held` only to a
+  row whose state still needs fetching (`not_wanted`, `wanted`, `searching`,
+  `unavailable`, `failed`) — and a press it applies to says the sentence in
+  the row (`RefusalToast`, `role="alert"`; for the cap with the open demands
+  as links, `components/OpenDemandLinks.tsx`, each with its own ✕ that
+  withdraws it in place and drops it from the list) without navigating; anything
+  the page lets through is still judged by the player's own demand, whose
+  409 is the truth. The hero's `playableEpisode` is the first aired episode
+  not watched (FR-W5's flag, so the pass's own in rewatch), else the first
+  ready one: ready or on this device → plain link, else the same demand link
+  and refusal check ("Play episode X"). `RewatchControl` (`aria-pressed` "Rewatch",
+  `useRewatch(animeId)` → `PUT`/`DELETE /api/anime/{id}/rewatch`, the cached
+  show patched then refetched with home; the 409 sentence under it via
+  `rewatchErrorMessage`) sits after Keep files, and an open pass shows the
+  badge "Rewatching · ep `position` / `total`" with "Your list and
+  MyAnimeList are left as they are." `SampleControl`, `useRequestSample`,
+  `useCancelSample`, `sampleErrorMessage` and the `Sample` type are gone;
+  `AnimeDetail.sample` is typed `null` for the release the server keeps it.
+  `Player.tsx`: the demand is posted before `/play` on `state.demand`, or
+  once per open when `/play` answers `pending` with `demanded` not true (a
+  window or walk want too). **Under the cap** (a `demand_cap` 409) the
+  `/play` query stays enabled: while the pending state is still on its way
+  (`stillComing`: anything but `unavailable`, `not_wanted`, `missing`) the
+  refusal is said above `PendingView` — the sentence, "It is still on its
+  way for your list." when `downloading`, and the open demands with their ✕
+  — and the poll goes on, so the episode plays live or when ready; otherwise
+  `DemandRefused` replaces the wait and the poll stops (a ✕ there also
+  refetches `/play`). Any other 409 stops the query as before; `PendingView` shows `pending.note` in
+  place of "It plays here as soon as it is ready.", `pendingLabel` reads "No
+  release found yet; Arc looks again every day" for `unavailable` (no
+  spinner), and `awaiting_pick` adds a link to `/review`; `DemandRefused`
+  lists `demandRefusal(error).open` for `demand_cap`. The completion receipt
+  is `receiptFor(result)`: "Rewatch finished. Your list was left as it was."
+  on `rewatch_ended` (6 s, shown over the end card too; also after a manual
+  mark that ends the pass), "Marked as watched" only on `newly_completed`
+  outside a pass (`rewatching` false), else nothing. `useNextSeasonPress`:
+  with `next_season.rewatch_carry` the touch is `PUT
+  /api/anime/{sequel}/rewatch` and no list write (never the direct link),
+  then the demand and the waiting player as before. The admin Rules tab edits
+  `demand_max_open` and `batch_sweep_dry_run` (T1). Home has **no** "Rewatch"
+  label yet: the home rows carry the pass's marks but no flag saying a show
+  is in a pass.
 
 ### 5.4a Streaming and playback as built (M8)
 - **`/play` for any aired episode (M21 T4, spec FR-A14, FR-W7).**
@@ -7937,3 +7973,5 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-11-03 — M21 T4: **the read API** (§5.4a "/play for any aired episode", §5b `/play`, `GET /api/anime/{id}`, `GET /api/home`; spec FR-A14, FR-W1, FR-W5, FR-W7, FR-S5 item 3). New `acquisition/demand_gate.py` (`DemandGate`: open demands, `demand_max_open`, pause, hold; `refuses(episode)` in the demand's own order, `refusal()` for the page) replaces `wants.coverable`, `coverable_once_active` and `_Plan.covers`, which are deleted. `/play`: any aired not-ready episode the caller has no want on answers `pending` with `demanded: false` (no write); `pending.demanded` is "an open demand"; `pending.note` for a pack, a live refusal of the current download or a release named `.mp4`, only while downloading; `awaiting_pick` constant false until T7; the episode's watched fields through `watch_view`. `NextSeasonRef.rewatch_carry`. `AnimeDetail.demand` (`ShowDemandOut`), `.rewatch` (`RewatchOut`, moved to `anime_schemas`), `EpisodeOut.demanded`, `fetchable` = aired ∧ not ready, `sample` always null. `ready_to_watch` in one query with three branches; home rows of a show in a pass carry the pass's marks. No schema change, no new dependency.
 - 2026-11-03 (orchestrator's call, reported to the owner) — M21 T4 fix round: **Continue watching reads the pass** (§5b `GET /api/home`; spec FR-W1, FR-W7 item 2). `playback.progress.continue_watching` outer-joins the viewer's open `rewatches` row and keeps, for a show in a pass, only `watch_progress.updated_at >= started_at`; a pre-pass partial is on Ready to watch's pass branch instead, so the two shelves never both offer one episode. Another user's pass changes nothing; the resume position is untouched. Same round: `catalog.airing.has_aired` is the one "aired" rule (moved from `next_season`), `is_aired` answers false for a `NOT_YET_RELEASED` show whatever its dates, and the Next-season offer's gate is handed the sequel's own aired answer. No schema change, no new dependency.
 - 2026-11-04 (orchestrator's call, reported to the owner) — M21 T5: **the retention anchor is the latest finish, and a finish is not a partial** (§5.7; spec FR-T1, FR-W7 item 4). `retention/sweep._facts` reads `max(greatest(completed_at, finished_at))` (per row the newer of the two, NULLs ignored, as `GET /api/progress/completed` answers), without the `completed` filter, so a rewatch pass finish (which never sets `completed`) is a fresh watched anchor: deletable `watched_grace_hours` after it. Hold (b)'s partial fact additionally requires `finished_at IS NULL OR finished_at < updated_at`: otherwise a pass finish (`completed = false`, position at the end) read as a partial watch and held the file D days, and the floor skipped it for 24 h. A later report below the mark (a genuine partial replay) still counts. Demand and walk files follow the existing rule (no live want + anchor + grace), pinned by tests. No schema change, no new dependency, no MAL-writing code.
+- 2026-11-04 — M21 T6: **the client** (§5.4 "M21 client as built"; spec FR-A14, FR-W7, FR-S5 item 3). Every aired episode on the show page is a target (`fetchable` from the server, demand flag for a not-ready row, Play chip with the M21 hint); "Fetching on request" with a ✕ that withdraws (`withdrawDemand`); the page's `demand.refusal` applied per row as `ShowDemandOut` documents it, said in the row with the open demands for the cap, never navigating; the hero offers the first unwatched aired episode; `RewatchControl` and its badge; "Try episode 1" and its hooks deleted, `sample` typed null. The player demands on `pending.demanded` not true once per open, shows `pending.note`, the `unavailable` sentence, a Review link for `awaiting_pick`, the cap's open demands, the rewatch-ended receipt and no "Marked as watched" in a pass; Next season in a pass opens the sequel's pass instead of writing the list. New shared `components/OpenDemandLinks.tsx`. No new dependency, no server change. The optional Home "Rewatch" label is not built: no home row says a show is in a pass.
+- 2026-11-04 (orchestrator's call) — M21 T6 fix round: **withdraw anywhere, and the cap does not stop a download already coming** (§5.4 "M21 client as built"; spec FR-A14). Every demanded row offers the ✕ ("Requested" once ready), and the cap's list of open demands carries a ✕ per row on the show page and in the player. A `demand_cap` 409 on an episode still on its way for a window or walk is said above the pending view while `/play` keeps polling; on one with nothing coming it is the refusal view and the poll stops. The hero plays a device copy without a demand, as the row does. No new dependency, no server change.

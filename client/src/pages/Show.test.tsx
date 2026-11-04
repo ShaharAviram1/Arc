@@ -24,7 +24,6 @@ import {
   FRIEREN_DETAIL_VIA_MAL,
   FRIEREN_DETAIL_VIA_OFFLINE,
   FRIEREN_DETAIL_WITH_STILLS,
-  FRIEREN_SAMPLE,
   FRIEREN_SPECIAL,
   LINKED_RELATION,
   listEntry,
@@ -50,10 +49,6 @@ const OFFLINE_NOTICE =
   'Catalogue data from the weekly offline import — live sources are unavailable. Air dates unknown until a live source answers.'
 const DETAIL_PATH = `GET /api/anime/${FRIEREN.id}`
 const LIST_PATH = `/api/list/${FRIEREN.id}`
-/** "Try episode 1" (FR-A8): one route, POSTed and DELETEd. */
-const SAMPLE_PATH = `/api/anime/${FRIEREN.id}/sample`
-/** The server's own sentence for a sample it refuses. */
-const NOT_AIRED_DETAIL = 'episode 1 has not aired yet'
 /** The one failed episode in the fixture, the only one with a Retry button. */
 const TRANSCODE_PATH = '/api/episodes/9007/transcode'
 /** Episode 1 is the fixture's only watched episode; episode 2 has aired and is not. */
@@ -328,8 +323,23 @@ describe('Show', () => {
     expect((backdrop?.parentElement as HTMLElement).style.aspectRatio).toBe('')
   })
 
-  it('offers the first ready episode as the primary action', async () => {
+  it('offers the first unwatched aired episode as the primary action, ready or not (M21)', async () => {
+    // Episode 1 is ready and watched; episode 2 has aired, is not watched and
+    // is still being prepared: the hero offers it, with the demand.
     mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
+
+    renderShow()
+
+    const play = await screen.findByRole('link', { name: 'Play episode 2' })
+    expect(play).toHaveAttribute('href', '/watch/9002')
+  })
+
+  it('falls back to the first ready episode once everything aired is watched', async () => {
+    const allWatched: AnimeDetail = {
+      ...FRIEREN_DETAIL,
+      episodes: FRIEREN_DETAIL.episodes.map((episode) => ({ ...episode, watched: true })),
+    }
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: allWatched } })
 
     renderShow()
 
@@ -337,14 +347,17 @@ describe('Show', () => {
     expect(play).toHaveAttribute('href', '/watch/9001')
   })
 
-  it('offers nothing to play when no episode has arrived', async () => {
-    const nothingReady: AnimeDetail = {
+  it('offers nothing to play when nothing has aired or arrived', async () => {
+    const nothingAired: AnimeDetail = {
       ...FRIEREN_DETAIL,
-      episodes: FRIEREN_DETAIL.episodes.map((episode) =>
-        episode.state === 'ready' ? { ...episode, state: 'preparing' } : episode,
-      ),
+      episodes: FRIEREN_DETAIL.episodes.map((episode) => ({
+        ...episode,
+        aired: false,
+        watched: false,
+        state: 'not_wanted',
+      })),
     }
-    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: nothingReady } })
+    mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: nothingAired } })
 
     renderShow()
 
@@ -1368,207 +1381,6 @@ describe('Show', () => {
 
       expect(await screen.findByText('Watched 4 / 28')).toBeInTheDocument()
       expect(screen.queryByText(/^MAL:/)).not.toBeInTheDocument()
-    })
-  })
-
-  describe('trying episode 1 (FR-A8)', () => {
-    /** Episode 1 has aired and Arc has not been asked for it: the sample case. */
-    const NOT_FETCHED: AnimeDetail = withEpisode(0, {
-      state: 'not_wanted',
-      watched: false,
-      rendition: null,
-    })
-    const TRY = 'Try episode 1'
-    /** The pressed button's accessible name: the action, not the state. */
-    const CANCEL_HINT = 'Cancel the request'
-
-    it('offers the sample on a show the viewer has not committed to', async () => {
-      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: NOT_FETCHED } })
-
-      renderShow()
-
-      const button = await screen.findByRole('button', { name: TRY })
-      expect(button).toBeEnabled()
-      // One control, both directions: off to begin with.
-      expect(button).toHaveAttribute('aria-pressed', 'false')
-    })
-
-    it('names the episode it will actually fetch, not always episode 1', async () => {
-      // A special published as episode 0 is the row the server samples from.
-      const zeroFirst: AnimeDetail = {
-        ...NOT_FETCHED,
-        episodes: [
-          { ...(NOT_FETCHED.episodes[0] as EpisodeOut), id: 9000, number: 0 },
-          ...NOT_FETCHED.episodes,
-        ],
-      }
-      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: zeroFirst } })
-
-      renderShow()
-
-      expect(await screen.findByRole('button', { name: 'Try episode 0' })).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
-    })
-
-    it('names the requested episode in the button the same way', async () => {
-      mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: {
-          body: {
-            ...NOT_FETCHED,
-            sample: { ...FRIEREN_SAMPLE, episode_id: 9000, episode_number: 0 },
-          } satisfies AnimeDetail,
-        },
-      })
-
-      renderShow()
-
-      expect(await screen.findByText('Episode 0 requested')).toBeInTheDocument()
-    })
-
-    it('offers nothing when the episode has already arrived', async () => {
-      // The fixture's episode 1 is `ready`: the Play button above is the offer.
-      mockApi({ 'GET /api/auth/me': ME, [DETAIL_PATH]: { body: FRIEREN_DETAIL } })
-
-      renderShow()
-
-      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
-      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
-    })
-
-    it('offers nothing before episode 1 has aired', async () => {
-      mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: {
-          body: withEpisode(0, {
-            state: 'not_wanted',
-            watched: false,
-            rendition: null,
-            aired: false,
-            air_at: '2099-09-29T14:00:00Z',
-          }),
-        },
-      })
-
-      renderShow()
-
-      await screen.findByRole('heading', { name: FRIEREN.title.preferred })
-      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
-    })
-
-    it.each(['watching', 'planned'] as const)(
-      'offers nothing while the show is %s: the window covers it',
-      async (status) => {
-        mockApi({
-          'GET /api/auth/me': ME,
-          [DETAIL_PATH]: {
-            body: {
-              ...NOT_FETCHED,
-              list_status: status,
-              list_entry: listEntry({ status }),
-            } satisfies AnimeDetail,
-          },
-        })
-
-        renderShow()
-
-        await screen.findByRole('heading', { name: FRIEREN.title.preferred })
-        expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
-      },
-    )
-
-    it.each(['watching', 'planned'] as const)(
-      'still offers it on a dormant %s entry: there is no window to duplicate',
-      async (status) => {
-        // FR-A9: nothing is being fetched for this row, so one episode is a
-        // smaller thing to ask for than the whole show — and the hero offers
-        // both, "Try episode 1" here and "Fetch this show" in the note.
-        mockApi({
-          'GET /api/auth/me': ME,
-          [DETAIL_PATH]: {
-            body: {
-              ...NOT_FETCHED,
-              list_status: status,
-              list_entry: listEntry({ status, activated_at: null, dormant: true }),
-            } satisfies AnimeDetail,
-          },
-        })
-
-        renderShow()
-
-        expect(await screen.findByRole('button', { name: TRY })).toBeInTheDocument()
-        expect(screen.getByRole('button', { name: 'Fetch this show' })).toBeInTheDocument()
-      },
-    )
-
-    it('still offers it on a show that is dropped or completed', async () => {
-      mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: {
-          body: {
-            ...NOT_FETCHED,
-            list_status: 'dropped',
-            list_entry: listEntry({ status: 'dropped' }),
-          } satisfies AnimeDetail,
-        },
-      })
-
-      renderShow()
-
-      expect(await screen.findByRole('button', { name: TRY })).toBeInTheDocument()
-    })
-
-    it('asks the server for the episode', async () => {
-      const fetchMock = mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: { body: NOT_FETCHED },
-        [`POST ${SAMPLE_PATH}`]: { status: 202, body: FRIEREN_SAMPLE },
-      })
-
-      renderShow()
-      await userEvent.setup().click(await screen.findByRole('button', { name: TRY }))
-
-      await waitFor(() => {
-        expect(requestsMade(fetchMock)).toContain(`POST ${SAMPLE_PATH}`)
-      })
-    })
-
-    it('says which episode is on its way, and takes the request back', async () => {
-      const fetchMock = mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: { body: { ...NOT_FETCHED, sample: FRIEREN_SAMPLE } satisfies AnimeDetail },
-        [`DELETE ${SAMPLE_PATH}`]: { status: 204 },
-      })
-
-      renderShow()
-
-      // The same button, pressed: it says what has been asked for, and its
-      // accessible name is what pressing it again would do.
-      expect(await screen.findByText('Episode 1 requested')).toBeInTheDocument()
-      const toggle = screen.getByRole('button', { name: CANCEL_HINT })
-      expect(toggle).toHaveAttribute('aria-pressed', 'true')
-      expect(toggle).toHaveAttribute('title', CANCEL_HINT)
-      // Hover offers the other half, from markup rather than from state.
-      expect(within(toggle).getByText('Cancel request')).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: TRY })).not.toBeInTheDocument()
-      await userEvent.setup().click(toggle)
-
-      await waitFor(() => {
-        expect(requestsMade(fetchMock)).toContain(`DELETE ${SAMPLE_PATH}`)
-      })
-    })
-
-    it("renders the server's own reason when the sample is refused", async () => {
-      mockApi({
-        'GET /api/auth/me': ME,
-        [DETAIL_PATH]: { body: NOT_FETCHED },
-        [`POST ${SAMPLE_PATH}`]: { status: 409, body: { detail: NOT_AIRED_DETAIL } },
-      })
-
-      renderShow()
-      await userEvent.setup().click(await screen.findByRole('button', { name: TRY }))
-
-      expect(await screen.findByRole('alert')).toHaveTextContent(NOT_AIRED_DETAIL)
     })
   })
 
