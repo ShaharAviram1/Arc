@@ -545,7 +545,7 @@ async def reconcile(
     now: datetime,
     period: timedelta,
     live_hashes: Collection[str] | None,
-    listed_for: Collection[str] | None = None,
+    listed_for: Collection[str] | None,
     age_rule: bool = True,
 ) -> Reconciled:
     """Dismiss the picks nobody will make (FR-A4; architecture.md §5.1).
@@ -565,7 +565,8 @@ async def reconcile(
       ``listed_for`` is the set of hashes the caller asked the client about
       (read before the listing, which is taken before the want lock): a pick
       whose pack is not in it — opened after the listing was read — is judged
-      unknown this pass rather than missing. ``None`` judges every pick;
+      unknown this pass rather than missing. ``None`` judges every pick
+      (required, so a caller says which it means);
     * **stale** — pending ``period`` (D, floored at a day; :func:`stale`).
       ``age_rule=False`` skips it: while acquisition is paused or held nobody
       can act on a pick, so its clock is not held against it.

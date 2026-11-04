@@ -548,28 +548,56 @@ async def test_an_unknown_listing_neither_confirms_nor_clears_a_miss(
     assert pick.absent_since == stamped
 
 
-async def test_a_pick_the_listing_was_not_asked_about_is_not_judged_missing(
+async def test_a_pick_opened_after_the_listing_was_read_is_not_judged_missing(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A pick opened after the listing was read is unknown this pass, not missing."""
-    wired, _episode, pick = await _refused(
-        db_session, monkeypatch, tmp_path, anilist_id=963725, email="gone4@arc.test"
+    """The race B1 opens: the hashes are read, the client is listed, and only then
+    is the want lock taken — a pick on a pack held in between is in the rows
+    ``reconcile`` locks but was not asked about, so a listing that misses it
+    says nothing about it. Pack A was asked about and is stamped; pack B is not."""
+    wired, episode, first = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963726, email="gone5@arc.test"
     )
-    pick.absent_since = datetime.now(UTC) - timedelta(hours=3)
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.UNAVAILABLE
+    eighth.unavailable_reason = PACK_PICK_REASON
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    later_pack = Torrent(
+        episode_id=None,
+        kind=TorrentKind.BATCH,
+        info_hash=SECOND_HASH,
+        title="[Other] Sousou no Frieren (Season 1) [1080p]",
+        qbit_state=QBIT_AWAITING_PICK,
+    )
+    db_session.add(later_pack)
     await db_session.flush()
-    stamped = pick.absent_since
-
-    found = await pack_picks.reconcile(
-        db_session,
-        now=datetime.now(UTC),
-        period=timedelta(days=21),
-        live_hashes={"e" * 40},
-        listed_for=[],
+    second = PackPick(
+        torrent_id=later_pack.id,
+        episode_id=eighth.id,
+        reason="no file in the batch is episode 8",
+        candidates=first.candidates,
     )
+    db_session.add(second)
+    await db_session.flush()
 
-    assert found == pack_picks.Reconciled()
-    assert pick.resolved_at is None
-    assert pick.absent_since == stamped
+    # The hashes were read before pack B's pick existed: only pack A's.
+    async def before_b(session: AsyncSession) -> list[str]:
+        return [BATCH_HASH]
+
+    monkeypatch.setattr(pack_picks, "awaiting_hashes", before_b)
+    # The client lists neither pack.
+    wired.qbit.torrents = [{**wired.qbit.torrents[0], "hash": "e" * 40}]
+
+    await _compute(db_session, wired)
+
+    assert first.absent_since is not None, "asked about and missing: the first miss"
+    assert second.absent_since is None, "never asked about: unknown, not missing"
+    assert first.resolved_at is None and second.resolved_at is None
 
 
 async def test_an_empty_client_listing_dismisses_nothing(

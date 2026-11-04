@@ -506,6 +506,9 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
     hashes = await pack_picks.awaiting_hashes(ctx.session)
     live: set[str] | None = None
     if hashes:
+        # Nothing is written yet: end the read's transaction so the HTTP call
+        # below is not made inside an open one.
+        await ctx.session.commit()
         try:
             async with QbitClient.from_settings(ctx.settings) as qbit:
                 live = {info.hash.lower() for info in await qbit.torrents()}
