@@ -566,7 +566,10 @@ async def reconcile(
       (read before the listing, which is taken before the want lock): a pick
       whose pack is not in it — opened after the listing was read — is judged
       unknown this pass rather than missing. ``None`` judges every pick
-      (required, so a caller says which it means);
+      (required, so a caller says which it means). A pack found gone takes
+      **every** pending pick on it with it, in the same pass and for the same
+      reason: the pack is tombstoned once, and a sibling pick left pending
+      would wait on a pack that is no longer there;
     * **stale** — pending ``period`` (D, floored at a day; :func:`stale`).
       ``age_rule=False`` skips it: while acquisition is paused or held nobody
       can act on a pick, so its clock is not held against it.
@@ -599,6 +602,8 @@ async def reconcile(
     asked = None if listed_for is None else {value.lower() for value in listed_for}
     stale_count = gone_count = dead_count = 0
     for row in rows:
+        if row.resolved_at is not None:
+            continue  # a sibling of a pack found gone earlier in this pass
         why = await dead_reason(session, row.episode_id)
         if why is not None:
             await _forget(session, row, user_id=None, why=why)
@@ -614,8 +619,10 @@ async def reconcile(
                 row.absent_since = sighting.absent_since
                 await session.flush()
             if sighting.gone:
-                await _forget(session, row, user_id=None, why=GONE)
-                gone_count += 1
+                for sibling in rows:
+                    if sibling.torrent_id == row.torrent_id and sibling.resolved_at is None:
+                        await _forget(session, sibling, user_id=None, why=GONE)
+                        gone_count += 1
                 continue
         if age_rule and stale(row.created_at, now=now, period=period):
             await _forget(session, row, user_id=None, why=STALE)

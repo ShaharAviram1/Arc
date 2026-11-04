@@ -600,6 +600,51 @@ async def test_a_pick_opened_after_the_listing_was_read_is_not_judged_missing(
     assert first.resolved_at is None and second.resolved_at is None
 
 
+async def test_a_pack_found_gone_dismisses_every_pick_on_it(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two picks on one pack: one miss, a second an hour later — both picks are
+    dismissed as gone in that pass, and the pack is forgotten once."""
+    wired, episode, first = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963727, email="gone6@arc.test"
+    )
+    eighth = await db_session.scalar(
+        select(Episode).where(Episode.anime_id == episode.anime_id, Episode.number == 8)
+    )
+    assert eighth is not None
+    want = await db_session.scalar(select(Want).where(Want.episode_id == episode.id))
+    assert want is not None
+    eighth.state = EpisodeState.UNAVAILABLE
+    eighth.unavailable_reason = PACK_PICK_REASON
+    db_session.add(Want(user_id=want.user_id, episode_id=eighth.id))
+    second = PackPick(
+        torrent_id=first.torrent_id,
+        episode_id=eighth.id,
+        reason="no file in the batch is episode 8",
+        candidates=first.candidates,
+    )
+    db_session.add(second)
+    await db_session.flush()
+
+    wired.qbit.torrents = [{**wired.qbit.torrents[0], "hash": "e" * 40}]
+    await _compute(db_session, wired)
+    assert first.absent_since is not None and second.absent_since is not None
+    assert first.resolved_at is None and second.resolved_at is None
+
+    # The second pick's own stamp is younger: only the first's is an hour old.
+    first.absent_since = datetime.now(UTC) - pack_picks.GONE_AFTER - timedelta(minutes=1)
+    await db_session.flush()
+    await _compute(db_session, wired)
+
+    assert first.resolution == PACK_PICK_DISMISSED
+    assert second.resolution == PACK_PICK_DISMISSED
+    assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
+    assert await _forgets(db_session) == 1
+    # Neither episode is left resting on a pick that no longer exists.
+    assert episode.unavailable_reason != PACK_PICK_REASON
+    assert eighth.unavailable_reason != PACK_PICK_REASON
+
+
 async def test_an_empty_client_listing_dismisses_nothing(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
