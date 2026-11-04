@@ -2395,8 +2395,8 @@ Reviewer where marked.
       toast, withdraw, `downloads.watched` for a pass completion). DoD:
       lint, suite, Chrome check, the owner's iPad check on a pack and on a
       single.
-- [ ] **T7 — Pack match review** (M–L, **Reviewer: acquisition +
-      matching**; moved from M17). A pack refused permanently for
+- [x] **T7 — Pack match review** (M–L, **Reviewer: acquisition +
+      matching**; moved from M17; verified by the orchestrator 2026-11-04: Validator PASS (ten probes), Reviewer merge-after-fixes — both caught a pick starting a download under a pause or disk hold; the Reviewer also a lock-order inversion between the reconcile job and the pick route, an irreversible dismissal from one empty client listing, parser readings on the picked pack still claimable afterwards, a pack orphaned in the client on a mid-loop error, and dead picks lingering D days; one fix round closed all of them with tests and the Reviewer re-confirmed every item (verdict merge); my own runs: branch full suite 5559, merged main 74cdc7e targeted 491, client 1526, lint clean; the pick, dismiss and reconcile paths read personally; held-pack liveness check built as the reconciliation (gone from the client after 1 h, empty listing ignored); follow-ups to T10: read the client listing before taking the wants lock, a two-pass gone rule, `PICKABLE_STATES` import in the schema). A pack refused permanently for
       identification is kept stopped with nothing selected
       (`awaiting_pick`, `pack_picks`), the episode `unavailable` "the pack's
       files need a person's pick (Review)"; `POST /api/review/packs/{id}/pick`
