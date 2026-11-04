@@ -21,8 +21,11 @@ real torrent — and MyAnimeList linked so that "no write" is never vacuous.
    from episode 1 (the list window is suspended); episodes 1 → 3 are played
    to the mark through ``POST /api/progress``, each answered in the pass, and
    the window follows the pass; the pass ends on the last episode with
-   ``rewatch_ended``; the credits of the last episode inside ``TAIL_GRACE``
-   write nothing either. The list entry and the write log never change.
+   ``rewatch_ended``; the credits of the last episode, and a report on another
+   pass episode, inside ``TAIL_GRACE`` write nothing either — the list entry
+   and the write log never change in the pass. Past ``TAIL_GRACE`` the same
+   report is a new watch in normal mode: the list moves to 2 and the write
+   log gets its row, so the bound is real.
 3. **The cap race** (FR-A14). ``demand_max_open`` = 3: two open demands and
    five concurrent presses on fresh episodes → exactly one accepted; three
    open and five more concurrent presses → none accepted, every refusal a 409
@@ -48,7 +51,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient, Response
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from arc.config import Settings
 from arc.db import SessionFactory
@@ -518,7 +521,6 @@ async def test_a_rewatch_pass_end_to_end(
         )
         assert len(passes) == 1
         assert passes[0].ended_at is not None and passes[0].end_reason == REWATCH_END_FINISHED
-        assert datetime.now(UTC) - passes[0].ended_at < TAIL_GRACE
         rows = (
             await session.scalars(select(WatchProgress).where(WatchProgress.user_id == user.id))
         ).all()
@@ -536,6 +538,41 @@ async def test_a_rewatch_pass_end_to_end(
         assert last is not None and last.completed is False
     assert await entry_now(api_factory, user.id, anime_id) == entry_before
     await assert_no_mal(api_factory)
+
+    # --- Another pass episode inside TAIL_GRACE is still the pass's tail ----------------
+    other = await report(client, ids[2], 0.97 * LENGTH)
+    assert other["rewatching"] is True and other["list_progress"] is None
+    assert other["newly_completed"] is False
+    assert await entry_now(api_factory, user.id, anime_id) == entry_before
+    await assert_no_mal(api_factory)
+
+    # --- Past TAIL_GRACE it is a new watch, in normal mode: the list and MAL move -------
+    shift = TAIL_GRACE + timedelta(hours=1)
+    async with api_factory() as session:
+        await session.execute(
+            update(Rewatch)
+            .where(Rewatch.user_id == user.id)
+            .values(started_at=Rewatch.started_at - shift, ended_at=Rewatch.ended_at - shift)
+        )
+        await session.execute(
+            update(WatchProgress)
+            .where(WatchProgress.user_id == user.id)
+            .values(
+                finished_at=WatchProgress.finished_at - shift,
+                updated_at=WatchProgress.updated_at - shift,
+            )
+        )
+        await session.commit()
+    normal = await report(client, ids[2], 0.98 * LENGTH)
+    assert normal["rewatching"] is False
+    assert normal["newly_completed"] is True and normal["list_progress"] == 2
+    assert await entry_now(api_factory, user.id, anime_id) != entry_before
+    async with api_factory() as session:
+        entry = await session.get(ListEntry, (user.id, anime_id))
+        assert entry is not None and entry.progress == 2 and entry.mal_dirty is True
+    writes, mal_jobs = await mal_trace(api_factory)
+    assert [(row.field, row.old_value, row.new_value) for row in writes] == [("progress", 1, 2)]
+    assert mal_jobs, "the normal-mode completion queued its push"
 
 
 # --- 3. The cap race ---------------------------------------------------------------
