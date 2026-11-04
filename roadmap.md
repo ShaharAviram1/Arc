@@ -2389,7 +2389,7 @@ Reviewer where marked.
       `retention/sweep.py` (FR-T1). Tests: a rewatch completion at T →
       deletable at T + 6 h; demand lifecycle; a walk want keeps the playing
       episode; floor eviction order. Can follow T2 directly.
-- [ ] **T6 — Client** (L, Validator; Reviewer optional). Plan section 7 +
+- [x] **T6 — Client** (L, Validator; Reviewer optional; verified by the orchestrator 2026-11-04: Validator FAIL→PASS — it caught that an open demand on a ready episode had no ✕ anywhere; one fix round added the withdraw on every demanded row and in the cap list, and (orchestrator's call) the player keeps polling under the cap when the episode is already being fetched; re-confirmed by probe; my own runs: client 1513 passed on the branch and on merged main 5d5de12, lint clean; browser check against the dev stack from the worktree: Play chips and the hint, the paused refusal in place, one POST per open, "Fetching on request" with its ✕, the cap toast with links and ✕ (withdraw works), rewatch on/off with the badge, an in-pass completion that stamped only `finished_at` and left the list, MAL log and pass untouched with no toast, the announced-only 409 sentence, the admin Rules fields, Home unchanged; the Home "Rewatch" label stays unbuilt (needs a server field; optional in the plan); pack note and `unavailable` sentence covered by Vitest only). Plan section 7 +
       Vitest (EpisodeRow clickability and toast, RewatchControl, Player
       demand on `demanded: false`, pack note, cap refusal, rewatch-ended
       toast, withdraw, `downloads.watched` for a pass completion). DoD:
