@@ -5,8 +5,7 @@
  * not deactivate or demote themselves, and the last active admin may not be
  * removed by anyone (`arc/api/users.py`) — and this half of it exists so that
  * the first of those never reaches the server as a 409 in the first place: the
- * viewer's own row offers neither of those two controls, and says why. The
- * demo flag (M16) is not one of them and is offered on every row.
+ * viewer's own row offers neither of those two controls, and says why.
  *
  * The last-admin rule is *not* mirrored here. It is a race the client cannot
  * see (two admins, each demoting the other) and a check that would go stale the
@@ -70,8 +69,7 @@ const INVITE_STATUS_TONE: Record<InviteStatus, 'ok' | 'muted' | 'warn'> = {
 
 /**
  * One account. The viewer's own row is inert for the two guarded fields (see
- * the header) — but not for the demo flag, which takes nothing away from
- * anybody and which the server lets an admin set on themselves.
+ * the header).
  */
 function UserRow({
   user,
@@ -102,34 +100,11 @@ function UserRow({
       <td className={tdClass}>
         <Pill tone={user.is_active ? 'ok' : 'bad'}>{user.is_active ? 'active' : 'disabled'}</Pill>
       </td>
-      <td className={tdClass}>
-        {user.is_demo ? (
-          <Pill tone="busy">demo</Pill>
-        ) : (
-          <span className="text-[13px] text-[var(--arc-text-muted)]">—</span>
-        )}
-      </td>
       <td className={`${tdClass} whitespace-nowrap text-[var(--arc-text-muted)]`}>
         {isoDate(user.created_at)}
       </td>
       <td className={tdClass}>
         <div className="flex flex-wrap items-center gap-2">
-          {/*
-           * Outside the self branch: the demo flag is not one of the two the
-           * server guards, so there is no reason an admin should not put it on
-           * their own account — which is how the owner looks at the page the
-           * professor will see.
-           */}
-          <button
-            type="button"
-            className={subtleButtonClass}
-            disabled={pending}
-            onClick={() => {
-              onPatch({ is_demo: !user.is_demo })
-            }}
-          >
-            {user.is_demo ? 'Clear demo' : 'Make demo'}
-          </button>
           {isSelf ? (
             <span className="text-[13px] text-[var(--arc-text-muted)]">
               Your own account; another admin can change its role and access
@@ -212,7 +187,6 @@ function AccountsPanel() {
             <th className={thClass}>Email</th>
             <th className={thClass}>Role</th>
             <th className={thClass}>Status</th>
-            <th className={thClass}>Demo</th>
             <th className={thClass}>Created</th>
             <th className={thClass}>Actions</th>
           </tr>
@@ -453,9 +427,7 @@ export function UsersTab() {
       <SectionHeading>Accounts</SectionHeading>
       <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
         A deactivated account is signed out on its next request and cannot sign in again. Arc keeps
-        at least one active admin: the server refuses the change that would leave none. The demo
-        account gets a How Arc works entry in its nav and a strip on Watch Now pointing at it;
-        nothing else about it differs.
+        at least one active admin: the server refuses the change that would leave none.
       </p>
       <div className="mt-4">
         <AccountsPanel />

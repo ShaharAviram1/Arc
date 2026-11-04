@@ -28,7 +28,39 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+interface RouteNode {
+  path?: string
+  children?: RouteNode[]
+}
+
+/** Every path in the route table, depth first. */
+function pathsOf(nodes: RouteNode[]): string[] {
+  return nodes.flatMap((node) => [
+    ...(node.path === undefined ? [] : [node.path]),
+    ...pathsOf(node.children ?? []),
+  ])
+}
+
 describe('router', () => {
+  it('routes exactly these paths: the demo-only page went with the demo (M21)', () => {
+    expect(pathsOf(routes)).toEqual([
+      '/login',
+      '/invite/:token',
+      '/watch/:episodeId',
+      '/',
+      '/schedule',
+      '/search',
+      '/list',
+      '/anime/:id',
+      '/mal',
+      '/recs',
+      '/downloads',
+      '/review',
+      '/admin',
+      '*',
+    ])
+  })
+
   it('renders the not-found page for an unknown path, inside the layout', async () => {
     mockApi({ 'GET /api/auth/me': { body: TEST_USER } })
 

@@ -14,14 +14,13 @@ skip). Thin over :mod:`arc.services.acquisition.holdings` and
   device, whose episode the report leaves out, is put back to ``pending`` —
   the device lost the copy and fetches it again (:mod:`arc.services.trips.
   lost`).
-* **204** on success. **403** ``demo_account`` for the demo account (it has no
-  downloads). **422** when ``device_id`` is not a version-4 UUID, or the body is
-  neither shape.
+* **204** on success. **422** when ``device_id`` is not a version-4 UUID, or the
+  body is neither shape.
 
 ``POST /api/devices/{device_id}/report`` — the device's own event log, for the
 operator (``arc.cli device-report``): ``{events: [{at, kind, episode_id?,
-detail?}]}``, at most 500 events and 256 KiB; **204**, **403** for the demo
-account, **413** over the size, **422** otherwise malformed.
+detail?}]}``, at most 500 events and 256 KiB; **204**, **413** over the size,
+**422** otherwise malformed.
 
 ``device_id`` is a UUID the device generated; it is stored as a label and never
 used as, or in, a path (spec §7). It is parsed and stored in its canonical
@@ -51,7 +50,6 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["devices"])
 
-DEMO_REFUSED: Final[str] = "demo_account"
 BAD_DEVICE_ID: Final[str] = "device_id must be a version 4 UUID"
 
 #: A UUID in any of the spellings :class:`uuid.UUID` accepts is at most 38
@@ -184,7 +182,6 @@ def parse_device_id(raw: str) -> str:
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Replace the set of unwatched episodes one device holds (FR-A15)",
     responses={
-        403: {"description": DEMO_REFUSED},
         422: {"description": BAD_DEVICE_ID},
     },
 )
@@ -196,8 +193,6 @@ async def put_holdings(
     settings: SettingsDep,
 ) -> Response:
     """Store this device's set, re-pend the trip copies it lost; 204."""
-    if user.is_demo:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
     canonical = parse_device_id(device_id)
     at = now()
     ids, details = body.held()
@@ -225,7 +220,6 @@ async def put_holdings(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Keep a device's download-manager event log for the operator",
     responses={
-        403: {"description": DEMO_REFUSED},
         413: {"description": REPORT_TOO_LARGE},
         422: {"description": BAD_DEVICE_ID},
     },
@@ -249,8 +243,6 @@ async def post_report(
     :data:`MAX_REPORT_BYTES` is refused unread, and the stream is cut off as
     soon as it passes the cap (a chunked body declares none).
     """
-    if user.is_demo:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
     canonical = parse_device_id(device_id)
     raw = await _capped_body(request, MAX_REPORT_BYTES)
     try:
@@ -296,7 +288,6 @@ async def _capped_body(request: Request, cap: int) -> bytes:
 __all__ = [
     "REPORT_KIND_PATTERN",
     "BAD_DEVICE_ID",
-    "DEMO_REFUSED",
     "REPORT_TOO_LARGE",
     "HeldEpisode",
     "HoldingsIn",

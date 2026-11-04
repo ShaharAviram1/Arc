@@ -2259,8 +2259,8 @@ function PlayerView({ id }: { id: number }) {
   }
   const { anime, episode, previous, next } = info
   const episodeLabel = `Episode ${String(episode.number)}`
-  /** The demo account never downloads; `OfflineButton` rules out the rest. */
-  const canKeepOffline = me?.is_demo === false
+  /** Once `me` has loaded; `OfflineButton` rules out the rest. */
+  const canKeepOffline = me != null
 
   const watched = watchedOverride ?? episode.watched
   /**

@@ -104,7 +104,6 @@ from arc.services.settings import read_override
 from arc.services.tmdb.jobs import enqueue_show_enrichment, tmdb_ids_for
 from arc.services.trips.create import active_trip
 from arc.services.trips.estimate import copy_estimate_bytes
-from arc.services.trips.names import FALLBACK_COPY_BYTES
 from arc.services.trips.rules import trip_max_episodes
 from arc.services.trips.view import trip_facts
 
@@ -342,16 +341,14 @@ async def detail(
         episode_ids,
         offline_codec=settings.offline_codec,
         offline_height=settings.offline_height,
-        offline_demo=user.is_demo,
         live_settings=settings,
     )
     # The caller's active trip on this show (FR-A12; a user may have one per
     # show, owner 2026-10-28): one indexed lookup, and the trip's own few
     # queries only when there is one. The copy estimate is on the page either
-    # way: the trip card checks what fits the device before a trip exists. The
-    # demo account can never make a trip, so it is sent the fallback unread.
+    # way: the trip card checks what fits the device before a trip exists.
     trip = await active_trip(session, user.id, anime.id)
-    estimate = FALLBACK_COPY_BYTES if user.is_demo else await copy_estimate_bytes(session, settings)
+    estimate = await copy_estimate_bytes(session, settings)
     trip_out = (
         TripOut.build(await trip_facts(session, settings, trip)) if trip is not None else None
     )

@@ -1,6 +1,6 @@
 """Asking for an episode's small offline copy (FR-P6).
 
-Two endpoints, for any signed-in account except the demo one:
+Two endpoints, for any signed-in account:
 
 * ``POST /api/episodes/{id}/offline`` — "Keep offline" on a ready episode.
   Queues the copy if there is not one and answers **202** with
@@ -16,9 +16,8 @@ Two endpoints, for any signed-in account except the demo one:
 * ``GET /api/episodes/{id}/offline`` — the same answer without asking for
   anything: what a device polls while ``preparing``.
 
-Both answer **404** for an unknown episode and for one that is not ``ready``,
-and **403** to the demo account before anything is looked up. Like the
-transcode control beside them, nothing here runs ffmpeg: the encode is a job
+Both answer **404** for an unknown episode and for one that is not ``ready``.
+Like the transcode control beside them, nothing here runs ffmpeg: the encode is a job
 (:mod:`arc.services.media.offline`), twenty-odd seconds a minute of episode
 behind every transcode in the queue.
 """
@@ -31,7 +30,6 @@ from typing import Final
 from fastapi import APIRouter, HTTPException, status
 
 from arc.api.deps import CurrentUser, EpisodeId, SessionDep, SettingsDep
-from arc.api.media_stream import DEMO_REFUSED
 from arc.api.offline_schemas import OfflineOut
 from arc.models import Episode, EpisodeState, OfflineCopy
 from arc.services.acquisition.rules import is_storage_held
@@ -58,11 +56,6 @@ router = APIRouter(tags=["media"])
 NOT_READY: Final[str] = "episode not found or not ready"
 
 
-def _refuse_demo(user_is_demo: bool) -> None:
-    if user_is_demo:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
-
-
 async def _answer(
     session: SessionDep, settings: SettingsDep, episode_id: int, copy: OfflineCopy | None
 ) -> OfflineOut:
@@ -85,7 +78,6 @@ async def _answer(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Ask for the small offline copy of one ready episode (FR-P6)",
     responses={
-        403: {"description": DEMO_REFUSED},
         404: {"description": NOT_READY},
         409: {
             "description": (
@@ -103,7 +95,6 @@ async def request_offline_copy(
     episode_id: EpisodeId, user: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> OfflineOut:
     """Queue the copy unless it exists; 202 with where it stands either way."""
-    _refuse_demo(user.is_demo)
     try:
         asked = await request_copy(
             session,
@@ -146,13 +137,12 @@ async def request_offline_copy(
     "/api/episodes/{episode_id}/offline",
     response_model=OfflineOut,
     summary="Where one ready episode's small offline copy stands (FR-P6)",
-    responses={403: {"description": DEMO_REFUSED}, 404: {"description": NOT_READY}},
+    responses={404: {"description": NOT_READY}},
 )
 async def get_offline_copy(
-    episode_id: EpisodeId, user: CurrentUser, session: SessionDep, settings: SettingsDep
+    episode_id: EpisodeId, _user: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> OfflineOut:
-    """Read-only, and safe to poll."""
-    _refuse_demo(user.is_demo)
+    """Read-only, and safe to poll. ``_user``: a session is required (any account)."""
     episode = await session.get(Episode, episode_id)
     if episode is None or episode.state is not EpisodeState.READY:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_READY)

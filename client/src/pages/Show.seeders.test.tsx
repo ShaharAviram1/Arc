@@ -7,7 +7,7 @@ import type { AnimeDetail } from '@/lib/anime'
 import { createQueryClient } from '@/lib/queryClient'
 import { Show } from '@/pages/Show'
 import { FRIEREN, FRIEREN_DETAIL } from '@/test/animeFixtures'
-import { mockApi, requestsMade, TEST_DEMO_USER, TEST_USER } from '@/test/apiMock'
+import { mockApi, requestsMade, TEST_USER } from '@/test/apiMock'
 
 /**
  * The few-seeders line on an episode row (FR-A16, M20 T9): "Few seeders (2) —
@@ -95,21 +95,6 @@ describe('Show — few seeders (FR-A16)', () => {
       expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
     })
     expect(screen.queryByText(/Few seeders/)).not.toBeInTheDocument()
-  })
-
-  it('offers no Pin to the demo account', async () => {
-    const fetchMock = mockApi({
-      'GET /api/auth/me': { body: TEST_DEMO_USER },
-      [DETAIL]: { body: detail() },
-    })
-
-    renderShow()
-    expect(await screen.findByText('Few seeders (2)')).toBeInTheDocument()
-    await waitFor(() => {
-      expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
-    })
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(screen.queryByRole('button', { name: 'Pin this show' })).not.toBeInTheDocument()
   })
 
   it('says so when the pin is refused', async () => {

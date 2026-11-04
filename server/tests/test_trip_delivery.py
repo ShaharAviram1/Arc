@@ -763,14 +763,15 @@ async def test_who_may_fetch_a_trip_copy(db_session: AsyncSession, settings: Set
     episode = rows[0]
     owner, trip = await trip_with_copies(db_session, settings, rows, "fetch-owner@arc.test")
     other = await make_user(db_session, "fetch-other@arc.test")
-    demo = await make_user(db_session, "fetch-demo@arc.test")
-    demo.is_demo = True
+    # M21 T9: a fresh plain account where the demo account was; no account is
+    # refused outright any more, only by the trip and ready rules below.
+    plain = await make_user(db_session, "fetch-plain@arc.test")
     copy = await db_session.get(OfflineCopy, episode.id)
     assert copy is not None
 
     assert await may_fetch_copy(db_session, owner, episode, copy), "owner, pending"
     assert not await may_fetch_copy(db_session, other, episode, copy), "another user"
-    assert not await may_fetch_copy(db_session, demo, episode, copy), "demo"
+    assert not await may_fetch_copy(db_session, plain, episode, copy), "no trip row: no"
 
     await confirm_delivered(
         db_session, user=owner, trip_id=trip.id, episode_id=episode.id, etag=None, now=now()
@@ -785,7 +786,7 @@ async def test_who_may_fetch_a_trip_copy(db_session: AsyncSession, settings: Set
     episode.state = EpisodeState.READY
     await db_session.flush()
     assert await may_fetch_copy(db_session, other, episode, copy), "a ready episode: anyone"
-    assert not await may_fetch_copy(db_session, demo, episode, copy), "never demo"
+    assert await may_fetch_copy(db_session, plain, episode, copy), "a ready episode: any account"
 
 
 # --- MyAnimeList ------------------------------------------------------------

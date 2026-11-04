@@ -111,7 +111,6 @@ async def home(user: CurrentUser, session: SessionDep, settings: SettingsDep) ->
         episode_ids,
         offline_codec=settings.offline_codec,
         offline_height=settings.offline_height,
-        offline_demo=user.is_demo,
     )
     # Only "new this week" needs this: a continue-watching row carries its own
     # ``completed`` out of the query that found it (a rewatch left half-way is

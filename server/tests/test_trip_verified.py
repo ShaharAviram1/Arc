@@ -79,8 +79,8 @@ pytestmark = pytest.mark.pg
 
 OWNER_EMAIL = "verified-owner@arc.test"
 OWNER_PASSWORD = "verified-owner-password"
-DEMO_EMAIL = "verified-demo@arc.test"
-DEMO_PASSWORD = "verified-demo-password"
+OTHER_EMAIL = "verified-plain@arc.test"
+OTHER_PASSWORD = "verified-plain-password"
 IPAD = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
 MAC = "0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d"
 
@@ -104,15 +104,11 @@ async def owner_client(api_app: FastAPI, owner: User) -> AsyncIterator[AsyncClie
 
 
 @pytest.fixture
-async def demo_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
-    made = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, made.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+async def other_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
+    """A second plain account: where the demo account's 403 used to be."""
+    await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
     async with api_transport(api_app) as http:
-        yield await login(http, DEMO_EMAIL, DEMO_PASSWORD)
+        yield await login(http, OTHER_EMAIL, OTHER_PASSWORD)
 
 
 def holdings_url(device: str = IPAD) -> str:
@@ -980,9 +976,13 @@ async def test_a_report_over_256_kib_is_413(owner_client: AsyncClient) -> None:
     assert (await owner_client.post(report_url(), json=body)).status_code == 413
 
 
-async def test_the_demo_account_sends_no_report(demo_client: AsyncClient) -> None:
+async def test_no_account_is_refused_a_report_any_more(other_client: AsyncClient) -> None:
+    """M21 T9: the demo 403 is gone; any account reports, the size cap still applies."""
     body = {"events": [{"at": "2026-10-30T03:30:00Z", "kind": "x"}]}
-    assert (await demo_client.post(report_url(), json=body)).status_code == 403
+    assert (await other_client.post(report_url(), json=body)).status_code == 204
+    detail = {"b": "x" * 300_000}
+    big = {"events": [{"at": "2026-10-30T03:30:00Z", "kind": "big", "detail": detail}]}
+    assert (await other_client.post(report_url(), json=big)).status_code == 413
 
 
 # --- Fix loop (review of E2, 2026-10-30) ---------------------------------------

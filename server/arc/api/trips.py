@@ -3,10 +3,9 @@
 Three routes, thin over :mod:`arc.services.trips`:
 
 * ``POST /api/anime/{id}/trip`` ``{count, device_id}`` → **201** :class:`~arc.api.
-  trip_schemas.TripOut`. Refusals carry a short code as ``detail``: **403**
-  ``demo_account``; **409** ``trip_active`` (this show already has the
-  caller's active trip: one per show, any number of shows) or
-  ``storage_held`` (FR-T6); **422** ``count_out_of_range`` (1..
+  trip_schemas.TripOut`. Refusals carry a short code as ``detail``: **409**
+  ``trip_active`` (this show already has the caller's active trip: one per
+  show, any number of shows) or ``storage_held`` (FR-T6); **422** ``count_out_of_range`` (1..
   ``trip_max_episodes``) or ``nothing_aired`` (no aired episode after the
   caller's progress) or a ``device_id`` that is not a v4 UUID; **404** for an
   unknown show. The trip is the asking device's to download (owner,
@@ -65,7 +64,6 @@ from arc.services.trips.create import (
     TRIP_OTHER_DEVICE,
     TripConflict,
     TripError,
-    TripForbidden,
     TripInvalid,
     TripNotFound,
     active_trips,
@@ -99,9 +97,7 @@ def now() -> datetime:
 
 def _http(exc: TripError) -> HTTPException:
     code = status.HTTP_409_CONFLICT
-    if isinstance(exc, TripForbidden):
-        code = status.HTTP_403_FORBIDDEN
-    elif isinstance(exc, TripInvalid):
+    if isinstance(exc, TripInvalid):
         code = status.HTTP_422_UNPROCESSABLE_CONTENT
     elif isinstance(exc, TripNotFound):
         code = status.HTTP_404_NOT_FOUND
@@ -116,7 +112,6 @@ def _http(exc: TripError) -> HTTPException:
     status_code=status.HTTP_201_CREATED,
     summary="Prepare the next X aired episodes for a trip (FR-A12)",
     responses={
-        403: {"description": "demo_account"},
         404: {"description": "anime not found"},
         409: {"description": "trip_active | storage_held"},
         422: {"description": "count_out_of_range | nothing_aired | bad device_id"},

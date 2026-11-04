@@ -2025,10 +2025,11 @@ is its only user, and uses it daily.
   same summary.
 - FR-D5 **Retired 2026-11-03 (owner), removed in M21.** Arc is used only by
   its owner: the demo account (M16) was deleted from production on
-  2026-10-15, and M21 removes the `users.is_demo` flag, every refusal and
-  branch that read it, its toggle on the admin Users tab, the `--demo` option
-  of `arc.cli demo-list` (the command stays, for seeding lists), and the
-  **How Arc works** page with its nav entry and Watch Now strip.
+  2026-10-15, and M21 (T9, 2026-11-04) removed the `users.is_demo` flag,
+  every refusal and branch that read it, its toggle on the admin Users tab,
+  the `--demo` option of `arc.cli demo-list` (the command stays, for seeding
+  lists), and the **How Arc works** page with its nav entry and Watch Now
+  strip.
   `/api/auth/me` keeps answering `is_demo: false` for one release, so an
   installed app still running an older client does not reject the answer.
   Until M21 the flag refused file downloads, small copies, trips, pins,
@@ -3540,3 +3541,4 @@ through the same edge, without the grace period.
   counts as a partial.
 - 2026-11-04 — M21 T7: FR-A4's pick clause gains the reconciliation sentence: a pick whose pack was removed from the torrent client is dismissed on its own (as one left D days is), and while a pick waits the daily look goes on with no second pick opened for the episode.
 - 2026-11-04 (orchestrator's call) — M21 T7 fix round 1: FR-A4's pick clause also dismisses a pick nobody can make (no one wants the episode, or it is coming from another release), and a pick is refused while acquisition is paused or held, like any fetch.
+- 2026-11-04 — M21 T9: the demo removal landed as FR-D5's retirement note says (wording moved to the past tense). Every former demo refusal now applies the normal rule to every account; `is_demo` is no longer a field anybody may set (a PATCH carrying it is a 422), and `/api/auth/me` still answers `is_demo: false` until the next release.

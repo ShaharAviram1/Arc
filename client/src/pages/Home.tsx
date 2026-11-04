@@ -977,84 +977,6 @@ function behindMeta(item: BehindEntry): string {
   return parts.join(' · ')
 }
 
-/* --- The demo account's first-visit strip ------------------------------ */
-
-/**
- * "New here? See how Arc works" — one line above the hero, on the demo
- * account and nowhere else (M16, owner 2026-09-18).
- *
- * The page it points at is also in that account's nav; this exists because the
- * person it is for arrives on Watch Now, and a nav entry four items along is
- * not where a first-time visitor looks. It is one line, it carries a ✕, and
- * once dismissed it does not come back.
- *
- * Dismissal is remembered in `localStorage` under the viewer's own id, which
- * is the right store for it: it is a per-browser convenience with nothing to
- * say to the server, to another device, or to anybody else who opens this
- * account. Every read and write is wrapped, because the accessor itself throws
- * in a browser set to block site data — and a page that cannot render because
- * a hint could not remember being dismissed would be a poor trade.
- */
-const HINT_KEY_PREFIX = 'arc:how-arc-works-dismissed:'
-
-function hintKey(userId: number): string {
-  return `${HINT_KEY_PREFIX}${String(userId)}`
-}
-
-function hintDismissed(userId: number): boolean {
-  try {
-    return window.localStorage.getItem(hintKey(userId)) === '1'
-  } catch {
-    return false
-  }
-}
-
-function rememberHintDismissed(userId: number): void {
-  try {
-    window.localStorage.setItem(hintKey(userId), '1')
-  } catch {
-    // A viewer whose browser blocks storage sees the strip again next time,
-    // which is the harmless half of this failure.
-  }
-}
-
-function HowArcWorksHint({ userId }: { userId: number }) {
-  const [dismissed, setDismissed] = useState(() => hintDismissed(userId))
-
-  if (dismissed) return null
-
-  return (
-    <div className="mb-5 flex items-center gap-3 rounded-nav border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-2.5">
-      <p className="min-w-0 flex-1 text-[14px] text-[var(--arc-text-muted)]">
-        New here?{' '}
-        <Link
-          to="/how-arc-works"
-          className={cx(
-            'rounded-nav font-semibold text-[var(--arc-text)] underline decoration-[var(--arc-border-strong)] decoration-1 underline-offset-4 hover:decoration-[var(--arc-text)]',
-            FOCUS_RING,
-          )}
-        >
-          See how Arc works
-        </Link>
-      </p>
-      <button
-        type="button"
-        aria-label="Dismiss"
-        onClick={() => {
-          rememberHintDismissed(userId)
-          setDismissed(true)
-        }}
-        className={cx(
-          'shrink-0 rounded-full px-2 py-1 text-[14px] leading-none text-[var(--arc-text-muted)] hover:text-[var(--arc-text)]',
-          FOCUS_RING,
-        )}
-      >
-        <span aria-hidden>✕</span>
-      </button>
-    </div>
-  )
-}
-
 /* --- The viewer's own failures ----------------------------------------- */
 
 /**
@@ -1062,8 +984,7 @@ function HowArcWorksHint({ userId }: { userId: number }) {
  * downloads, transcodes and MAL writes").
  *
  * Above the hero, because a thing that is broken is the one piece of news on
- * this page that does not wait for a scroll — and below the demo strip, which
- * is about the whole site rather than about one episode. Quiet, though: one
+ * this page that does not wait for a scroll. Quiet, though: one
  * row per failure, no icon, no colour on the strip itself, the reason in the
  * muted voice the rest of the page uses. Arc saying "this stopped" should read
  * like Arc saying "this is ready", not like an alarm; an episode nobody can
@@ -1090,8 +1011,7 @@ const FAILURE_REGION = 'Problems on your shows'
  * anybody else to know about one person putting one row away).
  *
  * One `localStorage` entry per dismissed failure, keyed by the viewer's id and
- * the server's own failure key, which follows the demo strip's precedent
- * (`arc:how-arc-works-dismissed:<user id>`). A key per row rather than a list
+ * the server's own failure key. A key per row rather than a list
  * under one key because the rows arrive and leave independently, and because
  * it makes the pruning below a plain prefix scan.
  *
@@ -1425,8 +1345,6 @@ export function Home() {
 
   return (
     <section>
-      {me?.is_demo === true ? <HowArcWorksHint key={me.id} userId={me.id} /> : null}
-
       {/*
         Mounted even with nothing to show: the banner is what prunes the
         dismissal store, and a store only pruned while something is broken

@@ -7,7 +7,6 @@ import { createQueryClient } from '@/lib/queryClient'
 import { Admin } from '@/pages/Admin'
 import {
   ACCOUNTS,
-  ADMIN_SELF,
   CREATED_INVITE,
   CREATED_INVITE_URL,
   DISK,
@@ -285,43 +284,14 @@ describe('Admin — Users (FR-D1)', () => {
     expect(bodyOf(fetchMock, 'PATCH', '/api/users/5')).toEqual({ role: 'admin' })
   })
 
-  it('flags an account as the demo one, and offers it on the viewer’s own row too', async () => {
-    const { fetchMock } = renderAdmin({
-      'PATCH /api/users/5': { body: { ...OTHER_USER, is_demo: true } },
-    })
+  it('has no demo column or control any more (M21)', async () => {
+    renderAdmin()
 
     const row = await accountRow('leah@example.com')
-    // Not flagged yet: the column says so without relying on a colour.
-    expect(within(row).getByText('—')).toBeInTheDocument()
-
-    await userEvent.click(within(row).getByRole('button', { name: 'Make demo' }))
-
-    await waitFor(() => {
-      expect(requestsMade(fetchMock)).toContain('PATCH /api/users/5')
-    })
-    expect(bodyOf(fetchMock, 'PATCH', '/api/users/5')).toEqual({ is_demo: true })
-
-    // The flag takes nothing away, so unlike Deactivate and Make user it is
-    // offered on the admin's own row as well.
+    expect(screen.queryByRole('columnheader', { name: 'Demo' })).not.toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: 'Make demo' })).not.toBeInTheDocument()
     const self = await accountRow('admin@example.com')
-    expect(within(self).getByRole('button', { name: 'Make demo' })).toBeInTheDocument()
-  })
-
-  it('offers to clear the flag on an account that already has it', async () => {
-    const { fetchMock } = renderAdmin({
-      [USERS]: { body: [ADMIN_SELF, { ...OTHER_USER, is_demo: true }] },
-      'PATCH /api/users/5': { body: OTHER_USER },
-    })
-
-    const row = await accountRow('leah@example.com')
-    expect(within(row).getByText('demo')).toBeInTheDocument()
-
-    await userEvent.click(within(row).getByRole('button', { name: 'Clear demo' }))
-
-    await waitFor(() => {
-      expect(requestsMade(fetchMock)).toContain('PATCH /api/users/5')
-    })
-    expect(bodyOf(fetchMock, 'PATCH', '/api/users/5')).toEqual({ is_demo: false })
+    expect(within(self).queryByRole('button', { name: 'Make demo' })).not.toBeInTheDocument()
   })
 
   it('shows the server’s 409 next to the row that caused it', async () => {

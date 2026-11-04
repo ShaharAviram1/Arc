@@ -42,8 +42,7 @@ import { useDownload } from '@/offline/useDownloads'
  * decides, as for any episode.
  *
  * Renders nothing for an episode that is not ready and not the viewer's trip
- * episode, has no file route, or on a browser with no OPFS or no workers. The
- * demo account is the caller's to rule out (it does not render this at all).
+ * episode, has no file route, or on a browser with no OPFS or no workers.
  */
 
 export type OfflineButtonVariant = 'row' | 'player'

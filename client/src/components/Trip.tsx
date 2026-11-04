@@ -65,8 +65,8 @@ import { useDownloads } from '@/offline/useDownloads'
  * device that started it) shows each row as "Kept on another device" and
  * offers nothing to fetch or ask again; cancelling it stays allowed.
  *
- * Neither is rendered for the demo account, nor where the browser cannot keep
- * files or play the copies; the page decides that and says it in one line.
+ * Neither is rendered where the browser cannot keep files or play the copies;
+ * the page decides that and says it in one line.
  */
 
 const TRIP_LABEL = 'Prepare for a trip'

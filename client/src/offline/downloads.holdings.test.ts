@@ -28,7 +28,7 @@ import {
  * Device holdings (M20, FR-S9, architecture §5.4d): the device tells the
  * server which episodes it holds unwatched, at launch, on reconnect, when a
  * download completes and when one is deleted — debounced, deduped, queued
- * while offline, never for the demo account.
+ * while offline.
  */
 
 const ALICE = 1
@@ -40,7 +40,6 @@ interface Setup {
   online?: () => boolean
   put?: (deviceId: string, ids: number[]) => Promise<unknown>
   clock?: { now: number }
-  demo?: boolean
   /** Use the real request (through `fetch`) instead of the recording fake. */
   wire?: boolean
   release?: (tripId: number, episodeId: number, deviceId: string) => Promise<unknown>
@@ -80,7 +79,7 @@ async function launch(setup: Setup = {}) {
     const stored = record as DownloadRecord
     harness.files.set(stored.name, stored.bytes)
   }
-  harness.manager.setOwner(ALICE, { demo: setup.demo === true })
+  harness.manager.setOwner(ALICE)
   await harness.manager.hydrate()
   return { ...harness, put, bodies, reports, meta, clock }
 }
@@ -372,23 +371,17 @@ describe('reportHoldings', () => {
     expect(put).toHaveBeenCalledTimes(2)
   })
 
-  it('never reports for the demo account', async () => {
-    const { manager, put } = await launch({ initial: [held()], demo: true })
-    manager.reportHoldings()
-    await manager.sendHoldings()
-    await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS * 2)
-    expect(put).not.toHaveBeenCalled()
-  })
-
-  it('stops after the server refuses with a 403', async () => {
-    const put = vi.fn(() => Promise.reject(new ApiError(403, { detail: 'demo_account' })))
+  it('keeps reporting after a 403: no account is refused for good (M21)', async () => {
+    // The demo account, which the server once refused, went in M21; a 403 is
+    // now an ordinary 4xx, tried again at the next moment.
+    const put = vi.fn(() => Promise.reject(new ApiError(403, { detail: 'forbidden' })))
     const { manager } = await launch({ initial: [held()], put })
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
     expect(put).toHaveBeenCalledTimes(1)
 
-    await manager.remove(9001)
+    manager.reportHoldings()
     await vi.advanceTimersByTimeAsync(HOLDINGS_DEBOUNCE_MS)
-    expect(put).toHaveBeenCalledTimes(1)
+    expect(put).toHaveBeenCalledTimes(2)
   })
 
   it('reports nothing while nobody is signed in', async () => {

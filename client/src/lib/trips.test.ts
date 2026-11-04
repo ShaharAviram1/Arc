@@ -220,14 +220,8 @@ describe('refusals, in sentences', () => {
     ],
     ['nothing_aired', 'Nothing has aired after where you are in this show.'],
     ['count_out_of_range', 'That is more episodes than this server allows for one trip.'],
-    ['demo_account', 'The demo account cannot prepare trips.'],
   ])('%s', (detail, sentence) => {
-    const status =
-      detail === 'demo_account'
-        ? 403
-        : detail.startsWith('trip') || detail === 'storage_held'
-          ? 409
-          : 422
+    const status = detail.startsWith('trip') || detail === 'storage_held' ? 409 : 422
     expect(tripErrorMessage(new ApiError(status, { detail }))).toBe(sentence)
   })
 

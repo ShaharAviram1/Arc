@@ -24,9 +24,8 @@ this module — it guards ``/api/`` and only unsafe methods, and both routes are
 back with no ffmpeg and no temporary file — fMP4 makes that a valid MP4 on its
 own (:mod:`arc.services.media.download` has the reasoning and the pure
 arithmetic). It answers ranges, ``If-Range`` and ``If-None-Match`` itself,
-against an ETag over every part, and refuses the demo account with a 403.
-Every part it sends has passed the same name, symlink and confinement checks
-as a segment request, described next.
+against an ETag over every part. Every part it sends has passed the same name,
+symlink and confinement checks as a segment request, described next.
 
 **Paths are derived from the id and a closed vocabulary of names.** The
 episode id decides the directory (:func:`~arc.services.media.names.
@@ -263,9 +262,6 @@ DOWNLOAD_CACHE: Final[str] = "private, no-cache"
 #: How much of a part one read takes. Bounded, so a download costs one chunk of
 #: memory however long the episode is; a megabyte is about one segment.
 DOWNLOAD_CHUNK: Final[int] = 1 << 20
-
-#: The demo account may watch but not take files away (owner, 2026-10-04).
-DEMO_REFUSED: Final[str] = "downloads are turned off for the demo account"
 
 #: The small offline copy's name (FR-P6). A literal like :data:`DOWNLOAD_NAME`,
 #: registered before the segment route so it wins the match, and outside the
@@ -1262,7 +1258,6 @@ class _PartsResponse(StreamingResponse):
         304: {"description": "the caller's copy is current"},
         400: {"description": RANGE_ERRORS[status.HTTP_400_BAD_REQUEST]},
         401: {"description": "not authenticated"},
-        403: {"description": DEMO_REFUSED},
         404: {"description": NOT_FOUND},
         416: {"description": RANGE_ERRORS[status.HTTP_416_RANGE_NOT_SATISFIABLE]},
     },
@@ -1285,16 +1280,11 @@ async def download(
     downloader that will consume this route resumes 8 MB ranges and restarts
     whenever that ETag moves.
 
-    The demo account is refused before anything is looked up, so the 403 says
-    nothing about which episodes exist.
-
     A remuxed rendition with a text track is refused with a reason (FR-S7,
     owner 2026-10-13): the WebVTT track cannot travel inside one MP4, and a
     full-size file without subtitles is not what a device asked for. One
     without a text track is concatenated from ``video.m3u8`` like any other.
     """
-    if user.is_demo:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
     directory, row = await _ready_rendition(session, settings, episode_id)
     if _is_remux(row) and row is not None and row.text_subtitles:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=TEXT_SUBTITLES_REFUSED)
@@ -1398,7 +1388,6 @@ def _download_response(
         304: {"description": "the caller's copy is current"},
         400: {"description": RANGE_ERRORS[status.HTTP_400_BAD_REQUEST]},
         401: {"description": "not authenticated"},
-        403: {"description": DEMO_REFUSED},
         404: {"description": NOT_FOUND},
         416: {"description": RANGE_ERRORS[status.HTTP_416_RANGE_NOT_SATISFIABLE]},
     },
@@ -1419,15 +1408,12 @@ async def offline_copy(
     rather than cached for ever — a copy is remade under the same name — and
     named for the person saving it like the full-size download.
 
-    The demo account is refused before anything is looked up. Then the copy
-    must exist and be ``ready``, and :func:`~arc.services.media.copies.
+    The copy must exist and be ``ready``, and :func:`~arc.services.media.copies.
     may_fetch_copy` must say this caller may have it; every other answer is
     the router's one 404. ``last_served_at`` is touched at most every five
     minutes, for the idle rule (``offline_idle_days``) and retention's "copy
     being sent" hold (M20 T8), and only when bytes go out.
     """
-    if user.is_demo:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=DEMO_REFUSED)
     episode = await session.get(Episode, episode_id)
     copy = await session.get(OfflineCopy, episode_id)
     if episode is None or copy is None or copy.state is not OfflineCopyState.READY:
@@ -1599,7 +1585,6 @@ for _route, _endpoint in (
 
 
 __all__ = [
-    "DEMO_REFUSED",
     "DOWNLOAD_CACHE",
     "DOWNLOAD_NAME",
     "LIVE_PLAYLIST_CACHE",

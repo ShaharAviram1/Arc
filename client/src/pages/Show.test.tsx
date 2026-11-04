@@ -32,15 +32,7 @@ import {
   UNAVAILABLE_REASON,
   UNLINKED_RELATION,
 } from '@/test/animeFixtures'
-import {
-  callTo,
-  jsonBodyOf,
-  mockApi,
-  requestsMade,
-  TEST_ADMIN,
-  TEST_DEMO_USER,
-  TEST_USER,
-} from '@/test/apiMock'
+import { callTo, jsonBodyOf, mockApi, requestsMade, TEST_ADMIN, TEST_USER } from '@/test/apiMock'
 
 const ME = { body: TEST_USER }
 const MAL_NOTICE =
@@ -1596,20 +1588,6 @@ describe('keeping an episode inside Arc (FR-S9)', () => {
 
     await screen.findByRole('button', { name: 'Keep episode 1 offline' })
     expect(screen.getAllByRole('button', { name: /^Keep episode/ })).toHaveLength(1)
-  })
-
-  it('is not offered to the demo account', async () => {
-    pretendOpfs()
-    mockApi({
-      'GET /api/auth/me': { body: TEST_DEMO_USER },
-      [DETAIL_PATH]: { body: FRIEREN_DETAIL },
-    })
-
-    renderShow()
-
-    // The row is still playable; only the download is off.
-    expect(await screen.findByRole('link', { name: /^1\. / })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /offline/ })).not.toBeInTheDocument()
   })
 
   it('sits beside the Watched control, in the same group', async () => {

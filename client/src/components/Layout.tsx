@@ -31,18 +31,12 @@ import { canDownloadInApp } from '@/offline/opfs'
  * `useIsPhone` branch instead of `hidden md:flex`. The tab bar holds four
  * tabs and no more, so Schedule lives at the top of the sheet. Nothing hides
  * on a phone: every account item in the avatar menu is in the sheet too.
- *
- * One entry is conditional (M16, owner 2026-09-18): the demo account — the one
- * the course professor signs in to — gets a fourth destination, "How Arc
- * works", in the toolbar and at the top of the phone sheet. Nobody else sees
- * it, and the page behind it is reachable by anybody who has the link.
  */
 
 const BROWSE_PATH = '/search'
 const REVIEW_PATH = '/review'
 const LIST_PATH = '/list'
 const SCHEDULE_PATH = '/schedule'
-const HOW_PATH = '/how-arc-works'
 
 /** Long enough that a typed word is one navigation, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 300
@@ -60,22 +54,6 @@ const MAIN_NAV: NavItem[] = [
   { to: BROWSE_PATH, label: 'Browse' },
   { to: SCHEDULE_PATH, label: 'Schedule' },
 ]
-
-/**
- * The demo account's fourth entry (M16, owner 2026-09-18).
- *
- * A nav entry rather than something behind the avatar because the person it is
- * for has never seen Arc before and will not go looking under a letter in a
- * circle. It is gated on `is_demo` and on nothing else, so the owner's own
- * toolbar is the three it has always been — and the *route* is not gated at
- * all, so a bookmarked link keeps working for whoever follows it.
- */
-const HOW_NAV: NavItem = { to: HOW_PATH, label: 'How Arc works' }
-
-/** The toolbar's destinations for this viewer. */
-function mainNav(isDemo: boolean): NavItem[] {
-  return isDemo ? [...MAIN_NAV, HOW_NAV] : MAIN_NAV
-}
 
 /* --- Account menu ------------------------------------------------------ */
 
@@ -97,14 +75,6 @@ interface AccountMenu {
    * storage guard (spec §4.9 FR-T6). `null` when nothing is.
    */
   acquisitionBrake: 'paused' | 'held' | null
-  /**
-   * Whether this is the demo account (M16). Not an account-menu entry — it
-   * decides whether the toolbar and the "More" sheet carry "How Arc works" —
-   * but it is derived here because this is the one place in the shell that
-   * reads `me`, and two components asking the same question separately is how
-   * two components come to disagree about it.
-   */
-  isDemo: boolean
   logout: () => void
   loggingOut: boolean
 }
@@ -157,9 +127,9 @@ function useAccountMenu(): AccountMenu | null {
         badge.count > 0 ? <ReviewCountPill count={badge.count} label={badge.label} /> : undefined,
     },
   ]
-  // Episodes kept on this device (FR-S9): never for the demo account, which
-  // may not download, and only where the browser can keep them.
-  if (!me.is_demo && canDownloadInApp()) entries.push({ to: '/downloads', label: 'Downloads' })
+  // Episodes kept on this device (FR-S9), for every account, wherever the
+  // browser can keep them.
+  if (canDownloadInApp()) entries.push({ to: '/downloads', label: 'Downloads' })
   if (me.role === 'admin') entries.push({ to: '/admin', label: 'Admin' })
 
   return {
@@ -168,7 +138,6 @@ function useAccountMenu(): AccountMenu | null {
     entries,
     acquisitionBrake:
       acquisition?.paused === true ? 'paused' : acquisition?.storage_held === true ? 'held' : null,
-    isDemo: me.is_demo,
     logout: () => {
       logout.mutate()
     },
@@ -543,7 +512,7 @@ function Toolbar({ account, isPhone }: { account: AccountMenu | null; isPhone: b
 
             {isPhone ? null : (
               <nav aria-label="Main" className="mx-auto flex items-center gap-0.5">
-                {mainNav(account?.isDemo === true).map((item) => (
+                {MAIN_NAV.map((item) => (
                   <NavLink key={item.to} to={item.to} end={item.end} className={navPillClass}>
                     {item.label}
                   </NavLink>
@@ -652,8 +621,7 @@ function TabBar({ moreOpen, onMore }: { moreOpen: boolean; onMore: () => void })
  * concession this design makes and "somewhere else entirely" is not. Schedule
  * is a destination rather than an account item, so it sits first and above the
  * hairline: the tab bar is four tabs and a fifth would crowd them, and this is
- * the phone's version of the toolbar entry (owner, 2026-09-11). "How Arc
- * works" joins it there on the demo account, for the same reason.
+ * the phone's version of the toolbar entry (owner, 2026-09-11).
  */
 function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null)
@@ -687,23 +655,20 @@ function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => 
           className="mx-auto mb-3 h-1 w-9 rounded-full bg-[rgba(255,255,255,0.22)]"
         />
         {/*
-         * The toolbar's destinations that the four tabs have no room for —
-         * Schedule always, and "How Arc works" on the demo account (M16).
-         * Same order as the toolbar, so the phone is the same app.
+         * The toolbar's destination that the four tabs have no room for:
+         * Schedule. Same order as the toolbar, so the phone is the same app.
          */}
-        {mainNav(account.isDemo)
-          .filter((item) => item.to === SCHEDULE_PATH || item.to === HOW_PATH)
-          .map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              data-menu-item
-              onClick={onClose}
-              className={cx(MENU_ITEM, FOCUS_RING, 'min-h-12')}
-            >
-              <span>{item.label}</span>
-            </Link>
-          ))}
+        {MAIN_NAV.filter((item) => item.to === SCHEDULE_PATH).map((item) => (
+          <Link
+            key={item.to}
+            to={item.to}
+            data-menu-item
+            onClick={onClose}
+            className={cx(MENU_ITEM, FOCUS_RING, 'min-h-12')}
+          >
+            <span>{item.label}</span>
+          </Link>
+        ))}
         <MenuSeparator />
         <AccountItems account={account} onNavigate={onClose} itemClassName="min-h-12" />
         <button
@@ -730,18 +695,7 @@ function MoreSheet({ account, onClose }: { account: AccountMenu; onClose: () => 
  * render it underneath; the rest fail as they always did. Either way the way
  * out is the same: the episodes on this device, which need no network.
  */
-function OfflineStrip({ downloads }: { downloads: boolean }) {
-  // The demo account may not download, so it is told only the fact.
-  if (!downloads) {
-    return (
-      <p
-        role="status"
-        className="mb-5 rounded-card border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-4 py-3 text-[14px] text-[var(--arc-text-muted)]"
-      >
-        You’re offline.
-      </p>
-    )
-  }
+function OfflineStrip() {
   return (
     <p
       role="status"
@@ -810,9 +764,7 @@ export function Layout() {
            * once Arc is on the Home Screen, or once dismissed.
            */}
           {location.pathname === '/' ? <InstallHint /> : null}
-          {offline && location.pathname !== '/downloads' ? (
-            <OfflineStrip downloads={account?.isDemo !== true} />
-          ) : null}
+          {offline && location.pathname !== '/downloads' ? <OfflineStrip /> : null}
           <Outlet />
         </div>
       </main>

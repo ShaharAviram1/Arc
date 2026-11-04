@@ -14,7 +14,6 @@ import {
   jsonBodyOf,
   mockApi,
   requestsMade,
-  TEST_DEMO_USER,
   TEST_USER,
   type MockRoutes,
 } from '@/test/apiMock'
@@ -328,16 +327,6 @@ describe('Prepare for a trip', () => {
     await user.click(start)
     expect(callTo(fetchMock, TRIP_PATH)).toBeDefined()
     expect(await screen.findByRole('heading', { name: 'Trip · Episode 2' })).toBeInTheDocument()
-  })
-
-  it('is not offered to the demo account', async () => {
-    installManager()
-    api({ 'GET /api/auth/me': { body: TEST_DEMO_USER }, [DETAIL]: { body: FRIEREN_DETAIL } })
-
-    renderShow()
-
-    await screen.findByRole('heading', { level: 1 })
-    expect(screen.queryByRole('button', { name: 'Prepare for a trip' })).not.toBeInTheDocument()
   })
 
   it('says why where the device cannot play the copies', async () => {

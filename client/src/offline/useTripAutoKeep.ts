@@ -37,8 +37,8 @@
  * already on this device stays here (its confirmations are refused, which
  * ends the asking without touching the file).
  *
- * Not for the demo account, nor where the browser cannot keep files (no OPFS
- * or no workers); nothing runs while nobody is signed in.
+ * Not where the browser cannot keep files (no OPFS or no workers); nothing
+ * runs while nobody is signed in.
  */
 
 import { useEffect } from 'react'
@@ -96,7 +96,7 @@ export async function autoKeep(trips: readonly Trip[], manager: DownloadManager)
 
 /** Whether this account on this browser keeps trips at all. */
 export function keepsTrips(me: User | null | undefined): boolean {
-  return me !== undefined && me !== null && !me.is_demo && canDownloadInApp()
+  return me !== undefined && me !== null && canDownloadInApp()
 }
 
 export function useTripAutoKeep(me: User | null | undefined): void {
