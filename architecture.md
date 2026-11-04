@@ -680,9 +680,9 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
     upsert clears `trip` and `sample`, so a trip's cancel and release and a
     sample's cancel (which skip such rows as their own) count it as the live
     want it is. A demanded trip episode always enters `desired` (so it gets
-    an HLS rendition). `plan.covers` and M20's coverage helpers go in T4
-    with their last callers (`fetchable`); the window-only refusal is
-    deleted.
+    an HLS rendition). `plan.covers` and M20's coverage helpers went with
+    their last callers in T4 (`fetchable` now reads the demand gate, §5.4a);
+    the window-only refusal is deleted.
   - *Windows per (user, show)* in `_plan_wants`. Base position `p_base`: an
     open rewatch → `p_rw` (the highest number with `finished_at >=
     started_at`, else 0) and the list window is **suspended**; else a
