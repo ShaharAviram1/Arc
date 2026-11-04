@@ -18,6 +18,7 @@ import {
   jsonBodyOf,
   mockApi,
   requestsMade,
+  TEST_ADMIN,
   TEST_USER,
   type MockRoutes,
 } from '@/test/apiMock'
@@ -337,10 +338,10 @@ describe('the pending player, any aired episode (FR-A14, M21)', () => {
     expect(screen.queryByTestId('pending-spinner')).not.toBeInTheDocument()
   })
 
-  it('awaiting_pick links to Review', async () => {
+  it('awaiting_pick links an admin to Review', async () => {
     renderAt(
       {
-        'GET /api/auth/me': { body: TEST_USER },
+        'GET /api/auth/me': { body: TEST_ADMIN },
         [PLAY]: { body: pending({ demanded: true, awaiting_pick: true }) },
       },
       { pathname: `/watch/${String(EPISODE)}` },
@@ -350,6 +351,23 @@ describe('the pending player, any aired episode (FR-A14, M21)', () => {
       'href',
       '/review#season-packs',
     )
+  })
+
+  it('awaiting_pick offers no link to a viewer who cannot pick', async () => {
+    const { fetchMock } = renderAt(
+      {
+        'GET /api/auth/me': { body: TEST_USER },
+        [PLAY]: { body: pending({ demanded: true, awaiting_pick: true }) },
+      },
+      { pathname: `/watch/${String(EPISODE)}` },
+    )
+
+    expect(await screen.findByRole('link', { name: 'Back to the show' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(requestsMade(fetchMock)).toContain('GET /api/auth/me')
+    })
+    expect(screen.queryByText(/Its season pack needs someone/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Review' })).not.toBeInTheDocument()
   })
 
   it('demand_cap view lists open demands', async () => {
