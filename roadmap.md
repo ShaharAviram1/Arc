@@ -2417,7 +2417,7 @@ Reviewer where marked.
       (claimed/unclaimed/in-flight/recent), qBittorrent priority mock,
       symlink refused, dry run deletes nothing, a downloading pack untouched.
       Depends on T3 and the M20.4 B guards.
-- [ ] **T9 — Demo removal** (M, **Reviewer: auth + media-serving guards**).
+- [x] **T9 — Demo removal** (M, **Reviewer: auth + media-serving guards**; verified by the orchestrator 2026-11-04: Validator PASS (nine probes incl. a by-hand migration round-trip with a row and `alembic check`), Reviewer merge-after-fixes (tests only: anonymous and deactivated callers now pinned to 401 on all twelve former demo routes; the kept `is_demo: false` wire shape pinned on the client); every removed guard was only the demo branch, session and ownership checks intact, confirmed by probe; production pre-check: the users table holds only the owner's admin account with the flag off; my own runs: branch full suite 5633, merged main 20927a4 targeted 192, client 1514, lint clean, one Alembic head 91b56c5bdf4a; the migration and the media-route diff read personally).
       Plan section 6 + R5 (drop `users.is_demo`; `UserOut.is_demo` a
       constant `false` for one release); server guards, CLI `--demo`,
       client nav/strip/page/fixtures, `README.md`/`deploy/README.md` (FR-D5
