@@ -403,6 +403,25 @@ export interface RetentionPreview {
   /** The two graces the reasons are written in (FR-T1, FR-T5). */
   watched_grace_hours?: number
   grace_days?: number
+  /**
+   * Files under `downloads/batch/<hash>/` no episode claims any more (FR-T1's
+   * leftover sweep, M21), and their bytes. Optional for older payloads.
+   */
+  leftover_files?: LeftoverFile[]
+  leftover_bytes?: number
+  /** `batch_sweep_dry_run`: while true the sweep only logs the leftovers. */
+  batch_sweep_dry_run?: boolean
+  /** False when qBittorrent could not be asked (the list is then empty). */
+  leftover_checked?: boolean
+}
+
+/** One leftover pack file the next sweep would delete (M21). */
+export interface LeftoverFile {
+  path: string
+  /** Bytes allocated on the disk: what deleting it frees. */
+  bytes: number
+  torrent_id: number
+  reason: string
 }
 
 /* --- Wire shapes: offline catalogue (M15.5) --------------------------- */

@@ -44,6 +44,7 @@ import {
   useRetentionPreview,
   useRunSweep,
   usedFraction,
+  type LeftoverFile,
   type OfflineCatalogue,
   type OfflineSource,
   type RetentionDisk,
@@ -281,6 +282,66 @@ function EpisodeList({
   )
 }
 
+const LEFTOVER_EXPLANATION =
+  'Files a season pack left behind that no episode claims any more — what had arrived of an ' +
+  'episode before its download was withdrawn. The hourly sweep deletes them once qBittorrent ' +
+  'has them switched off (or no longer has the pack) and they have not changed for an hour.'
+
+/** Leftover pack files (FR-T1, M21): what the sweep would remove, or only log. */
+function LeftoverPanel({ preview }: { preview: RetentionPreview }) {
+  const files: LeftoverFile[] = preview.leftover_files ?? []
+  const dryRun = preview.batch_sweep_dry_run ?? true
+  const count = files.length === 1 ? '1 file' : `${String(files.length)} files`
+  return (
+    <section className="mt-6" aria-labelledby="leftover-files-heading">
+      <h3 id="leftover-files-heading" className="text-[16px] font-medium text-[var(--arc-text)]">
+        Leftover pack files
+      </h3>
+      <p className="mt-2 max-w-[66ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
+        {LEFTOVER_EXPLANATION}
+      </p>
+      <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">
+        {dryRun ? (
+          <Pill tone="warn">Dry run: the sweep only logs these</Pill>
+        ) : (
+          <Pill>Deleting: the sweep removes these</Pill>
+        )}{' '}
+        <Link to="/admin?tab=rules" className="hover:underline">
+          Change in Rules (batch_sweep_dry_run)
+        </Link>
+      </p>
+      {preview.leftover_checked === false ? (
+        <p className="mt-3 text-[14px] text-[var(--arc-warn)]">
+          qBittorrent could not be asked, so nothing counts as a leftover right now.
+        </p>
+      ) : files.length === 0 ? (
+        <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">No leftover pack files.</p>
+      ) : (
+        <>
+          <p className="mt-3 text-[14px] text-[var(--arc-text-muted)]">
+            {count}, {formatBytes(preview.leftover_bytes ?? 0)}.
+          </p>
+          <ul className="mt-3 flex flex-col gap-0.5">
+            {files.map((file) => (
+              <li
+                key={file.path}
+                className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-row border-[0.5px] border-[var(--arc-border)] bg-[var(--arc-surface)] px-3.5 py-3"
+              >
+                <span className="font-mono text-[13px] break-all text-[var(--arc-text)]">
+                  {file.path}
+                </span>
+                <span className="text-[13px] text-[var(--arc-text-muted)]">
+                  {file.reason} · {formatBytes(file.bytes)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
 /**
  * How many batch file claims the whole preview would give back (FR-A11).
  *
@@ -503,6 +564,7 @@ export function StorageTab() {
             )}
             <FloorList floor={preview.data.floor ?? []} />
             <HeldList held={preview.data.held ?? []} />
+            <LeftoverPanel preview={preview.data} />
           </div>
         )}
       </section>
