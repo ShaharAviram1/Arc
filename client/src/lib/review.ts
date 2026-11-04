@@ -148,10 +148,44 @@ export interface ReviewPage {
   suggestions_enabled?: boolean
 }
 
-/** `GET /api/review/summary` — the one number the sidebar polls. */
+/** `GET /api/review/summary` — the numbers the sidebar polls. */
 export interface ReviewSummary {
   /** Media files waiting for this viewer to resolve them. */
   pending: number
+  /**
+   * Season packs waiting for a person's file pick (M21, FR-A4); counted for
+   * an admin only, 0 for anyone else. Optional for an older server.
+   */
+  packs?: number
+}
+
+/** One video file of a pack waiting for a pick, as the parser read it. */
+export interface PackCandidate {
+  file_index: number
+  /** The file's path inside the pack — never an absolute path. */
+  path: string
+  size: number
+  /** The parser's reading of the file's own name; null when it read none. */
+  parsed_number: number | null
+}
+
+/** `GET /api/review/packs` row: a season pack waiting for a pick (M21). */
+export interface PackPick {
+  id: number
+  anime: AnimeSummary
+  episode: { id: number; number: number; title: string | null }
+  /** Why Arc could not pick the file itself, in the parser's words. */
+  reason: string
+  /** The pack's title as Nyaa listed it. */
+  title: string
+  candidates: PackCandidate[]
+  created_at: string
+}
+
+/** `POST /api/review/packs/{id}/pick`. */
+export interface PickPackFile {
+  id: number
+  file_index: number
 }
 
 /** `POST /api/review/{id}/confirm` (FR-L6). Both fields are set by hand. */
@@ -193,6 +227,13 @@ export function reviewQueueQueryKey(state: ReviewTab): readonly unknown[] {
 export function reviewSearchQueryKey(id: number, q: string): readonly unknown[] {
   return [REVIEW_QUERY_KEY, 'search', id, q]
 }
+
+/** The season packs waiting for a pick (M21). */
+export const packPicksQueryKey = [REVIEW_QUERY_KEY, 'packs'] as const
+
+/** Where the show page and the player send a person to make a pick. */
+export const SEASON_PACKS_ANCHOR = 'season-packs'
+export const SEASON_PACKS_PATH = `/review#${SEASON_PACKS_ANCHOR}`
 
 /* --- Timings ---------------------------------------------------------- */
 
@@ -259,6 +300,52 @@ export function reviewErrorMessage(error: unknown): string {
       return detail === SUGGESTIONS_OFF_DETAIL ? SUGGESTIONS_OFF_MESSAGE : 'Try again in a moment.'
     default:
       return 'Something went wrong. Try again.'
+  }
+}
+
+/**
+ * What to say when a pick or a dismiss fails (M21). A 409 or 422 carries the
+ * server's own sentence (`{detail: {code, message}}`); everything else is
+ * `reviewErrorMessage`'s.
+ */
+export function packErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && (error.status === 409 || error.status === 422)) {
+    const body: unknown = error.body
+    if (typeof body === 'object' && body !== null && 'detail' in body) {
+      const detail: unknown = body.detail
+      if (typeof detail === 'object' && detail !== null && 'message' in detail) {
+        const message: unknown = detail.message
+        if (typeof message === 'string' && message !== '') return message
+      }
+    }
+    return 'This pack has changed. Refresh to see where it stands.'
+  }
+  if (error instanceof ApiError && error.status === 404) {
+    return 'That pack is no longer waiting. Refresh to see the current list.'
+  }
+  return reviewErrorMessage(error)
+}
+
+/**
+ * The number on the Review entry's pill and what it says: the files waiting
+ * plus, for an admin, the packs waiting for a pick (M21).
+ */
+export function reviewBadge(summary: ReviewSummary | undefined): {
+  count: number
+  label: string
+} {
+  const files = summary?.pending ?? 0
+  const packs = summary?.packs ?? 0
+  const count = files + packs
+  if (packs === 0) {
+    return {
+      count,
+      label: count === 1 ? '1 file needs review' : `${String(count)} files need review`,
+    }
+  }
+  return {
+    count,
+    label: count === 1 ? '1 item needs review' : `${String(count)} items need review`,
   }
 }
 
@@ -494,6 +581,57 @@ export function useIgnoreReview(): UseMutationResult<ReviewItem, Error, number> 
 export function useReopenReview(): UseMutationResult<ReviewItem, Error, number> {
   return useReviewMutation<number>((id) =>
     apiFetch<ReviewItem>(`/api/review/${String(id)}/reopen`, { method: 'POST' }),
+  )
+}
+
+/**
+ * The season packs waiting for a person's file pick (M21, FR-A4). Admin only
+ * on the server, so the query only runs for an admin.
+ */
+export function usePackPicks(): UseQueryResult<PackPick[], Error> {
+  const { data: me } = useMe()
+
+  return useQuery<PackPick[], Error>({
+    queryKey: packPicksQueryKey,
+    queryFn: () => apiFetch<PackPick[]>('/api/review/packs'),
+    retry: false,
+    enabled: me?.role === 'admin',
+  })
+}
+
+/**
+ * A pick or a dismiss changes the pack list, the badge and — because the
+ * episode starts downloading or goes back to the daily retry — the show page.
+ */
+function usePackMutation<TVariables>(
+  request: (variables: TVariables) => Promise<void>,
+): UseMutationResult<void, Error, TVariables> {
+  const client = useQueryClient()
+
+  return useMutation<void, Error, TVariables>({
+    mutationFn: request,
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: packPicksQueryKey })
+      void client.invalidateQueries({ queryKey: reviewSummaryQueryKey })
+      void client.invalidateQueries({ queryKey: [ANIME_QUERY_KEY] })
+    },
+  })
+}
+
+/** "This is episode N": fetch that one file of the pack. */
+export function usePickPackFile(): UseMutationResult<void, Error, PickPackFile> {
+  return usePackMutation<PickPackFile>(({ id, file_index }) =>
+    apiFetch<void>(`/api/review/packs/${String(id)}/pick`, {
+      method: 'POST',
+      body: JSON.stringify({ file_index }),
+    }),
+  )
+}
+
+/** Forget a pack Arc could not read; the episode goes back to the daily retry. */
+export function useDismissPack(): UseMutationResult<void, Error, number> {
+  return usePackMutation<number>((id) =>
+    apiFetch<void>(`/api/review/packs/${String(id)}/dismiss`, { method: 'POST' }),
   )
 }
 

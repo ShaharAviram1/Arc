@@ -348,7 +348,7 @@ describe('the pending player, any aired episode (FR-A14, M21)', () => {
 
     expect(await screen.findByRole('link', { name: 'Open Review' })).toHaveAttribute(
       'href',
-      '/review',
+      '/review#season-packs',
     )
   })
 

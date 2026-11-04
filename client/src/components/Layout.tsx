@@ -6,7 +6,7 @@ import { useAcquisitionStatus } from '@/lib/acquisition'
 import { useLogout, useMe } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/events'
 import { useIsPhone } from '@/lib/media'
-import { useReviewSummary } from '@/lib/review'
+import { reviewBadge, useReviewSummary } from '@/lib/review'
 import { useOffline } from '@/offline/network'
 import { canDownloadInApp } from '@/offline/opfs'
 
@@ -110,14 +110,13 @@ interface AccountMenu {
 }
 
 /**
- * The pending-review count beside the Review entry. Only ever rendered for a
- * positive count, so the menu is silent when there is nothing to do; the label
- * spells out what the number means, since a bare "3" tells a screen reader
- * nothing.
+ * The pending-review count beside the Review entry — files to match, and for
+ * an admin the season packs waiting for a file pick (M21). Only ever rendered
+ * for a positive count, so the menu is silent when there is nothing to do; the
+ * label spells out what the number means, since a bare "3" tells a screen
+ * reader nothing.
  */
-function ReviewCountPill({ count }: { count: number }) {
-  const label = count === 1 ? '1 file needs review' : `${String(count)} files need review`
-
+function ReviewCountPill({ count, label }: { count: number; label: string }) {
   return (
     <span
       aria-label={label}
@@ -147,14 +146,15 @@ function useAccountMenu(): AccountMenu | null {
 
   if (!me) return null
 
-  const pending = review?.pending ?? 0
+  const badge = reviewBadge(review)
   const entries: AccountEntry[] = [
     { to: LIST_PATH, label: 'My List' },
     { to: '/mal', label: 'MyAnimeList' },
     {
       to: REVIEW_PATH,
       label: 'Review',
-      badge: pending > 0 ? <ReviewCountPill count={pending} /> : undefined,
+      badge:
+        badge.count > 0 ? <ReviewCountPill count={badge.count} label={badge.label} /> : undefined,
     },
   ]
   // Episodes kept on this device (FR-S9): never for the demo account, which

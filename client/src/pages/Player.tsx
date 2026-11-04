@@ -14,6 +14,7 @@ import { OpenDemandLinks } from '@/components/OpenDemandLinks'
 import { buttonClass, cx, FOCUS_RING } from '@/components/ui'
 import { listErrorMessage, rewatchErrorMessage, useRewatch, useSetListEntry } from '@/lib/anime'
 import { isStatus, useMe } from '@/lib/auth'
+import { SEASON_PACKS_PATH } from '@/lib/review'
 import {
   alreadyDemanded,
   DEMAND_NOT_FOUND_RETRIES,
@@ -664,7 +665,7 @@ function PendingView({
       {pending.awaiting_pick === true ? (
         <p className="mt-3 max-w-[46ch] text-[14px] leading-[1.55] text-[var(--arc-text-muted)]">
           {AWAITING_PICK}{' '}
-          <Link to="/review" className={cx('underline underline-offset-4', FOCUS_RING)}>
+          <Link to={SEASON_PACKS_PATH} className={cx('underline underline-offset-4', FOCUS_RING)}>
             Open Review
           </Link>
         </p>

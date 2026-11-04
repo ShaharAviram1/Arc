@@ -71,6 +71,7 @@ import {
   type WatchState,
 } from '@/lib/playback'
 import { CHANGEABLE_STATES } from '@/lib/releases'
+import { SEASON_PACKS_PATH } from '@/lib/review'
 import {
   KEPT_ELSEWHERE,
   PHASE_LABEL,
@@ -1165,6 +1166,17 @@ function EpisodeRow({
             </span>
           )}
           {episode.demanded === true ? <DemandedNote animeId={anime.id} episode={episode} /> : null}
+          {episode.awaiting_pick === true && isAdmin ? (
+            <Link
+              to={SEASON_PACKS_PATH}
+              className={cx(
+                'relative z-10 text-[13px] text-[var(--arc-text-muted)] underline underline-offset-4 hover:text-[var(--arc-text)]',
+                FOCUS_RING,
+              )}
+            >
+              Pick the file in Review
+            </Link>
+          ) : null}
           {episode.state === 'failed' && isAdmin ? (
             <span className="relative z-10 flex flex-col items-end gap-1.5">
               <RetryTranscode animeId={anime.id} episodeId={episode.id} />

@@ -1,5 +1,5 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { ErrorState } from '@/components/ErrorState'
 import {
   Artwork,
@@ -22,21 +22,28 @@ import {
   formatConfidence,
   formatScore,
   formatSize,
+  packErrorMessage,
   parseEpisodeInput,
   parsedChips,
   REVIEW_TAB_LABELS,
   REVIEW_TABS,
   reviewErrorMessage,
+  SEASON_PACKS_ANCHOR,
   startingEpisode,
   SUGGESTION_WAIT_MS,
   suggestionOf,
   suggestionsEnabled,
   useConfirmReview,
+  useDismissPack,
   useIgnoreReview,
+  usePackPicks,
+  usePickPackFile,
   useReopenReview,
   useRequestSuggestion,
   useReviewQueue,
   useReviewSearch,
+  type PackCandidate,
+  type PackPick,
   type ReviewCandidate,
   type ReviewItem,
   type ReviewSuggestion,
@@ -616,6 +623,165 @@ function AutoRow({ item }: { item: ReviewItem }) {
   )
 }
 
+/** What the season-pack section is for, said once, above it (M21, FR-A4). */
+const PACKS_EXPLANATION =
+  'Arc found only season packs for these episodes and could not tell from the file names which ' +
+  'file is the one wanted. Nothing has been downloaded. Pick the file that is the episode, or ' +
+  'dismiss the pack and Arc keeps looking once a day.'
+
+/**
+ * One file of a pack, with what the parser read in its name and the button
+ * that says it is the wanted episode. The reading is shown, never applied.
+ */
+function PackCandidateRow({
+  candidate,
+  wanted,
+  disabled,
+  onPick,
+}: {
+  candidate: PackCandidate
+  wanted: number
+  disabled: boolean
+  onPick: () => void
+}) {
+  const reading =
+    candidate.parsed_number === null
+      ? 'no episode number in the name'
+      : `the name says episode ${String(candidate.parsed_number)}`
+
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-3 border-t-[0.5px] border-[var(--arc-border)] py-3 first:border-t-0">
+      <div className="min-w-0 flex-1 basis-64">
+        <p className="font-mono text-[13px] break-all text-[var(--arc-text)]">{candidate.path}</p>
+        <p className="mt-1 text-[13px] text-[var(--arc-text-muted)]">
+          {formatSize(candidate.size)} · {reading}
+        </p>
+      </div>
+      <button type="button" className={smallButtonClass} disabled={disabled} onClick={onPick}>
+        This is episode {String(wanted)}
+      </button>
+    </li>
+  )
+}
+
+/** A season pack waiting for a person's file pick (M21, FR-A4). */
+function PackCard({ pack, onDone }: { pack: PackPick; onDone: (message: string) => void }) {
+  const pick = usePickPackFile()
+  const dismiss = useDismissPack()
+  const busy = pick.isPending || dismiss.isPending
+  const error = pick.error ?? dismiss.error
+  const label = `${pack.anime.title.preferred} episode ${String(pack.episode.number)}`
+
+  return (
+    <article aria-label={label} className={cardClass}>
+      <div className="flex items-start gap-3.5">
+        <ShowLine anime={pack.anime}>
+          <p className="mt-1.5 text-[14px] text-[var(--arc-text)]">
+            Wanted: episode {String(pack.episode.number)}
+            {pack.episode.title === null || pack.episode.title === ''
+              ? ''
+              : ` — ${pack.episode.title}`}
+          </p>
+        </ShowLine>
+      </div>
+      <p className="mt-3 font-mono text-[13px] break-all text-[var(--arc-text-muted)]">
+        {pack.title}
+      </p>
+      <p className="mt-2 text-[14px] text-[var(--arc-text-muted)]">
+        <span className="text-[var(--arc-text)]">{WHY_LABEL}</span> {pack.reason}
+      </p>
+      <ul aria-label="Files in the pack" className="mt-3">
+        {pack.candidates.map((candidate) => (
+          <PackCandidateRow
+            key={candidate.file_index}
+            candidate={candidate}
+            wanted={pack.episode.number}
+            disabled={busy}
+            onPick={() => {
+              pick.mutate(
+                { id: pack.id, file_index: candidate.file_index },
+                {
+                  onSuccess: () => {
+                    onDone(
+                      `Fetching ${candidate.path.split('/').pop() ?? candidate.path} as episode ${String(pack.episode.number)}.`,
+                    )
+                  },
+                },
+              )
+            }}
+          />
+        ))}
+      </ul>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className={buttonClass('secondary')}
+          disabled={busy}
+          onClick={() => {
+            dismiss.mutate(pack.id, {
+              onSuccess: () => {
+                onDone(`Dismissed the pack for ${label}. Arc keeps looking once a day.`)
+              },
+            })
+          }}
+        >
+          Dismiss
+        </button>
+      </div>
+      {error === null ? null : (
+        <p role="alert" className={`mt-3 ${FIELD_ERROR_CLASS}`}>
+          {packErrorMessage(error)}
+        </p>
+      )}
+    </article>
+  )
+}
+
+/**
+ * The season packs waiting for a file pick (M21, FR-A4), above the match
+ * queue. Admin only (the query does not run for anyone else), and absent when
+ * nothing waits. Reached from a show's row and the waiting player through
+ * `/review#season-packs`, so the section scrolls itself into view then.
+ */
+function SeasonPacks({ onDone }: { onDone: (message: string) => void }) {
+  const { data } = usePackPicks()
+  const { hash } = useLocation()
+  const section = useRef<HTMLElement>(null)
+  const packs = data ?? []
+  const shown = packs.length > 0
+
+  useEffect(() => {
+    if (shown && hash === `#${SEASON_PACKS_ANCHOR}`) {
+      section.current?.scrollIntoView({ block: 'start' })
+    }
+  }, [shown, hash])
+
+  if (!shown) return null
+  return (
+    <section
+      ref={section}
+      id={SEASON_PACKS_ANCHOR}
+      aria-labelledby="season-packs-heading"
+      className="mt-8"
+    >
+      <h2
+        id="season-packs-heading"
+        className="text-[22px] font-semibold tracking-[-0.018em] text-[var(--arc-text)]"
+      >
+        Season packs ({String(packs.length)})
+      </h2>
+      <p className="mt-2 max-w-[66ch] text-[15px] leading-[1.6] text-[var(--arc-text-muted)]">
+        {PACKS_EXPLANATION}
+      </p>
+      <div className="mt-5 flex flex-col gap-4">
+        {packs.map((pack) => (
+          <PackCard key={pack.id} pack={pack} onDone={onDone} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
 /**
  * Match review (spec §4.3 FR-L4/FR-L5/FR-L6, roadmap M13).
  *
@@ -671,6 +837,8 @@ export function Review() {
       <p className="mt-3 max-w-[66ch] text-[16px] leading-[1.6] text-[var(--arc-text-muted)]">
         {EXPLANATION}
       </p>
+
+      <SeasonPacks onDone={setNotice} />
 
       <div className="no-scrollbar mt-6 flex flex-wrap gap-2.5">
         {REVIEW_TABS.map((value) => (
