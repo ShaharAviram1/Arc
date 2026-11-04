@@ -2408,8 +2408,8 @@ Reviewer where marked.
       claim/reselect/downloading; dismiss → tombstone; pick on a withdrawn
       want → 409; second pick → 409; landing → linked confirmed; Vitest.
       Depends on T3; runs after T6.
-- [ ] **T8 — `downloads/batch` leftover sweep** (M, **Reviewer: retention +
-      file deletion**; moved from M17). `retention/batch_sweep.py`
+- [x] **T8 — `downloads/batch` leftover sweep** (M, **Reviewer: retention +
+      file deletion**; moved from M17; verified by the orchestrator 2026-11-04: Validator FAIL→PASS and Reviewer merge-after-fixes→merge over two fix rounds — both caught "gone from the client" failing open on an empty or category-filtered listing; the Reviewer also the missing recheck after deleting from a pack the client still holds (the 2026-10-29 incident's shape), a session left failed by the step, no client re-ask before unlinking, and the dry-run state ignoring `RETENTION_DRY_RUN`; orchestrator's call: a pack is swept only when finished (every wanted file complete and the client fetching nothing in it) or confirmed gone (non-empty listing, category-independent lookup, row state agreeing); all re-confirmed by probe; my own runs: branch full suite 5609, merged main be7ae43 targeted 168, client 1530, lint clean; the pure rule and the delete step read personally; ships with `batch_sweep_dry_run = true` — stays on until the owner has read a production dry-run log). `retention/batch_sweep.py`
       `leftover_files(session, settings, qbit)` (FR-T1, spec rule list),
       a step of the hourly retention job, `batch_sweep_dry_run` (default on),
       `leftover_files`/`leftover_bytes` in `GET /api/retention/preview` and
