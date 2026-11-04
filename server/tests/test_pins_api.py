@@ -1,8 +1,8 @@
 """Pinning a show: ``PUT``/``DELETE /api/anime/{id}/pin`` (FR-T8, M20 T8).
 
 Idempotent both ways, 204 each time; 404 for an unknown show; no 403 since
-the demo account went (M21 T9). ``pinned on the show payload is the caller's own pin, and the
-admin disk view lists every pinned show with its bytes.
+the demo account went (M21 T9). ``pinned`` on the show payload is the caller's
+own pin, and the admin disk view lists every pinned show with its bytes.
 """
 
 from __future__ import annotations

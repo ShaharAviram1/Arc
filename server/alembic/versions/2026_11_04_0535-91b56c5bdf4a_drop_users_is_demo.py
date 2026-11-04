@@ -3,7 +3,9 @@
 M21 (owner 2026-11-03, R5): the demo ended and the demo account is gone, so
 the flag that marked it goes too (it was added by ``b63c05a9f1d2``, M16). Only
 the column is dropped; no row is deleted — the demo user was already removed
-from production on 2026-10-15. ``UserOut.is_demo`` stays on the API as a
+from production on 2026-10-15 (roadmap.md, M20 "Status 2026-10-15: MERGED AND
+DEPLOYED": "the owner cleared the demo account"), and the orchestrator checks
+production before deploy (T10). ``UserOut.is_demo`` stays on the API as a
 constant ``false`` for one release so a cached client keeps working.
 
 The downgrade re-adds the column ``NOT NULL DEFAULT false``, which is what
