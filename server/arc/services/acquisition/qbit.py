@@ -214,6 +214,27 @@ DECIDED_STATES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: And the two the client reports when it has stopped trying: ``error`` (it
+#: could not write, could not read, or the tracker rejected it) and
+#: ``missingFiles`` (the data it was seeding or checking is not on the disk any
+#: more). Neither is a matter of waiting — no threshold applies — and neither
+#: was a stall before today, which was a gap for singles and became a hole with
+#: batches (2026-09-18): retention unlinking one episode's file out of a
+#: *running* pack is exactly how a torrent reaches ``missingFiles``, and every
+#: other episode in that pack would otherwise sit ``downloading`` for ever
+#: against a client that had stopped.
+ERROR_STATES: Final[frozenset[str]] = frozenset({"error", "missingFiles"})
+
+#: The states a torrent is in while the client re-reads its pieces from disk
+#: (M20.4): a recheck Arc asked for, or the client's own resume check — and
+#: ``moving``/``allocating``, which are the same kind of busy. A file's
+#: progress is not to be believed while one runs, so a pack in one of these is
+#: left to finish — no complete is stamped, no recheck is asked for again, and
+#: nothing is a stall.
+CHECKING_STATES: Final[frozenset[str]] = frozenset(
+    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData", "moving", "allocating"}
+)
+
 #: Below what rate, in KiB/s, qBittorrent counts a torrent as "slow" and stops
 #: it occupying one of the active slots. 2 rather than 0: the client treats 0
 #: as "no threshold", and a torrent moving a kilobyte a second is not
@@ -1256,10 +1277,12 @@ class QbitClient:
 __all__ = [
     "API",
     "BATCH_DIR",
+    "CHECKING_STATES",
     "COMPLETE_PROGRESS",
     "COMPLETE_STATES",
     "DECIDED_STATES",
     "DELETE_ON_SIGHT",
+    "ERROR_STATES",
     "FILE_OFF",
     "FILE_ON",
     "MAX_TORRENT_FILES",
