@@ -934,6 +934,22 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
 - `qbit_top_prio` (per episode, priority 60, FR-A12, M19 T5): `torrents/topPrio`
   for the single or pack a `downloading` episode is fetched from, once it is no
   longer trip-only (the trip-packs bullet below). Queued by the reconciler.
+- `qbit_forget_pack` (per torrent, priority 60, M21 T7, FR-A4): deletes a
+  dismissed pack pick's pack from the client **with its files**, and only for
+  a row that is the `unreadable` tombstone by then (§5.2 step 4). Queued by the
+  dismiss route and by the pick reconciliation below.
+- **Pack picks and the batch poll (M21 T7).** A pack held for a person's file
+  pick is `awaiting_pick`, in `DECIDED_STATES`, so the batch poll skips it
+  exactly as it skips the other held and decided states (no `torrents/files`
+  call, never re-stated `missing`, never started), `claim_existing` never
+  attaches to it and `qbit_reselect` writes nothing to it. What notices it is
+  **`compute_wants`** — the job that revives `unavailable` episodes — which
+  first runs `pack_picks.reconcile`: a pick pending **D** days
+  (`unwatched_days_d`, floored at one day) is dismissed, and so is one whose
+  pack is gone from the client (`torrents/info` is asked only while a pick is
+  pending; a client that cannot be reached leaves only the age rule, and the
+  reconciliation never fails on it). Dismissed is the same ending as the
+  dismiss route's. Idempotent: a resolved pick is never looked at again.
 - **Stalls (FR-A6, 2026-09-13).** The same handler gives up on a torrent that
   is going nowhere, which before this it never did: `poll_qbit` reacted only to
   a torrent that had *vanished*, so a dead magnet held one of qBittorrent's
@@ -1104,7 +1120,8 @@ episodes is sent to the bottom of qBittorrent's queue (`torrents/bottomPrio`).
   selected and started; now its insert raises `batch.BatchTaken` before it
   touches the client's selection, the job retries and `claim_existing` attaches
   it to the winner's pack. A refusal deletes the torrent, which has fetched
-  nothing, and **what it remembers depends on whether the answer could change**:
+  nothing (since M21 except the one pack the search's fallback keeps stopped
+  for a person's file pick, §5.2 step 4), and **what it remembers depends on whether the answer could change**:
   files that could not be identified, a listing the client could not describe in
   full, more files than `MAX_TORRENT_FILES`, or a blob whose hash was not the
   advertised one keep the row as a `qbit_state = 'unreadable'` tombstone
@@ -1666,6 +1683,46 @@ owner 2026-10-13).**
    a client slot at no byte cost; a pick goes through `qbit_reselect` (the
    M20.4 start/recheck cool-downs) and never marks `cancelled`, which
    deletes with files.
+
+   **As built (M21 T7, `acquisition/pack_picks.py`).** Only the search's own
+   fallback (`_take_batch(pick=True)`, after no single was acceptable) keeps
+   a pack; a trip's preferred pass, `_prefer_batch` and a manual choice never
+   do. Eligibility is the pure `pick_eligible(reason, permanent, chosen)`:
+   a permanent refusal whose reason is "k files claim episode n" or "no file
+   in the batch is episode n", and nothing started. The **first** such pack
+   in rank order is kept — every file written to priority 0, still stopped —
+   and if a later candidate is started it is tombstoned after all; the
+   others are tombstoned as before. `open_pick` writes `torrent_files` rows
+   for **every** file (not only the videos: `qbit_reselect` writes nothing
+   to a listing whose rows do not match it one for one), each carrying the
+   parser's unambiguous reading and `wanted = false`, and the `pack_picks`
+   row whose `candidates` are the video files with
+   `batch.pick_candidates`' reading (two files reading the same number both
+   say so). The search then ends with the episode `unavailable` and
+   `PACK_PICK_REASON` (`searching → unavailable`, an existing edge) instead
+   of FR-A6's six-hourly requeue; the reconciler's daily revival still looks
+   once a day, and while a pick is pending no second pick is opened for the
+   episode and the episode rests on the same sentence. `EpisodeOut.awaiting_pick`
+   is exactly that state and reason (no query); `PendingOut.awaiting_pick`
+   is a pending row on an episode still `unavailable` or `wanted` (a pick
+   left pending after a single turned up is not what it waits for; such a
+   pick stays listed until dismissed, and a pick on it is 409
+   `episode_moved_on`). **Pick** (`lock_wants`, then the pick,
+   the torrent and the episode re-read `FOR UPDATE`): 409 `pick_resolved`,
+   `pack_not_waiting`, `not_wanted` (no live want), `episode_moved_on` (not
+   `unavailable`/`wanted`, or another live claim); 422 `not_a_candidate`.
+   Then the file's row gets the episode and `wanted = true` (progress and
+   `completed_at` cleared), the torrent `qbit_state = 'added'` and
+   `wanted_bytes` = that file, the episode `unavailable → wanted → searching
+   → downloading` through `transition` (no search is queued), the pick is
+   stamped, and `qbit_reselect` writes the selection and starts the pack. On
+   landing, `_complete_file` asks `pack_picks.picked_file` and links the
+   file with `library.link.link(review_state=confirmed)`; the queued
+   `match_file` finds it decided. **Dismiss** (route or reconciliation):
+   resolution `dismissed`, the torrent `unreadable` with its `torrent_files`
+   rows deleted (a tombstone has none), `qbit_forget_pack` queued, and the
+   episode, if it still rests on the pick's sentence, says
+   `UNREADABLE_BATCH` instead and is left to the daily revival.
 
 ### 5.2a Matching rules as built (M5)
 - Parser: `anitopy` plus normalisation into `ParsedName` (title, `title_key`,
@@ -2525,7 +2582,9 @@ gate), `acquisition/qbit.py` (sequential download, piece states).
   refetches `/play`). Any other 409 stops the query as before; `PendingView` shows `pending.note` in
   place of "It plays here as soon as it is ready.", `pendingLabel` reads "No
   release found yet; Arc looks again every day" for `unavailable` (no
-  spinner), and `awaiting_pick` adds a link to `/review`; `DemandRefused`
+  spinner), and `awaiting_pick` adds a link to `/review#season-packs` (M21 T7:
+  the Review page's "Season packs" section, which scrolls into view on that
+  hash; the show page's row links there too, for an admin); `DemandRefused`
   lists `demandRefusal(error).open` for `demand_cap`. The completion receipt
   is `receiptFor(result)`: "Rewatch finished. Your list was left as it was."
   on `rewatch_ended` (6 s, shown over the end card too; also after a manual
@@ -5395,8 +5454,8 @@ Mutating requests must carry an allowed `Origin`.
 | `GET /api/schedule?year=&season=` | any | cache-only season grid: on a browse 7 undated days (0 = Monday in the user's timezone); on the current season 7–13 days each with a local `date` (Monday of this week to today + 6) holding only the shows airing that date (any season, via `airing_between`; `last_episode` when two of a show's air that date), finished shows only on dates an episode of theirs aired and otherwise in `ended`, not-yet-started ones in `unscheduled` with `starts_on` (2026-10-04); entries with local time, next episode, `following`; movies/OVAs/specials/music and rows with no known air time in `unscheduled`; `prev`/`next` season refs. Each entry also carries `watched` (`bool | null`) — FR-W5 for the episode `next_episode` names, and **only** where `next_at` is already past (`api/schedule.watched_marks`, owner 2026-09-17): an upcoming slot sends null, so Watch Now's appointment card cannot draw a tick beside a broadcast that has not happened. Three extra queries, and only when at least one slot has aired. `prev`/`next` season refs. The **current** season's grid also holds every weekly-format show with an air time on its dates, whatever season it is tagged with (a two-cour show, a long-runner) — flagged `carried_over` so the card can name the season it started in; a prev/next view is exactly the shows of that season and carries none (§5.0) |
 | `GET /api/home` | any | `continue_watching` (started ≥ 30 s and short of the completion mark and of the last three minutes; episode `ready` **or** held on the caller's device — a delivered, unreleased `trip_episodes` row of their own trip, which sets the row's `on_device`; newest first, max 20), `ready_to_watch` (episodes in state `ready` on a watching/planned/**on-hold** list, with no `watch_progress` row past `RESUME_MIN_S` = 10 s and none completed, and a number above the entry's progress — FR-W5 read backwards; ordered by `renditions.ready_at DESC NULLS LAST, episodes.id DESC`, max `READY_LIMIT` = 20; **any air date**, which is the point: it was the client filtering `new_this_week` until 2026-09-17, so a ready episode of a show that stopped airing a fortnight ago could not reach the page; since M21 also the ready episodes of a show in an open rewatch pass — any list status, not finished in the pass nor started since it began, the show leaving the list branch — and ready unwatched episodes the viewer holds a live want on, listed or not, all in one newest-file-first order (§5.4a); rows of a show in a pass carry the pass's `watched`; and for a show in the caller's open pass `continue_watching` keeps only positions written since `started_at`, so a pre-pass partial is on `ready_to_watch` and never on both), `behind` (watching shows with aired episodes above progress, newest first), `new_this_week` (episodes of watching/planned shows aired in the last 7 days, max 50). Every row's `EpisodeOut` carries FR-W5's `watched`/`watched_source`, from one extra `list_progress_for` query over the page's shows plus the completions of the `new_this_week` episodes — which is why an imported list with no completion rows still ticks (the This-week shelf shows that tick and no acquisition state at all). Every row embeds an `AnimeSummary` and an `EpisodeOut`, so the hero's `backdrop_url`/`banner_url`, the shelves' `studio`/`genres[]`/`cover_large_url` and the Up Next tiles' `still_url` all arrive in this one call (M15). Every visit also queues, cheaply and deduped, the art the page found missing: a full enrichment for the shelf cards with no still and an art-only one for the season shows with no `backdrop_url` (§5.8). Since M16 it also answers `failures` (FR-W6, §5.4b): the caller's **own** stopped episodes (a live want on an episode that is `failed` or `unavailable`) and their own failed `mal_write_log` rows, newest first across both, capped at 20 — two queries plus the transcode-job lookup only where something is `failed`, each row a `key` + `AnimeSummary` + one trimmed sentence rather than an `EpisodeOut`. Here rather than on a route of its own so §5.9's invalidation of this query carries it |
 | `POST /api/catalog/season-sweep` | admin | enqueue the season pre-cache now (deduped) |
-| `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain. Since M21 the summary also counts pending pack picks |
-| `GET /api/review/packs`, `POST /api/review/packs/{id}/pick`, `POST /api/review/packs/{id}/dismiss` | any | M21 (FR-A4, FR-D4; §5.2 step 4): the season packs waiting for a person's file pick — `[{id, anime, episode, reason, candidates: [{file_index, path, size, parsed_number}], created_at}]`, paths relative to the pack, never absolute. `pick` body `{file_index}` → under the want lock, 409 unless the row is pending, the torrent `awaiting_pick` and the wanted episode still has a live want, and for a second pick; then claims the file, re-selects and starts the pack, the episode → `downloading`. `dismiss` → the pack's `unreadable` tombstone, deleted with its files, FR-A6's daily retry. No LLM suggestion is shown or applied. Origin required |
+| `GET /api/review?state=&limit=`, `GET /api/review/summary` | any | match-review queue: files below the auto-link threshold with top candidates and reasons; paths relative to `DATA_DIR`, never absolute. Each item may carry `suggestion` = `{anime_id, anime, episode_number, reason, confidence: high\|medium\|low, model, created_at, error}` (FR-L5; when `error` is set the rest may be null and the client shows "no suggestion: &lt;error&gt;"). The page carries `suggestions_enabled` = `LLM_MATCH_SUGGESTIONS` **and** a configured provider chain. Since M21 the summary is `{pending, packs}`: `packs` counts pending pack picks for an admin, 0 for anyone else |
+| `GET /api/review/packs`, `POST /api/review/packs/{id}/pick`, `POST /api/review/packs/{id}/dismiss` | admin | M21 (FR-A4, FR-D4; §5.2 step 4): the season packs waiting for a person's file pick — `[{id, anime, episode: {id, number, title}, reason, title, candidates: [{file_index, path, size, parsed_number}], created_at}]`, oldest first, paths relative to the pack, never absolute. `pick` body `{file_index}` → **204**; under the want lock, 409 `{detail: {code, message}}` with `pick_resolved` (a second pick), `pack_not_waiting`, `not_wanted` (no live want) or `episode_moved_on`, 422 `not_a_candidate`; then claims the file, re-selects and starts the pack, the episode → `downloading`. `dismiss` → **204** (409 `pick_resolved`): the pack's `unreadable` tombstone, deleted with its files by `qbit_forget_pack`, FR-A6's daily retry. 404 for an unknown id. No LLM suggestion is shown or applied. Origin required |
 | `POST /api/review/{id}/confirm`, `…/ignore`, `…/reopen`, `GET …/search?q=` | any | resolve a file: link to (anime, episode) creating the episode row if needed; ignore; reopen an ignored one; search the catalogue for another title. Confirm is unaffected by any suggestion — it reads only its body |
 | `POST /api/review/{id}/suggest` | any | ask a model which candidate this file is (FR-L5) → 202 `{job_id, status: "pending"}`, enqueuing `llm_suggest_match` with `force` (deduped per file). 404 unknown; 409 unless the file is `pending`; 503 `Suggestions are not enabled` when the flag is off or no provider is configured. **Never links anything** — the answer is stored for the queue to show |
 | `GET`/`HEAD /media/{id}/index.m3u8`, `/media/{id}/{init.mp4\|seg_NNNNN.m4s\|video.m3u8\|subs.m3u8\|sub_NNNNN.vtt}` | any (session cookie) | HLS delivery from `DATA_DIR/renditions/<id>/`; name validated by regex (a name with `/` is a 422 too), path built from the id; 404 unless the episode is `ready`; playlist `no-cache`, init/segments `immutable` + ETag/304; Range → 206/416 (Starlette native). For a remux (M20): `index.m3u8` is a generated master (video + default WebVTT subtitle rendition), `subs.m3u8` and `sub_NNNNN.vtt` (`text/vtt`, `no-cache` + ETag/304) are generated from `subs.vtt`; 404 for a rendition without a text track (§5.4a) |
@@ -7975,3 +8034,4 @@ asked*, so `make test` is exactly as fast as it was.
 - 2026-11-04 (orchestrator's call, reported to the owner) — M21 T5: **the retention anchor is the latest finish, and a finish is not a partial** (§5.7; spec FR-T1, FR-W7 item 4). `retention/sweep._facts` reads `max(greatest(completed_at, finished_at))` (per row the newer of the two, NULLs ignored, as `GET /api/progress/completed` answers), without the `completed` filter, so a rewatch pass finish (which never sets `completed`) is a fresh watched anchor: deletable `watched_grace_hours` after it. Hold (b)'s partial fact additionally requires `finished_at IS NULL OR finished_at < updated_at`: otherwise a pass finish (`completed = false`, position at the end) read as a partial watch and held the file D days, and the floor skipped it for 24 h. A later report below the mark (a genuine partial replay) still counts. Demand and walk files follow the existing rule (no live want + anchor + grace), pinned by tests. No schema change, no new dependency, no MAL-writing code.
 - 2026-11-04 — M21 T6: **the client** (§5.4 "M21 client as built"; spec FR-A14, FR-W7, FR-S5 item 3). Every aired episode on the show page is a target (`fetchable` from the server, demand flag for a not-ready row, Play chip with the M21 hint); "Fetching on request" with a ✕ that withdraws (`withdrawDemand`); the page's `demand.refusal` applied per row as `ShowDemandOut` documents it, said in the row with the open demands for the cap, never navigating; the hero offers the first unwatched aired episode; `RewatchControl` and its badge; "Try episode 1" and its hooks deleted, `sample` typed null. The player demands on `pending.demanded` not true once per open, shows `pending.note`, the `unavailable` sentence, a Review link for `awaiting_pick`, the cap's open demands, the rewatch-ended receipt and no "Marked as watched" in a pass; Next season in a pass opens the sequel's pass instead of writing the list. New shared `components/OpenDemandLinks.tsx`. No new dependency, no server change. The optional Home "Rewatch" label is not built: no home row says a show is in a pass.
 - 2026-11-04 (orchestrator's call) — M21 T6 fix round: **withdraw anywhere, and the cap does not stop a download already coming** (§5.4 "M21 client as built"; spec FR-A14). Every demanded row offers the ✕ ("Requested" once ready), and the cap's list of open demands carries a ✕ per row on the show page and in the player. A `demand_cap` 409 on an episode still on its way for a window or walk is said above the pending view while `/play` keeps polling; on one with nothing coming it is the refusal view and the poll stops. The hero plays a device copy without a demand, as the row does. No new dependency, no server change.
+- 2026-11-04 — M21 T7: **pack match review as built** (§5.1 job list and "Pack picks and the batch poll", §5.2 step 4 "As built", §5b review rows; spec FR-A4). New `acquisition/pack_picks.py` (pure `pick_eligible`/`identification_refusal`/`stale`; `open_pick`, `pick`, `dismiss`, `reconcile`), `batch.pick_candidates` (the per-file reading `plan_files` uses, factored out as `_file_number`), job type `qbit_forget_pack` (per torrent, priority 60; deletes only a tombstoned hash), `PACK_PICK_REASON` in `models/acquisition.py`, `EpisodeOut.awaiting_pick` (derived from state and reason), `PendingOut.awaiting_pick` (a pending row, the episode `unavailable`/`wanted`), `ReviewSummary.packs`. Calls inside the plan: the held pack gets `torrent_files` rows for **every** file, not only the videos (`qbit_reselect`'s listing gate needs one row per file); a pick requires the episode `unavailable`/`wanted` with no other live claim (409 `episode_moved_on`); D is floored at one day for a pick; a dismiss leaves the episode `unavailable` with `UNREADABLE_BATCH` for the daily revival rather than searching at once; the reconciliation runs at the head of `compute_wants`, asking the client only while a pick is pending; the routes are admin-only (the §5b row said `any`); the show row's Review link is admin-only.
