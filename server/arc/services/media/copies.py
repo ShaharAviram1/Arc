@@ -376,8 +376,7 @@ async def may_fetch_copy(
 ) -> bool:
     """Whether ``user`` may download ``copy`` (FR-P6, FR-A12). The media route asks this.
 
-    Only a ``ready`` copy, and never for the demo account (the route refuses
-    it with a 403 before anything is looked up; this says no as well). Then:
+    Only a ``ready`` copy. Then:
 
     * the copy of a ``ready`` episode — any account;
     * the copy of an episode that is **not** ready (a trip's: its source is
@@ -388,7 +387,7 @@ async def may_fetch_copy(
       or ``cancelled`` row, another user, or no row at all is the route's
       ordinary 404 — never a 403, which would say the file exists.
     """
-    if user.is_demo or copy.state is not OfflineCopyState.READY:
+    if copy.state is not OfflineCopyState.READY:
         return False
     if episode.state is EpisodeState.READY:
         return True

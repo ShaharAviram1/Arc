@@ -1,7 +1,7 @@
 """Choosing or changing the release for an episode or a trip by hand (FR-A13).
 
 Four routes, thin over :mod:`arc.services.acquisition.manual`. Every account
-except the demo may use them; the work is the service's.
+may use them; the work is the service's.
 
 * ``GET /api/episodes/{id}/releases`` → :class:`ReleasesOut` — the ranked
   candidates for an episode the caller wants (a live window, sample or trip
@@ -16,7 +16,7 @@ except the demo may use them; the work is the service's.
   replaces what the trip's pending episodes were downloading from.
 
 Refusals carry ``detail: {code, message}``, ``message`` a sentence a person can
-be shown: **403** ``demo_account``; **404** ``not_wanted`` / ``trip_not_found``;
+be shown: **404** ``not_wanted`` / ``trip_not_found``;
 **409** ``storage_held``, ``acquisition_paused``, ``packs_off``, ``busy``,
 ``already_arrived``, ``trip_not_active``, ``nothing_to_fetch``; **422**
 ``host_not_allowed``, ``bad_link``, ``magnet_unknown``, ``unknown_candidate``,
@@ -203,7 +203,6 @@ def _http(exc: ManualError) -> HTTPException:
 
 
 _REFUSALS: dict[int | str, dict[str, str]] = {
-    403: {"description": "demo_account"},
     404: {"description": "not_wanted | trip_not_found"},
     409: {"description": "storage_held | acquisition_paused | packs_off | busy | …"},
     429: {"description": "search_running | too_many_searches | searches_busy"},

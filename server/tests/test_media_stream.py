@@ -468,8 +468,8 @@ async def test_a_head_request_reports_the_length_without_the_body(
 # by one shows up as a byte mismatch rather than as a length that happens to
 # agree.
 
-DEMO_EMAIL = "demo@arc.test"
-DEMO_PASSWORD = "demo-password"
+OTHER_EMAIL = "plain-downloader@arc.test"
+OTHER_PASSWORD = "plain-password"
 
 
 def whole_file(settings: Settings, episode_id: int) -> bytes:
@@ -656,28 +656,22 @@ async def test_an_anonymous_download_is_401(anon: AsyncClient, episode_id: int) 
     assert response.json() == {"detail": "not authenticated"}
 
 
-async def test_the_demo_account_cannot_download(
-    api_app: FastAPI, api_factory: SessionFactory, episode_id: int
+async def test_no_account_is_refused_the_download_any_more(
+    api_app: FastAPI, api_factory: SessionFactory, episode_id: int, settings: Settings
 ) -> None:
-    """Owner, 2026-10-04: the demo account watches, it does not take files away."""
-    demo = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, demo.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+    """M21 T9: the demo 403 is gone; any account downloads, an unknown id is 404."""
+    await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
 
     async with api_transport(api_app) as http:
-        await login(http, DEMO_EMAIL, DEMO_PASSWORD)
+        await login(http, OTHER_EMAIL, OTHER_PASSWORD)
         response = await http.get(download_path(episode_id))
         head = await http.head(download_path(episode_id))
-        # Streaming is unaffected: only the file download is off.
-        playlist = await http.get(f"/media/{episode_id}/index.m3u8")
+        missing = await http.get(download_path(99_999_999))
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "downloads are turned off for the demo account"}
-    assert head.status_code == 403
-    assert playlist.status_code == 200
+    assert response.status_code == 200
+    assert response.content == whole_file(settings, episode_id)
+    assert head.status_code == 200
+    assert missing.status_code == 404
 
 
 async def test_a_download_of_an_episode_that_is_not_ready_is_404(

@@ -132,13 +132,10 @@ class OfflineFacts:
     sources: frozenset[int] = frozenset()
     codec: str | None = None
     height: int | None = None
-    #: The caller is the demo account, which gets no copies (FR-D5): every
-    #: ``out()`` is null, so the client offers no control it would refuse.
-    demo: bool = False
 
     def out(self, episode: Episode) -> OfflineOut | None:
         """``EpisodeOut.offline`` for one episode: null unless it is ``ready``."""
-        if self.demo or episode.state is not EpisodeState.READY:
+        if episode.state is not EpisodeState.READY:
             return None
         return OfflineOut.build(
             episode.id,
@@ -337,7 +334,6 @@ async def episode_extras(
     *,
     offline_codec: str | None = None,
     offline_height: int | None = None,
-    offline_demo: bool = False,
     live_settings: Settings | None = None,
 ) -> EpisodeExtras:
     """All five lookups for one page's worth of episodes, in at most nine queries.
@@ -346,24 +342,17 @@ async def episode_extras(
 
     ``offline_codec`` and ``offline_height`` are the host's ``OFFLINE_CODEC``
     and ``OFFLINE_HEIGHT``, passed by the callers that hold the settings
-    (:class:`OfflineFacts`); ``offline_demo`` is whether the caller is the
-    demo account, which is sent no copies.
+    (:class:`OfflineFacts`).
     """
     if not episode_ids:
-        return EpisodeExtras(
-            offline=OfflineFacts(codec=offline_codec, height=offline_height, demo=offline_demo)
-        )
+        return EpisodeExtras(offline=OfflineFacts(codec=offline_codec, height=offline_height))
     return EpisodeExtras(
         torrents=await torrents_for(session, episode_ids),
         renditions=await renditions_for(session, episode_ids),
         transcode_jobs=await latest_transcode_jobs(session, episode_ids),
         next_searches=await next_searches_for(session, episode_ids),
-        offline=(
-            OfflineFacts(codec=offline_codec, height=offline_height, demo=True)
-            if offline_demo
-            else await offline_facts_for(
-                session, episode_ids, codec=offline_codec, height=offline_height
-            )
+        offline=await offline_facts_for(
+            session, episode_ids, codec=offline_codec, height=offline_height
         ),
         trip_only=frozenset(await trip_only_episode_ids(session, episode_ids)),
         min_seeders_warn=await min_seeders_warn(session),

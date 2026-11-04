@@ -1,9 +1,9 @@
 """Play on demand and device holdings over HTTP (FR-A14, FR-A15, M20 T4).
 
 * ``POST /api/episodes/{id}/demand`` — the route matrix: in the window, not in
-  it, held on a device, paused, short of disk, the demo account.
+  it, held on a device, paused, short of disk.
 * ``PUT /api/devices/{device_id}/holdings`` — replace semantics, the UUID rule,
-  the demo refusal, the size limit.
+  no account refused (the demo 403 went in M21), the size limit.
 * ``GET /api/episodes/{id}/play`` — the ``pending`` answer for a wanted episode
   that is not ready, and ``next.fetchable``.
 """
@@ -58,8 +58,8 @@ pytestmark = pytest.mark.pg
 
 USER_EMAIL = "demander@arc.test"
 USER_PASSWORD = "demander-password"
-DEMO_EMAIL = "demo-demander@arc.test"
-DEMO_PASSWORD = "demo-demander-password"
+OTHER_EMAIL = "plain-holder@arc.test"
+OTHER_PASSWORD = "plain-holder-password"
 
 DEVICE = "0b7c3f2e-5d3a-4c1b-9a8e-1f2d3c4b5a69"
 
@@ -76,15 +76,11 @@ async def client(api_app: FastAPI, user: User) -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture
-async def demo_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
-    demo = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, demo.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+async def other_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
+    """A second plain account: where the demo account's refusals used to be."""
+    await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
     async with api_transport(api_app) as http:
-        yield await login(http, DEMO_EMAIL, DEMO_PASSWORD)
+        yield await login(http, OTHER_EMAIL, OTHER_PASSWORD)
 
 
 async def followed_show(
@@ -196,13 +192,13 @@ async def test_demanding_while_storage_is_held_is_a_409(
     assert response.json()["detail"]["code"] == "storage_held"
 
 
-async def test_the_demo_account_may_demand(
-    demo_client: AsyncClient, api_factory: SessionFactory
+async def test_a_second_account_may_demand(
+    other_client: AsyncClient, api_factory: SessionFactory
 ) -> None:
-    demo_id = await user_id_of(api_factory, DEMO_EMAIL)
-    ids = await followed_show(api_factory, demo_id, anilist_id=975006)
+    other_id = await user_id_of(api_factory, OTHER_EMAIL)
+    ids = await followed_show(api_factory, other_id, anilist_id=975006)
 
-    response = await demo_client.post(f"/api/episodes/{ids[4]}/demand")
+    response = await other_client.post(f"/api/episodes/{ids[4]}/demand")
 
     assert response.status_code == 202
 
@@ -447,10 +443,15 @@ async def test_holdings_are_limited_to_500(client: AsyncClient) -> None:
     assert response.status_code == 422
 
 
-async def test_the_demo_account_has_no_holdings(demo_client: AsyncClient) -> None:
-    response = await demo_client.put(f"/api/devices/{DEVICE}/holdings", json={"episode_ids": []})
+async def test_no_account_is_refused_holdings_any_more(other_client: AsyncClient) -> None:
+    """M21 T9: the demo 403 is gone; any account reports, the UUID rule still applies."""
+    response = await other_client.put(f"/api/devices/{DEVICE}/holdings", json={"episode_ids": []})
+    assert response.status_code == 204
 
-    assert response.status_code == 403
+    bad = await other_client.put(
+        "/api/devices/not-a-uuid-at-all-not-a-uuid-at-all/holdings", json={"episode_ids": []}
+    )
+    assert bad.status_code == 422
 
 
 async def test_an_anonymous_caller_cannot_report_holdings(api_client: AsyncClient) -> None:

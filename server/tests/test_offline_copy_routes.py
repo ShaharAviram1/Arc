@@ -41,8 +41,8 @@ pytestmark = pytest.mark.pg
 
 USER_EMAIL = "keeper@arc.test"
 USER_PASSWORD = "keeper-password"
-DEMO_EMAIL = "demo-offline@arc.test"
-DEMO_PASSWORD = "demo-password"
+OTHER_EMAIL = "plain-offline@arc.test"
+OTHER_PASSWORD = "plain-password"
 
 #: A copy's bytes: non-repeating, so a wrong offset shows.
 COPY_BYTES = bytes(range(256)) * 16
@@ -73,15 +73,11 @@ async def anon(api_app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture
-async def demo(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
-    made = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, made.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+async def other(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
+    """A second plain account: where the demo 403 used to be (M21 T9)."""
+    await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
     async with api_transport(api_app) as http:
-        yield await login(http, DEMO_EMAIL, DEMO_PASSWORD)
+        yield await login(http, OTHER_EMAIL, OTHER_PASSWORD)
 
 
 async def write_copy(
@@ -174,14 +170,13 @@ async def test_an_anonymous_request_is_401(anon: AsyncClient, episode_id: int) -
     assert response.json() == {"detail": "not authenticated"}
 
 
-async def test_the_demo_account_is_refused_before_any_lookup(
-    demo: AsyncClient, episode_id: int
-) -> None:
-    for path in (copy_path(episode_id), copy_path(99_999_999)):
-        response = await demo.get(path)
-        assert response.status_code == 403
-        assert response.json() == {"detail": "downloads are turned off for the demo account"}
-    assert (await demo.head(copy_path(episode_id))).status_code == 403
+async def test_no_account_is_refused_the_copy_any_more(other: AsyncClient, episode_id: int) -> None:
+    """M21 T9: the demo 403 is gone; any account gets a ready copy, else a 404."""
+    response = await other.get(copy_path(episode_id))
+    assert response.status_code == 200
+    assert response.content == COPY_BYTES
+    assert (await other.head(copy_path(episode_id))).status_code == 200
+    assert (await other.get(copy_path(99_999_999))).status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -467,10 +462,15 @@ async def test_post_and_get_refuse_unknown_and_not_ready_episodes(
         assert (await client.get(api_path(target))).status_code == 404
 
 
-async def test_post_and_get_refuse_the_demo_account(demo: AsyncClient, episode_id: int) -> None:
-    for response in (await demo.post(api_path(episode_id)), await demo.get(api_path(episode_id))):
-        assert response.status_code == 403
-        assert response.json() == {"detail": "downloads are turned off for the demo account"}
+async def test_post_and_get_refuse_no_account_any_more(other: AsyncClient, episode_id: int) -> None:
+    """M21 T9: no demo 403; any account is answered, an unknown episode is 404."""
+    posted = await other.post(api_path(episode_id))
+    assert posted.status_code == 202
+    assert posted.json()["state"] == "available"
+    got = await other.get(api_path(episode_id))
+    assert got.status_code == 200
+    assert got.json()["state"] == "available"
+    assert (await other.get(api_path(99_999_999))).status_code == 404
 
 
 async def test_anonymous_callers_are_401(anon: AsyncClient, episode_id: int) -> None:

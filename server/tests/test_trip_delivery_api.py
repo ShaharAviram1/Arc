@@ -44,8 +44,6 @@ OWNER_EMAIL = "trip-owner@arc.test"
 OWNER_PASSWORD = "trip-owner-password"
 OTHER_EMAIL = "trip-other@arc.test"
 OTHER_PASSWORD = "trip-other-password"
-DEMO_EMAIL = "trip-demo@arc.test"
-DEMO_PASSWORD = "trip-demo-password"
 
 
 @pytest.fixture
@@ -71,18 +69,6 @@ async def other_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIt
     await add_user(api_factory, OTHER_EMAIL, OTHER_PASSWORD)
     async with api_transport(api_app) as http:
         yield await login(http, OTHER_EMAIL, OTHER_PASSWORD)
-
-
-@pytest.fixture
-async def demo_client(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
-    made = await add_user(api_factory, DEMO_EMAIL, DEMO_PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, made.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
-    async with api_transport(api_app) as http:
-        yield await login(http, DEMO_EMAIL, DEMO_PASSWORD)
 
 
 async def a_trip(
@@ -295,7 +281,6 @@ async def test_again_on_an_ended_trip_is_409(
 async def test_the_owner_fetches_a_trip_copy_and_nobody_else_does(
     owner_client: AsyncClient,
     other_client: AsyncClient,
-    demo_client: AsyncClient,
     owner: User,
     api_factory: SessionFactory,
     settings: Settings,
@@ -307,7 +292,6 @@ async def test_the_owner_fetches_a_trip_copy_and_nobody_else_does(
     assert pending.status_code == 200 and pending.content == COPY_BYTES
     assert (await other_client.get(url)).status_code == 404, "404, never 403"
     assert (await other_client.head(url)).status_code == 404
-    assert (await demo_client.get(url)).status_code == 403, "demo: refused before any lookup"
 
     await owner_client.post(delivered_url(trip_id, ids[1]), json={})
     assert (await owner_client.get(url)).status_code == 200, "a second device, within the hour"

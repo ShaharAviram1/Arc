@@ -44,7 +44,6 @@ from arc.services.acquisition import rules as acquisition_rules
 from arc.services.acquisition.jobs import MANUAL_STALL, manual_stall, poll_qbit, search_release
 from arc.services.acquisition.manual import (
     ManualConflict,
-    ManualForbidden,
     ManualInvalid,
     ManualNotFound,
     Tried,
@@ -594,11 +593,11 @@ async def test_the_refusals(
         await episode_scope(db_session, stranger, episode.id)
     with pytest.raises(ManualNotFound):
         await episode_scope(db_session, user, 987654321)
-    stranger.is_demo = True
+    # M21 T9: no account is forbidden any more; once it wants the episode, any
+    # account has a scope (the demo account's 403 went with the demo).
     db_session.add(Want(user_id=stranger.id, episode_id=episode.id))
     await db_session.flush()
-    with pytest.raises(ManualForbidden):
-        await episode_scope(db_session, stranger, episode.id)
+    assert (await episode_scope(db_session, stranger, episode.id)).user is stranger
 
     scope = await episode_scope(db_session, user, episode.id)
     with pytest.raises(ManualInvalid) as unknown:
@@ -831,24 +830,23 @@ async def test_http_refusals(
 
 
 @pg
-async def test_http_demo_is_refused(api_app: FastAPI, api_factory: SessionFactory) -> None:
-    user = await add_user(api_factory, "demo-chooser@arc.test", "demopassword1")
-    async with api_factory() as session:
-        row = await session.get(User, user.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+async def test_http_no_account_is_refused_any_more(
+    chooser: AsyncClient, api_app: FastAPI, api_factory: SessionFactory
+) -> None:
+    """M21 T9: the demo 403 is gone; a second plain account meets the normal rules."""
+    await add_user(api_factory, "plain-chooser@arc.test", "plainpassword1")
     episode_id = await _wanted_episode(
-        api_factory, anilist_id=963102, email="demo-chooser@arc.test"
+        api_factory, anilist_id=963102, email="plain-chooser@arc.test"
     )
     async with api_transport(api_app) as client:
-        await login(client, "demo-chooser@arc.test", "demopassword1")
-        listed = await client.get(f"/api/episodes/{episode_id}/releases")
-        chose = await client.post(
-            f"/api/episodes/{episode_id}/release", json={"link": "https://nyaa.si/view/1"}
+        await login(client, "plain-chooser@arc.test", "plainpassword1")
+        unknown = await client.post(
+            f"/api/episodes/{episode_id}/release", json={"candidate_id": "deadbeef"}
         )
-    assert listed.status_code == 403 and listed.json()["detail"]["code"] == "demo_account"
-    assert chose.status_code == 403
+        missing = await client.get("/api/episodes/987654/releases")
+    assert unknown.status_code == 422, unknown.text
+    assert unknown.json()["detail"]["code"] == "unknown_candidate"
+    assert missing.status_code == 404 and missing.json()["detail"]["code"] == "not_wanted"
 
 
 @pg

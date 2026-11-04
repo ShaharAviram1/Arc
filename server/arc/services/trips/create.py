@@ -1,10 +1,9 @@
 """Starting a trip (FR-A12, owner 2026-10-05).
 
 "Prepare for a trip" on a show: the next X **aired** episodes after the
-user's progress, each made into a small offline copy for the device. Five
+user's progress, each made into a small offline copy for the device. Four
 refusals, each a sentence the show page can say:
 
-* the demo account (403) — FR-D5: no trips;
 * an active trip on this show already (409) — one per show per user, also a
   database index (owner, 2026-10-28: any number of shows may each have one;
   the device's free space is the only other limit, and the user's call);
@@ -82,7 +81,6 @@ log = logging.getLogger(__name__)
 
 #: The refusals' details: short codes the client maps to its own sentences,
 #: like ``source_gone`` on the copy route.
-DEMO_REFUSED = "demo_account"
 TRIP_ACTIVE = "trip_active"
 STORAGE_HELD = "storage_held"
 COUNT_OUT_OF_RANGE = "count_out_of_range"
@@ -100,10 +98,6 @@ COPY_MISMATCH = "copy_mismatch"
 
 class TripError(Exception):
     """Why a trip cannot be made or changed. ``str()`` is the API's detail."""
-
-
-class TripForbidden(TripError):
-    """403: this account may not have trips."""
 
 
 class TripConflict(TripError):
@@ -364,8 +358,6 @@ async def create_trip(
     that device's to download (owner, 2026-10-30). The route always sends one;
     ``None`` makes a trip any device may claim, as every trip before was.
     """
-    if user.is_demo:
-        raise TripForbidden(DEMO_REFUSED)
     anime = await session.get(Anime, anime_id)
     if anime is None:
         raise TripNotFound("anime not found")
@@ -487,7 +479,6 @@ async def create_trip(
 __all__ = [
     "COPY_MISMATCH",
     "COUNT_OUT_OF_RANGE",
-    "DEMO_REFUSED",
     "NOTHING_AIRED",
     "STORAGE_HELD",
     "TRIP_ACTIVE",
@@ -497,7 +488,6 @@ __all__ = [
     "TripConflict",
     "TripCreated",
     "TripError",
-    "TripForbidden",
     "TripInvalid",
     "TripNotFound",
     "active_trip",

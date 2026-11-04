@@ -1,7 +1,7 @@
 """Pinning a show: ``PUT``/``DELETE /api/anime/{id}/pin`` (FR-T8, M20 T8).
 
-Idempotent both ways, 204 each time; 404 for an unknown show; 403 for the
-demo account. ``pinned`` on the show payload is the caller's own pin, and the
+Idempotent both ways, 204 each time; 404 for an unknown show; no 403 since
+the demo account went (M21 T9). ``pinned on the show payload is the caller's own pin, and the
 admin disk view lists every pinned show with its bytes.
 """
 
@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 
 from arc.db import SessionFactory
-from arc.models import ShowPin, User, UserRole
+from arc.models import ShowPin, UserRole
 from tests.acquisition_helpers import make_anime, make_episodes
 from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD, add_user, api_transport, login
 
@@ -47,18 +47,6 @@ async def member(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator
     await add_user(api_factory, "pin-member@arc.test", PASSWORD)
     async with api_transport(api_app) as client:
         yield await login(client, "pin-member@arc.test", PASSWORD)
-
-
-@pytest.fixture
-async def demo(api_app: FastAPI, api_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
-    made = await add_user(api_factory, "pin-demo@arc.test", PASSWORD)
-    async with api_factory() as session:
-        row = await session.get(User, made.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
-    async with api_transport(api_app) as client:
-        yield await login(client, "pin-demo@arc.test", PASSWORD)
 
 
 async def test_pin_and_unpin_are_idempotent(
@@ -98,14 +86,18 @@ async def test_an_unknown_show_is_404(member: AsyncClient) -> None:
     assert (await member.delete("/api/anime/999999999/pin")).status_code == 404
 
 
-async def test_the_demo_account_is_refused(demo: AsyncClient, api_factory: SessionFactory) -> None:
+async def test_no_account_is_refused_a_pin_any_more(
+    member: AsyncClient, api_factory: SessionFactory
+) -> None:
+    """M21 T9: the demo 403 is gone; a plain account pins, and 404 still applies."""
     anime_id = await a_show(api_factory, anilist_id=973003)
 
-    put = await demo.put(f"/api/anime/{anime_id}/pin")
-    assert put.status_code == 403
-    assert put.json()["detail"] == "demo_account"
-    assert (await demo.delete(f"/api/anime/{anime_id}/pin")).status_code == 403
+    put = await member.put(f"/api/anime/{anime_id}/pin")
+    assert put.status_code == 204, put.text
+    assert await pins(api_factory, anime_id) == 1
+    assert (await member.delete(f"/api/anime/{anime_id}/pin")).status_code == 204
     assert await pins(api_factory, anime_id) == 0
+    assert (await member.put("/api/anime/999999998/pin")).status_code == 404
 
 
 async def test_a_signed_out_caller_is_refused(api_client: AsyncClient) -> None:

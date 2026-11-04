@@ -276,7 +276,6 @@ async def play(
         [episode.id],
         offline_codec=settings.offline_codec,
         offline_height=settings.offline_height,
-        offline_demo=user.is_demo,
     )
     rendition = extras.renditions.get(episode.id)
     progress = await session.get(WatchProgress, (user.id, episode.id))

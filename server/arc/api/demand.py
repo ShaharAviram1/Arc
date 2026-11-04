@@ -23,8 +23,7 @@ episode that is not ready, and when they withdraw that press. Thin over
 ``DELETE`` withdraws the caller's demand (M21): **204** whether or not there
 was one (idempotent), 404 for an unknown episode.
 
-Open to every signed-in account, the demo one included: it streams, and the
-demo is allowed to stream (owner, M20 plan). Unsafe, so the Origin check
+Open to every signed-in account. Unsafe, so the Origin check
 (:mod:`arc.api.csrf`) applies. Nothing here touches a list entry or
 MyAnimeList.
 """

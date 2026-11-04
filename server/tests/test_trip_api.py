@@ -17,7 +17,6 @@ from arc.models import Anime, Episode, Setting, User, Want
 from arc.services.acquisition import compute_wants
 from arc.services.trips.create import (
     COUNT_OUT_OF_RANGE,
-    DEMO_REFUSED,
     NOTHING_AIRED,
     TRIP_ACTIVE,
     TRIP_NOT_FOUND,
@@ -222,22 +221,22 @@ async def test_the_refusals(user_client: AsyncClient, api_factory: SessionFactor
     assert (again.status_code, again.json()["detail"]) == (409, TRIP_ACTIVE)
 
 
-async def test_the_demo_account_is_refused(
+async def test_no_account_is_refused_a_trip_any_more(
     api_app: FastAPI, api_factory: SessionFactory, user_client: AsyncClient
 ) -> None:
+    """M21 T9: the demo 403 is gone; a second plain account starts a trip (201)."""
     anime_id = await a_show(api_factory, anilist_id=981004)
-    await add_user(api_factory, "demo@arc.test", "demopassword123")
-    async with api_factory() as session:
-        demo = await session.scalar(select(User).where(User.email == "demo@arc.test"))
-        assert demo is not None
-        demo.is_demo = True
-        await session.commit()
+    await add_user(api_factory, "plain-tripper@arc.test", "plainpassword123")
     async with api_transport(api_app) as client:
-        await login(client, "demo@arc.test", "demopassword123")
+        await login(client, "plain-tripper@arc.test", "plainpassword123")
         response = await client.post(
             f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
         )
-    assert (response.status_code, response.json()["detail"]) == (403, DEMO_REFUSED)
+        again = await client.post(
+            f"/api/anime/{anime_id}/trip", json={"count": 2, "device_id": DEVICE}
+        )
+    assert response.status_code == 201, response.text
+    assert (again.status_code, again.json()["detail"]) == (409, TRIP_ACTIVE)
 
 
 async def test_only_the_owner_can_cancel_and_others_see_404(
@@ -324,13 +323,13 @@ async def test_the_show_page_carries_the_trip_cap(
     assert body["trip_limits"]["max_episodes"] == 7
 
 
-async def test_the_show_page_reads_the_estimate_for_everyone_but_the_demo(
+async def test_the_show_page_reads_the_estimate_for_everyone(
     api_app: FastAPI,
     api_factory: SessionFactory,
     user_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The demo account can never make a trip: it is sent the fallback, unread."""
+    """Every account is sent the measured estimate (the demo's fallback went in M21)."""
     from arc.api import anime as anime_api
 
     calls: list[int] = []
@@ -346,17 +345,12 @@ async def test_the_show_page_reads_the_estimate_for_everyone_but_the_demo(
     assert body["trip_limits"]["copy_estimate_bytes"] == 254_000_000
     assert calls == [1]
 
-    await add_user(api_factory, "demo-estimate@arc.test", "demopassword123")
-    async with api_factory() as session:
-        demo = await session.scalar(select(User).where(User.email == "demo-estimate@arc.test"))
-        assert demo is not None
-        demo.is_demo = True
-        await session.commit()
+    await add_user(api_factory, "plain-estimate@arc.test", "plainpassword123")
     async with api_transport(api_app) as client:
-        await login(client, "demo-estimate@arc.test", "demopassword123")
-        demo_body = (await client.get(f"/api/anime/{anime_id}")).json()
-    assert demo_body["trip_limits"]["copy_estimate_bytes"] == FALLBACK_COPY_BYTES
-    assert calls == [1], "no estimate query for the demo account"
+        await login(client, "plain-estimate@arc.test", "plainpassword123")
+        other_body = (await client.get(f"/api/anime/{anime_id}")).json()
+    assert other_body["trip_limits"]["copy_estimate_bytes"] == 254_000_000
+    assert calls == [1, 1]
 
 
 async def test_the_trip_records_the_device_that_started_it(

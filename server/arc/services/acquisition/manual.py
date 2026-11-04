@@ -2,11 +2,10 @@
 
 The owner's request of 2026-10-06: a person who can see that Arc picked a dead
 release, or that a better pack exists, can point the episode — or their whole
-trip — at a release of their choosing. Every account except the demo may do it.
-It is **not** a "download anything" door (spec §8): it only redirects an
-episode or a trip the caller has already asked for, and the release it takes
-goes through the same add paths and the same byte guarantee as an automatic
-pick.
+trip — at a release of their choosing. Every account may do it. It is **not**
+a "download anything" door (spec §8): it only redirects an episode or a trip
+the caller has already asked for, and the release it takes goes through the
+same add paths and the same byte guarantee as an automatic pick.
 
 Two halves.
 
@@ -138,10 +137,6 @@ class ManualError(Exception):
         self.message = message
 
 
-class ManualForbidden(ManualError):
-    status = 403
-
-
 class ManualNotFound(ManualError):
     status = 404
 
@@ -172,7 +167,6 @@ class ManualTooMany(ManualError):
     status = 429
 
 
-DEMO = ManualForbidden("demo_account", "The demo account cannot change releases.")
 NOT_WANTED_EPISODE = ManualNotFound(
     "not_wanted", "You have not asked for this episode, so there is no release to change."
 )
@@ -716,9 +710,7 @@ async def _caller_wanted(session: AsyncSession, user_id: int, anime_id: int) -> 
 
 
 async def episode_scope(session: AsyncSession, user: User, episode_id: int) -> Scope:
-    """One episode the caller wants; demo 403, not wanted 404."""
-    if user.is_demo:
-        raise DEMO
+    """One episode the caller wants; not wanted 404."""
     episode = await session.get(Episode, episode_id)
     if episode is None:
         raise NOT_WANTED_EPISODE
@@ -743,8 +735,6 @@ async def episode_scope(session: AsyncSession, user: User, episode_id: int) -> S
 
 async def trip_scope(session: AsyncSession, user: User, trip_id: int) -> Scope:
     """The caller's active trip: its pending episodes that have not landed."""
-    if user.is_demo:
-        raise DEMO
     trip = await session.get(Trip, trip_id)
     if trip is None or trip.user_id != user.id:
         raise TRIP_NOT_FOUND
@@ -1627,7 +1617,6 @@ __all__ = [
     "Link",
     "ManualConflict",
     "ManualError",
-    "ManualForbidden",
     "ManualInvalid",
     "ManualNotFound",
     "ManualTooMany",

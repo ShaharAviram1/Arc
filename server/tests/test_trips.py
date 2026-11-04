@@ -80,7 +80,6 @@ from arc.services.trips.create import (
     STORAGE_HELD,
     TRIP_ACTIVE,
     TripConflict,
-    TripForbidden,
     TripInvalid,
     TripNotFound,
     active_trip,
@@ -224,15 +223,18 @@ async def test_a_trip_takes_the_next_aired_episodes_after_progress(
     assert len(await jobs_of(db_session, COMPUTE_WANTS)) == 1
 
 
-async def test_the_demo_account_cannot_make_a_trip(
+async def test_no_account_is_forbidden_a_trip_any_more(
     db_session: AsyncSession, settings: Settings
 ) -> None:
+    """M21 T9: the demo refusal is gone; a plain account's trip is made."""
     anime, _ = await show(db_session, 980002)
-    user = await make_user(db_session, "trip-demo@arc.test")
-    user.is_demo = True
+    user = await make_user(db_session, "trip-plain@arc.test")
 
-    with pytest.raises(TripForbidden):
-        await create_trip(db_session, settings, user=user, anime_id=anime.id, count=2, now=now())
+    created = await create_trip(
+        db_session, settings, user=user, anime_id=anime.id, count=2, now=now()
+    )
+
+    assert created.trip.user_id == user.id
 
 
 async def test_one_active_trip_per_show_and_any_number_of_shows(

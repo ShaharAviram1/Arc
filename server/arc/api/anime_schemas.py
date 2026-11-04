@@ -655,10 +655,9 @@ class EpisodeOut(BaseModel):
     #: Where the ready episode downloads as one MP4 file (FR-S7), sent exactly
     #: when :attr:`rendition` is. Built by :func:`~arc.api.media_stream.
     #: download_url` beside the route that answers it, like the player's
-    #: ``playlist_url``, so the client never assembles a media path itself. The
-    #: demo account is sent it too and refused by the route; the show page
-    #: hides the control for it. Null for a remuxed rendition with a text
-    #: track (M20): one MP4 cannot carry the track, and the route refuses it.
+    #: ``playlist_url``, so the client never assembles a media path itself.
+    #: Null for a remuxed rendition with a text track (M20): one MP4 cannot
+    #: carry the track, and the route refuses it.
     download_url: str | None = None
     #: The small offline copy (FR-P6), on a ``ready`` episode only — null on
     #: every other. What "Keep offline" downloads: ``available`` with a

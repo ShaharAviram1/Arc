@@ -5,8 +5,8 @@ measures the chosen tracks and refusals are not retried (S2); the request queue
 is bounded and respects the storage guard (S3); concurrent requests share one
 row (S4); retention and a request cannot leave a copy on an episode that is
 gone (S7); and the nits — start-up sweep (N1), the rendition's own languages
-(N2), no touch on a refused range (N3), no copy for the demo account (N4), a
-cancelled encode (N9).
+(N2), no touch on a refused range (N3), the offline field for every account
+(N4; the demo account it once hid from went in M21), a cancelled encode (N9).
 """
 
 from __future__ import annotations
@@ -553,28 +553,24 @@ async def test_an_unsatisfiable_range_does_not_count_as_a_fetch(
         assert row is not None and row.last_served_at is None
 
 
-# --- N4: the demo account is sent no copy --------------------------------------------
+# --- N4: every account is sent the copy (the demo exception went in M21) ------------
 
 
-async def test_the_demo_account_sees_no_offline_field(
+async def test_every_account_sees_the_offline_field(
     api_app: FastAPI, api_factory: SessionFactory, settings: Settings
 ) -> None:
     ready = await add_episode(api_factory, anilist_id=942080)
     write_rendition(settings, ready)
     await write_copy(api_factory, settings, ready)
-    demo = await add_user(api_factory, "demo-n4@arc.test", "demo-password")
-    async with api_factory() as session:
-        row = await session.get(User, demo.id)
-        assert row is not None
-        row.is_demo = True
-        await session.commit()
+    await add_user(api_factory, "plain-n4@arc.test", "plain-password")
 
     async with api_transport(api_app) as http:
-        await login(http, "demo-n4@arc.test", "demo-password")
+        await login(http, "plain-n4@arc.test", "plain-password")
         play = await http.get(f"/api/episodes/{ready}/play")
 
     assert play.status_code == 200
-    assert play.json()["episode"]["offline"] is None
+    offline = play.json()["episode"]["offline"]
+    assert offline is not None and offline["state"] == "available"
 
 
 # --- N9: a cancelled encode -----------------------------------------------------------
