@@ -921,8 +921,10 @@ M21_WALKS = "d4f8b2c6e937"
 M21_DEMAND_SEED = "e5a1c9d3f748"
 M21_PACK_PICKS = "f6b2d0e4a859"
 M21_DRY_RUN_SEED = "a8c3e1f5b960"
+M21_DROP_IS_DEMO = "91b56c5bdf4a"
 #: The chain from the newest M21 revision back to the one before M21.
 M21_CHAIN = (
+    M21_DROP_IS_DEMO,
     M21_DRY_RUN_SEED,
     M21_PACK_PICKS,
     M21_DEMAND_SEED,
@@ -945,8 +947,8 @@ def _scalar(url: str, sql: str, params: dict[str, Any] | None = None) -> Any:
     return asyncio.run(run())
 
 
-def _m21_state(url: str) -> tuple[bool, bool, bool, bool, bool, bool]:
-    """What of M21 T1 is in the database, in chain order."""
+def _m21_state(url: str) -> tuple[bool, ...]:
+    """What of M21 (T1, and T9's column drop) is in the database, in chain order."""
     keys = set(_fetch_settings(url))
     return (
         _column(url, "watch_progress", "finished_at") is not None,
@@ -955,12 +957,13 @@ def _m21_state(url: str) -> tuple[bool, bool, bool, bool, bool, bool]:
         "demand_max_open" in keys,
         bool(_column_types(url, "pack_picks")),
         "batch_sweep_dry_run" in keys,
+        _column(url, "users", "is_demo") is None,
     )
 
 
 def test_the_m21_revisions_are_the_head_and_a_straight_chain(test_database_url: str) -> None:
     script = ScriptDirectory.from_config(alembic_config(test_database_url))
-    assert script.get_current_head() == M21_DRY_RUN_SEED
+    assert script.get_current_head() == M21_DROP_IS_DEMO
     for revision, parent in zip(M21_CHAIN, (*M21_CHAIN[1:], BEFORE_M21), strict=True):
         found = script.get_revision(revision)
         assert found is not None and found.down_revision == parent
@@ -969,9 +972,9 @@ def test_the_m21_revisions_are_the_head_and_a_straight_chain(test_database_url: 
 def test_the_m21_revisions_go_down_one_at_a_time_and_back_up(
     pg_engine: AsyncEngine, test_database_url: str
 ) -> None:
-    """Each step down removes exactly its own change; the way up restores all six."""
+    """Each step down removes exactly its own change; the way up restores them all."""
     config = alembic_config(test_database_url)
-    assert _m21_state(test_database_url) == (True,) * 6
+    assert _m21_state(test_database_url) == (True,) * len(M21_CHAIN)
     try:
         for step in range(1, len(M21_CHAIN) + 1):
             command.downgrade(config, "-1")
@@ -981,7 +984,7 @@ def test_the_m21_revisions_go_down_one_at_a_time_and_back_up(
 
         command.upgrade(config, "head")
 
-        assert _m21_state(test_database_url) == (True,) * 6
+        assert _m21_state(test_database_url) == (True,) * len(M21_CHAIN)
         assert _diff(test_database_url) == []
     finally:
         command.upgrade(config, "head")
@@ -1136,4 +1139,41 @@ def test_the_m21_seeds_keep_a_value_set_by_hand(
             test_database_url,
             "UPDATE settings SET value = CAST(:value AS jsonb) WHERE key = :key",
             {"key": key, "value": json.dumps(DEFAULT_SETTINGS[key])},
+        )
+
+
+_IS_DEMO_USER = "migration-is-demo@arc.test"
+
+
+def test_dropping_users_is_demo_goes_up_and_down_and_keeps_the_rows(
+    pg_engine: AsyncEngine, test_database_url: str
+) -> None:
+    """M21 R5: the column goes, no account does; the downgrade re-adds it false."""
+    config = alembic_config(test_database_url)
+    assert _column(test_database_url, "users", "is_demo") is None
+    _execute(
+        test_database_url,
+        "INSERT INTO users (email, password_hash) VALUES (:email, 'x')",
+        {"email": _IS_DEMO_USER},
+    )
+    count = "SELECT count(*) FROM users WHERE email = :email"
+    try:
+        command.downgrade(config, M21_DRY_RUN_SEED)
+        assert _column(test_database_url, "users", "is_demo") == ("boolean", "NO")
+        flag = "SELECT is_demo FROM users WHERE email = :email"
+        assert _scalar(test_database_url, flag, {"email": _IS_DEMO_USER}) is False
+        _execute(
+            test_database_url,
+            "UPDATE users SET is_demo = true WHERE email = :email",
+            {"email": _IS_DEMO_USER},
+        )
+
+        command.upgrade(config, M21_DROP_IS_DEMO)
+
+        assert _column(test_database_url, "users", "is_demo") is None
+        assert _scalar(test_database_url, count, {"email": _IS_DEMO_USER}) == 1
+    finally:
+        command.upgrade(config, "head")
+        _execute(
+            test_database_url, "DELETE FROM users WHERE email = :email", {"email": _IS_DEMO_USER}
         )
