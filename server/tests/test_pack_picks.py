@@ -781,10 +781,12 @@ async def test_a_pick_while_storage_is_held_is_refused_and_writes_nothing(
     await _nothing_moved(db_session, episode, pick)
 
 
-async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
+async def test_the_pick_reconciliation_lists_the_client_before_the_want_lock(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The routes lock ``lock_wants`` then a pick row; the job must do the same."""
+    """The listing (an HTTP call) is read before ``lock_wants`` is taken, and
+    the pick rows are locked only after it: the routes' order, the want lock
+    then a pick row, and the global lock never held across the client call."""
     wired, _episode, _pick = await _refused(
         db_session, monkeypatch, tmp_path, anilist_id=963722, email="fix3@arc.test"
     )
@@ -792,14 +794,19 @@ async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
     real_lock = acquisition_jobs.lock_wants
     real_hashes = pack_picks.awaiting_hashes
     real_reconcile = pack_picks.reconcile
+    real_torrents = acquisition_jobs.QbitClient.torrents
 
     async def lock(session: AsyncSession) -> None:
         order.append("lock_wants")
         await real_lock(session)
 
     async def hashes(session: AsyncSession) -> list[str]:
-        order.append("pick rows")
+        order.append("pick hashes")
         return await real_hashes(session)
+
+    async def torrents(self: object, *args: object, **kwargs: object) -> object:
+        order.append("listing")
+        return await real_torrents(self, *args, **kwargs)  # type: ignore[arg-type]
 
     async def reconcile(session: AsyncSession, **kwargs: object) -> pack_picks.Reconciled:
         order.append("pick rows")
@@ -807,12 +814,12 @@ async def test_the_pick_reconciliation_takes_the_want_lock_before_the_pick_rows(
 
     monkeypatch.setattr(acquisition_jobs, "lock_wants", lock)
     monkeypatch.setattr(pack_picks, "awaiting_hashes", hashes)
+    monkeypatch.setattr(acquisition_jobs.QbitClient, "torrents", torrents)
     monkeypatch.setattr(pack_picks, "reconcile", reconcile)
 
     await _compute(db_session, wired)
 
-    assert order[0] == "lock_wants"
-    assert "pick rows" in order
+    assert order[:4] == ["pick hashes", "listing", "lock_wants", "pick rows"], order
 
 
 async def test_a_picked_pack_offers_no_other_reading_to_a_later_want(

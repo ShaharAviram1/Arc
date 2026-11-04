@@ -489,12 +489,16 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
     when a pick is pending, and a client that cannot be reached leaves only
     the age rule: the reconciliation must not fail because qBittorrent is down.
 
-    **``lock_wants`` first**, then the pick rows: the routes take the want lock
-    and then a pick's row, and taking them here in the other order would let a
-    pick and this pass deadlock. The lock is transaction-scoped and re-entrant,
-    so ``reconcile_wants`` taking it again after this costs nothing.
+    **The listing first, then ``lock_wants``, then the pick rows.** The listing
+    is a read of the client and the hashes it is asked about a plain read of
+    the rows (no row lock), so neither needs the want lock — and taking the
+    global want lock before an HTTP call would hold every demand and pick
+    route behind qBittorrent's answer. The routes take the want lock and then
+    a pick's row; :func:`~arc.services.acquisition.pack_picks.reconcile` locks
+    the pick rows only after this takes the want lock, the same order, so a
+    pick and this pass cannot deadlock. The lock is transaction-scoped and
+    re-entrant, so ``reconcile_wants`` taking it again costs nothing.
     """
-    await lock_wants(ctx.session)
     hashes = await pack_picks.awaiting_hashes(ctx.session)
     live: set[str] | None = None
     if hashes:
@@ -506,6 +510,7 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
                 "could not list the torrent client; pack picks judged by age only",
                 extra={"error": str(exc)},
             )
+    await lock_wants(ctx.session)
     braked = await is_paused(ctx.session) or await is_storage_held(ctx.session, ctx.settings)
     return await pack_picks.reconcile(
         ctx.session,
