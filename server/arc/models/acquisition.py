@@ -377,3 +377,9 @@ class PackPick(Base):
     picked_file_index: Mapped[int | None] = mapped_column(Integer)
     #: Who resolved it; kept null if that account is deleted.
     resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    #: When a reconcile pass first found the pack missing from the client's
+    #: listing; cleared when a later listing shows it again. The pick counts as
+    #: gone only when a second pass at least ``pack_picks.GONE_AFTER`` later
+    #: still finds it missing (M21 T10). Null while the pack is listed, and
+    #: while the listing is unknown (unreachable or empty).
+    absent_since: Mapped[datetime | None] = mapped_column(TZDateTime)

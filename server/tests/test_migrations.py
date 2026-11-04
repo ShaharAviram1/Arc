@@ -922,8 +922,10 @@ M21_DEMAND_SEED = "e5a1c9d3f748"
 M21_PACK_PICKS = "f6b2d0e4a859"
 M21_DRY_RUN_SEED = "a8c3e1f5b960"
 M21_DROP_IS_DEMO = "91b56c5bdf4a"
+M21_ABSENT_SINCE = "1e9bbaa45bb6"
 #: The chain from the newest M21 revision back to the one before M21.
 M21_CHAIN = (
+    M21_ABSENT_SINCE,
     M21_DROP_IS_DEMO,
     M21_DRY_RUN_SEED,
     M21_PACK_PICKS,
@@ -948,7 +950,8 @@ def _scalar(url: str, sql: str, params: dict[str, Any] | None = None) -> Any:
 
 
 def _m21_state(url: str) -> tuple[bool, ...]:
-    """What of M21 (T1, and T9's column drop) is in the database, in chain order."""
+    """What of M21 (T1, T9's column drop, T10's ``absent_since``) is in the database,
+    in chain order."""
     keys = set(_fetch_settings(url))
     return (
         _column(url, "watch_progress", "finished_at") is not None,
@@ -958,12 +961,13 @@ def _m21_state(url: str) -> tuple[bool, ...]:
         bool(_column_types(url, "pack_picks")),
         "batch_sweep_dry_run" in keys,
         _column(url, "users", "is_demo") is None,
+        _column(url, "pack_picks", "absent_since") is not None,
     )
 
 
 def test_the_m21_revisions_are_the_head_and_a_straight_chain(test_database_url: str) -> None:
     script = ScriptDirectory.from_config(alembic_config(test_database_url))
-    assert script.get_current_head() == M21_DROP_IS_DEMO
+    assert script.get_current_head() == M21_ABSENT_SINCE
     for revision, parent in zip(M21_CHAIN, (*M21_CHAIN[1:], BEFORE_M21), strict=True):
         found = script.get_revision(revision)
         assert found is not None and found.down_revision == parent
@@ -1018,6 +1022,7 @@ def test_the_m21_tables_and_indexes(pg_engine: AsyncEngine, test_database_url: s
         "resolution": ("character varying", "YES"),
         "picked_file_index": ("integer", "YES"),
         "resolved_by": ("bigint", "YES"),
+        "absent_since": ("timestamp with time zone", "YES"),
     }
 
     rewatch_open = _index_definition(url, "rewatches", OPEN_REWATCH_INDEX)

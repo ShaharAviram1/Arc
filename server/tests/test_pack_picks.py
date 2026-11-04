@@ -116,16 +116,32 @@ def test_pick_eligibility_a_transient_refusal_never_qualifies() -> None:
     assert not pack_picks.pick_eligible(reason, permanent=False)
 
 
-def test_gone_from_the_client_needs_a_listing_and_an_hour() -> None:
+def test_gone_from_the_client_needs_two_misses_an_hour_apart() -> None:
     now = datetime.now(UTC)
-    old = now - timedelta(hours=2)
-    young = now - timedelta(minutes=10)
     hash_ = "ab" * 20
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=None)
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live=set())
-    assert not pack_picks.gone_from(hash_, created_at=young, now=now, live={"cd" * 20})
-    assert not pack_picks.gone_from(hash_, created_at=old, now=now, live={hash_})
-    assert pack_picks.gone_from(hash_, created_at=old, now=now, live={"cd" * 20})
+    other = {"cd" * 20}
+    gone_from = pack_picks.gone_from
+    Sighting = pack_picks.Sighting
+
+    # An unknown listing (unreachable, or empty) changes nothing either way.
+    assert gone_from(hash_, absent_since=None, now=now, live=None) == Sighting(False, None)
+    assert gone_from(hash_, absent_since=None, now=now, live=set()) == Sighting(False, None)
+    earlier = now - timedelta(hours=2)
+    assert gone_from(hash_, absent_since=earlier, now=now, live=None) == Sighting(False, earlier)
+    # Listed: kept, and an earlier miss is forgotten.
+    assert gone_from(hash_, absent_since=None, now=now, live={hash_}) == Sighting(False, None)
+    assert gone_from(hash_, absent_since=earlier, now=now, live={hash_}) == Sighting(False, None)
+    # The first miss only stamps the moment.
+    assert gone_from(hash_, absent_since=None, now=now, live=other) == Sighting(False, now)
+    # A second miss under an hour later keeps waiting; an hour or more is gone.
+    recent = now - timedelta(minutes=59)
+    assert gone_from(hash_, absent_since=recent, now=now, live=other) == Sighting(False, recent)
+    hour = now - pack_picks.GONE_AFTER
+    assert gone_from(hash_, absent_since=hour, now=now, live=other) == Sighting(True, hour)
+    # Case does not matter: the listing is lower-case, a stored hash may not be.
+    assert gone_from(hash_.upper(), absent_since=None, now=now, live={hash_}) == Sighting(
+        False, None
+    )
 
 
 def test_pick_candidates_are_the_video_files_with_the_parser_reading() -> None:
@@ -458,21 +474,102 @@ async def test_a_pack_gone_from_the_client_is_reconciled(
     )
     await _compute(db_session, wired)
     assert pick.resolved_at is None, "still in the client"
+    assert pick.absent_since is None
 
-    # The client lists something else, but the pick is younger than an hour:
-    # a restarted qBittorrent lists short at first.
-    other = {**wired.qbit.torrents[0], "hash": "e" * 40}
+    # The client lists something else: the first miss is only noted.
+    listed = wired.qbit.torrents[0]
+    other = {**listed, "hash": "e" * 40}
     wired.qbit.torrents = [other]
+    before = datetime.now(UTC)
     await _compute(db_session, wired)
-    assert pick.resolved_at is None, "younger than an hour"
+    assert pick.resolved_at is None, "absent once: kept"
+    assert pick.absent_since is not None and pick.absent_since >= before
+    first_miss = pick.absent_since
 
-    pick.created_at = datetime.now(UTC) - timedelta(hours=2)
+    # Missing again minutes later: still kept, and the first miss stands.
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "absent twice, but not an hour apart"
+    assert pick.absent_since == first_miss
+
+    # Missing again an hour after the first miss: gone.
+    pick.absent_since = datetime.now(UTC) - pack_picks.GONE_AFTER - timedelta(minutes=1)
     await db_session.flush()
     await _compute(db_session, wired)
 
     assert pick.resolution == PACK_PICK_DISMISSED
     assert (await _pack(db_session)).qbit_state == QBIT_UNREADABLE
     assert episode.unavailable_reason == batch_module.UNREADABLE_BATCH
+
+
+async def test_a_pack_listed_again_between_two_misses_resets_the_clock(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963723, email="gone2@arc.test"
+    )
+    listed = wired.qbit.torrents[0]
+    other = {**listed, "hash": "e" * 40}
+
+    # Missed once, long enough ago that a second miss would dismiss it ...
+    wired.qbit.torrents = [other]
+    await _compute(db_session, wired)
+    assert pick.absent_since is not None
+    pick.absent_since = datetime.now(UTC) - timedelta(hours=3)
+    await db_session.flush()
+
+    # ... but the client lists it again in between: the miss is forgotten.
+    wired.qbit.torrents = [listed, other]
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None
+    assert pick.absent_since is None
+
+    # So the next miss is a first miss again, not a second.
+    wired.qbit.torrents = [other]
+    await _compute(db_session, wired)
+    assert pick.resolved_at is None, "a fresh first miss"
+    assert pick.absent_since is not None
+    assert (await _pack(db_session)).qbit_state == QBIT_AWAITING_PICK
+
+
+async def test_an_unknown_listing_neither_confirms_nor_clears_a_miss(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963724, email="gone3@arc.test"
+    )
+    stamped = datetime.now(UTC) - timedelta(hours=3)
+    pick.absent_since = stamped
+    await db_session.flush()
+
+    wired.qbit.torrents = []  # a client that has just restarted lists nothing
+    await _compute(db_session, wired)
+
+    assert pick.resolved_at is None
+    assert pick.absent_since == stamped
+
+
+async def test_a_pick_the_listing_was_not_asked_about_is_not_judged_missing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pick opened after the listing was read is unknown this pass, not missing."""
+    wired, _episode, pick = await _refused(
+        db_session, monkeypatch, tmp_path, anilist_id=963725, email="gone4@arc.test"
+    )
+    pick.absent_since = datetime.now(UTC) - timedelta(hours=3)
+    await db_session.flush()
+    stamped = pick.absent_since
+
+    found = await pack_picks.reconcile(
+        db_session,
+        now=datetime.now(UTC),
+        period=timedelta(days=21),
+        live_hashes={"e" * 40},
+        listed_for=[],
+    )
+
+    assert found == pack_picks.Reconciled()
+    assert pick.resolved_at is None
+    assert pick.absent_since == stamped
 
 
 async def test_an_empty_client_listing_dismisses_nothing(

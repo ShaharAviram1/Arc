@@ -437,9 +437,10 @@ async def dismiss(session: AsyncSession, pick_id: int, *, user_id: int | None) -
 
 # --- Reconciliation -------------------------------------------------------------
 
-#: How old a pick must be before "its pack is not in the client's listing" is
-#: believed. A qBittorrent that has just restarted answers the WebUI before it
-#: has loaded its torrents, and its first listings are short.
+#: How long a pack must stay missing from the client's listing before it is
+#: believed gone: two reconcile passes at least this far apart must both miss
+#: it (:func:`gone_from`). A qBittorrent that has just restarted answers the
+#: WebUI before it has loaded its torrents, and its first listings are short.
 GONE_AFTER: Final[timedelta] = timedelta(hours=1)
 
 #: Why :func:`reconcile` dismissed a pick nobody can make any more.
@@ -504,18 +505,38 @@ async def dead_reason(session: AsyncSession, episode_id: int) -> str | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class Sighting:
+    """:func:`gone_from`'s answer: the verdict and the row's next ``absent_since``."""
+
+    gone: bool
+    absent_since: datetime | None
+
+
 def gone_from(
-    info_hash: str, *, created_at: datetime, now: datetime, live: Collection[str] | None
-) -> bool:
-    """Whether a held pack counts as gone from the client. Pure.
+    info_hash: str,
+    *,
+    absent_since: datetime | None,
+    now: datetime,
+    live: Collection[str] | None,
+) -> Sighting:
+    """Whether a held pack counts as gone from the client: the two-pass rule. Pure.
 
     ``live`` is the client's listing, lower-case; ``None`` or **empty** means
     unknown (unreachable, or a client that has just restarted and listed
-    nothing yet), and so does a pick younger than :data:`GONE_AFTER`.
+    nothing yet) and changes nothing — it neither confirms an absence nor
+    clears one. A listing that **shows** the pack clears ``absent_since``. A
+    listing that misses it stamps ``absent_since = now`` the first time, and
+    counts it gone only when it was already missing at least
+    :data:`GONE_AFTER` ago — two passes, an hour apart, both without it.
     """
-    if not live or now - created_at < GONE_AFTER:
-        return False
-    return info_hash.lower() not in live
+    if not live:
+        return Sighting(gone=False, absent_since=absent_since)
+    if info_hash.lower() in live:
+        return Sighting(gone=False, absent_since=None)
+    if absent_since is None:
+        return Sighting(gone=False, absent_since=now)
+    return Sighting(gone=now - absent_since >= GONE_AFTER, absent_since=absent_since)
 
 
 async def reconcile(
@@ -524,6 +545,7 @@ async def reconcile(
     now: datetime,
     period: timedelta,
     live_hashes: Collection[str] | None,
+    listed_for: Collection[str] | None = None,
     age_rule: bool = True,
 ) -> Reconciled:
     """Dismiss the picks nobody will make (FR-A4; architecture.md §5.1).
@@ -535,9 +557,15 @@ async def reconcile(
     * **dead** — :func:`dead_reason`: nobody wants the episode, or it is on its
       way from another release, so Review and the badge do not show a pick
       that can only be refused;
-    * **gone** — the pack is not in the client's listing (:func:`gone_from`).
-      The batch poll skips ``awaiting_pick`` (a decided state), so this is the
-      only place that notices a pack deleted by hand;
+    * **gone** — the pack is missing from the client's listing on two passes
+      at least :data:`GONE_AFTER` apart (:func:`gone_from`; the first miss is
+      stamped on the row's ``absent_since``, a listing that shows the pack
+      clears it). The batch poll skips ``awaiting_pick`` (a decided state), so
+      this is the only place that notices a pack deleted by hand.
+      ``listed_for`` is the set of hashes the caller asked the client about
+      (read before the listing, which is taken before the want lock): a pick
+      whose pack is not in it — opened after the listing was read — is judged
+      unknown this pass rather than missing. ``None`` judges every pick;
     * **stale** — pending ``period`` (D, floored at a day; :func:`stale`).
       ``age_rule=False`` skips it: while acquisition is paused or held nobody
       can act on a pick, so its clock is not held against it.
@@ -567,6 +595,7 @@ async def reconcile(
         ).all()
     }
     live = None if not live_hashes else {value.lower() for value in live_hashes}
+    asked = None if listed_for is None else {value.lower() for value in listed_for}
     stale_count = gone_count = dead_count = 0
     for row in rows:
         why = await dead_reason(session, row.episode_id)
@@ -575,14 +604,18 @@ async def reconcile(
             dead_count += 1
             continue
         found = hashes.get(row.torrent_id)
-        if (
-            found is not None
-            and found[1] == QBIT_AWAITING_PICK
-            and gone_from(found[0], created_at=row.created_at, now=now, live=live)
-        ):
-            await _forget(session, row, user_id=None, why=GONE)
-            gone_count += 1
-            continue
+        if found is not None and found[1] == QBIT_AWAITING_PICK:
+            known = asked is None or found[0].lower() in asked
+            sighting = gone_from(
+                found[0], absent_since=row.absent_since, now=now, live=live if known else None
+            )
+            if sighting.absent_since != row.absent_since:
+                row.absent_since = sighting.absent_since
+                await session.flush()
+            if sighting.gone:
+                await _forget(session, row, user_id=None, why=GONE)
+                gone_count += 1
+                continue
         if age_rule and stale(row.created_at, now=now, period=period):
             await _forget(session, row, user_id=None, why=STALE)
             stale_count += 1
@@ -606,6 +639,7 @@ __all__ = [
     "PickConflict",
     "PickNotFound",
     "Reconciled",
+    "Sighting",
     "awaiting_hashes",
     "awaiting_ids",
     "dismiss",

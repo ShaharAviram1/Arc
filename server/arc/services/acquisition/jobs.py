@@ -485,9 +485,11 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
     here is on the ordinary daily retry in the same pass. A pick pending D
     days is dismissed; so is one whose pack is gone from the client — the
     batch poll skips ``awaiting_pick`` (a decided state), so this is what
-    notices a pack deleted by hand. The client's listing is asked for only
-    when a pick is pending, and a client that cannot be reached leaves only
-    the age rule: the reconciliation must not fail because qBittorrent is down.
+    notices a pack deleted by hand (two passes an hour apart must both miss
+    it: :func:`~arc.services.acquisition.pack_picks.gone_from`). The client's
+    listing is asked for only when a pick is pending, and a client that cannot
+    be reached leaves only the age rule: the reconciliation must not fail
+    because qBittorrent is down.
 
     **The listing first, then ``lock_wants``, then the pick rows.** The listing
     is a read of the client and the hashes it is asked about a plain read of
@@ -497,7 +499,9 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
     a pick's row; :func:`~arc.services.acquisition.pack_picks.reconcile` locks
     the pick rows only after this takes the want lock, the same order, so a
     pick and this pass cannot deadlock. The lock is transaction-scoped and
-    re-entrant, so ``reconcile_wants`` taking it again costs nothing.
+    re-entrant, so ``reconcile_wants`` taking it again costs nothing. A pick
+    opened after the listing was read is not in ``listed_for`` and is judged
+    unknown this pass, not missing.
     """
     hashes = await pack_picks.awaiting_hashes(ctx.session)
     live: set[str] | None = None
@@ -517,6 +521,7 @@ async def _reconcile_pack_picks(ctx: JobContext) -> pack_picks.Reconciled:
         now=datetime.now(UTC),
         period=await unwatched_period(ctx.session),
         live_hashes=live,
+        listed_for=hashes,
         age_rule=not braked,
     )
 
