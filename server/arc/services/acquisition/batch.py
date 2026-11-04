@@ -77,7 +77,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -302,6 +302,72 @@ def _member_number(parsed: ParsedName, *, season: int | None, offset: int | None
     return parsed.episode - offset if absolute and offset is not None else parsed.episode
 
 
+def _file_number(
+    info: FileInfo, *, titles: Sequence[str], season: int | None, offset: int | None
+) -> int | None:
+    """The episode one file of a pack holds by its own name, or ``None``.
+
+    :func:`plan_files`' reading of a single file, and the reading a pack pick
+    shows a person (:func:`pick_candidates`).
+
+    **The basename only, directory components discarded.** The same call
+    ``library/jobs._parsed_of`` makes, so the parser corpus governs this too —
+    and it means a pack's own directory names are not evidence: ``Season
+    2/- 01.mkv`` parses as episode 1 with no season named, and what saves it
+    from being read as this entry's episode 1 is not the directory but
+    :func:`plan_files`' **exactly one claim** rule, since a complete-franchise
+    pack holding both seasons has a ``Season 1/- 01`` beside it and the number
+    is then ambiguous and refused.
+    """
+    parsed = parse(PurePosixPath(info.name).name, path=True)
+    number = _member_number(parsed, season=season, offset=offset)
+    if number is None or number < 1:
+        return None
+    if parsed.title_key:
+        similarity = title_score(parsed.title_key, titles)
+        if similarity < TITLE_THRESHOLD:
+            log.debug(
+                "a file inside a batch is another show",
+                extra={
+                    "path": info.name,
+                    "title_key": parsed.title_key,
+                    "similarity": round(similarity, 2),
+                },
+            )
+            return None
+    return number
+
+
+def pick_candidates(
+    anime: Anime, files: Sequence[FileInfo], *, offset: int | None = None
+) -> list[dict[str, Any]]:
+    """A pack's video files with the parser's reading of each (M21, FR-A4). Pure.
+
+    What a pack pick shows a person: ``{file_index, path, size,
+    parsed_number}`` for every file whose extension is a video one, in the
+    client's order, ``parsed_number`` being the episode :func:`plan_files`
+    would read the file as on its own (``None`` when it reads none). Two files
+    reading the same number both say so: that ambiguity is why the pick
+    exists. Nothing here chooses; the reading is shown, never applied.
+    """
+    titles = anime_titles(anime)
+    season = anime_season(anime)
+    found: list[dict[str, Any]] = []
+    for info in files:
+        extension = parse(PurePosixPath(info.name).name, path=True).extension
+        if not extension or extension not in VIDEO_EXTENSIONS:
+            continue
+        found.append(
+            {
+                "file_index": info.index,
+                "path": info.name,
+                "size": info.size,
+                "parsed_number": _file_number(info, titles=titles, season=season, offset=offset),
+            }
+        )
+    return found
+
+
 def plan_files(
     anime: Anime,
     wanted_numbers: Collection[int],
@@ -353,31 +419,9 @@ def plan_files(
 
     claims: dict[int, list[FileInfo]] = {}
     for info in files:
-        # **The basename only, directory components discarded.** The same call
-        # ``library/jobs._parsed_of`` makes, so the parser corpus governs this
-        # too — and it means a pack's own directory names are not evidence:
-        # ``Season 2/- 01.mkv`` parses as episode 1 with no season named, and
-        # what saves it from being read as this entry's episode 1 is not the
-        # directory but the **exactly one claim** rule below, since a
-        # complete-franchise pack holding both seasons has a ``Season 1/- 01``
-        # beside it and the number is then ambiguous and refused.
-        parsed = parse(PurePosixPath(info.name).name, path=True)
-        number = _member_number(parsed, season=season, offset=offset)
-        if number is None or number < 1:
-            continue
-        if parsed.title_key:
-            similarity = title_score(parsed.title_key, titles)
-            if similarity < TITLE_THRESHOLD:
-                log.debug(
-                    "a file inside a batch is another show",
-                    extra={
-                        "path": info.name,
-                        "title_key": parsed.title_key,
-                        "similarity": round(similarity, 2),
-                    },
-                )
-                continue
-        claims.setdefault(number, []).append(info)
+        number = _file_number(info, titles=titles, season=season, offset=offset)
+        if number is not None:
+            claims.setdefault(number, []).append(info)
 
     episodes = {number: found[0] for number, found in claims.items() if len(found) == 1}
 
@@ -911,6 +955,7 @@ __all__ = [
     "listing_mismatch",
     "mark_unreadable",
     "plan_files",
+    "pick_candidates",
     "plan_offset",
     "record_files",
     "reserve_batch",
