@@ -32,10 +32,12 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from arc.config import ConfigurationError
 from arc.models import Episode, Want
-from arc.services.acquisition.qbit import QbitUnavailable
+from arc.services.acquisition.qbit import QbitClient, QbitUnavailable
 from arc.services.jobs.registry import JobContext, register
 from arc.services.media.live import sweep_live_leftovers
+from arc.services.retention.batch_sweep import LeftoverSweep, sweep_leftovers
 from arc.services.retention.delete import (
     delete_episode_files,
     delete_idle_copy,
@@ -43,7 +45,7 @@ from arc.services.retention.delete import (
 )
 from arc.services.retention.floor import floor_plan, floor_target, free_bytes
 from arc.services.retention.names import DELETE_EPISODE_FILES, RETENTION_SWEEP
-from arc.services.retention.rules import offline_idle_period
+from arc.services.retention.rules import batch_sweep_dry_run, offline_idle_period
 from arc.services.retention.sweep import (
     REASON_MANUAL,
     Deletable,
@@ -165,6 +167,11 @@ async def retention_sweep(ctx: JobContext) -> None:
     )
     freed += evicted_bytes
 
+    # Then the bytes a pack left behind that no episode claims any more (FR-T1,
+    # M21 T8): files per-episode retention cannot see. Dry while
+    # ``batch_sweep_dry_run`` (seeded on) or ``RETENTION_DRY_RUN`` is set.
+    leftovers = await _sweep_pack_leftovers(ctx, dry_run=dry_run)
+
     # Live directories (M20 T6) nothing stands behind any more: a download
     # that was cancelled, a file that went to review, a remux that did not
     # adopt. Never in a dry run: it is housekeeping, not a retention decision.
@@ -186,11 +193,39 @@ async def retention_sweep(ctx: JobContext) -> None:
             "idle_copies": copies,
             "floor_evicted": evicted,
             "remembered_forgotten": forgotten,
+            "leftover_files": leftovers.deleted,
+            "leftover_candidates": leftovers.candidates,
+            "leftover_bytes": leftovers.freed_bytes,
+            "leftover_dry_run": leftovers.dry_run,
             "skipped_qbit_down": unreachable,
             "freed_bytes": freed,
             "dry_run": dry_run,
         },
     )
+
+
+async def _sweep_pack_leftovers(ctx: JobContext, *, dry_run: bool) -> LeftoverSweep:
+    """The leftover pack files step (M21 T8): never fatal to the sweep.
+
+    A qBittorrent that is not configured, or does not answer, leaves every
+    pack file where it is (fail closed); anything else unexpected is logged and
+    the rest of the sweep carries on.
+    """
+    dry = dry_run or await batch_sweep_dry_run(ctx.session)
+    try:
+        client = QbitClient.from_settings(ctx.settings)
+    except ConfigurationError:
+        return await sweep_leftovers(ctx.session, ctx.settings, None, dry_run=dry)
+    try:
+        async with client as qbit:
+            return await sweep_leftovers(ctx.session, ctx.settings, qbit, dry_run=dry)
+    except Exception as exc:  # the step must never fail the whole sweep
+        ctx.log.warning("the leftover pack sweep failed", extra={"error": repr(exc)})
+        # The step writes nothing, so a rollback loses nothing — and leaves the
+        # session usable for the live-leftover and remembered-release steps
+        # after it, which a failed statement would otherwise abort.
+        await ctx.session.rollback()
+        return LeftoverSweep(candidates=0, deleted=0, freed_bytes=0, dry_run=dry)
 
 
 async def _evict_to_floor(

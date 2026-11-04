@@ -146,8 +146,10 @@ from arc.services.acquisition.nyaa import (
     search_for_episode,
 )
 from arc.services.acquisition.qbit import (
+    CHECKING_STATES,
     DECIDED_STATES,
     DELETE_ON_SIGHT,
+    ERROR_STATES,
     FILE_OFF,
     FILE_ON,
     MAX_TORRENT_FILES,
@@ -257,27 +259,6 @@ FILES_GONE = "the downloaded files are missing"
 #: The states a torrent is in while qBittorrent is asking the swarm for its
 #: metadata: a magnet that has not become a torrent yet.
 METADATA_STATES: frozenset[str] = frozenset({"metaDL", "forcedMetaDL"})
-
-#: And the two the client reports when it has stopped trying: ``error`` (it
-#: could not write, could not read, or the tracker rejected it) and
-#: ``missingFiles`` (the data it was seeding or checking is not on the disk any
-#: more). Neither is a matter of waiting — no threshold applies — and neither
-#: was a stall before today, which was a gap for singles and became a hole with
-#: batches (2026-09-18): retention unlinking one episode's file out of a
-#: *running* pack is exactly how a torrent reaches ``missingFiles``, and every
-#: other episode in that pack would otherwise sit ``downloading`` for ever
-#: against a client that had stopped.
-ERROR_STATES: frozenset[str] = frozenset({"error", "missingFiles"})
-
-#: The states a torrent is in while the client re-reads its pieces from disk
-#: (M20.4): a recheck Arc asked for, or the client's own resume check — and
-#: ``moving``/``allocating``, which are the same kind of busy. A file's
-#: progress is not to be believed while one runs, so a pack in one of these is
-#: left to finish — no complete is stamped, no recheck is asked for again, and
-#: nothing is a stall.
-CHECKING_STATES: frozenset[str] = frozenset(
-    {"checkingDL", "checkingUP", "queuedForChecking", "checkingResumeData", "moving", "allocating"}
-)
 
 #: How long after asking for a pack's recheck Arc waits before asking again
 #: (M20.4). The client moves into :data:`CHECKING_STATES` within seconds, so

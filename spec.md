@@ -1909,14 +1909,19 @@ is its only user, and uses it daily.
   cannot see, and the pack itself may never reach deletion while somebody
   keeps the show. The hourly sweep therefore also deletes a file under a
   pack's directory (`downloads/batch/<hash>/`) when: the pack is one Arc
-  knows; the file is not being ingested and is not an incomplete file of a
-  pack Arc is holding; no library file and no wanted claim names it; the
-  torrent client has it at priority 0, or no longer has the pack; it has
-  not changed for an hour; and it lies under the data root with no symlink
-  on its path. Directories left empty go with it. It starts as a **dry run**
-  (`batch_sweep_dry_run`, default on, FR-D2) that only logs what it would
-  delete, and the retention preview (FR-T4) lists the leftover files and
-  their bytes. A directory under `batch/` that no pack names is out of its
+  knows and is **finished or gone** (a pack still downloading a wanted file,
+  waiting for a pick, or being checked is kept whole); the file is not being
+  ingested; no library file and no wanted claim names it; the torrent client
+  has it at priority 0, or no longer has the pack (in any category, which the
+  pack's own record must already say — a client that answers nothing, or an
+  empty list, is never taken as "gone"); it has not changed for an hour; and
+  it lies under the data root with no symlink on its path. Directories left
+  empty inside the pack go with it; the pack's directory itself goes only once
+  the client no longer has the pack, and a pack the client still has is asked
+  to recheck itself after losing a file. It starts as a **dry run**
+  (`batch_sweep_dry_run`, default on, FR-D2; `RETENTION_DRY_RUN` also keeps
+  it dry) that only logs what it would delete, and the retention preview
+  (FR-T4) lists the leftover files and their bytes. A directory under `batch/` that no pack names is out of its
   scope (FR-L1 already keeps the library away from it).
 - FR-T4 Admin can see disk usage and manually delete or re-fetch. The
   preview of the next sweep gives each episode's reason with its grace in the

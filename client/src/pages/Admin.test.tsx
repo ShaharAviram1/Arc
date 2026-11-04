@@ -1054,6 +1054,86 @@ describe('Admin — Storage (FR-D3, FR-T4)', () => {
     expect(screen.queryByRole('region', { name: 'Floor evictions' })).not.toBeInTheDocument()
   })
 
+  it('lists the leftover pack files with their bytes and the dry-run state (M21)', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          leftover_files: [
+            {
+              path: '/data/downloads/batch/abcd/Show - 02.mkv',
+              bytes: 52_428_800,
+              torrent_id: 4,
+              reason: 'qBittorrent has this file switched off and no episode claims it',
+            },
+          ],
+          leftover_bytes: 52_428_800,
+          batch_sweep_dry_run: true,
+          leftover_checked: true,
+        },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Leftover pack files' })
+    expect(
+      within(section).getByText('/data/downloads/batch/abcd/Show - 02.mkv'),
+    ).toBeInTheDocument()
+    expect(within(section).getByText(/switched off and no episode claims it/)).toBeInTheDocument()
+    expect(within(section).getByText(/^1 file,/)).toBeInTheDocument()
+    expect(within(section).getByText('Dry run: the sweep only logs these')).toBeInTheDocument()
+    expect(within(section).getByRole('link', { name: /Change in Rules/ })).toHaveAttribute(
+      'href',
+      '/admin?tab=rules',
+    )
+  })
+
+  it('says when the leftover sweep deletes, and when it has nothing', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          leftover_files: [],
+          leftover_bytes: 0,
+          batch_sweep_dry_run: false,
+          leftover_checked: true,
+        },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Leftover pack files' })
+    expect(within(section).getByText('Deleting: the sweep removes these')).toBeInTheDocument()
+    expect(within(section).getByText('No leftover pack files.')).toBeInTheDocument()
+  })
+
+  it('shows the leftover sweep as a dry run while RETENTION_DRY_RUN is on', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          dry_run: true,
+          leftover_files: [],
+          leftover_bytes: 0,
+          batch_sweep_dry_run: false,
+          leftover_checked: true,
+        },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Leftover pack files' })
+    expect(within(section).getByText('Dry run: the sweep only logs these')).toBeInTheDocument()
+  })
+
+  it('says when qBittorrent could not be asked about leftovers', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: { ...RETENTION_PREVIEW, leftover_files: [], leftover_checked: false },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Leftover pack files' })
+    expect(within(section).getByText(/qBittorrent could not be asked/)).toBeInTheDocument()
+  })
+
   it('says nothing about claims when there are none', async () => {
     await openStorage()
 

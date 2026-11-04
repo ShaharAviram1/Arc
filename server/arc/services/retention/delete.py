@@ -171,6 +171,38 @@ def _remove_file(path: Path, settings: Settings) -> bool:
     return True
 
 
+def remove_file(path: Path, settings: Settings) -> bool:
+    """:func:`_remove_file`, public for the leftover sweep (M21 T8)."""
+    return _remove_file(path, settings)
+
+
+def prune_empty_dirs(start: Path, stop: Path, settings: Settings, *, include_stop: bool) -> int:
+    """Remove ``start`` and each parent up to ``stop`` while they are empty.
+
+    ``stop`` itself goes only with ``include_stop``. Nothing outside ``stop``
+    is touched, a non-empty directory ends the walk, and every directory is
+    re-checked against the data roots (no symlink, inside a root, not a root)
+    before ``rmdir``. Returns how many went. Blocking.
+    """
+    removed = 0
+    current = start
+    while current == stop or current.is_relative_to(stop):
+        if current == stop and not include_stop:
+            break
+        checked = safe_path(current, settings)
+        if checked is None or checked != current:
+            break
+        try:
+            current.rmdir()
+        except OSError:  # not empty, gone, or not ours to remove
+            break
+        removed += 1
+        if current == stop:
+            break
+        current = current.parent
+    return removed
+
+
 async def _delete_leftover_wants(session: AsyncSession, episode_id: int) -> int:
     """Drop the tombstoned ``wants`` rows of an episode that has just been swept.
 
@@ -567,4 +599,11 @@ async def delete_copy(
     return True
 
 
-__all__ = ["Removed", "delete_copy", "delete_episode_files", "delete_idle_copy"]
+__all__ = [
+    "Removed",
+    "delete_copy",
+    "delete_episode_files",
+    "delete_idle_copy",
+    "prune_empty_dirs",
+    "remove_file",
+]
