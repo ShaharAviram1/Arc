@@ -30,6 +30,7 @@ from arc.api.trip_schemas import TripLimits, TripOut
 from arc.core.text import trim_middle
 from arc.models import (
     DEFAULT_SETTINGS,
+    PACK_PICK_REASON,
     Anime,
     Episode,
     EpisodeState,
@@ -697,6 +698,10 @@ class EpisodeOut(BaseModel):
     #: The episode plays from its download right now (FR-P8): the row reads
     #: "downloading 43 % · playable" (FR-A7). False for a ready episode.
     live_playable: bool = False
+    #: Its season pack waits for a person's file pick (M21, FR-A4): the episode
+    #: rests ``unavailable`` with :data:`~arc.models.PACK_PICK_REASON` exactly
+    #: while a pick is pending, and the show page's row links to Review.
+    awaiting_pick: bool = False
 
     @classmethod
     def from_episode(
@@ -786,6 +791,8 @@ class EpisodeOut(BaseModel):
             few_seeders=few_seeders(release, min_seeders_warn),
             seeders=release.live_seeders if release is not None else None,
             live_playable=live_playable and episode.state is not EpisodeState.READY,
+            awaiting_pick=episode.state is EpisodeState.UNAVAILABLE
+            and episode.unavailable_reason == PACK_PICK_REASON,
         )
 
 

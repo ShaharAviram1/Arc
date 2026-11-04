@@ -276,9 +276,13 @@ class SuggestJobOut(BaseModel):
 
 
 class ReviewSummary(BaseModel):
-    """``GET /api/review/summary``: the one number the sidebar polls."""
+    """``GET /api/review/summary``: the numbers the sidebar polls."""
 
     pending: int
+    #: Season packs waiting for a person's file pick (M21, FR-A4). Counted for
+    #: an admin only — the only one who can act on them — and 0 for anyone
+    #: else.
+    packs: int = 0
 
 
 class ConfirmRequest(BaseModel):
@@ -296,11 +300,73 @@ class ConfirmRequest(BaseModel):
     episode_number: int = Field(ge=1)
 
 
+class PackCandidateOut(BaseModel):
+    """One video file of a pack waiting for a pick, as the parser read it.
+
+    ``path`` is the file's path **inside the pack** — never an absolute path,
+    and never one Arc opens on a request: the pick addresses the file by
+    ``file_index``. ``parsed_number`` is the parser's reading (null when it
+    read none); it is shown, never applied.
+    """
+
+    file_index: int
+    path: str
+    size: int
+    parsed_number: int | None = None
+
+    @classmethod
+    def from_stored(cls, raw: dict[str, Any]) -> PackCandidateOut | None:
+        try:
+            number = raw.get("parsed_number")
+            return cls(
+                file_index=int(raw["file_index"]),
+                path=str(raw["path"]),
+                size=int(raw.get("size") or 0),
+                parsed_number=int(number) if number is not None else None,
+            )
+        except KeyError, TypeError, ValueError:
+            return None
+
+
+class PackEpisodeOut(BaseModel):
+    """The wanted episode a pick is for."""
+
+    id: int
+    number: int
+    title: str | None = None
+
+
+class PackPickOut(BaseModel):
+    """``GET /api/review/packs`` row: a season pack waiting for a pick (M21)."""
+
+    id: int
+    anime: AnimeSummary
+    episode: PackEpisodeOut
+    #: Why Arc could not pick the file itself, in the parser's words.
+    reason: str
+    #: The pack's title as Nyaa listed it.
+    title: str
+    candidates: list[PackCandidateOut]
+    created_at: datetime
+
+
+class PickRequest(BaseModel):
+    """The body of ``POST /api/review/packs/{id}/pick``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_index: int = Field(ge=0)
+
+
 __all__ = [
     "CONFIDENCES",
     "CandidateOut",
     "ConfirmRequest",
+    "PackCandidateOut",
+    "PackEpisodeOut",
+    "PackPickOut",
     "ParsedOut",
+    "PickRequest",
     "ReviewItem",
     "ReviewPage",
     "ReviewSummary",

@@ -79,6 +79,7 @@ from arc.models import (
     Want,
     WatchProgress,
 )
+from arc.services.acquisition import pack_picks
 from arc.services.acquisition.demand import PLAYS_WHEN_DOWNLOADED_MESSAGE
 from arc.services.acquisition.demand_gate import DemandGate, demand_gate
 from arc.services.catalog import episodes_for
@@ -218,7 +219,8 @@ async def play(
        unknown one.
 
     ``pending`` is the state, download percentage and seeders, plus ``note``
-    (:func:`pending_note`) and ``awaiting_pick`` (M21 T7; false until then).
+    (:func:`pending_note`) and ``awaiting_pick`` (M21 T7: its pack waits for a
+    person's file pick, §5.2 step 4).
     With a live want and a live remux serving its download (FR-P8) the answer
     is the playlist and ``live`` instead.
 
@@ -374,7 +376,10 @@ async def play(
                 if downloading and release is not None
                 else None
             ),
-            awaiting_pick=False,
+            # Only while the episode still rests on it: a pick left pending
+            # after a single turned up is no longer what it waits for.
+            awaiting_pick=episode.state in pack_picks.PICKABLE_STATES
+            and await pack_picks.pending_for(session, episode.id) is not None,
         )
     return PlayInfo(
         episode=EpisodeOut.from_episode(
