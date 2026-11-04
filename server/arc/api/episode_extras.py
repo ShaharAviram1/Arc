@@ -51,6 +51,7 @@ from arc.models import (
     TorrentFile,
     TorrentKind,
 )
+from arc.services.acquisition import pack_picks
 from arc.services.acquisition.names import SEARCH_RELEASE
 from arc.services.acquisition.qbit import DECIDED_STATES, QBIT_EVICTED, QBIT_MISSING
 from arc.services.acquisition.rules import min_seeders_warn
@@ -209,6 +210,9 @@ class EpisodeExtras:
     #: "downloading 43 % · playable", FR-P8). Only when the caller passed the
     #: settings that locate the live directories; empty otherwise.
     live_playable: frozenset[int] = frozenset()
+    #: The episodes with a pending pack pick (M21, FR-A4), one query for the
+    #: page; ``EpisodeOut.from_episode`` adds the state half of the rule.
+    awaiting_pick: frozenset[int] = frozenset()
 
 
 async def torrents_for(
@@ -368,6 +372,7 @@ async def episode_extras(
             if live_settings is not None
             else frozenset()
         ),
+        awaiting_pick=frozenset(await pack_picks.awaiting_ids(session, episode_ids)),
     )
 
 

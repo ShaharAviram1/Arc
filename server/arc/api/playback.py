@@ -376,10 +376,10 @@ async def play(
                 if downloading and release is not None
                 else None
             ),
-            # Only while the episode still rests on it: a pick left pending
-            # after a single turned up is no longer what it waits for.
+            # The same rule as ``EpisodeOut.awaiting_pick``: a pending pick
+            # while the episode still rests on it (not after a single turned up).
             awaiting_pick=episode.state in pack_picks.PICKABLE_STATES
-            and await pack_picks.pending_for(session, episode.id) is not None,
+            and episode.id in extras.awaiting_pick,
         )
     return PlayInfo(
         episode=EpisodeOut.from_episode(
@@ -399,6 +399,7 @@ async def play(
             trip_only=episode.id in extras.trip_only,
             min_seeders_warn=extras.min_seeders_warn,
             live_playable=live is not None,
+            awaiting_pick=episode.id in extras.awaiting_pick,
         ),
         anime=AnimeSummary.from_anime(anime),
         playlist_url=playlist_url(episode.id) if not not_ready or live is not None else None,
