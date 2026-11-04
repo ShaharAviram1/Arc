@@ -356,7 +356,10 @@ is its only user, and uses it daily.
   forgets the pack as unreadable, exactly as without a pick, and FR-A6's
   daily retry goes on. A pick on an episode nobody wants any more, or a second
   pick, is refused; a pick left waiting **D** days is dismissed on its own,
-  and so is one whose pack has been removed from the torrent client. While a
+  and so is one whose pack has been removed from the torrent client, one on
+  an episode nobody wants any more, and one whose episode is already coming
+  from another release. A pick is fetching, so it waits like any fetch while
+  acquisition is paused or held for disk space. While a
   pick waits, Arc still looks for a release once a day; it opens no second
   pick for the episode. Every other refused pack is forgotten as before. One batch serves several
   wants: the other episodes somebody is waiting for that the release's own name
@@ -3531,3 +3534,4 @@ through the same edge, without the grace period.
   partial that holds the file D days. A later report below the mark still
   counts as a partial.
 - 2026-11-04 — M21 T7: FR-A4's pick clause gains the reconciliation sentence: a pick whose pack was removed from the torrent client is dismissed on its own (as one left D days is), and while a pick waits the daily look goes on with no second pick opened for the episode.
+- 2026-11-04 (orchestrator's call) — M21 T7 fix round 1: FR-A4's pick clause also dismisses a pick nobody can make (no one wants the episode, or it is coming from another release), and a pick is refused while acquisition is paused or held, like any fetch.
