@@ -457,6 +457,22 @@ describe('Phone chrome', () => {
     }
   })
 
+  it('offers Downloads in the desktop avatar menu too, for every signed-in account', async () => {
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      value: { getDirectory: () => Promise.reject(new Error('not in tests')) },
+    })
+    vi.stubGlobal('Worker', class {})
+    try {
+      renderShell({ phone: false })
+      await openAccountMenu()
+
+      expect(screen.getByRole('link', { name: 'Downloads' })).toHaveAttribute('href', '/downloads')
+    } finally {
+      Reflect.deleteProperty(navigator, 'storage')
+    }
+  })
+
   it('opens the account items in the More sheet, and closes it on Escape', async () => {
     renderShell({ me: TEST_ADMIN, phone: true, review: { body: { pending: 2 } } })
 

@@ -215,4 +215,12 @@ describe('the remembered user is checked before it is kept', () => {
     expect(isUser(TEST_USER)).toBe(true)
     expect(await recallUser()).toBeNull()
   })
+
+  it('accepts the /me answer with and without the deprecated is_demo (M21)', () => {
+    // The server still sends `is_demo: false` for one release, for older
+    // clients; this one neither needs it nor minds it.
+    expect(isUser({ ...TEST_USER, is_demo: false })).toBe(true)
+    expect(isUser({ ...TEST_USER })).toBe(true)
+    expect('is_demo' in TEST_USER).toBe(false)
+  })
 })
