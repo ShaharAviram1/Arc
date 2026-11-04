@@ -181,6 +181,11 @@ export interface BehindEntry {
 export interface NewEpisodeEntry {
   anime: AnimeSummary
   episode: EpisodeOut
+  /**
+   * The viewer has an open rewatch pass on this show (FR-W7, M21): the card
+   * says "Rewatch". Optional because a server from before it never sends it.
+   */
+  in_rewatch?: boolean
 }
 
 /**
@@ -204,6 +209,11 @@ export interface ContinueWatchingEntry {
    * False on every `ready` row (owner, 2026-10-08).
    */
   on_device: boolean
+  /**
+   * The viewer has an open rewatch pass on this show (FR-W7, M21): the card
+   * says "Rewatch". Optional because a server from before it never sends it.
+   */
+  in_rewatch?: boolean
 }
 
 /** Which of the two questions produced a failure row (FR-W6). */

@@ -286,6 +286,9 @@ class NewEpisodeEntry(BaseModel):
 
     anime: AnimeSummary
     episode: EpisodeOut
+    #: The caller has an open rewatch pass on this show (FR-W7, M21 T10): the
+    #: card says "Rewatch", and watched means finished in the pass.
+    in_rewatch: bool = False
 
     @classmethod
     def from_row(
@@ -301,8 +304,10 @@ class NewEpisodeEntry(BaseModel):
         transcode_job: Job | None = None,
         offline: OfflineOut | None = None,
         trip_only: bool = False,
+        in_rewatch: bool = False,
     ) -> NewEpisodeEntry:
         return cls(
+            in_rewatch=in_rewatch,
             anime=AnimeSummary.from_anime(row.anime, list_status),
             episode=EpisodeOut.from_episode(
                 row.episode,
@@ -348,6 +353,9 @@ class ContinueWatchingEntry(BaseModel):
     #: this device" and the player plays that copy (owner, 2026-10-08). False
     #: on every ``ready`` row, trip or no trip.
     on_device: bool = False
+    #: The caller has an open rewatch pass on this show (FR-W7, M21 T10): the
+    #: card says "Rewatch", and watched means finished in the pass.
+    in_rewatch: bool = False
 
     @classmethod
     def from_row(
@@ -363,6 +371,7 @@ class ContinueWatchingEntry(BaseModel):
         transcode_job: Job | None = None,
         offline: OfflineOut | None = None,
         trip_only: bool = False,
+        in_rewatch: bool = False,
     ) -> ContinueWatchingEntry:
         """``completed`` overrides the row's own flag: in an open rewatch pass
         (FR-W7) the caller passes the pass's finish, with ``list_progress`` 0.
@@ -391,6 +400,7 @@ class ContinueWatchingEntry(BaseModel):
             position_s=row.position_s,
             duration_s=row.duration_s,
             on_device=row.on_device,
+            in_rewatch=in_rewatch,
         )
 
 
