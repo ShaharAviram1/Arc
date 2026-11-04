@@ -34,12 +34,21 @@ from pydantic import BaseModel
 
 from arc.api.deps import EpisodeId, SessionDep, SettingsDep, get_admin_user
 from arc.api.jobs import JobOut
+from arc.config import ConfigurationError, Settings
 from arc.models import Anime, Episode, EpisodeState, Job
+from arc.services.acquisition.qbit import QbitClient
+from arc.services.acquisition.status import STATUS_TIMEOUT_SECONDS
 from arc.services.catalog import preferred_title
 from arc.services.pins import pinned_usage
+from arc.services.retention.batch_sweep import Leftover, leftover_files
 from arc.services.retention.floor import floor_plan
 from arc.services.retention.names import enqueue_delete_files, enqueue_retention_sweep
-from arc.services.retention.rules import grace_days, offline_idle_period, watched_grace_hours
+from arc.services.retention.rules import (
+    batch_sweep_dry_run,
+    grace_days,
+    offline_idle_period,
+    watched_grace_hours,
+)
 from arc.services.retention.sweep import (
     PROTECTED_STATES,
     Deletable,
@@ -96,6 +105,16 @@ class RetentionItemOut(BaseModel):
     hold: str | None = None
 
 
+class LeftoverOut(BaseModel):
+    """One leftover pack file the next sweep would delete (FR-T1, M21 T8)."""
+
+    path: str
+    #: Bytes allocated on the disk — what deleting it frees.
+    bytes: int
+    torrent_id: int
+    reason: str
+
+
 class RetentionPreviewOut(BaseModel):
     """``GET /api/retention/preview``."""
 
@@ -118,6 +137,15 @@ class RetentionPreviewOut(BaseModel):
     #: watching, G days after a drop or for a file nobody ever wanted.
     watched_grace_hours: int = 6
     grace_days: int = 7
+    #: Files under ``downloads/batch/<hash>/`` no episode claims any more
+    #: (FR-T1's leftover sweep, M21 T8), and their bytes.
+    leftover_files: list[LeftoverOut] = []
+    leftover_bytes: int = 0
+    #: ``batch_sweep_dry_run``: while true the sweep only logs the list above.
+    batch_sweep_dry_run: bool = True
+    #: False when qBittorrent could not be asked, in which case the list is
+    #: empty because nothing may be called a leftover (fail closed).
+    leftover_checked: bool = True
 
 
 @router.get(
@@ -128,8 +156,10 @@ class RetentionPreviewOut(BaseModel):
 async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPreviewOut:
     """The sweep's own rule, read-only.
 
-    Nothing is written and no upstream service is called, so this is safe to
-    poll and safe to look at while a sweep is running.
+    Nothing is written, so this is safe to poll and safe to look at while a
+    sweep is running. The one upstream call is the leftover half's question to
+    qBittorrent (M21 T8), bounded like the status probe; a client that does not
+    answer leaves the list empty and says so.
     """
     now = datetime.now(UTC)
     plan = await retention_plan(session, settings, now=now)
@@ -144,6 +174,7 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
         session, settings, now=now, already=plan.deletable, pending_bytes=pending
     )
     titles = await _titles(session, {t.anime_id for t in (*plan.deletable, *plan.held, *floor)})
+    leftovers, checked = await _leftovers(session, settings, now)
     return RetentionPreviewOut(
         dry_run=settings.retention_dry_run,
         bytes=sum(target.bytes for target in plan.deletable),
@@ -152,7 +183,44 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
         floor=[_item(target, titles) for target in floor],
         watched_grace_hours=await watched_grace_hours(session),
         grace_days=await grace_days(session),
+        leftover_files=[
+            LeftoverOut(
+                path=str(item.path), bytes=item.size, torrent_id=item.torrent_id, reason=item.reason
+            )
+            for item in leftovers
+        ],
+        leftover_bytes=sum(item.size for item in leftovers),
+        batch_sweep_dry_run=await batch_sweep_dry_run(session),
+        leftover_checked=checked,
     )
+
+
+async def _leftovers(
+    session: SessionDep, settings: Settings, now: datetime
+) -> tuple[list[Leftover], bool]:
+    """The leftover sweep's own list, and whether qBittorrent could be asked."""
+    try:
+        client = QbitClient.from_settings(settings, timeout=STATUS_TIMEOUT_SECONDS)
+    except ConfigurationError:
+        return [], False
+    try:
+        async with client as qbit, asyncio.timeout(STATUS_TIMEOUT_SECONDS * 2):
+            if not await _answers(qbit):
+                return [], False
+            return await leftover_files(session, settings, qbit, now=now), True
+    except TimeoutError:
+        log.warning("qBittorrent was too slow for the leftover preview")
+        return [], False
+
+
+async def _answers(qbit: QbitClient) -> bool:
+    """Whether the client answers at all: an empty leftover list must not hide
+    a client that is down."""
+    try:
+        await qbit.torrents()
+    except Exception:  # noqa: BLE001 - any failure means "could not ask"
+        return False
+    return True
 
 
 async def _titles(session: SessionDep, anime_ids: set[int]) -> dict[int, str]:
