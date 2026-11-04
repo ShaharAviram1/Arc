@@ -409,7 +409,10 @@ export interface RetentionPreview {
    */
   leftover_files?: LeftoverFile[]
   leftover_bytes?: number
-  /** `batch_sweep_dry_run`: while true the sweep only logs the leftovers. */
+  /**
+   * Whether the sweep only logs the leftovers: `batch_sweep_dry_run` or
+   * `RETENTION_DRY_RUN` (the effective state).
+   */
   batch_sweep_dry_run?: boolean
   /** False when qBittorrent could not be asked (the list is then empty). */
   leftover_checked?: boolean

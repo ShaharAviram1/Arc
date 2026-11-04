@@ -1105,6 +1105,24 @@ describe('Admin — Storage (FR-D3, FR-T4)', () => {
     expect(within(section).getByText('No leftover pack files.')).toBeInTheDocument()
   })
 
+  it('shows the leftover sweep as a dry run while RETENTION_DRY_RUN is on', async () => {
+    await openStorage({
+      [PREVIEW_PATH]: {
+        body: {
+          ...RETENTION_PREVIEW,
+          dry_run: true,
+          leftover_files: [],
+          leftover_bytes: 0,
+          batch_sweep_dry_run: false,
+          leftover_checked: true,
+        },
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: 'Leftover pack files' })
+    expect(within(section).getByText('Dry run: the sweep only logs these')).toBeInTheDocument()
+  })
+
   it('says when qBittorrent could not be asked about leftovers', async () => {
     await openStorage({
       [PREVIEW_PATH]: {

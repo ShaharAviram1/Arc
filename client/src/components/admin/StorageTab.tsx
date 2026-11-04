@@ -290,7 +290,8 @@ const LEFTOVER_EXPLANATION =
 /** Leftover pack files (FR-T1, M21): what the sweep would remove, or only log. */
 function LeftoverPanel({ preview }: { preview: RetentionPreview }) {
   const files: LeftoverFile[] = preview.leftover_files ?? []
-  const dryRun = preview.batch_sweep_dry_run ?? true
+  // Either brake keeps the sweep dry: the setting, or RETENTION_DRY_RUN.
+  const dryRun = (preview.batch_sweep_dry_run ?? true) || preview.dry_run
   const count = files.length === 1 ? '1 file' : `${String(files.length)} files`
   return (
     <section className="mt-6" aria-labelledby="leftover-files-heading">

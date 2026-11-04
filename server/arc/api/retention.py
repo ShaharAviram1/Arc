@@ -40,7 +40,7 @@ from arc.services.acquisition.qbit import QbitClient
 from arc.services.acquisition.status import STATUS_TIMEOUT_SECONDS
 from arc.services.catalog import preferred_title
 from arc.services.pins import pinned_usage
-from arc.services.retention.batch_sweep import Leftover, leftover_files
+from arc.services.retention.batch_sweep import Leftover, client_listing, leftover_files
 from arc.services.retention.floor import floor_plan
 from arc.services.retention.names import enqueue_delete_files, enqueue_retention_sweep
 from arc.services.retention.rules import (
@@ -141,7 +141,8 @@ class RetentionPreviewOut(BaseModel):
     #: (FR-T1's leftover sweep, M21 T8), and their bytes.
     leftover_files: list[LeftoverOut] = []
     leftover_bytes: int = 0
-    #: ``batch_sweep_dry_run``: while true the sweep only logs the list above.
+    #: Whether the sweep will only log the list above: ``batch_sweep_dry_run``
+    #: **or** ``RETENTION_DRY_RUN`` (the effective state, not the setting alone).
     batch_sweep_dry_run: bool = True
     #: False when qBittorrent could not be asked, in which case the list is
     #: empty because nothing may be called a leftover (fail closed).
@@ -190,7 +191,8 @@ async def preview(session: SessionDep, settings: SettingsDep) -> RetentionPrevie
             for item in leftovers
         ],
         leftover_bytes=sum(item.size for item in leftovers),
-        batch_sweep_dry_run=await batch_sweep_dry_run(session),
+        # The state the sweep will act on: the environment brake overrides.
+        batch_sweep_dry_run=settings.retention_dry_run or await batch_sweep_dry_run(session),
         leftover_checked=checked,
     )
 
@@ -205,22 +207,15 @@ async def _leftovers(
         return [], False
     try:
         async with client as qbit, asyncio.timeout(STATUS_TIMEOUT_SECONDS * 2):
-            if not await _answers(qbit):
+            # Asked once and passed through: an empty or failed listing is
+            # "could not ask", never "nothing is left over".
+            listing = await client_listing(qbit)
+            if listing is None:
                 return [], False
-            return await leftover_files(session, settings, qbit, now=now), True
+            return await leftover_files(session, settings, qbit, now=now, listing=listing), True
     except TimeoutError:
         log.warning("qBittorrent was too slow for the leftover preview")
         return [], False
-
-
-async def _answers(qbit: QbitClient) -> bool:
-    """Whether the client answers at all: an empty leftover list must not hide
-    a client that is down."""
-    try:
-        await qbit.torrents()
-    except Exception:  # noqa: BLE001 - any failure means "could not ask"
-        return False
-    return True
 
 
 async def _titles(session: SessionDep, anime_ids: set[int]) -> dict[int, str]:
